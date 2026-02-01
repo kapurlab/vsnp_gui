@@ -24,6 +24,7 @@ export default function App() {
     sra_allow_insecure_https: false
   });
   const [sraText, setSraText] = useState("");
+  const [sraFolder, setSraFolder] = useState("");
   const [localPath, setLocalPath] = useState("");
   const [reference, setReference] = useState("");
   const [debugMode, setDebugMode] = useState(false);
@@ -36,9 +37,15 @@ export default function App() {
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [excluded, setExcluded] = useState({});
+  const [step1Status, setStep1Status] = useState([]);
+  const [step1StatusError, setStep1StatusError] = useState("");
+  const [step1LogSample, setStep1LogSample] = useState("");
+  const [step1LogText, setStep1LogText] = useState("");
+  const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [step2Outputs, setStep2Outputs] = useState([]);
+  const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
@@ -106,8 +113,16 @@ export default function App() {
     if (!selectedProject) return;
     setExcluded({});
     loadQC();
+    loadStep1Status();
     loadStep2Outputs();
   }, [selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (jobStatus === "succeeded" || jobStatus === "failed") {
+      loadStep1Status();
+    }
+  }, [jobStatus, selectedProject]);
 
   async function createProject() {
     if (!newProjectName.trim()) return;
@@ -229,7 +244,13 @@ export default function App() {
       return;
     }
     const data = await res.json();
-    setStep2Outputs(data);
+    if (Array.isArray(data)) {
+      setStep2Outputs(data);
+      setStep2Groups([]);
+    } else {
+      setStep2Outputs(data.top || []);
+      setStep2Groups(data.groups || []);
+    }
   }
 
   async function openOutput(path) {
@@ -312,7 +333,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/sra/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessions })
+      body: JSON.stringify({ accessions, folder: sraFolder || null })
     });
     const data = await res.json();
     setJobId(data.job_id);
@@ -322,17 +343,20 @@ export default function App() {
     if (!selectedProject) return;
     await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, { method: "POST" });
     await loadAll();
+    await loadStep1Status();
   }
 
   async function step1Run() {
     if (!selectedProject || !reference) return;
+    const refValue = reference === "__auto__" ? null : reference;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference, debug: debugMode })
+      body: JSON.stringify({ reference: refValue, debug: debugMode })
     });
     const data = await res.json();
     setJobId(data.job_id);
+    await loadStep1Status();
   }
 
   async function step2Setup() {
@@ -360,6 +384,44 @@ export default function App() {
     }
     const data = await res.json();
     setJobId(data.job_id);
+  }
+
+  async function loadStep1Status() {
+    if (!selectedProject) return;
+    setStep1StatusError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/status`);
+      if (!res.ok) {
+        const msg = await res.json();
+        setStep1StatusError(msg.detail || "Failed to load Step 1 status");
+        return;
+      }
+      const data = await res.json();
+      setStep1Status(data.samples || []);
+    } catch (err) {
+      setStep1StatusError("Failed to load Step 1 status");
+    }
+  }
+
+  async function viewStep1Log(sample) {
+    if (!selectedProject || !sample) return;
+    setStep1LogSample(sample);
+    setStep1LogText("");
+    setStep1LogLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/log?sample=${encodeURIComponent(sample)}`);
+      if (!res.ok) {
+        const msg = await res.json();
+        setStep1LogText(msg.detail || "Log not found");
+        return;
+      }
+      const data = await res.json();
+      setStep1LogText(data.log || "");
+    } catch (err) {
+      setStep1LogText("Failed to load log");
+    } finally {
+      setStep1LogLoading(false);
+    }
   }
 
   return (
@@ -548,6 +610,11 @@ export default function App() {
               onChange={(e) => setSraText(e.target.value)}
               rows={6}
             />
+            <input
+              placeholder="Optional subfolder (e.g. 2026-02-01_batch1)"
+              value={sraFolder}
+              onChange={(e) => setSraFolder(e.target.value)}
+            />
             <button onClick={sraDownload} disabled={!selectedProject}>Download</button>
           </div>
           <div className="block">
@@ -597,9 +664,9 @@ export default function App() {
             <select
               value={reference}
               onChange={(e) => setReference(e.target.value)}
-              disabled={refLock.references && refLock.references.length === 1}
             >
               <option value="">Select reference</option>
+              <option value="__auto__">Auto-detect (best match)</option>
               {references.map((r) => (
                 <option key={r.name} value={r.name}>{r.name}</option>
               ))}
@@ -607,6 +674,10 @@ export default function App() {
             {refLock.references && refLock.references.length > 1 ? (
               <div className="note error">
                 Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+              </div>
+            ) : refLock.references && refLock.references.length === 1 ? (
+              <div className="note">
+                Detected reference from Step 1: {refLock.references[0]}. You can override for a new Step 1 run.
               </div>
             ) : null}
           </div>
@@ -622,6 +693,36 @@ export default function App() {
               />
               Debug (keep intermediates, skip cleanup)
             </label>
+            <div className="step1-status">
+              <div className="step1-status-header">
+                <span>Samples</span>
+                <button onClick={loadStep1Status} disabled={!selectedProject}>Refresh</button>
+              </div>
+              {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
+              {step1Status.length ? (
+                <ul>
+                  {step1Status.map((s) => (
+                    <li key={s.sample}>
+                      <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
+                      <span className="sample-name">{s.sample}</span>
+                      <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
+                        View log
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="note">No Step 1 samples yet.</div>
+              )}
+              {step1LogSample ? (
+                <div className="log-viewer">
+                  <div className="log-title">
+                    Log: {step1LogSample}
+                  </div>
+                  <pre>{step1LogLoading ? "Loading..." : (step1LogText || "No log content")}</pre>
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="block">
             <h3>Step 2</h3>
@@ -721,9 +822,28 @@ export default function App() {
                   </div>
                 </div>
               ))
-            ) : (
+            ) : null}
+            {step2Groups.length ? (
+              <div className="results-groups">
+                {step2Groups.map((group) => (
+                  <details key={group.name} className="results-group">
+                    <summary>{group.name}</summary>
+                    {group.files.map((item) => (
+                      <div key={item.path} className="results-item">
+                        <div className="results-name">{item.label}</div>
+                        <div className="results-path">{item.path}</div>
+                        <div className="results-actions">
+                          <button onClick={() => openOutput(item.path)}>Open</button>
+                        </div>
+                      </div>
+                    ))}
+                  </details>
+                ))}
+              </div>
+            ) : null}
+            {!step2Outputs.length && !step2Groups.length ? (
               <div className="note">No Step 2 outputs found yet.</div>
-            )}
+            ) : null}
           </div>
         </section>
 

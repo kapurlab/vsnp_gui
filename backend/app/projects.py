@@ -49,7 +49,7 @@ def _project_counts(project_dir: Path) -> Dict:
     step1_dir = project_dir / "step1"
     step2_dir = project_dir / "step2"
     return {
-        "fastq_count": len(list(download_dir.glob("*.fastq.gz"))) if download_dir.exists() else 0,
+        "fastq_count": len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.exists() else 0,
         "step1_samples": len([d for d in step1_dir.iterdir() if d.is_dir()]) if step1_dir.exists() else 0,
         "step1_vcfs": len(list(step1_dir.glob("**/*.vcf"))) if step1_dir.exists() else 0,
         "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,

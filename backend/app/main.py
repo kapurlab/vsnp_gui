@@ -82,6 +82,7 @@ class ProjectCreate(BaseModel):
 
 class SraRequest(BaseModel):
     accessions: List[str]
+    folder: Optional[str] = None
 
 
 class LinkLocalRequest(BaseModel):
@@ -89,7 +90,7 @@ class LinkLocalRequest(BaseModel):
 
 
 class Step1Request(BaseModel):
-    reference: str
+    reference: Optional[str] = None
     debug: bool = False
 
 
@@ -206,14 +207,19 @@ def sra_download(project: str, payload: SraRequest):
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
     expanded = expand_accessions(payload.accessions)
-    script = build_download_script(project_dir / "download", expanded, cfg["sra"]["allow_insecure_https"])
-    script_path = project_dir / "download" / "download_sra.sh"
+    download_root = project_dir / "download"
+    if payload.folder:
+        safe = Path(payload.folder).name
+        download_root = download_root / safe
+    download_root.mkdir(parents=True, exist_ok=True)
+    script = build_download_script(download_root, expanded, cfg["sra"]["allow_insecure_https"])
+    script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)
     job_id = job_manager.start_job(
         name="sra_download",
         command=wrap_cmd(cfg, f"bash {script_path}"),
-        cwd=project_dir / "download",
+        cwd=download_root,
         env=build_env(cfg)
     )
     return {"job_id": job_id}
@@ -229,8 +235,8 @@ def step1_setup(project: str):
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
 
-    # Group by sample prefix before _R1/_R2
-    fastqs = list(download_dir.glob("*.fastq.gz"))
+    # Group by sample prefix before _R1/_R2 (scan recursively for subfolders)
+    fastqs = list(download_dir.rglob("*.fastq.gz"))
     if not fastqs:
         return {"created": 0, "message": "No FASTQ files found"}
 
@@ -261,14 +267,19 @@ def step1_run(project: str, payload: Step1Request):
     step1_dir = project_dir / "step1"
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
+    ref_arg = f"-t {payload.reference}" if payload.reference else ""
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
-            "set -euo pipefail",
+            "set -uo pipefail",
+            "FAIL=0",
             "for d in */; do",
             "  if [ -d \"$d\" ]; then",
             "    echo \"== Running step1 in $d ==\"",
             "    cd \"$d\"",
+            "    LOG=run_step1.log",
+            "    echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
+            "    echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
             "    if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
             "      for dir in alignment_*; do",
             "        if [ -d \"$dir\" ]; then",
@@ -278,20 +289,31 @@ def step1_run(project: str, payload: Step1Request):
             "      if [ -d \"unmapped_reads\" ]; then",
             "        rm -rf \"unmapped_reads\"",
             "      fi",
+            "      if [ -d \"sourmash\" ]; then",
+            "        rm -rf \"sourmash\"",
+            "      fi",
             "    fi",
             "    R1=$(ls *_R1*.fastq.gz 2>/dev/null | head -n1 || true)",
             "    R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
             "    if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "    if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "    if [ -z \"$R1\" ] || [ -z \"$R2\" ]; then",
-            "      echo \"Missing R1/R2 in $d\"",
+            "      echo \"Missing R1/R2 in $d\" | tee -a \"$LOG\"",
             "      cd ..",
             "      continue",
             "    fi",
-            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" -t {payload.reference} {debug_flag}",
+            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} >> \"$LOG\" 2>&1",
+            "    STATUS=$?",
+            "    if [ \"$STATUS\" -eq 0 ]; then",
+            "      echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+            "    else",
+            "      echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
+            "      FAIL=1",
+            "    fi",
             "    cd ..",
             "  fi",
             "done",
+            "exit $FAIL",
         ]),
         encoding="utf-8"
     )
@@ -302,7 +324,72 @@ def step1_run(project: str, payload: Step1Request):
         cwd=step1_dir,
         env=build_env(cfg)
     )
+    (step1_dir / ".step1_job_id").write_text(job_id, encoding="utf-8")
     return {"job_id": job_id}
+
+
+@app.get("/api/projects/{project}/step1/status")
+def step1_status(project: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step1_dir = project_dir / "step1"
+    if not step1_dir.exists():
+        raise HTTPException(status_code=404, detail="Step1 directory not found")
+
+    job_id_path = step1_dir / ".step1_job_id"
+    job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
+    job = job_manager.get_job(job_id) if job_id else None
+    job_status = job["status"] if job else "unknown"
+
+    statuses = []
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir():
+            continue
+        sample = sample_dir.name
+        log_path = sample_dir / "run_step1.log"
+        vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
+        nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+        status = "not_started"
+        log_tail = ""
+        if log_path.exists():
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()[-200:]
+                    log_tail = "".join(lines)
+            except OSError:
+                log_tail = ""
+        if vcf and nodup:
+            status = "complete"
+        elif log_tail:
+            if "Traceback" in log_tail or "Error:" in log_tail or "Exception" in log_tail:
+                status = "error"
+            elif job_status == "running":
+                status = "running"
+            else:
+                status = "unknown"
+        statuses.append({
+            "sample": sample,
+            "status": status,
+            "log_path": str(log_path),
+            "has_log": log_path.exists(),
+            "has_outputs": bool(vcf and nodup),
+        })
+    return {"job_status": job_status, "samples": statuses}
+
+
+@app.get("/api/projects/{project}/step1/log")
+def step1_log(project: str, sample: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    log_path = project_dir / "step1" / sample / "run_step1.log"
+    if not log_path.exists():
+        raise HTTPException(status_code=404, detail="Log not found")
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-400:]
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"sample": sample, "log": "".join(lines)}
 
 
 @app.post("/api/projects/{project}/step2/setup")
@@ -321,13 +408,13 @@ def step2_setup(project: str):
         except FileNotFoundError:
             pass
     count = 0
-    for vcf in step1_dir.glob("**/*_filtered_hapall_annotated.vcf"):
+    for vcf in step1_dir.glob("**/*_zc.vcf"):
         target = step2_dir / vcf.name
         if target.exists():
             continue
         target.symlink_to(vcf)
         count += 1
-    total = len(list(step2_dir.glob("*_filtered_hapall_annotated.vcf")))
+    total = len(list(step2_dir.glob("*_zc.vcf")))
     return {"linked": count, "total": total}
 
 
@@ -626,17 +713,27 @@ def step2_outputs(project: str):
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
-    outputs = []
+    top = []
     for f in step2_dir.glob("*.html"):
-        outputs.append({"label": f.name, "path": str(f), "type": "html"})
+        top.append({"label": f.name, "path": str(f), "type": "html"})
     for f in step2_dir.glob("*.zip"):
-        outputs.append({"label": f.name, "path": str(f), "type": "zip"})
-    for f in (step2_dir / "name-All").glob("*"):
-        if f.is_file():
-            ext = f.suffix.lstrip(".")
-            outputs.append({"label": f.name, "path": str(f), "type": ext or "file"})
-    outputs.sort(key=lambda x: x["label"])
-    return outputs
+        top.append({"label": f.name, "path": str(f), "type": "zip"})
+    top.sort(key=lambda x: x["label"])
+
+    groups = []
+    for d in sorted(step2_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name == "vcf_source":
+            continue
+        files = []
+        for f in sorted(d.iterdir()):
+            if f.is_file():
+                ext = f.suffix.lstrip(".")
+                files.append({"label": f.name, "path": str(f), "type": ext or "file"})
+        if files:
+            groups.append({"name": d.name, "files": files})
+    return {"top": top, "groups": groups}
 
 
 @app.post("/api/projects/{project}/open")

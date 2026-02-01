@@ -13,7 +13,7 @@ import shutil
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
-from app.projects import create_project, list_projects, ensure_project_dirs
+from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project
 from app.refs import list_references
 from app.sra import expand_accessions, build_download_script
 
@@ -145,6 +145,28 @@ def project_create(payload: ProjectCreate):
     cfg = load_config()
     project_dir = create_project(Path(cfg["projects_root"]), payload.name)
     return {"path": str(project_dir), "name": payload.name}
+
+
+@app.post("/api/projects/{project}/archive")
+def project_archive(project: str):
+    cfg = load_config()
+    try:
+        target = archive_project(Path(cfg["projects_root"]), project)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"archived_to": str(target)}
+
+
+@app.delete("/api/projects/{project}")
+def project_delete(project: str):
+    cfg = load_config()
+    try:
+        deleted = delete_project(Path(cfg["projects_root"]), project)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"deleted": project}
 
 
 @app.post("/api/projects/{project}/link-local")

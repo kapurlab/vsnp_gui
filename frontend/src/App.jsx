@@ -77,8 +77,8 @@ export default function App() {
       conda_env_path: cfg.conda_env_path || "",
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
     });
-    if (!selectedProject && proj.length) {
-      setSelectedProject(proj[0].name);
+    if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
+      setSelectedProject("");
     }
   }
 
@@ -137,6 +137,27 @@ export default function App() {
     });
     setNewProjectName("");
     await loadAll();
+  }
+
+  async function refreshProjects(nextSelected = selectedProject) {
+    const proj = await fetch(`${API_BASE}/api/projects`).then((r) => r.json());
+    setProjects(proj);
+    if (nextSelected && proj.find((p) => p.name === nextSelected)) {
+      return;
+    }
+    setSelectedProject(proj[0]?.name || "");
+  }
+
+  async function archiveProject(name) {
+    if (!window.confirm(`Archive project "${name}" to projects_archive?`)) return;
+    await fetch(`${API_BASE}/api/projects/${name}/archive`, { method: "POST" });
+    await refreshProjects(selectedProject === name ? "" : selectedProject);
+  }
+
+  async function deleteProject(name) {
+    if (!window.confirm(`Delete project "${name}" permanently?`)) return;
+    await fetch(`${API_BASE}/api/projects/${name}`, { method: "DELETE" });
+    await refreshProjects(selectedProject === name ? "" : selectedProject);
   }
 
   async function saveSettings() {
@@ -446,7 +467,7 @@ export default function App() {
           <img className="app-logo" src="/vSNP_icon_align_256.png" alt="vSNP alignment icon" />
           <div>
             <h1>vSNP GUI</h1>
-            <p>Local workflow for vSNP3 with clean logs and resilient SRA download fallbacks.</p>
+            <p>Local workflows for vSNP3 implementation</p>
           </div>
         </div>
         <div className="status-pill">
@@ -642,16 +663,43 @@ export default function App() {
             </div>
             <div className="list">
               {projects.map((p) => (
-                <button
+                <div
                   key={p.name}
                   className={`list-item ${p.name === selectedProject ? "active" : ""}`}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setSelectedProject(p.name)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") setSelectedProject(p.name);
+                  }}
                 >
-                  <div className="list-title">{p.name}</div>
-                  <div className="list-meta">
-                    FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
+                  <div className="list-details">
+                    <div className="list-title">{p.name}</div>
+                    <div className="list-meta">
+                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
+                    </div>
                   </div>
-                </button>
+                  <div className="list-actions">
+                    <button
+                      className="ghost-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        archiveProject(p.name);
+                      }}
+                    >
+                      Archive
+                    </button>
+                    <button
+                      className="ghost-btn danger"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteProject(p.name);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
           </section>

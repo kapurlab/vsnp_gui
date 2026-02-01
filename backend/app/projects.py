@@ -1,6 +1,9 @@
 import json
+import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+ARCHIVE_DIR_NAME = "projects_archive"
 
 
 def ensure_project_dirs(project_dir: Path) -> None:
@@ -33,6 +36,10 @@ def list_projects(projects_root: Path) -> List[Dict]:
     for p in projects_root.iterdir():
         if not p.is_dir():
             continue
+        if p.name == ARCHIVE_DIR_NAME:
+            continue
+        if p.name.startswith("."):
+            continue
         meta_path = project_meta_path(p)
         if meta_path.exists():
             with open(meta_path, "r", encoding="utf-8") as f:
@@ -46,6 +53,30 @@ def list_projects(projects_root: Path) -> List[Dict]:
     for meta in projects:
         meta.pop("_mtime", None)
     return projects
+
+
+def archive_project(projects_root: Path, name: str) -> Path:
+    project_dir = _resolve_project_dir(projects_root, name)
+    archive_root = projects_root / ARCHIVE_DIR_NAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+    timestamp = _now_iso().replace(":", "-")
+    target = archive_root / f"{name}_{timestamp}"
+    project_dir.replace(target)
+    return target
+
+
+def delete_project(projects_root: Path, name: str) -> Optional[Path]:
+    project_dir = _resolve_project_dir(projects_root, name)
+    if not project_dir.exists():
+        return None
+    shutil.rmtree(project_dir)
+    return project_dir
+
+
+def _resolve_project_dir(projects_root: Path, name: str) -> Path:
+    if "/" in name or name.startswith("."):
+        raise ValueError("Invalid project name")
+    return projects_root / name
 
 
 def _project_counts(project_dir: Path) -> Dict:

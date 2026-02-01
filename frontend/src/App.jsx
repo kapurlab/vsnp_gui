@@ -266,6 +266,17 @@ export default function App() {
     });
   }
 
+  async function runBootstrap() {
+    const res = await fetch(`${API_BASE}/api/bootstrap`, { method: "POST" });
+    if (!res.ok) {
+      const msg = await res.json();
+      window.alert(msg.detail || "Bootstrap failed to start");
+      return;
+    }
+    const data = await res.json();
+    setJobId(data.job_id);
+  }
+
   async function downloadQC() {
     if (!selectedProject) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.csv`);
@@ -431,9 +442,12 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div>
-          <h1>vSNP GUI</h1>
-          <p>Local workflow for vSNP3 with clean logs and resilient SRA download fallbacks.</p>
+        <div className="app-brand">
+          <img className="app-logo" src="/vSNP_icon_align_256.png" alt="vSNP alignment icon" />
+          <div>
+            <h1>vSNP GUI</h1>
+            <p>Local workflow for vSNP3 with clean logs and resilient SRA download fallbacks.</p>
+          </div>
         </div>
         <div className="status-pill">
           <span className="dot" data-state={jobStatus}></span>
@@ -478,6 +492,7 @@ export default function App() {
             <div className="panel-header">
               <h2>Settings</h2>
               <div className="panel-actions">
+                <button className="ghost action" onClick={runBootstrap} title="Run setup assistant">Setup</button>
                 <button className="ghost action" onClick={runPreflight} title="Run preflight">Preflight</button>
                 <button className="ghost action-primary" onClick={saveSettings} title="Save settings">Save</button>
               </div>

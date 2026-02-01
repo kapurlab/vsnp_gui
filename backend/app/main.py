@@ -738,6 +738,22 @@ def step2_outputs(project: str):
     return {"top": top, "groups": groups}
 
 
+@app.post("/api/bootstrap")
+def bootstrap():
+    cfg = load_config()
+    root_dir = Path(__file__).resolve().parent.parent.parent
+    script_path = root_dir / "scripts" / "bootstrap_vsnp3.sh"
+    if not script_path.exists():
+        raise HTTPException(status_code=404, detail="Bootstrap script not found")
+    job_id = job_manager.start_job(
+        name="bootstrap",
+        command=f"bash {script_path}",
+        cwd=root_dir,
+        env=build_env(cfg)
+    )
+    return {"job_id": job_id}
+
+
 @app.post("/api/projects/{project}/open")
 def open_path(project: str, payload: OpenRequest):
     cfg = load_config()

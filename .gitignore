@@ -18,6 +18,11 @@ dist/
 .DS_Store
 *.log
 
+# App bundle / icon assets
+vSNP.app/
+vSNP.icns
+Gemini_Generated_Image_*.png
+
 # App data
 backend/data/
 backend/projects/

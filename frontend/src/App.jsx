@@ -49,7 +49,11 @@ export default function App() {
   const [step2OutputsError, setStep2OutputsError] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
-  const [showChecklist, setShowChecklist] = useState(true);
+  const [showSetup, setShowSetup] = useState(true);
+  const [showRowProjects, setShowRowProjects] = useState(true);
+  const [showRowStep1, setShowRowStep1] = useState(true);
+  const [showRowStep2, setShowRowStep2] = useState(true);
+  const [showRowLogs, setShowRowLogs] = useState(true);
 
   const selected = useMemo(
     () => projects.find((p) => p.name === selectedProject),
@@ -437,262 +441,308 @@ export default function App() {
         </div>
       </header>
 
-      <main className="grid">
-        {showChecklist ? (
-          <section className="panel checklist">
-            <div className="checklist-header">
+      <main className="layout">
+        <section className="status-strip">
+          <div className="status-item">
+            <span className="status-label">Project</span>
+            <span className="status-value">{selected?.name || "None"}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">FASTQ</span>
+            <span className="status-value">{selected?.fastq_count ?? 0}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Step 1 Samples</span>
+            <span className="status-value">{selected?.step1_samples ?? 0}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">VCFs Ready</span>
+            <span className="status-value">{selected?.step2_vcfs ?? 0}</span>
+          </div>
+          <div className="status-item">
+            <span className="status-label">Job Status</span>
+            <span className="status-value">{jobStatus}</span>
+          </div>
+        </section>
+
+        <div className="row-header">
+          <h2>Setup</h2>
+          <button className="ghost" onClick={() => setShowSetup(!showSetup)}>
+            {showSetup ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showSetup ? (
+          <div className="row-grid">
+            <section className="panel">
+            <div className="panel-header">
+              <h2>Settings</h2>
+              <div className="panel-actions">
+                <button className="ghost action" onClick={runPreflight} title="Run preflight">Preflight</button>
+                <button className="ghost action-primary" onClick={saveSettings} title="Save settings">Save</button>
+              </div>
+            </div>
+            <div className="settings-grid">
+                <div className="settings-row">
+                  <label className="label">vSNP3 path</label>
+                  <input
+                    placeholder="/Users/vivekkapur/vsnp3"
+                    value={settings.vsnp3_path}
+                    onChange={(e) => setSettings({ ...settings, vsnp3_path: e.target.value })}
+                  />
+                </div>
+                <div className="settings-row">
+                  <label className="label">Projects root</label>
+                  <input
+                    placeholder="/Users/vivekkapur/vsnp3/projects"
+                    value={settings.projects_root}
+                    onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
+                  />
+                </div>
+                <div className="settings-row">
+                  <label className="label">Conda env for vSNP3</label>
+                  <input
+                    placeholder="vsnp3"
+                    value={settings.conda_env}
+                    onChange={(e) => setSettings({ ...settings, conda_env: e.target.value })}
+                  />
+                </div>
+                <div className="settings-row">
+                  <label className="label">Conda executable (optional)</label>
+                  <input
+                    placeholder="/Users/vivekkapur/anaconda3/bin/conda"
+                    value={settings.conda_exe}
+                    onChange={(e) => setSettings({ ...settings, conda_exe: e.target.value })}
+                  />
+                </div>
+                <div className="settings-row">
+                  <label className="label">Conda env path (optional)</label>
+                  <input
+                    placeholder="/Users/vivekkapur/anaconda3/envs/vivek"
+                    value={settings.conda_env_path}
+                    onChange={(e) => setSettings({ ...settings, conda_env_path: e.target.value })}
+                  />
+                </div>
+              </div>
+              <div className="block">
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.sra_allow_insecure_https}
+                    onChange={(e) =>
+                      setSettings({ ...settings, sra_allow_insecure_https: e.target.checked })
+                    }
+                  />
+                  Allow insecure HTTPS fallback for ENA
+                </label>
+              </div>
+              <div className="block">
+                {preflightError ? (
+                  <div className="note error">{preflightError}</div>
+                ) : null}
+                {preflight ? (
+                  <div className="note">
+                    Checked: {preflight.checked.join(", ")} | Missing:{" "}
+                    {preflight.missing.length ? preflight.missing.join(", ") : "none"}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="panel checklist">
+            <div className="panel-header">
               <h2>Start-Up Checklist</h2>
-              <button className="ghost" onClick={() => setShowChecklist(false)}>
-                Hide
-              </button>
+              <div className="panel-actions">
+                <button className="ghost" onClick={runPreflight} title="Run preflight">Preflight</button>
+              </div>
             </div>
             <div className="checklist-body">
-              <div className="checklist-item">
-                <span className="check-title">Set vSNP3 path</span>
-                <span className={settings.vsnp3_path ? "ok" : "warn"}>
-                  {settings.vsnp3_path || "Missing"}
-                </span>
-              </div>
-              <div className="checklist-item">
-                <span className="check-title">Set projects root</span>
-                <span className={settings.projects_root ? "ok" : "warn"}>
-                  {settings.projects_root || "Missing"}
-                </span>
-              </div>
-              <div className="checklist-item">
-                <span className="check-title">Conda env</span>
-                <span className={settings.conda_env ? "ok" : "warn"}>
-                  {settings.conda_env || "Missing"}
-                </span>
-              </div>
-              <div className="checklist-item">
-                <span className="check-title">Preflight</span>
-                {preflightError ? (
-                  <span className="warn">{preflightError}</span>
-                ) : preflight ? (
-                  <span className={preflight.missing.length || preflight.issues?.length ? "warn" : "ok"}>
-                    {preflight.missing.length
-                      ? `Missing: ${preflight.missing.join(", ")}`
-                      : "All good"}
+                <div className="checklist-item">
+                  <span className="check-title">Set vSNP3 path</span>
+                  <span className={settings.vsnp3_path ? "ok" : "warn"}>
+                    {settings.vsnp3_path || "Missing"}
                   </span>
-                ) : (
-                  <span className="muted">Not run</span>
-                )}
-              </div>
-              <div className="checklist-actions">
-                <button onClick={runPreflight}>Run Preflight</button>
-              </div>
-              {preflight?.missing?.length ? (
-                <div className="note error">
-                  Install missing deps with:
-                  <div className="code-line">conda install -n {settings.conda_env || "<env>"} pandas biopython pysam</div>
                 </div>
-              ) : null}
-              {preflight?.issues?.length ? (
-                <div className="note error">
-                  {preflight.issues.join("; ")}. Fix with:
-                  <div className="code-line">conda run -n {settings.conda_env || "<env>"} python -m pip install "pandas&lt;2"</div>
+                <div className="checklist-item">
+                  <span className="check-title">Set projects root</span>
+                  <span className={settings.projects_root ? "ok" : "warn"}>
+                    {settings.projects_root || "Missing"}
+                  </span>
                 </div>
-              ) : null}
-            </div>
-          </section>
-        ) : (
-          <section className="panel checklist collapsed">
-            <div className="checklist-header">
-              <h2>Start-Up Checklist</h2>
-              <button className="ghost" onClick={() => setShowChecklist(true)}>
-                Show
-              </button>
-            </div>
-          </section>
-        )}
-        <section className="panel">
-          <h2>Settings</h2>
-          <div className="block">
-            <label className="label">vSNP3 path</label>
-            <input
-              placeholder="/Users/vivekkapur/vsnp3"
-              value={settings.vsnp3_path}
-              onChange={(e) => setSettings({ ...settings, vsnp3_path: e.target.value })}
-            />
-          </div>
-          <div className="block">
-            <label className="label">Projects root</label>
-            <input
-              placeholder="/Users/vivekkapur/vsnp3/projects"
-              value={settings.projects_root}
-              onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
-            />
-          </div>
-          <div className="block">
-            <label className="label">Conda env for vSNP3</label>
-            <input
-              placeholder="vsnp3"
-              value={settings.conda_env}
-              onChange={(e) => setSettings({ ...settings, conda_env: e.target.value })}
-            />
-          </div>
-          <div className="block">
-            <label className="label">Conda executable (optional)</label>
-            <input
-              placeholder="/Users/vivekkapur/anaconda3/bin/conda"
-              value={settings.conda_exe}
-              onChange={(e) => setSettings({ ...settings, conda_exe: e.target.value })}
-            />
-          </div>
-          <div className="block">
-            <label className="label">Conda env path (optional, overrides conda run)</label>
-            <input
-              placeholder="/Users/vivekkapur/anaconda3/envs/vivek"
-              value={settings.conda_env_path}
-              onChange={(e) => setSettings({ ...settings, conda_env_path: e.target.value })}
-            />
-          </div>
-          <div className="block">
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={settings.sra_allow_insecure_https}
-                onChange={(e) =>
-                  setSettings({ ...settings, sra_allow_insecure_https: e.target.checked })
-                }
-              />
-              Allow insecure HTTPS fallback for ENA
-            </label>
-          </div>
-          <div className="block">
-            <button onClick={runPreflight}>Run Preflight</button>
-            {preflightError ? (
-              <div className="note error">{preflightError}</div>
-            ) : null}
-            {preflight ? (
-              <div className="note">
-                Checked: {preflight.checked.join(", ")} | Missing:{" "}
-                {preflight.missing.length ? preflight.missing.join(", ") : "none"}
+                <div className="checklist-item">
+                  <span className="check-title">Conda env</span>
+                  <span className={settings.conda_env ? "ok" : "warn"}>
+                    {settings.conda_env || "Missing"}
+                  </span>
+                </div>
+                <div className="checklist-item">
+                  <span className="check-title">Preflight</span>
+                  {preflightError ? (
+                    <span className="warn">{preflightError}</span>
+                  ) : preflight ? (
+                    <span className={preflight.missing.length || preflight.issues?.length ? "warn" : "ok"}>
+                      {preflight.missing.length
+                        ? `Missing: ${preflight.missing.join(", ")}`
+                        : "All good"}
+                    </span>
+                  ) : (
+                    <span className="muted">Not run</span>
+                  )}
+                </div>
+                {preflight?.missing?.length ? (
+                  <div className="note error">
+                    Install missing deps with:
+                    <div className="code-line">conda install -n {settings.conda_env || "<env>"} pandas biopython pysam</div>
+                  </div>
+                ) : null}
+                {preflight?.issues?.length ? (
+                  <div className="note error">
+                    {preflight.issues.join("; ")}. Fix with:
+                    <div className="code-line">conda run -n {settings.conda_env || "<env>"} python -m pip install "pandas&lt;2"</div>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+            </section>
           </div>
-          <button onClick={saveSettings}>Save Settings</button>
-        </section>
-        <section className="panel">
-          <h2>Projects</h2>
-          <div className="row">
-            <input
-              placeholder="New project name"
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-            />
-            <button onClick={createProject}>Create</button>
-          </div>
-          <div className="list">
-            {projects.map((p) => (
-              <button
-                key={p.name}
-                className={`list-item ${p.name === selectedProject ? "active" : ""}`}
-                onClick={() => setSelectedProject(p.name)}
-              >
-                <div className="list-title">{p.name}</div>
-                <div className="list-meta">
-                  FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
+        ) : null}
 
-        <section className="panel">
-          <h2>Inputs</h2>
-          <div className="block">
-            <h3>SRA Download</h3>
-            <textarea
-              placeholder="SRR/SRX/SRS accessions (one per line)"
-              value={sraText}
-              onChange={(e) => setSraText(e.target.value)}
-              rows={6}
-            />
-            <input
-              placeholder="Optional subfolder (e.g. 2026-02-01_batch1)"
-              value={sraFolder}
-              onChange={(e) => setSraFolder(e.target.value)}
-            />
-            <button onClick={sraDownload} disabled={!selectedProject}>Download</button>
-          </div>
-          <div className="block">
-            <h3>Bring Your Own FASTQ</h3>
-            <input
-              placeholder="/path/to/fastq_dir"
-              value={localPath}
-              onChange={(e) => setLocalPath(e.target.value)}
-            />
-            <button onClick={linkLocal} disabled={!selectedProject}>Link Local Files</button>
-          </div>
-          <div className="block">
-            <h3>Upload / Drag & Drop</h3>
-            <div
-              className="dropzone"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                uploadFiles(e.dataTransfer.files);
-              }}
-            >
+        <div className="row-header">
+          <h2>Projects & Inputs</h2>
+          <button className="ghost" onClick={() => setShowRowProjects(!showRowProjects)}>
+            {showRowProjects ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showRowProjects ? (
+          <div className="row-grid">
+          <section className="panel">
+            <h2>Projects</h2>
+            <div className="row">
               <input
-                type="file"
-                multiple
-                onChange={(e) => uploadFiles(e.target.files)}
+                placeholder="New project name"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
               />
-              <span>Drop FASTQ.GZ files here or click to select</span>
+              <button onClick={createProject}>Create</button>
             </div>
-            <div className="folder-pick">
-              <label className="label">Pick a folder (Safari supported)</label>
-              <input
-                type="file"
-                multiple
-                webkitdirectory="true"
-                onChange={(e) => uploadFiles(e.target.files)}
-              />
-            </div>
-            {uploadStatus ? <div className="note">{uploadStatus}</div> : null}
-          </div>
-        </section>
-
-
-        <section className="panel">
-          <h2>Run</h2>
-          <div className="block">
-            <h3>Reference</h3>
-            <select
-              value={reference}
-              onChange={(e) => setReference(e.target.value)}
-            >
-              <option value="">Select reference</option>
-              <option value="__auto__">Auto-detect (best match)</option>
-              {references.map((r) => (
-                <option key={r.name} value={r.name}>{r.name}</option>
+            <div className="list">
+              {projects.map((p) => (
+                <button
+                  key={p.name}
+                  className={`list-item ${p.name === selectedProject ? "active" : ""}`}
+                  onClick={() => setSelectedProject(p.name)}
+                >
+                  <div className="list-title">{p.name}</div>
+                  <div className="list-meta">
+                    FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
+                  </div>
+                </button>
               ))}
-            </select>
-            {refLock.references && refLock.references.length > 1 ? (
-              <div className="note error">
-                Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+            </div>
+          </section>
+
+          <section className="panel">
+            <h2>Inputs</h2>
+            <div className="input-columns">
+              <div className="input-column">
+                <h3>Bring Your Own FASTQ</h3>
+                <input
+                  placeholder="/path/to/fastq_dir"
+                  value={localPath}
+                  onChange={(e) => setLocalPath(e.target.value)}
+                />
+                <button onClick={linkLocal} disabled={!selectedProject}>Link Local Files</button>
+                <div className="block">
+                  <h3>Upload / Drag & Drop</h3>
+                  <div
+                    className="dropzone"
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      uploadFiles(e.dataTransfer.files);
+                    }}
+                  >
+                    <input
+                      type="file"
+                      multiple
+                      onChange={(e) => uploadFiles(e.target.files)}
+                    />
+                    <span>Drop FASTQ.GZ files here or click to select</span>
+                  </div>
+                  {uploadStatus ? <div className="note">{uploadStatus}</div> : null}
+                </div>
               </div>
-            ) : refLock.references && refLock.references.length === 1 ? (
-              <div className="note">
-                Detected reference from Step 1: {refLock.references[0]}. You can override for a new Step 1 run.
+              <div className="input-column">
+                <h3>SRA Download</h3>
+                <textarea
+                  placeholder="SRR/SRX/SRS accessions (one per line)"
+                  value={sraText}
+                  onChange={(e) => setSraText(e.target.value)}
+                  rows={6}
+                />
+                <input
+                  placeholder="Optional subfolder (e.g. 2026-02-01_batch1)"
+                  value={sraFolder}
+                  onChange={(e) => setSraFolder(e.target.value)}
+                />
+                <button onClick={sraDownload} disabled={!selectedProject}>Download</button>
               </div>
-            ) : null}
-          </div>
-          <div className="block">
-            <h3>Step 1</h3>
-            <button onClick={step1Setup} disabled={!selectedProject}>Setup</button>
-            <button onClick={step1Run} disabled={!selectedProject || !reference}>Run</button>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={debugMode}
-                onChange={(e) => setDebugMode(e.target.checked)}
-              />
-              Debug (keep intermediates, skip cleanup)
-            </label>
+            </div>
+          </section>
+        </div>
+        ) : null}
+
+        <div className="row-header">
+          <h2>Step 1</h2>
+          <button className="ghost" onClick={() => setShowRowStep1(!showRowStep1)}>
+            {showRowStep1 ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showRowStep1 ? (
+          <div className="row-grid row-grid-split">
+          <section className="panel run-panel">
+            <h2>Step 1</h2>
+            <div className="block">
+              <h3>Reference</h3>
+              <select
+                value={reference}
+                onChange={(e) => setReference(e.target.value)}
+              >
+                <option value="">Select reference</option>
+                <option value="__auto__">Auto-detect (best match)</option>
+                {references.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name}</option>
+                ))}
+              </select>
+              {refLock.references && refLock.references.length > 1 ? (
+                <div className="note error">
+                  Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+                </div>
+              ) : refLock.references && refLock.references.length === 1 ? (
+                <div className="inline-help">
+                  <span className="muted">Reference detected</span>
+                  <span
+                    className="help-icon"
+                    data-tooltip={`Detected reference from Step 1: ${refLock.references[0]}. You can override for a new Step 1 run.`}
+                  >
+                    ?
+                  </span>
+                </div>
+              ) : null}
+            </div>
+            <div className="block">
+              <button onClick={step1Setup} disabled={!selectedProject}>Setup</button>
+              <button onClick={step1Run} disabled={!selectedProject || !reference}>Run</button>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={debugMode}
+                  onChange={(e) => setDebugMode(e.target.checked)}
+                />
+                Debug (keep intermediates, skip cleanup)
+              </label>
+            </div>
             <div className="step1-status">
               <div className="step1-status-header">
                 <span>Samples</span>
@@ -700,7 +750,7 @@ export default function App() {
               </div>
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
               {step1Status.length ? (
-                <ul>
+                <ul className="sample-list">
                   {step1Status.map((s) => (
                     <li key={s.sample}>
                       <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
@@ -723,143 +773,171 @@ export default function App() {
                 </div>
               ) : null}
             </div>
-          </div>
-          <div className="block">
-            <h3>Step 2</h3>
-            <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
-            <button onClick={step2Run} disabled={!selectedProject || !reference || (selected && selected.step2_vcfs === 0) || (refLock.references && refLock.references.length > 1)}>Run</button>
-            <div className="note">
-              {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
-            </div>
-          </div>
-        </section>
+          </section>
 
-        <section className="panel qc-panel">
-          <div className="qc-header">
-            <h2>QC Summary (Step 1)</h2>
-            <div className="qc-actions">
-              <button onClick={loadQC} disabled={!selectedProject || qcLoading}>
-                {qcLoading ? "Loading..." : "Refresh"}
-              </button>
-              <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
-              <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
-            </div>
-          </div>
-          <div className="note">
-            {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
-          </div>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={showFlaggedOnly}
-              onChange={(e) => setShowFlaggedOnly(e.target.checked)}
-            />
-            Show only flagged samples
-          </label>
-          {qcError ? <div className="note error">{qcError}</div> : null}
-          <div className="qc-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Exclude</th>
-                  <th>Sample</th>
-                  <th>Reference</th>
-                  <th>Avg Depth</th>
-                  <th>Zero Cov %</th>
-                  <th>Dup %</th>
-                  <th>R1 Q20</th>
-                  <th>R2 Q20</th>
-                  <th>Genome Cov</th>
-                  <th>Quality SNPs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {qcRows
-                  .filter((r) => !showFlaggedOnly || isFlagged(r))
-                  .map((row) => (
-                    <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(excluded[row._sample])}
-                          onChange={(e) =>
-                            setExcluded({ ...excluded, [row._sample]: e.target.checked })
-                          }
-                        />
-                      </td>
-                      <td>{row._sample || row.sample || "-"}</td>
-                      <td>{row.Reference || "-"}</td>
-                      <td>{row["Average Depth"] || "-"}</td>
-                      <td>{row["Percent Ref with Zero Coverage"] || "-"}</td>
-                      <td>{row["Duplicate Percent of Mapped Reads"] || "-"}</td>
-                      <td>{row["R1 Passing Q20"] || "-"}</td>
-                      <td>{row["R2 Passing Q20"] || "-"}</td>
-                      <td>{row["Genome with Coverage"] || "-"}</td>
-                      <td>{row["Quality SNPs"] || "-"}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="panel results-panel">
-          <div className="qc-header">
-            <h2>Step 2 Results</h2>
-            <div className="qc-actions">
-              <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
-            </div>
-          </div>
-          {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
-          <div className="results-list">
-            {step2Outputs.length ? (
-              step2Outputs.map((item) => (
-                <div key={item.path} className="results-item">
-                  <div className="results-name">{item.label}</div>
-                  <div className="results-path">{item.path}</div>
-                  <div className="results-actions">
-                    <button onClick={() => openOutput(item.path)}>Open</button>
-                  </div>
-                </div>
-              ))
-            ) : null}
-            {step2Groups.length ? (
-              <div className="results-groups">
-                {step2Groups.map((group) => (
-                  <details key={group.name} className="results-group">
-                    <summary>{group.name}</summary>
-                    {group.files.map((item) => (
-                      <div key={item.path} className="results-item">
-                        <div className="results-name">{item.label}</div>
-                        <div className="results-path">{item.path}</div>
-                        <div className="results-actions">
-                          <button onClick={() => openOutput(item.path)}>Open</button>
-                        </div>
-                      </div>
-                    ))}
-                  </details>
-                ))}
+          <section className="panel qc-panel">
+            <div className="qc-header">
+              <h2>QC Summary (Step 1)</h2>
+              <div className="qc-actions">
+                <button onClick={loadQC} disabled={!selectedProject || qcLoading}>
+                  {qcLoading ? "Loading..." : "Refresh"}
+                </button>
+                <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
+                <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
               </div>
-            ) : null}
-            {!step2Outputs.length && !step2Groups.length ? (
-              <div className="note">No Step 2 outputs found yet.</div>
-            ) : null}
-          </div>
-        </section>
+            </div>
+            <div className="note">
+              {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
+            </div>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={showFlaggedOnly}
+                onChange={(e) => setShowFlaggedOnly(e.target.checked)}
+              />
+              Show only flagged samples
+            </label>
+            {qcError ? <div className="note error">{qcError}</div> : null}
+            <div className="qc-table scrollable">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Exclude</th>
+                    <th>Sample</th>
+                    <th>Reference</th>
+                    <th>Avg Depth</th>
+                    <th>Zero Cov %</th>
+                    <th>Dup %</th>
+                    <th>R1 Q20</th>
+                    <th>R2 Q20</th>
+                    <th>Genome Cov</th>
+                    <th>Quality SNPs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {qcRows
+                    .filter((r) => !showFlaggedOnly || isFlagged(r))
+                    .map((row) => (
+                      <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(excluded[row._sample])}
+                            onChange={(e) =>
+                              setExcluded({ ...excluded, [row._sample]: e.target.checked })
+                            }
+                          />
+                        </td>
+                        <td>{row._sample || row.sample || "-"}</td>
+                        <td>{row.Reference || "-"}</td>
+                        <td>{row["Average Depth"] || "-"}</td>
+                        <td>{row["Percent Ref with Zero Coverage"] || "-"}</td>
+                        <td>{row["Duplicate Percent of Mapped Reads"] || "-"}</td>
+                        <td>{row["R1 Passing Q20"] || "-"}</td>
+                        <td>{row["R2 Passing Q20"] || "-"}</td>
+                        <td>{row["Genome with Coverage"] || "-"}</td>
+                        <td>{row["Quality SNPs"] || "-"}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+        ) : null}
 
-        <section className="panel log-panel">
-          <h2>Live Logs</h2>
-          <div className="log">
-            {jobId ? (
-              logs.length ? logs.map((l, i) => <div key={i}>{l}</div>) : <div>Waiting for output...</div>
-            ) : (
-              <div>No job running</div>
-            )}
-          </div>
-          <div className="footer-note">
-            Project: {selected?.name || "None"}
-          </div>
-        </section>
+        <div className="row-header">
+          <h2>Step 2</h2>
+          <button className="ghost" onClick={() => setShowRowStep2(!showRowStep2)}>
+            {showRowStep2 ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showRowStep2 ? (
+          <div className="row-grid row-grid-split">
+          <section className="panel run-panel">
+            <h2>Step 2</h2>
+            <div className="block">
+              <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
+              <button onClick={step2Run} disabled={!selectedProject || !reference || (selected && selected.step2_vcfs === 0) || (refLock.references && refLock.references.length > 1)}>Run</button>
+              <div className="note">
+                {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
+              </div>
+            </div>
+          </section>
+
+          <section className="panel results-panel">
+            <div className="qc-header">
+              <h2>Step 2 Results</h2>
+              <div className="qc-actions">
+                <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
+              </div>
+            </div>
+            {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
+            <div className="results-list">
+              {step2Outputs.length ? (
+                step2Outputs.map((item) => (
+                  <div key={item.path} className="results-item">
+                    <div className="results-main">
+                      <div className="results-name">{item.label}</div>
+                      <div className="results-path">{item.path}</div>
+                    </div>
+                    <div className="results-actions">
+                      <button onClick={() => openOutput(item.path)}>Open</button>
+                    </div>
+                  </div>
+                ))
+              ) : null}
+              {step2Groups.length ? (
+                <div className="results-groups">
+                  {step2Groups.map((group) => (
+                    <details key={group.name} className="results-group">
+                      <summary>{group.name}</summary>
+                      {group.files.map((item) => (
+                        <div key={item.path} className="results-item">
+                          <div className="results-main">
+                            <div className="results-name">{item.label}</div>
+                            <div className="results-path">{item.path}</div>
+                          </div>
+                          <div className="results-actions">
+                            <button onClick={() => openOutput(item.path)}>Open</button>
+                          </div>
+                        </div>
+                      ))}
+                    </details>
+                  ))}
+                </div>
+              ) : null}
+              {!step2Outputs.length && !step2Groups.length ? (
+                <div className="note">No Step 2 outputs found yet.</div>
+              ) : null}
+            </div>
+          </section>
+        </div>
+        ) : null}
+
+        <div className="row-header">
+          <h2>Logs</h2>
+          <button className="ghost" onClick={() => setShowRowLogs(!showRowLogs)}>
+            {showRowLogs ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showRowLogs ? (
+          <section className="panel log-panel">
+            <h2>Live Logs</h2>
+            <div className="log">
+              {jobId ? (
+                logs.length ? logs.map((l, i) => <div key={i}>{l}</div>) : <div>Waiting for output...</div>
+              ) : (
+                <div>No job running</div>
+              )}
+            </div>
+            <div className="footer-note">
+              Project: {selected?.name || "None"}
+            </div>
+          </section>
+        ) : null}
       </main>
     </div>
   );

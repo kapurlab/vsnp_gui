@@ -714,8 +714,10 @@ def step2_outputs(project: str):
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
     top = []
-    for f in step2_dir.glob("*.html"):
-        top.append({"label": f.name, "path": str(f), "type": "html"})
+    html_files = sorted(step2_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
+    if html_files:
+        latest_html = html_files[-1]
+        top.append({"label": latest_html.name, "path": str(latest_html), "type": "html"})
     for f in step2_dir.glob("*.zip"):
         top.append({"label": f.name, "path": str(f), "type": "zip"})
     top.sort(key=lambda x: x["label"])

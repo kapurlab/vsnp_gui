@@ -30,7 +30,7 @@ def list_projects(projects_root: Path) -> List[Dict]:
     if not projects_root.exists():
         return []
     projects = []
-    for p in sorted(projects_root.iterdir()):
+    for p in projects_root.iterdir():
         if not p.is_dir():
             continue
         meta_path = project_meta_path(p)
@@ -40,7 +40,11 @@ def list_projects(projects_root: Path) -> List[Dict]:
         else:
             meta = {"name": p.name}
         meta.update(_project_counts(p))
+        meta["_mtime"] = p.stat().st_mtime
         projects.append(meta)
+    projects.sort(key=lambda x: x.get("_mtime", 0), reverse=True)
+    for meta in projects:
+        meta.pop("_mtime", None)
     return projects
 
 

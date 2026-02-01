@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+**/.venv/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Env / local config
+.env
+.env.*
+!.env.example
+
+# OS / logs
+.DS_Store
+*.log
+
+# App data
+backend/data/
+backend/projects/

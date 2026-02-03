@@ -54,6 +54,12 @@ In the Settings panel:
 
 Then click **Save** and **Preflight**.
 
+## 4b) Sample data (VCF Lite Pack)
+For Step 2 testing, you can use the built‑in **VCF Lite Pack**:
+- Step 2 → **VCF Sources**
+- Preset: **“VCF Lite Pack (repo)”**
+- Build VCF set → Run
+
 ## Conda path (recommended if you already use conda)
 Create a conda environment and install dependencies:
 ```

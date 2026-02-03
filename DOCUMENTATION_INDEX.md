@@ -63,6 +63,7 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
 | **[ALPHA_TESTING.md](ALPHA_TESTING.md)** | ~2 | Quickstart for testers | Collaborators, setup |
 | **[APP_ICON_README.md](APP_ICON_README.md)** | ~3 | Icon creation guide | Developers |
 | **[ICONS_README.md](ICONS_README.md)** | ~3 | Icon options | Customization |
+| **[sample_data/vcf_lite/README.md](sample_data/vcf_lite/README.md)** | ~1 | Built‑in VCF Lite Pack | Step 2 demo/testing |
 
 **Total:** ~110 pages of documentation
 

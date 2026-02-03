@@ -2,6 +2,10 @@
 
 Local web GUI for vSNP3 with FastAPI + React. Focus: stable workflow, centralized SRA download handling, and clean logs.
 
+## Sample data (VCF Lite Pack)
+For quick Step 2 testing, a small VCF pack is included at `sample_data/vcf_lite/`.
+Use the Step 2 preset **“VCF Lite Pack (repo)”** to auto‑fill sources and reference.
+
 ## Quick Start
 
 ### Backend

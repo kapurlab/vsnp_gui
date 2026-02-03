@@ -25,6 +25,11 @@ In **Settings**, use **Choose** buttons to pick:
 
 Click **Save** and **Preflight**.
 
+## 4) Try the VCF Lite Pack
+For a quick Step 2 demo:
+- Step 2 → VCF Sources → Preset **“VCF Lite Pack (repo)”**
+- Build VCF set → Run
+
 ## 4) Troubleshooting
 - If the Electron window is blank, check that the frontend dev server is running.
 - If Preflight fails, install dependencies in the selected conda env:

@@ -1171,11 +1171,23 @@ export default function App() {
                         setImportPrefixDupes(true);
                         setImportDedupe(true);
                         setImportFuzzyMatch(true);
+                      } else if (value === "lite") {
+                        setImportSourcesText([
+                          "/Users/vivekkapur/vsnp_gui/sample_data/vcf_lite"
+                        ].join("\\n"));
+                        setImportReference("mtbc0_v1.1");
+                        setImportIncludeStep1(false);
+                        setImportAction("copy");
+                        setImportConflict("rename");
+                        setImportPrefixDupes(true);
+                        setImportDedupe(true);
+                        setImportFuzzyMatch(true);
                       }
                     }}
                   >
                     <option value="">Preset...</option>
                     <option value="mtbc0">MTBC0 + VCF_REFS</option>
+                    <option value="lite">VCF Lite Pack (repo)</option>
                   </select>
                 </div>
                 {canPickPath ? (

@@ -51,6 +51,7 @@ export default function App() {
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
+  const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
   const [importReference, setImportReference] = useState("");
   const [importAction, setImportAction] = useState("copy");
@@ -171,6 +172,14 @@ export default function App() {
       loadStep1Status();
     }
   }, [jobStatus, selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (!step2AutoRefreshPending) return;
+    if (jobStatus !== "succeeded") return;
+    loadStep2Outputs();
+    setStep2AutoRefreshPending(false);
+  }, [jobStatus, selectedProject, step2AutoRefreshPending]);
 
   async function createProject() {
     if (!newProjectName.trim()) return;
@@ -542,6 +551,7 @@ export default function App() {
     setStep2Groups([]);
     setStep2OutputsError("");
     setStep2RunId(new Date().toISOString());
+    setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
   }
 

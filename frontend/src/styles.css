@@ -744,13 +744,17 @@ button:hover:not(:disabled) {
 
 .results-panel {
   grid-column: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .results-list {
   margin-top: 12px;
   display: grid;
   gap: 10px;
-  max-height: 660px;
+  max-height: 900px;
+  min-height: 800px;
+  flex: 1;
   overflow: auto;
   padding-right: 6px;
   position: relative;

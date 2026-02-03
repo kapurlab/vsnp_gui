@@ -47,6 +47,10 @@ export default function App() {
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
+  const [step2Mode, setStep2Mode] = useState("custom");
+  const [step2RunId, setStep2RunId] = useState("");
+  const [step2BuiltAt, setStep2BuiltAt] = useState("");
+  const [step2VcfCount, setStep2VcfCount] = useState(0);
   const [importSourcesText, setImportSourcesText] = useState("");
   const [importReference, setImportReference] = useState("");
   const [importAction, setImportAction] = useState("copy");
@@ -58,6 +62,7 @@ export default function App() {
   const [importPrefixDupes, setImportPrefixDupes] = useState(true);
   const [importDedupe, setImportDedupe] = useState(true);
   const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
+  const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
@@ -146,6 +151,9 @@ export default function App() {
     loadQC();
     loadStep1Status();
     loadStep2Outputs();
+    setStep2RunId("");
+    setStep2BuiltAt("");
+    setStep2VcfCount(0);
   }, [selectedProject]);
 
   useEffect(() => {
@@ -287,6 +295,9 @@ export default function App() {
         setRefLock(lock);
         if (lock.references && lock.references.length === 1) {
           setReference(lock.references[0]);
+          if (!importReference) {
+            setImportReference(lock.references[0]);
+          }
         }
       }
     } catch {
@@ -311,6 +322,11 @@ export default function App() {
     } else {
       setStep2Outputs(data.top || []);
       setStep2Groups(data.groups || []);
+    }
+    const countRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_count`);
+    if (countRes.ok) {
+      const countData = await countRes.json();
+      setStep2VcfCount(countData.count || 0);
     }
   }
 
@@ -461,6 +477,7 @@ export default function App() {
     ].filter(Boolean);
     setImportStatus(parts.join(" | "));
     setImportProjectLock(selectedProject);
+    setStep2BuiltAt(new Date().toISOString());
     await refreshProjects(selectedProject);
   }
 
@@ -500,6 +517,10 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/clear`, { method: "POST" });
     if (res.ok) {
       setStep2SetupMsg("VCF set cleared");
+      setStep2BuiltAt("");
+      setStep2Outputs([]);
+      setStep2Groups([]);
+      setStep2OutputsError("");
       await loadAll();
     }
   }
@@ -517,6 +538,10 @@ export default function App() {
       return;
     }
     const data = await res.json();
+    setStep2Outputs([]);
+    setStep2Groups([]);
+    setStep2OutputsError("");
+    setStep2RunId(new Date().toISOString());
     setJobId(data.job_id);
   }
 
@@ -1084,139 +1109,216 @@ export default function App() {
           <section className="panel run-panel">
             <h2>Step 2</h2>
             <div className="block">
-              <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
-              <button onClick={step2Run} disabled={!selectedProject || !reference || (selected && selected.step2_vcfs === 0) || (refLock.references && refLock.references.length > 1)}>Run</button>
-              <button className="ghost action" onClick={step2Clear} disabled={!selectedProject}>Clear VCF set</button>
+              <div className="mode-toggle">
+                <button
+                  className={step2Mode === "custom" ? "active" : ""}
+                  onClick={() => setStep2Mode("custom")}
+                >
+                  Use custom VCF set
+                </button>
+                <button
+                  className={step2Mode === "step1" ? "active" : ""}
+                  onClick={() => setStep2Mode("step1")}
+                >
+                  Use Step 1 only
+                </button>
+              </div>
+            </div>
+
+            {step2Mode === "custom" ? (
+              <div className="block">
+                <h3>
+                  VCF Sources (Step 2)
+                  <span
+                    className="help-icon"
+                    data-tooltip="Paste one or more folders (one per line). All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Use the same reference across all sources."
+                  >
+                    ?
+                  </span>
+                </h3>
+                <textarea
+                  placeholder="/path/to/step2/vcf_database (one per line, searched recursively)"
+                  value={importSourcesText}
+                  onChange={(e) => setImportSourcesText(e.target.value)}
+                  rows={4}
+                />
+                <div className="row">
+                  <select
+                    value={importPreset}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setImportPreset(value);
+                      if (value === "mtbc0") {
+                        setImportSourcesText([
+                          "/Users/vivekkapur/vsnp3/VCF_REFS/mtbc_representative",
+                          "/Users/vivekkapur/vsnp3/VCF_REFS/minimum_tree",
+                          "/Users/vivekkapur/vsnp3/VCF_REFS/faked_from_assembly"
+                        ].join("\\n"));
+                        setImportReference("mtbc0_v1.1");
+                        setImportIncludeStep1(true);
+                        setImportAction("copy");
+                        setImportConflict("rename");
+                        setImportPrefixDupes(true);
+                        setImportDedupe(true);
+                        setImportFuzzyMatch(true);
+                      }
+                    }}
+                  >
+                    <option value="">Preset...</option>
+                    <option value="mtbc0">MTBC0 + VCF_REFS</option>
+                  </select>
+                </div>
+                {canPickPath ? (
+                  <button
+                    className="ghost action"
+                    onClick={() =>
+                      pickPath(
+                        "directory",
+                        "Select Step 2 VCF database",
+                        "",
+                        (value) =>
+                          setImportSourcesText((prev) => (prev ? `${prev}\n${value}` : value))
+                      )
+                    }
+                  >
+                    Add Folder
+                  </button>
+                ) : null}
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={importIncludeStep1}
+                    onChange={(e) => setImportIncludeStep1(e.target.checked)}
+                  />
+                  Include current project Step 1 ZC VCFs
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={importAllowMismatch}
+                    onChange={(e) => setImportAllowMismatch(e.target.checked)}
+                  />
+                  Allow reference mismatches (not recommended)
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={importPrefixDupes}
+                    onChange={(e) => setImportPrefixDupes(e.target.checked)}
+                  />
+                  Prefix duplicates with source folder name
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={importDedupe}
+                    onChange={(e) => setImportDedupe(e.target.checked)}
+                  />
+                  Deduplicate identical sample IDs (keep newest)
+                </label>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={importFuzzyMatch}
+                    onChange={(e) => setImportFuzzyMatch(e.target.checked)}
+                  />
+                  Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
+                </label>
+                <input
+                  placeholder="Reference (must match VCFs)"
+                  value={importReference}
+                  onChange={(e) => setImportReference(e.target.value)}
+                  list="reference-options"
+                />
+                <div className="row">
+                  <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
+                    <option value="copy">Copy files</option>
+                    <option value="link">Link files</option>
+                  </select>
+                  <select value={importConflict} onChange={(e) => setImportConflict(e.target.value)}>
+                    <option value="skip">Skip conflicts</option>
+                    <option value="rename">Rename conflicts</option>
+                    <option value="overwrite">Overwrite conflicts</option>
+                  </select>
+                </div>
+                <div className="selection-box">
+                  <div>
+                    <strong>Selections:</strong>
+                  </div>
+                  <div>Sources: {parseAccessions(importSourcesText).length || 0}</div>
+                  <div>Include Step 1: {importIncludeStep1 ? "Yes" : "No"}</div>
+                  <div>Reference: {importReference || "None"}</div>
+                  <div>Action: {importAction} | Conflicts: {importConflict}</div>
+                  <button
+                    className="ghost action"
+                    onClick={() => {
+                      setImportSourcesText("");
+                      setImportMismatchReport("");
+                      setImportStatus("");
+                    }}
+                  >
+                    Clear sources
+                  </button>
+                </div>
+                <div className="row">
+                  <button onClick={importVcfs} disabled={!selectedProject}>Build VCF set</button>
+                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject}>Clear VCF set</button>
+                  <button
+                    className="ghost action"
+                    onClick={() => openOutput(`${settings.projects_root}/${selectedProject}/step2/vcf_source`)}
+                    disabled={!selectedProject}
+                  >
+                    Open vcf_source
+                  </button>
+                </div>
+                <div className="note">
+                  VCFs in set: {step2VcfCount}
+                  {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
+                </div>
+                {importMismatchReport ? (
+                  <button
+                    className="ghost action"
+                    onClick={() => openOutput(importMismatchReport)}
+                  >
+                    Open mismatch report
+                  </button>
+                ) : null}
+                {importStatus ? <div className="note">{importStatus}</div> : null}
+                {importProjectLock && selectedProject !== importProjectLock ? (
+                  <div className="note error">
+                    VCF set built for {importProjectLock}. Switch back to run Step 2 there.
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="block">
+                <div className="note">
+                  Step 2 will use only this project's Step 1 ZC VCFs.
+                </div>
+              </div>
+            )}
+
+            <div className="block">
+              {step2Mode === "step1" ? (
+                <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
+              ) : null}
+              <button
+                onClick={step2Run}
+                disabled={
+                  !selectedProject ||
+                  !reference ||
+                  (selected && selected.step2_vcfs === 0) ||
+                  (refLock.references && refLock.references.length > 1)
+                }
+              >
+                Run
+              </button>
               <div className="note">
                 {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
               </div>
               {selected ? (
                 <div className="note">
                   Outputs will be written to: {settings.projects_root}/{selected.name}/step2
-                </div>
-              ) : null}
-            </div>
-            <div className="block">
-              <h3>
-                VCF Sources (Step 2)
-                <span
-                  className="help-icon"
-                  data-tooltip="Paste one or more folders (one per line). All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Use the same reference across all sources."
-                >
-                  ?
-                </span>
-              </h3>
-              <textarea
-                placeholder="/path/to/step2/vcf_database (one per line, searched recursively)"
-                value={importSourcesText}
-                onChange={(e) => setImportSourcesText(e.target.value)}
-                rows={4}
-              />
-              {canPickPath ? (
-                <button
-                  className="ghost action"
-                  onClick={() =>
-                    pickPath(
-                      "directory",
-                      "Select Step 2 VCF database",
-                      "",
-                      (value) =>
-                        setImportSourcesText((prev) => (prev ? `${prev}\n${value}` : value))
-                    )
-                  }
-                >
-                  Add Folder
-                </button>
-              ) : null}
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={importIncludeStep1}
-                  onChange={(e) => setImportIncludeStep1(e.target.checked)}
-                />
-                Include current project Step 1 ZC VCFs
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={importAllowMismatch}
-                  onChange={(e) => setImportAllowMismatch(e.target.checked)}
-                />
-                Allow reference mismatches (not recommended)
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={importPrefixDupes}
-                  onChange={(e) => setImportPrefixDupes(e.target.checked)}
-                />
-                Prefix duplicates with source folder name
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={importDedupe}
-                  onChange={(e) => setImportDedupe(e.target.checked)}
-                />
-                Deduplicate identical sample IDs (keep newest)
-              </label>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={importFuzzyMatch}
-                  onChange={(e) => setImportFuzzyMatch(e.target.checked)}
-                />
-                Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
-              </label>
-              <input
-                placeholder="Reference (must match VCFs)"
-                value={importReference}
-                onChange={(e) => setImportReference(e.target.value)}
-                list="reference-options"
-              />
-              <div className="row">
-                <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
-                  <option value="copy">Copy files</option>
-                  <option value="link">Link files</option>
-                </select>
-                <select value={importConflict} onChange={(e) => setImportConflict(e.target.value)}>
-                  <option value="skip">Skip conflicts</option>
-                  <option value="rename">Rename conflicts</option>
-                  <option value="overwrite">Overwrite conflicts</option>
-                </select>
-              </div>
-              <div className="selection-box">
-                <div>
-                  <strong>Selections:</strong>
-                </div>
-                <div>Sources: {parseAccessions(importSourcesText).length || 0}</div>
-                <div>Include Step 1: {importIncludeStep1 ? "Yes" : "No"}</div>
-                <div>Reference: {importReference || "None"}</div>
-                <div>Action: {importAction} | Conflicts: {importConflict}</div>
-                <button
-                  className="ghost action"
-                  onClick={() => {
-                    setImportSourcesText("");
-                    setImportMismatchReport("");
-                    setImportStatus("");
-                  }}
-                >
-                  Clear sources
-                </button>
-              </div>
-              <button onClick={importVcfs} disabled={!selectedProject}>Build VCF set</button>
-              {importMismatchReport ? (
-                <button
-                  className="ghost action"
-                  onClick={() => openOutput(importMismatchReport)}
-                >
-                  Open mismatch report
-                </button>
-              ) : null}
-              {importStatus ? <div className="note">{importStatus}</div> : null}
-              {importProjectLock && selectedProject !== importProjectLock ? (
-                <div className="note error">
-                  VCF set built for {importProjectLock}. Switch back to run Step 2 there.
                 </div>
               ) : null}
             </div>
@@ -1229,12 +1331,18 @@ export default function App() {
                 <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
               </div>
             </div>
+            {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
-            <div className="results-list">
-              {step2Outputs.length ? (
-                step2Outputs.map((item) => (
-                  <div key={item.path} className="results-item">
-                    <div className="results-main">
+            {(() => {
+              const groupCount = step2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
+              const totalCount = step2Outputs.length + groupCount;
+              return (
+                <>
+                  <div className="results-list">
+                  {step2Outputs.length ? (
+                    step2Outputs.map((item) => (
+                      <div key={item.path} className="results-item">
+                        <div className="results-main">
                       <div className="results-name">{item.label}</div>
                       <div className="results-path">{item.path}</div>
                     </div>
@@ -1267,7 +1375,11 @@ export default function App() {
               {!step2Outputs.length && !step2Groups.length ? (
                 <div className="note">No Step 2 outputs found yet.</div>
               ) : null}
-            </div>
+                  </div>
+                  {totalCount > 8 ? <div className="scroll-hint">Scroll for more results</div> : null}
+                </>
+              );
+            })()}
           </section>
         </div>
         ) : null}

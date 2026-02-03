@@ -829,6 +829,17 @@ class OpenRequest(BaseModel):
     path: str
 
 
+@app.get("/api/projects/{project}/step2/vcf_count")
+def step2_vcf_count(project: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    if not vcf_source_dir.exists():
+        return {"count": 0}
+    count = len(list(vcf_source_dir.glob("*.vcf"))) + len(list(vcf_source_dir.glob("*.vcf.gz")))
+    return {"count": count, "path": str(vcf_source_dir)}
+
+
 @app.post("/api/projects/{project}/qc_exclude")
 def qc_exclude(project: str, payload: ExcludeRequest):
     cfg = load_config()

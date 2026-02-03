@@ -10,6 +10,7 @@ import os
 import time
 import subprocess
 import shutil
+import gzip
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -87,6 +88,17 @@ class SraRequest(BaseModel):
 
 class LinkLocalRequest(BaseModel):
     path: str
+
+
+class ImportVcfRequest(BaseModel):
+    source_paths: List[str] = []
+    include_step1: bool = False
+    reference: Optional[str] = None
+    action: Optional[str] = "copy"  # copy | link
+    on_conflict: Optional[str] = "skip"  # skip | overwrite | rename
+    allow_mismatch: bool = False
+    prefix_duplicates: bool = False
+    dedupe: bool = False
 
 
 class Step1Request(BaseModel):
@@ -189,6 +201,112 @@ def project_link_local(project: str, payload: LinkLocalRequest):
             target.symlink_to(f)
             count += 1
     return {"linked": count}
+
+
+@app.post("/api/projects/{project}/import-vcfs")
+def project_import_vcfs(project: str, payload: ImportVcfRequest):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_dirs(project_dir)
+
+    vcfs = []
+    source_roots = []
+    for raw in payload.source_paths or []:
+        src = Path((raw or "").strip()).expanduser()
+        if not src.exists():
+            raise HTTPException(status_code=400, detail=f"Source path not found: {src}")
+        source_roots.append(src)
+        vcfs.extend(list(src.rglob("*_zc.vcf")))
+        vcfs.extend(list(src.rglob("*_zc.vcf.gz")))
+
+    if payload.include_step1:
+        step1_dir = project_dir / "step1"
+        if step1_dir.exists():
+            source_roots.append(step1_dir)
+            vcfs.extend(list(step1_dir.rglob("*_zc.vcf")))
+            vcfs.extend(list(step1_dir.rglob("*_zc.vcf.gz")))
+
+    if not vcfs:
+        raise HTTPException(status_code=400, detail="No *_zc.vcf files found in provided sources")
+
+    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    detected_refs = _detect_vcf_references(vcfs, alias_map)
+    if len(detected_refs) > 1 and not payload.reference:
+        raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(sorted(detected_refs))}")
+    detected_ref = payload.reference or (next(iter(detected_refs), "") if len(detected_refs) == 1 else "")
+    if not detected_ref:
+        raise HTTPException(status_code=400, detail="Reference is required (could not detect from VCF headers)")
+
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    vcf_source_dir.mkdir(parents=True, exist_ok=True)
+    action = (payload.action or "copy").lower()
+    on_conflict = (payload.on_conflict or "skip").lower()
+
+    imported = 0
+    skipped = 0
+    renamed = 0
+    mismatched = []
+    seen_samples = {}
+    for vcf in vcfs:
+        vcf_ref = _detect_vcf_reference(vcf, alias_map)
+        if vcf_ref and vcf_ref != detected_ref:
+            mismatched.append({"path": str(vcf), "reference": vcf_ref})
+            if not payload.allow_mismatch:
+                skipped += 1
+                continue
+        if not vcf_ref:
+            mismatched.append({"path": str(vcf), "reference": "unknown"})
+            if not payload.allow_mismatch:
+                skipped += 1
+                continue
+        if payload.dedupe:
+            sample = _sample_from_vcf(vcf)
+            if sample in seen_samples:
+                prev = seen_samples[sample]
+                if vcf.stat().st_mtime <= prev.stat().st_mtime:
+                    skipped += 1
+                    continue
+            seen_samples[sample] = vcf
+        target = vcf_source_dir / vcf.name
+        if target.exists():
+            if on_conflict == "skip":
+                skipped += 1
+                continue
+            if on_conflict == "rename":
+                if payload.prefix_duplicates:
+                    prefix = _source_prefix(vcf, source_roots)
+                    target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
+                else:
+                    target = _unique_target(vcf_source_dir, vcf.name)
+                renamed += 1
+            else:
+                target.unlink()
+        if action == "link":
+            target.symlink_to(vcf)
+        else:
+            shutil.copy2(vcf, target)
+        imported += 1
+
+    mismatch_report = ""
+    if mismatched:
+        report_path = project_dir / "step2" / "mismatch_report.csv"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("path,reference\n")
+            for row in mismatched:
+                f.write(f"\"{row['path']}\",\"{row['reference']}\"\n")
+        mismatch_report = str(report_path)
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "renamed": renamed,
+        "detected_reference": detected_ref or payload.reference or "",
+        "mismatched": len(mismatched),
+        "mismatch_report": mismatch_report
+    }
 
 
 @app.post("/api/projects/{project}/upload")
@@ -742,6 +860,9 @@ def step2_outputs(project: str):
         top.append({"label": latest_html.name, "path": str(latest_html), "type": "html"})
     for f in step2_dir.glob("*.zip"):
         top.append({"label": f.name, "path": str(f), "type": "zip"})
+    mismatch_report = step2_dir / "mismatch_report.csv"
+    if mismatch_report.exists():
+        top.append({"label": mismatch_report.name, "path": str(mismatch_report), "type": "csv"})
     top.sort(key=lambda x: x["label"])
 
     groups = []
@@ -787,3 +908,86 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=404, detail="File not found")
     subprocess.run(["open", str(target)])
     return {"opened": str(target)}
+
+
+def _detect_vcf_references(vcfs: List[Path], alias_map: Dict[str, str]) -> set:
+    refs = set()
+    for vcf in vcfs:
+        ref = _detect_vcf_reference(vcf, alias_map)
+        if ref:
+            refs.add(ref)
+    return {r for r in refs if r}
+
+
+def _detect_vcf_reference(vcf: Path, alias_map: Dict[str, str]) -> str:
+    try:
+        opener = gzip.open if vcf.suffix == ".gz" else open
+        with opener(vcf, "rt", encoding="utf-8", errors="ignore") as f:
+            for _ in range(200):
+                line = f.readline()
+                if not line:
+                    break
+                if line.startswith("##reference="):
+                    ref = line.split("=", 1)[1].strip()
+                    return _normalize_reference(ref, alias_map)
+    except Exception:
+        return ""
+    return ""
+
+
+def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
+    ref = ref.replace("file://", "").strip()
+    lower_ref = ref.lower()
+    for name in alias_map.values():
+        if f"/{name.lower()}/" in lower_ref:
+            return name
+    ref_path = Path(ref)
+    candidate = ref_path.stem
+    if candidate in alias_map:
+        return alias_map[candidate]
+    return candidate.replace("_", " ").strip().replace(" ", "_")
+
+
+def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    refs = list_references(vsnp3_path)
+    for ref in refs:
+        name = ref.get("name")
+        base = Path(ref.get("path", ""))
+        if not name or not base.exists():
+            continue
+        for ext in (".fa", ".fasta", ".fna", ".fas"):
+            for fasta in base.rglob(f"*{ext}"):
+                aliases[fasta.stem] = name
+            if name in aliases.values():
+                break
+    return aliases
+
+
+def _unique_target(base_dir: Path, filename: str) -> Path:
+    stem = Path(filename).stem
+    suffix = "".join(Path(filename).suffixes)
+    idx = 1
+    while True:
+        candidate = base_dir / f"{stem}_import{idx}{suffix}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def _source_prefix(vcf: Path, source_roots: List[Path]) -> str:
+    for root in source_roots:
+        try:
+            vcf.relative_to(root)
+            return root.name or "source"
+        except ValueError:
+            continue
+    return "source"
+
+
+def _sample_from_vcf(vcf: Path) -> str:
+    name = vcf.name
+    for suffix in ("_zc.vcf.gz", "_zc.vcf"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return vcf.stem

@@ -47,6 +47,17 @@ export default function App() {
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
+  const [importSourcesText, setImportSourcesText] = useState("");
+  const [importReference, setImportReference] = useState("");
+  const [importAction, setImportAction] = useState("copy");
+  const [importConflict, setImportConflict] = useState("skip");
+  const [importStatus, setImportStatus] = useState("");
+  const [importIncludeStep1, setImportIncludeStep1] = useState(true);
+  const [importAllowMismatch, setImportAllowMismatch] = useState(false);
+  const [importMismatchReport, setImportMismatchReport] = useState("");
+  const [importPrefixDupes, setImportPrefixDupes] = useState(true);
+  const [importDedupe, setImportDedupe] = useState(true);
+  const [importProjectLock, setImportProjectLock] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
   const [showSetup, setShowSetup] = useState(true);
@@ -55,10 +66,25 @@ export default function App() {
   const [showRowStep2, setShowRowStep2] = useState(true);
   const [showRowLogs, setShowRowLogs] = useState(true);
 
+  const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
+
+  const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
+  const excludeKey = (row) => row?._file || sampleKey(row);
+
   const selected = useMemo(
     () => projects.find((p) => p.name === selectedProject),
     [projects, selectedProject]
   );
+
+  async function pickPath(kind, title, currentValue, onPick) {
+    if (!window?.vsnp?.selectPath) return;
+    const picked = await window.vsnp.selectPath({
+      kind,
+      title,
+      defaultPath: currentValue || undefined
+    });
+    if (picked) onPick(picked);
+  }
 
   async function loadAll() {
     const [cfg, proj, refs] = await Promise.all([
@@ -120,6 +146,15 @@ export default function App() {
     loadStep1Status();
     loadStep2Outputs();
   }, [selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (jobStatus !== "running") return;
+    const id = setInterval(() => {
+      loadStep1Status();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [jobStatus, selectedProject]);
 
   useEffect(() => {
     if (!selectedProject) return;
@@ -314,11 +349,18 @@ export default function App() {
 
   async function saveExclusions() {
     if (!selectedProject) return;
-    const samples = Object.keys(excluded).filter((k) => excluded[k]);
+    const samples = new Set();
+    qcRows.forEach((row) => {
+      const key = excludeKey(row);
+      if (excluded[key]) {
+        const sample = sampleKey(row);
+        if (sample) samples.add(sample);
+      }
+    });
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ samples })
+      body: JSON.stringify({ samples: Array.from(samples) })
     });
     if (!res.ok) {
       const msg = await res.json();
@@ -373,6 +415,51 @@ export default function App() {
     });
     const data = await res.json();
     setJobId(data.job_id);
+  }
+
+  async function importVcfs() {
+    if (!selectedProject) return;
+    const sources = parseAccessions(importSourcesText);
+    if (!sources.length && !importIncludeStep1) {
+      setImportStatus("Provide at least one source path or include Step 1.");
+      return;
+    }
+    if (!importReference) {
+      setImportStatus("Reference is required");
+      return;
+    }
+    setImportStatus("");
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/import-vcfs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source_paths: sources,
+        include_step1: importIncludeStep1,
+        reference: importReference,
+        action: importAction,
+        on_conflict: importConflict,
+        allow_mismatch: importAllowMismatch,
+        prefix_duplicates: importPrefixDupes,
+        dedupe: importDedupe
+      })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      setImportStatus(`Import failed: ${data.detail || res.statusText}`);
+      return;
+    }
+    const data = await res.json();
+    setImportMismatchReport(data.mismatch_report || "");
+    const parts = [
+      `Imported ${data.imported}`,
+      data.renamed ? `Renamed ${data.renamed}` : null,
+      data.skipped ? `Skipped ${data.skipped}` : null,
+      data.mismatched ? `Mismatched ${data.mismatched}` : null,
+      data.detected_reference ? `Ref: ${data.detected_reference}` : null
+    ].filter(Boolean);
+    setImportStatus(parts.join(" | "));
+    setImportProjectLock(selectedProject);
+    await refreshProjects(selectedProject);
   }
 
   async function step1Setup() {
@@ -477,6 +564,11 @@ export default function App() {
       </header>
 
       <main className="layout">
+        <datalist id="reference-options">
+          {references.map((ref) => (
+            <option key={ref.name} value={ref.name} />
+          ))}
+        </datalist>
         <section className="status-strip">
           <div className="status-item">
             <span className="status-label">Project</span>
@@ -526,6 +618,21 @@ export default function App() {
                     value={settings.vsnp3_path}
                     onChange={(e) => setSettings({ ...settings, vsnp3_path: e.target.value })}
                   />
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "directory",
+                          "Select vSNP3 folder",
+                          settings.vsnp3_path,
+                          (value) => setSettings({ ...settings, vsnp3_path: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
                 </div>
                 <div className="settings-row">
                   <label className="label">Projects root</label>
@@ -534,6 +641,21 @@ export default function App() {
                     value={settings.projects_root}
                     onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
                   />
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "directory",
+                          "Select projects root",
+                          settings.projects_root,
+                          (value) => setSettings({ ...settings, projects_root: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
                 </div>
                 <div className="settings-row">
                   <label className="label">Conda env for vSNP3</label>
@@ -550,6 +672,21 @@ export default function App() {
                     value={settings.conda_exe}
                     onChange={(e) => setSettings({ ...settings, conda_exe: e.target.value })}
                   />
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "file",
+                          "Select conda executable",
+                          settings.conda_exe,
+                          (value) => setSettings({ ...settings, conda_exe: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
                 </div>
                 <div className="settings-row">
                   <label className="label">Conda env path (optional)</label>
@@ -558,6 +695,21 @@ export default function App() {
                     value={settings.conda_env_path}
                     onChange={(e) => setSettings({ ...settings, conda_env_path: e.target.value })}
                   />
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "directory",
+                          "Select conda env folder",
+                          settings.conda_env_path,
+                          (value) => setSettings({ ...settings, conda_env_path: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <div className="block">
@@ -885,9 +1037,9 @@ export default function App() {
                         <td>
                           <input
                             type="checkbox"
-                            checked={Boolean(excluded[row._sample])}
+                            checked={Boolean(excluded[excludeKey(row)])}
                             onChange={(e) =>
-                              setExcluded({ ...excluded, [row._sample]: e.target.checked })
+                              setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
                             }
                           />
                         </td>
@@ -926,6 +1078,127 @@ export default function App() {
               <div className="note">
                 {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
               </div>
+              {selected ? (
+                <div className="note">
+                  Outputs will be written to: {settings.projects_root}/{selected.name}/step2
+                </div>
+              ) : null}
+            </div>
+            <div className="block">
+              <h3>
+                VCF Sources (Step 2)
+                <span
+                  className="help-icon"
+                  data-tooltip="Paste one or more folders (one per line). All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Use the same reference across all sources."
+                >
+                  ?
+                </span>
+              </h3>
+              <textarea
+                placeholder="/path/to/step2/vcf_database (one per line, searched recursively)"
+                value={importSourcesText}
+                onChange={(e) => setImportSourcesText(e.target.value)}
+                rows={4}
+              />
+              {canPickPath ? (
+                <button
+                  className="ghost action"
+                  onClick={() =>
+                    pickPath(
+                      "directory",
+                      "Select Step 2 VCF database",
+                      "",
+                      (value) =>
+                        setImportSourcesText((prev) => (prev ? `${prev}\n${value}` : value))
+                    )
+                  }
+                >
+                  Add Folder
+                </button>
+              ) : null}
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={importIncludeStep1}
+                  onChange={(e) => setImportIncludeStep1(e.target.checked)}
+                />
+                Include current project Step 1 ZC VCFs
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={importAllowMismatch}
+                  onChange={(e) => setImportAllowMismatch(e.target.checked)}
+                />
+                Allow reference mismatches (not recommended)
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={importPrefixDupes}
+                  onChange={(e) => setImportPrefixDupes(e.target.checked)}
+                />
+                Prefix duplicates with source folder name
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={importDedupe}
+                  onChange={(e) => setImportDedupe(e.target.checked)}
+                />
+                Deduplicate identical sample IDs (keep newest)
+              </label>
+              <input
+                placeholder="Reference (must match VCFs)"
+                value={importReference}
+                onChange={(e) => setImportReference(e.target.value)}
+                list="reference-options"
+              />
+              <div className="row">
+                <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
+                  <option value="copy">Copy files</option>
+                  <option value="link">Link files</option>
+                </select>
+                <select value={importConflict} onChange={(e) => setImportConflict(e.target.value)}>
+                  <option value="skip">Skip conflicts</option>
+                  <option value="rename">Rename conflicts</option>
+                  <option value="overwrite">Overwrite conflicts</option>
+                </select>
+              </div>
+              <div className="selection-box">
+                <div>
+                  <strong>Selections:</strong>
+                </div>
+                <div>Sources: {parseAccessions(importSourcesText).length || 0}</div>
+                <div>Include Step 1: {importIncludeStep1 ? "Yes" : "No"}</div>
+                <div>Reference: {importReference || "None"}</div>
+                <div>Action: {importAction} | Conflicts: {importConflict}</div>
+                <button
+                  className="ghost action"
+                  onClick={() => {
+                    setImportSourcesText("");
+                    setImportMismatchReport("");
+                    setImportStatus("");
+                  }}
+                >
+                  Clear sources
+                </button>
+              </div>
+              <button onClick={importVcfs} disabled={!selectedProject}>Build VCF set</button>
+              {importMismatchReport ? (
+                <button
+                  className="ghost action"
+                  onClick={() => openOutput(importMismatchReport)}
+                >
+                  Open mismatch report
+                </button>
+              ) : null}
+              {importStatus ? <div className="note">{importStatus}</div> : null}
+              {importProjectLock && selectedProject !== importProjectLock ? (
+                <div className="note error">
+                  VCF set built for {importProjectLock}. Switch back to run Step 2 there.
+                </div>
+              ) : null}
             </div>
           </section>
 

@@ -8,6 +8,7 @@ __pycache__/
 node_modules/
 dist/
 .vite/
+electron/node_modules/
 
 # Env / local config
 .env

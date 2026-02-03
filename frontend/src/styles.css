@@ -171,7 +171,7 @@ p {
 
 .settings-row {
   display: grid;
-  grid-template-columns: 180px 1fr;
+  grid-template-columns: 180px 1fr auto;
   gap: 10px;
   align-items: center;
 }
@@ -215,7 +215,8 @@ p {
   border-radius: 6px;
   font-size: 12px;
   white-space: normal;
-  max-width: 260px;
+  width: 420px;
+  max-width: 520px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
@@ -778,6 +779,16 @@ button:hover:not(:disabled) {
   gap: 8px;
   align-items: start;
   justify-content: flex-end;
+}
+
+.selection-box {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
 }
 
 .footer-note {

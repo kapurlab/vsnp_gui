@@ -99,6 +99,7 @@ class ImportVcfRequest(BaseModel):
     allow_mismatch: bool = False
     prefix_duplicates: bool = False
     dedupe: bool = False
+    allow_fuzzy_match: bool = True
 
 
 class Step1Request(BaseModel):
@@ -233,11 +234,14 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
     detected_refs = _detect_vcf_references(vcfs, alias_map)
-    if len(detected_refs) > 1 and not payload.reference:
-        raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(sorted(detected_refs))}")
-    detected_ref = payload.reference or (next(iter(detected_refs), "") if len(detected_refs) == 1 else "")
-    if not detected_ref:
-        raise HTTPException(status_code=400, detail="Reference is required (could not detect from VCF headers)")
+    if not payload.reference:
+        if len(detected_refs) > 1:
+            raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(sorted(detected_refs))}")
+        detected_ref = next(iter(detected_refs), "")
+        if not detected_ref:
+            raise HTTPException(status_code=400, detail="Reference is required (could not detect from VCF headers)")
+    else:
+        detected_ref = payload.reference
 
     vcf_source_dir = project_dir / "step2" / "vcf_source"
     vcf_source_dir.mkdir(parents=True, exist_ok=True)
@@ -251,7 +255,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     seen_samples = {}
     for vcf in vcfs:
         vcf_ref = _detect_vcf_reference(vcf, alias_map)
-        if vcf_ref and vcf_ref != detected_ref:
+        if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
             mismatched.append({"path": str(vcf), "reference": vcf_ref})
             if not payload.allow_mismatch:
                 skipped += 1
@@ -846,6 +850,18 @@ def qc_exclude(project: str, payload: ExcludeRequest):
     return {"remove_file": str(remove_path), "count": len(payload.samples)}
 
 
+@app.post("/api/projects/{project}/step2/clear")
+def step2_clear(project: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step2_dir = project_dir / "step2"
+    vcf_source_dir = step2_dir / "vcf_source"
+    if vcf_source_dir.exists():
+        shutil.rmtree(vcf_source_dir)
+    vcf_source_dir.mkdir(parents=True, exist_ok=True)
+    return {"cleared": True}
+
+
 @app.get("/api/projects/{project}/step2_outputs")
 def step2_outputs(project: str):
     cfg = load_config()
@@ -962,6 +978,19 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
             if name in aliases.values():
                 break
     return aliases
+
+
+def _refs_match(a: str, b: str, allow_fuzzy: bool) -> bool:
+    if allow_fuzzy:
+        ca = _canonical_ref_key(a)
+        cb = _canonical_ref_key(b)
+        return ca == cb or ca.startswith(cb) or cb.startswith(ca)
+    return a == b
+
+
+def _canonical_ref_key(ref: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]", "", ref.lower())
 
 
 def _unique_target(base_dir: Path, filename: str) -> Path:

@@ -57,6 +57,7 @@ export default function App() {
   const [importMismatchReport, setImportMismatchReport] = useState("");
   const [importPrefixDupes, setImportPrefixDupes] = useState(true);
   const [importDedupe, setImportDedupe] = useState(true);
+  const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
   const [importProjectLock, setImportProjectLock] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
@@ -440,7 +441,8 @@ export default function App() {
         on_conflict: importConflict,
         allow_mismatch: importAllowMismatch,
         prefix_duplicates: importPrefixDupes,
-        dedupe: importDedupe
+        dedupe: importDedupe,
+        allow_fuzzy_match: importFuzzyMatch
       })
     });
     if (!res.ok) {
@@ -491,6 +493,15 @@ export default function App() {
       setStep2SetupMsg(`VCFs ready for Step 2: ${total} (linked ${data.linked})`);
     }
     await loadAll();
+  }
+
+  async function step2Clear() {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/clear`, { method: "POST" });
+    if (res.ok) {
+      setStep2SetupMsg("VCF set cleared");
+      await loadAll();
+    }
   }
 
   async function step2Run() {
@@ -1075,6 +1086,7 @@ export default function App() {
             <div className="block">
               <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
               <button onClick={step2Run} disabled={!selectedProject || !reference || (selected && selected.step2_vcfs === 0) || (refLock.references && refLock.references.length > 1)}>Run</button>
+              <button className="ghost action" onClick={step2Clear} disabled={!selectedProject}>Clear VCF set</button>
               <div className="note">
                 {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
               </div>
@@ -1147,6 +1159,14 @@ export default function App() {
                   onChange={(e) => setImportDedupe(e.target.checked)}
                 />
                 Deduplicate identical sample IDs (keep newest)
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={importFuzzyMatch}
+                  onChange={(e) => setImportFuzzyMatch(e.target.checked)}
+                />
+                Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
               </label>
               <input
                 placeholder="Reference (must match VCFs)"

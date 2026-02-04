@@ -1009,14 +1009,19 @@ def step1_igv_session(project: str, payload: OpenRequest):
     if not igv_running:
         _open_igv(session_path, igv_app_path, None)
         _wait_for_igv()
-    sent, err = _send_igv_commands(
+    sent, err, sent_commands = _send_igv_commands(
         ref_fasta,
         bam_path,
         contig,
         include_genome=not igv_running,
         retries=10
     )
-    return {"session": str(session_path), "igv_commands_sent": sent, "igv_error": err}
+    return {
+        "session": str(session_path),
+        "igv_commands_sent": sent,
+        "igv_error": err,
+        "igv_commands": sent_commands
+    }
 
 
 def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[Path] = None) -> None:
@@ -1059,7 +1064,7 @@ def _send_igv_commands(
     contig: str,
     include_genome: bool = True,
     retries: int = 1
-) -> tuple[bool, str]:
+) -> tuple[bool, str, List[str]]:
     commands = []
     if include_genome:
         commands.append(f"genome {ref_fasta}")
@@ -1073,12 +1078,12 @@ def _send_igv_commands(
             with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
                 payload = "\n".join(commands) + "\n"
                 sock.sendall(payload.encode("utf-8"))
-            return True, ""
+            return True, "", commands
         except OSError as exc:
             last_error = str(exc)
             time.sleep(1.5)
             continue
-    return False, last_error
+    return False, last_error, commands
 
 
 def _wait_for_igv(timeout: float = 10.0) -> None:

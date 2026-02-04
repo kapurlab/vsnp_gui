@@ -11,6 +11,7 @@ import time
 import subprocess
 import shutil
 import gzip
+import sys
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -1010,8 +1011,23 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    subprocess.run(["open", str(target)])
+    _open_path(target)
     return {"opened": str(target)}
+
+
+def _open_path(target: Path) -> None:
+    if sys.platform.startswith("darwin"):
+        subprocess.run(["open", str(target)])
+        return
+    if sys.platform.startswith("linux"):
+        opener = shutil.which("xdg-open")
+        if opener:
+            subprocess.run([opener, str(target)])
+            return
+    if sys.platform.startswith("win"):
+        subprocess.run(["explorer", str(target)])
+        return
+    subprocess.run(["open", str(target)])
 
 
 def _detect_vcf_references(vcfs: List[Path], alias_map: Dict[str, str]) -> set:

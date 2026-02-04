@@ -83,6 +83,25 @@ export default function App() {
   const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
   const excludeKey = (row) => row?._file || sampleKey(row);
 
+  function formatPercent(value) {
+    if (value === null || value === undefined || value === "") return "-";
+    if (typeof value === "number" && !Number.isNaN(value)) {
+      return value.toFixed(1);
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return "-";
+      if (trimmed.endsWith("%")) {
+        const num = Number.parseFloat(trimmed.replace("%", ""));
+        if (!Number.isNaN(num)) {
+          return `${num.toFixed(1)}%`;
+        }
+      }
+      return value;
+    }
+    return value;
+  }
+
   const selected = useMemo(
     () => projects.find((p) => p.name === selectedProject),
     [projects, selectedProject]
@@ -1190,11 +1209,11 @@ export default function App() {
                         </td>
                         <td>{row.Reference || "-"}</td>
                         <td>{row["Average Depth"] || "-"}</td>
-                        <td>{row["Percent Ref with Zero Coverage"] || "-"}</td>
-                        <td>{row["Duplicate Percent of Mapped Reads"] || "-"}</td>
-                        <td>{row["R1 Passing Q20"] || "-"}</td>
-                        <td>{row["R2 Passing Q20"] || "-"}</td>
-                        <td>{row["Genome with Coverage"] || "-"}</td>
+                        <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                        <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                        <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                        <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                        <td>{formatPercent(row["Genome with Coverage"])}</td>
                         <td>{row["Quality SNPs"] || "-"}</td>
                       </tr>
                     ))}

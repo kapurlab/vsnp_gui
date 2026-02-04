@@ -1075,8 +1075,10 @@ def _send_igv_commands(
 ) -> tuple[bool, str, List[str], List[str]]:
     commands = []
     if include_genome:
-        commands.append("new")
-        commands.append(f"genome {ref_fasta}")
+        if str(ref_fasta).endswith(".genome"):
+            commands.append(f"genome {ref_fasta}")
+        else:
+            commands.append(f"load {ref_fasta}")
     commands.append(f"load {bam_path}")
     if contig:
         commands.append(f"goto {contig}:1-10000")

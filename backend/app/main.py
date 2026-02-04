@@ -995,6 +995,7 @@ def step1_igv_session(project: str, payload: OpenRequest):
     session_xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
         f"<Session genome=\"{ref_fasta}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
+        f"  <Genome path=\"{ref_fasta}\"/>\n"
         "  <Resources>\n"
         f"    <Resource path=\"{ref_fasta}\"/>\n"
         f"    <Resource path=\"{bam_path}\"/>\n"

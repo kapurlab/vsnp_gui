@@ -1020,10 +1020,8 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
         if igv_path and igv_path.exists():
             if igv_path.suffix == ".app" or igv_path.is_dir():
                 if batch_path:
-                    app_exec = igv_path / "Contents" / "MacOS" / "IGV"
-                    if app_exec.exists():
-                        subprocess.run([str(app_exec), "-b", str(batch_path)])
-                        return
+                    subprocess.run(["open", "-n", "-a", str(igv_path), "--args", "-b", str(batch_path)])
+                    return
                 subprocess.run(["open", "-n", "-a", str(igv_path), str(session_path)])
                 return
             if igv_path.is_file() and os.access(igv_path, os.X_OK):
@@ -1035,10 +1033,8 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
         igv_apps = sorted(Path("/Applications").glob("IGV*.app"))
         if igv_apps:
             if batch_path:
-                app_exec = igv_apps[0] / "Contents" / "MacOS" / "IGV"
-                if app_exec.exists():
-                    subprocess.run([str(app_exec), "-b", str(batch_path)])
-                    return
+                subprocess.run(["open", "-n", "-a", str(igv_apps[0]), "--args", "-b", str(batch_path)])
+                return
             subprocess.run(["open", "-n", "-a", str(igv_apps[0]), str(session_path)])
             return
     if sys.platform.startswith("linux"):

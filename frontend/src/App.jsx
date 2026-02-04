@@ -44,6 +44,7 @@ export default function App() {
   const [step1LogText, setStep1LogText] = useState("");
   const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step1FilesCache, setStep1FilesCache] = useState({});
+  const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [step2Outputs, setStep2Outputs] = useState([]);
@@ -701,22 +702,6 @@ export default function App() {
     }
   }
 
-  async function copyIgvPaths(sample) {
-    const data = await getStep1Files(sample);
-    if (!data) return;
-    const lines = [];
-    if (data.reference_fasta) lines.push(`Reference: ${data.reference_fasta}`);
-    if (data.bam) lines.push(`BAM: ${data.bam}`);
-    if (data.alignment_dir) lines.push(`Alignment: ${data.alignment_dir}`);
-    const payload = lines.join("\n");
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(payload);
-      window.alert("Copied IGV paths to clipboard");
-    } else {
-      window.alert(payload);
-    }
-  }
-
   return (
     <div className="app">
       <header className="app-header">
@@ -1178,6 +1163,7 @@ export default function App() {
               ) : (
                 <div className="note">No Step 1 samples yet.</div>
               )}
+              {step1Status.length > 6 ? <div className="scroll-note">Scroll for more samples.</div> : null}
               {step1LogSample ? (
                 <div className="log-viewer">
                   <div className="log-title">
@@ -1246,36 +1232,35 @@ export default function App() {
                         </td>
                         <td>{row._sample || row.sample || "-"}</td>
                         <td>
-                          <details className="inline-details">
-                            <summary>Files</summary>
+                          <details
+                            className="inline-details"
+                            open={openStep1FilesRow === sampleKey(row)}
+                          >
+                            <summary
+                              onClick={(e) => {
+                                e.preventDefault();
+                                const key = sampleKey(row);
+                                setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
+                              }}
+                            >
+                              Files
+                            </summary>
                             <div className="inline-files">
-                              {row._file ? (
-                                <button onClick={() => openOutput(row._file)}>Stats</button>
-                              ) : null}
-                              <button
-                                onClick={() => openStep1File(sampleKey(row), "bam")}
-                                disabled={!sampleKey(row)}
-                              >
-                                BAM
-                              </button>
                               <button
                                 onClick={() => openStep1File(sampleKey(row), "sample_dir")}
                                 disabled={!sampleKey(row)}
                               >
-                                Folder
+                                Open Folder
                               </button>
                               <button
                                 onClick={() => openStep1Igv(sampleKey(row))}
                                 disabled={!sampleKey(row)}
                               >
-                                Open in IGV
+                                IGV
                               </button>
-                              <button
-                                onClick={() => copyIgvPaths(sampleKey(row))}
-                                disabled={!sampleKey(row)}
-                              >
-                                Copy IGV paths
-                              </button>
+                              {row._file ? (
+                                <button onClick={() => openOutput(row._file)}>Stats</button>
+                              ) : null}
                             </div>
                           </details>
                         </td>
@@ -1292,6 +1277,7 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+            {qcRows.length > 8 ? <div className="scroll-note">Scroll for more samples.</div> : null}
           </section>
         </div>
         ) : null}

@@ -982,10 +982,19 @@ def step1_igv_session(project: str, payload: OpenRequest):
     if not fasta_files:
         raise HTTPException(status_code=404, detail="Reference FASTA not found")
     ref_fasta = fasta_files[0]
+    contig = ""
+    try:
+        with ref_fasta.open("r", encoding="utf-8") as fh:
+            header = fh.readline().strip()
+        if header.startswith(">"):
+            contig = header[1:].split()[0]
+    except Exception:
+        contig = ""
     session_path = sample_dir / f"{sample}.igv.xml"
+    locus_attr = f' locus="{contig}:1-10000"' if contig else ""
     session_xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
-        f"<Session genome=\"{ref_fasta}\" hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
+        f"<Session genome=\"{ref_fasta}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
         "  <Resources>\n"
         f"    <Resource path=\"{bam_path}\"/>\n"
         "  </Resources>\n"

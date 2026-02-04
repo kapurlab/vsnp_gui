@@ -13,6 +13,7 @@ DEFAULTS: Dict[str, Any] = {
     "conda_env": "",
     "conda_exe": "",
     "conda_env_path": "",
+    "igv_app_path": "",
     "sra": {
         "use_sratoolkit_first": True,
         "allow_insecure_https": False,

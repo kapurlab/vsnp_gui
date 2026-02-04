@@ -21,6 +21,7 @@ export default function App() {
     conda_env: "",
     conda_exe: "",
     conda_env_path: "",
+    igv_app_path: "",
     sra_allow_insecure_https: false
   });
   const [sraText, setSraText] = useState("");
@@ -132,6 +133,7 @@ export default function App() {
       conda_env: cfg.conda_env || "",
       conda_exe: cfg.conda_exe || "",
       conda_env_path: cfg.conda_env_path || "",
+      igv_app_path: cfg.igv_app_path || "",
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
     });
     if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
@@ -254,6 +256,7 @@ export default function App() {
         conda_env: settings.conda_env,
         conda_exe: settings.conda_exe,
         conda_env_path: settings.conda_env_path,
+        igv_app_path: settings.igv_app_path,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
       })
     });
@@ -680,6 +683,33 @@ export default function App() {
     }
   }
 
+  async function openStep1Igv(sample) {
+    if (!selectedProject) return;
+    const data = await getStep1Files(sample);
+    if (!data || !data.sample_dir) return;
+    await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/igv_session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: data.sample_dir })
+    });
+  }
+
+  async function copyIgvPaths(sample) {
+    const data = await getStep1Files(sample);
+    if (!data) return;
+    const lines = [];
+    if (data.reference_fasta) lines.push(`Reference: ${data.reference_fasta}`);
+    if (data.bam) lines.push(`BAM: ${data.bam}`);
+    if (data.alignment_dir) lines.push(`Alignment: ${data.alignment_dir}`);
+    const payload = lines.join("\n");
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(payload);
+      window.alert("Copied IGV paths to clipboard");
+    } else {
+      window.alert(payload);
+    }
+  }
+
   return (
     <div className="app">
       <header className="app-header">
@@ -843,6 +873,29 @@ export default function App() {
                           "Select conda env folder",
                           settings.conda_env_path,
                           (value) => setSettings({ ...settings, conda_env_path: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
+                </div>
+                <div className="settings-row">
+                  <label className="label">IGV app (optional)</label>
+                  <input
+                    placeholder="/Applications/IGV_2.14.0.app"
+                    value={settings.igv_app_path}
+                    onChange={(e) => setSettings({ ...settings, igv_app_path: e.target.value })}
+                  />
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "file",
+                          "Select IGV app",
+                          settings.igv_app_path,
+                          (value) => setSettings({ ...settings, igv_app_path: value })
                         )
                       }
                     >
@@ -1203,6 +1256,18 @@ export default function App() {
                                 disabled={!sampleKey(row)}
                               >
                                 Folder
+                              </button>
+                              <button
+                                onClick={() => openStep1Igv(sampleKey(row))}
+                                disabled={!sampleKey(row)}
+                              >
+                                Open in IGV
+                              </button>
+                              <button
+                                onClick={() => copyIgvPaths(sampleKey(row))}
+                                disabled={!sampleKey(row)}
+                              >
+                                Copy IGV paths
                               </button>
                             </div>
                           </details>

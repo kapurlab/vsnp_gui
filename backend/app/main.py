@@ -75,6 +75,7 @@ class ConfigUpdate(BaseModel):
     conda_env: Optional[str] = None
     conda_exe: Optional[str] = None
     conda_env_path: Optional[str] = None
+    igv_app_path: Optional[str] = None
     sra: Optional[Dict] = None
 
 
@@ -139,6 +140,8 @@ def update_config(update: ConfigUpdate):
         cfg["conda_exe"] = update.conda_exe
     if update.conda_env_path is not None:
         cfg["conda_env_path"] = update.conda_env_path
+    if update.igv_app_path is not None:
+        cfg["igv_app_path"] = update.igv_app_path
     if update.sra is not None:
         cfg["sra"].update(update.sra)
     save_config(cfg)
@@ -943,12 +946,76 @@ def step1_files(project: str, sample: str = Query(...)):
     bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
     bam_path = str(bam_files[-1]) if bam_files else ""
     align_dir = str(bam_files[-1].parent) if bam_files else ""
+    ref_fasta = ""
+    if align_dir:
+        fasta_files = sorted(Path(align_dir).glob("*.fasta"))
+        if fasta_files:
+            ref_fasta = str(fasta_files[0])
     return {
         "stats": stats_path,
         "bam": bam_path,
         "alignment_dir": align_dir,
+        "reference_fasta": ref_fasta,
         "sample_dir": str(sample_dir)
     }
+
+
+@app.post("/api/projects/{project}/step1/igv_session")
+def step1_igv_session(project: str, payload: OpenRequest):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    target = Path(payload.path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    sample = target.name
+    sample_dir = project_dir / "step1" / sample
+    if not sample_dir.exists():
+        raise HTTPException(status_code=404, detail="Sample not found")
+    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    if not bam_files:
+        raise HTTPException(status_code=404, detail="BAM not found")
+    bam_path = bam_files[-1]
+    align_dir = bam_path.parent
+    fasta_files = sorted(align_dir.glob("*.fasta"))
+    if not fasta_files:
+        raise HTTPException(status_code=404, detail="Reference FASTA not found")
+    ref_fasta = fasta_files[0]
+    session_path = sample_dir / f"{sample}.igv.xml"
+    session_xml = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
+        f"<Session genome=\"{ref_fasta}\" hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
+        "  <Resources>\n"
+        f"    <Resource path=\"{bam_path}\"/>\n"
+        "  </Resources>\n"
+        "</Session>\n"
+    )
+    session_path.write_text(session_xml, encoding="utf-8")
+    _open_igv(session_path, cfg.get("igv_app_path", ""))
+    return {"session": str(session_path)}
+
+
+def _open_igv(session_path: Path, igv_app_path: str = "") -> None:
+    if sys.platform.startswith("darwin"):
+        igv_path = Path(igv_app_path).expanduser() if igv_app_path else None
+        if igv_path and igv_path.exists():
+            if igv_path.suffix == ".app" or igv_path.is_dir():
+                subprocess.run(["open", "-a", str(igv_path), str(session_path)])
+                return
+            if igv_path.is_file() and os.access(igv_path, os.X_OK):
+                subprocess.run([str(igv_path), str(session_path)])
+                return
+        igv_apps = sorted(Path("/Applications").glob("IGV*.app"))
+        if igv_apps:
+            subprocess.run(["open", "-a", str(igv_apps[0]), str(session_path)])
+            return
+    if sys.platform.startswith("linux"):
+        igv_sh = shutil.which("igv.sh")
+        if igv_sh:
+            subprocess.run([igv_sh, str(session_path)])
+            return
+    _open_path(session_path)
 
 
 @app.get("/api/projects/{project}/step2_outputs")

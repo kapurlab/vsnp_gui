@@ -13,6 +13,7 @@ import subprocess
 import shutil
 import gzip
 import sys
+import logging
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -21,6 +22,7 @@ from app.refs import list_references
 from app.sra import expand_accessions, build_download_script
 
 app = FastAPI(title="vSNP GUI API")
+logger = logging.getLogger("vsnp_gui")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1016,6 +1018,7 @@ def step1_igv_session(project: str, payload: OpenRequest):
         include_genome=not igv_running,
         retries=10
     )
+    logger.info("IGV commands sent=%s error=%s commands=%s", sent, err, sent_commands)
     return {
         "session": str(session_path),
         "igv_commands_sent": sent,

@@ -1013,8 +1013,8 @@ def step1_igv_session(project: str, payload: OpenRequest):
     batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     _open_igv(session_path, igv_app_path, batch_path)
-    sent = _send_igv_commands(ref_fasta, bam_path, contig, retries=5)
-    return {"session": str(session_path), "igv_commands_sent": sent}
+    sent, err = _send_igv_commands(ref_fasta, bam_path, contig, retries=8)
+    return {"session": str(session_path), "igv_commands_sent": sent, "igv_error": err}
 
 
 def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[Path] = None) -> None:
@@ -1051,7 +1051,7 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
     _open_path(session_path)
 
 
-def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: int = 1) -> bool:
+def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: int = 1) -> tuple[bool, str]:
     commands = [
         f"genome {ref_fasta}",
         f"load {bam_path}"
@@ -1059,16 +1059,18 @@ def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: in
     if contig:
         commands.append(f"goto {contig}:1-10000")
     commands.append("collapse")
+    last_error = ""
     for _ in range(retries):
         try:
             with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
                 payload = "\n".join(commands) + "\n"
                 sock.sendall(payload.encode("utf-8"))
-            return True
-        except OSError:
-            time.sleep(1)
+            return True, ""
+        except OSError as exc:
+            last_error = str(exc)
+            time.sleep(1.5)
             continue
-    return False
+    return False, last_error
 
 
 @app.get("/api/projects/{project}/step2_outputs")

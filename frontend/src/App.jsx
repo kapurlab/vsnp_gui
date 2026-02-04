@@ -687,11 +687,18 @@ export default function App() {
     if (!selectedProject) return;
     const data = await getStep1Files(sample);
     if (!data || !data.sample_dir) return;
-    await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/igv_session`, {
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/igv_session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: data.sample_dir })
     });
+    if (res.ok) {
+      const payload = await res.json();
+      if (!payload.igv_commands_sent) {
+        const detail = payload.igv_error ? ` (${payload.igv_error})` : "";
+        window.alert(`IGV command server did not accept commands${detail}.`);
+      }
+    }
   }
 
   async function copyIgvPaths(sample) {

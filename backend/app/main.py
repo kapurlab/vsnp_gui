@@ -1003,28 +1003,51 @@ def step1_igv_session(project: str, payload: OpenRequest):
         "</Session>\n"
     )
     session_path.write_text(session_xml, encoding="utf-8")
-    _open_igv(session_path, cfg.get("igv_app_path", ""))
+    batch_path = sample_dir / f"{sample}.igv.batch"
+    batch_lines = [f"genome {ref_fasta}", f"load {bam_path}"]
+    if contig:
+        batch_lines.append(f"goto {contig}:1-10000")
+    batch_lines.append("collapse")
+    batch_lines.append("exit")
+    batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
+    _open_igv(session_path, cfg.get("igv_app_path", ""), batch_path)
     return {"session": str(session_path)}
 
 
-def _open_igv(session_path: Path, igv_app_path: str = "") -> None:
+def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[Path] = None) -> None:
     if sys.platform.startswith("darwin"):
         igv_path = Path(igv_app_path).expanduser() if igv_app_path else None
         if igv_path and igv_path.exists():
             if igv_path.suffix == ".app" or igv_path.is_dir():
+                if batch_path:
+                    app_exec = igv_path / "Contents" / "MacOS" / "IGV"
+                    if app_exec.exists():
+                        subprocess.run([str(app_exec), "-b", str(batch_path)])
+                        return
                 subprocess.run(["open", "-n", "-a", str(igv_path), str(session_path)])
                 return
             if igv_path.is_file() and os.access(igv_path, os.X_OK):
-                subprocess.run([str(igv_path), str(session_path)])
+                if batch_path:
+                    subprocess.run([str(igv_path), "-b", str(batch_path)])
+                else:
+                    subprocess.run([str(igv_path), str(session_path)])
                 return
         igv_apps = sorted(Path("/Applications").glob("IGV*.app"))
         if igv_apps:
+            if batch_path:
+                app_exec = igv_apps[0] / "Contents" / "MacOS" / "IGV"
+                if app_exec.exists():
+                    subprocess.run([str(app_exec), "-b", str(batch_path)])
+                    return
             subprocess.run(["open", "-n", "-a", str(igv_apps[0]), str(session_path)])
             return
     if sys.platform.startswith("linux"):
         igv_sh = shutil.which("igv.sh")
         if igv_sh:
-            subprocess.run([igv_sh, str(session_path)])
+            if batch_path:
+                subprocess.run([igv_sh, "-b", str(batch_path)])
+            else:
+                subprocess.run([igv_sh, str(session_path)])
             return
     _open_path(session_path)
 

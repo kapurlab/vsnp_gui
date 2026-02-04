@@ -1012,7 +1012,7 @@ def step1_igv_session(project: str, payload: OpenRequest):
     batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     _open_igv(session_path, igv_app_path, batch_path)
-    sent, err = _send_igv_commands(ref_fasta, bam_path, contig, retries=8)
+    sent, err = _send_igv_commands(ref_fasta, bam_path, contig, retries=10)
     return {"session": str(session_path), "igv_commands_sent": sent, "igv_error": err}
 
 
@@ -1022,9 +1022,9 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
         if igv_path and igv_path.exists():
             if igv_path.suffix == ".app" or igv_path.is_dir():
                 if batch_path:
-                    subprocess.run(["open", "-n", "-a", str(igv_path), "--args", "-b", str(batch_path)])
+                    subprocess.run(["open", "-a", str(igv_path), "--args", "-b", str(batch_path)])
                     return
-                subprocess.run(["open", "-n", "-a", str(igv_path), str(session_path)])
+                subprocess.run(["open", "-a", str(igv_path), str(session_path)])
                 return
             if igv_path.is_file() and os.access(igv_path, os.X_OK):
                 if batch_path:
@@ -1035,9 +1035,9 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
         igv_apps = sorted(Path("/Applications").glob("IGV*.app"))
         if igv_apps:
             if batch_path:
-                subprocess.run(["open", "-n", "-a", str(igv_apps[0]), "--args", "-b", str(batch_path)])
+                subprocess.run(["open", "-a", str(igv_apps[0]), "--args", "-b", str(batch_path)])
                 return
-            subprocess.run(["open", "-n", "-a", str(igv_apps[0]), str(session_path)])
+            subprocess.run(["open", "-a", str(igv_apps[0]), str(session_path)])
             return
     if sys.platform.startswith("linux"):
         igv_sh = shutil.which("igv.sh")

@@ -162,6 +162,13 @@ export default function App() {
   }, [selectedProject]);
 
   useEffect(() => {
+    if (step2Mode !== "custom") return;
+    if (importReference && reference !== importReference) {
+      setReference(importReference);
+    }
+  }, [step2Mode, importReference, reference]);
+
+  useEffect(() => {
     if (!selectedProject || !settingsReady) return;
     if (jobStatus !== "running") return;
     const id = setInterval(() => {
@@ -499,6 +506,9 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
+    if (typeof data.total_found === "number") {
+      setStep2VcfCount(data.total_found);
+    }
     const parts = [
       `Imported ${data.imported}`,
       data.renamed ? `Renamed ${data.renamed}` : null,
@@ -1287,12 +1297,15 @@ export default function App() {
                   />
                   Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
                 </label>
-                <input
-                  placeholder="Reference (must match VCFs)"
+                <select
                   value={importReference}
                   onChange={(e) => setImportReference(e.target.value)}
-                  list="reference-options"
-                />
+                >
+                  <option value="">Select reference</option>
+                  {references.map((r) => (
+                    <option key={r.name} value={r.name}>{r.name}</option>
+                  ))}
+                </select>
                 <div className="row">
                   <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
                     <option value="copy">Copy files</option>

@@ -118,7 +118,10 @@ def health():
 
 @app.get("/api/config")
 def get_config():
-    return load_config()
+    cfg = load_config()
+    root_dir = Path(__file__).resolve().parent.parent.parent
+    cfg["gui_root"] = str(root_dir)
+    return cfg
 
 
 @app.post("/api/config")

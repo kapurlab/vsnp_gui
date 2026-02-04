@@ -1158,12 +1158,18 @@ export default function App() {
                     onChange={(e) => {
                       const value = e.target.value;
                       setImportPreset(value);
+                      const vsnpRoot = settings.vsnp3_path || "";
+                      const guiRoot = config?.gui_root || "";
                       if (value === "mtbc0") {
+                        if (!vsnpRoot) {
+                          setImportStatus("Set vSNP3 path in Settings first.");
+                          return;
+                        }
                         setImportSourcesText([
-                          "/Users/vivekkapur/vsnp3/VCF_REFS/mtbc_representative",
-                          "/Users/vivekkapur/vsnp3/VCF_REFS/minimum_tree",
-                          "/Users/vivekkapur/vsnp3/VCF_REFS/faked_from_assembly"
-                        ].join("\\n"));
+                          `${vsnpRoot}/VCF_REFS/mtbc_representative`,
+                          `${vsnpRoot}/VCF_REFS/minimum_tree`,
+                          `${vsnpRoot}/VCF_REFS/faked_from_assembly`
+                        ].join("\n"));
                         setImportReference("mtbc0_v1.1");
                         setImportIncludeStep1(true);
                         setImportAction("copy");
@@ -1172,9 +1178,13 @@ export default function App() {
                         setImportDedupe(true);
                         setImportFuzzyMatch(true);
                       } else if (value === "lite") {
+                        if (!guiRoot) {
+                          setImportStatus("GUI root not available yet. Try again after reload.");
+                          return;
+                        }
                         setImportSourcesText([
-                          "/Users/vivekkapur/vsnp_gui/sample_data/vcf_lite"
-                        ].join("\\n"));
+                          `${guiRoot}/sample_data/vcf_lite`
+                        ].join("\n"));
                         setImportReference("mtbc0_v1.1");
                         setImportIncludeStep1(false);
                         setImportAction("copy");

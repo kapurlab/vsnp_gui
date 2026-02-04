@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
 from typing import List, Optional, Dict
+import socket
 import json
 import os
 import time
@@ -1010,8 +1011,10 @@ def step1_igv_session(project: str, payload: OpenRequest):
     batch_lines.append("collapse")
     batch_lines.append("exit")
     batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
-    _open_igv(session_path, cfg.get("igv_app_path", ""), batch_path)
-    return {"session": str(session_path)}
+    igv_app_path = cfg.get("igv_app_path", "")
+    _open_igv(session_path, igv_app_path, batch_path)
+    sent = _send_igv_commands(ref_fasta, bam_path, contig, retries=5)
+    return {"session": str(session_path), "igv_commands_sent": sent}
 
 
 def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[Path] = None) -> None:
@@ -1046,6 +1049,26 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
                 subprocess.run([igv_sh, str(session_path)])
             return
     _open_path(session_path)
+
+
+def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: int = 1) -> bool:
+    commands = [
+        f"genome {ref_fasta}",
+        f"load {bam_path}"
+    ]
+    if contig:
+        commands.append(f"goto {contig}:1-10000")
+    commands.append("collapse")
+    for _ in range(retries):
+        try:
+            with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
+                payload = "\n".join(commands) + "\n"
+                sock.sendall(payload.encode("utf-8"))
+            return True
+        except OSError:
+            time.sleep(1)
+            continue
+    return False
 
 
 @app.get("/api/projects/{project}/step2_outputs")

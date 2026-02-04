@@ -22,7 +22,7 @@ from app.refs import list_references
 from app.sra import expand_accessions, build_download_script
 
 app = FastAPI(title="vSNP GUI API")
-logger = logging.getLogger("vsnp_gui")
+logger = logging.getLogger("uvicorn.error")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1074,7 +1074,6 @@ def _send_igv_commands(
     commands.append(f"load {bam_path}")
     if contig:
         commands.append(f"goto {contig}:1-10000")
-    commands.append("collapse")
     last_error = ""
     for _ in range(retries):
         try:
@@ -1100,9 +1099,15 @@ def _wait_for_igv(timeout: float = 10.0) -> None:
 
 
 def _igv_running() -> bool:
+    # Prefer checking command server availability; it indicates a live IGV instance.
+    try:
+        with socket.create_connection(("127.0.0.1", 60151), timeout=0.3):
+            return True
+    except OSError:
+        pass
     if sys.platform.startswith("darwin"):
         try:
-            res = subprocess.run(["pgrep", "-x", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res = subprocess.run(["pgrep", "-f", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return res.returncode == 0
         except Exception:
             return False

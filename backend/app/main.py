@@ -1011,7 +1011,8 @@ def step1_igv_session(project: str, payload: OpenRequest):
     # Avoid exit/collapse here; leave IGV open and visible.
     batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
-    _open_igv(session_path, igv_app_path, batch_path)
+    if not _igv_running():
+        _open_igv(session_path, igv_app_path, batch_path)
     sent, err = _send_igv_commands(ref_fasta, bam_path, contig, retries=10)
     return {"session": str(session_path), "igv_commands_sent": sent, "igv_error": err}
 
@@ -1070,6 +1071,22 @@ def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: in
             time.sleep(1.5)
             continue
     return False, last_error
+
+
+def _igv_running() -> bool:
+    if sys.platform.startswith("darwin"):
+        try:
+            res = subprocess.run(["pgrep", "-x", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return res.returncode == 0
+        except Exception:
+            return False
+    if sys.platform.startswith("linux"):
+        try:
+            res = subprocess.run(["pgrep", "-f", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return res.returncode == 0
+        except Exception:
+            return False
+    return False
 
 
 @app.get("/api/projects/{project}/step2_outputs")

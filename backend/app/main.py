@@ -100,6 +100,7 @@ class ImportVcfRequest(BaseModel):
     prefix_duplicates: bool = False
     dedupe: bool = False
     allow_fuzzy_match: bool = True
+    confirm_large: bool = False
 
 
 class Step1Request(BaseModel):
@@ -234,6 +235,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     if not vcfs:
         raise HTTPException(status_code=400, detail="No *_zc.vcf files found in provided sources")
+    if len(vcfs) > 500 and not payload.confirm_large:
+        raise HTTPException(status_code=400, detail=f"Large import ({len(vcfs)} VCFs). Confirm to continue.")
 
     alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
     detected_refs = _detect_vcf_references(vcfs, alias_map)
@@ -312,7 +315,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         "renamed": renamed,
         "detected_reference": detected_ref or payload.reference or "",
         "mismatched": len(mismatched),
-        "mismatch_report": mismatch_report
+        "mismatch_report": mismatch_report,
+        "total_found": len(vcfs)
     }
 
 
@@ -960,7 +964,8 @@ def _detect_vcf_reference(vcf: Path, alias_map: Dict[str, str]) -> str:
                 if line.startswith("##reference="):
                     ref = line.split("=", 1)[1].strip()
                     return _normalize_reference(ref, alias_map)
-    except Exception:
+    except Exception as e:
+        print(f"[vcf-ref] Failed to read {vcf}: {e}")
         return ""
     return ""
 

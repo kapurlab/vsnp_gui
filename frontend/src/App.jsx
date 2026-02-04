@@ -455,24 +455,42 @@ export default function App() {
       return;
     }
     setImportStatus("");
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/import-vcfs`, {
+    const payload = {
+      source_paths: sources,
+      include_step1: importIncludeStep1,
+      reference: importReference,
+      action: importAction,
+      on_conflict: importConflict,
+      allow_mismatch: importAllowMismatch,
+      prefix_duplicates: importPrefixDupes,
+      dedupe: importDedupe,
+      allow_fuzzy_match: importFuzzyMatch
+    };
+    let res = await fetch(`${API_BASE}/api/projects/${selectedProject}/import-vcfs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        source_paths: sources,
-        include_step1: importIncludeStep1,
-        reference: importReference,
-        action: importAction,
-        on_conflict: importConflict,
-        allow_mismatch: importAllowMismatch,
-        prefix_duplicates: importPrefixDupes,
-        dedupe: importDedupe,
-        allow_fuzzy_match: importFuzzyMatch
-      })
+      body: JSON.stringify(payload)
     });
     if (!res.ok) {
       const data = await res.json();
-      setImportStatus(`Import failed: ${data.detail || res.statusText}`);
+      if (data.detail && data.detail.startsWith("Large import")) {
+        const ok = window.confirm(`${data.detail} Continue?`);
+        if (!ok) return;
+        payload.confirm_large = true;
+        res = await fetch(`${API_BASE}/api/projects/${selectedProject}/import-vcfs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const retry = await res.json();
+          setImportStatus(`Import failed: ${retry.detail || res.statusText}`);
+          return;
+        }
+      } else {
+        setImportStatus(`Import failed: ${data.detail || res.statusText}`);
+        return;
+      }
       return;
     }
     const data = await res.json();

@@ -19,6 +19,11 @@ electron/node_modules/
 .DS_Store
 *.log
 
+# Local icon drafts
+assets/icons/*_draft.*
+assets/icons/*_drafts/*
+assets/icons/*_temp.*
+
 # App bundle / icon assets
 vSNP.app/
 vSNP.icns

@@ -996,6 +996,7 @@ def step1_igv_session(project: str, payload: OpenRequest):
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
         f"<Session genome=\"{ref_fasta}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
         "  <Resources>\n"
+        f"    <Resource path=\"{ref_fasta}\"/>\n"
         f"    <Resource path=\"{bam_path}\"/>\n"
         "  </Resources>\n"
         "</Session>\n"
@@ -1010,14 +1011,14 @@ def _open_igv(session_path: Path, igv_app_path: str = "") -> None:
         igv_path = Path(igv_app_path).expanduser() if igv_app_path else None
         if igv_path and igv_path.exists():
             if igv_path.suffix == ".app" or igv_path.is_dir():
-                subprocess.run(["open", "-a", str(igv_path), str(session_path)])
+                subprocess.run(["open", "-n", "-a", str(igv_path), str(session_path)])
                 return
             if igv_path.is_file() and os.access(igv_path, os.X_OK):
                 subprocess.run([str(igv_path), str(session_path)])
                 return
         igv_apps = sorted(Path("/Applications").glob("IGV*.app"))
         if igv_apps:
-            subprocess.run(["open", "-a", str(igv_apps[0]), str(session_path)])
+            subprocess.run(["open", "-n", "-a", str(igv_apps[0]), str(session_path)])
             return
     if sys.platform.startswith("linux"):
         igv_sh = shutil.which("igv.sh")

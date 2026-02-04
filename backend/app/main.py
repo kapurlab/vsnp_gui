@@ -1004,16 +1004,18 @@ def step1_igv_session(project: str, payload: OpenRequest):
         "</Session>\n"
     )
     session_path.write_text(session_xml, encoding="utf-8")
-    batch_path = sample_dir / f"{sample}.igv.batch"
-    batch_lines = [f"genome {ref_fasta}", f"load {bam_path}"]
-    if contig:
-        batch_lines.append(f"goto {contig}:1-10000")
-    # Avoid exit/collapse here; leave IGV open and visible.
-    batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
-    if not _igv_running():
-        _open_igv(session_path, igv_app_path, batch_path)
-    sent, err = _send_igv_commands(ref_fasta, bam_path, contig, retries=10)
+    igv_running = _igv_running()
+    if not igv_running:
+        _open_igv(session_path, igv_app_path, None)
+        _wait_for_igv()
+    sent, err = _send_igv_commands(
+        ref_fasta,
+        bam_path,
+        contig,
+        include_genome=not igv_running,
+        retries=10
+    )
     return {"session": str(session_path), "igv_commands_sent": sent, "igv_error": err}
 
 
@@ -1051,11 +1053,17 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
     _open_path(session_path)
 
 
-def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: int = 1) -> tuple[bool, str]:
-    commands = [
-        f"genome {ref_fasta}",
-        f"load {bam_path}"
-    ]
+def _send_igv_commands(
+    ref_fasta: Path,
+    bam_path: Path,
+    contig: str,
+    include_genome: bool = True,
+    retries: int = 1
+) -> tuple[bool, str]:
+    commands = []
+    if include_genome:
+        commands.append(f"genome {ref_fasta}")
+    commands.append(f"load {bam_path}")
     if contig:
         commands.append(f"goto {contig}:1-10000")
     commands.append("collapse")
@@ -1071,6 +1079,16 @@ def _send_igv_commands(ref_fasta: Path, bam_path: Path, contig: str, retries: in
             time.sleep(1.5)
             continue
     return False, last_error
+
+
+def _wait_for_igv(timeout: float = 10.0) -> None:
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with socket.create_connection(("127.0.0.1", 60151), timeout=0.5):
+                return
+        except OSError:
+            time.sleep(0.5)
 
 
 def _igv_running() -> bool:

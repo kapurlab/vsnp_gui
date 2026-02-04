@@ -23,6 +23,7 @@ from app.sra import expand_accessions, build_download_script
 
 app = FastAPI(title="vSNP GUI API")
 logger = logging.getLogger("uvicorn.error")
+_IGV_STATE = {"genome": ""}
 
 app.add_middleware(
     CORSMiddleware,
@@ -1008,17 +1009,21 @@ def step1_igv_session(project: str, payload: OpenRequest):
     session_path.write_text(session_xml, encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     igv_running = _igv_running()
+    desired_genome = str(ref_fasta)
+    include_genome = not igv_running or _IGV_STATE["genome"] != desired_genome
     if not igv_running:
         _open_igv(session_path, igv_app_path, None)
         _wait_for_igv()
-    sent, err, sent_commands = _send_igv_commands(
+    sent, err, sent_commands, responses = _send_igv_commands(
         ref_fasta,
         bam_path,
         contig,
-        include_genome=not igv_running,
+        include_genome=include_genome,
         retries=10
     )
-    logger.info("IGV commands sent=%s error=%s commands=%s", sent, err, sent_commands)
+    if sent and include_genome:
+        _IGV_STATE["genome"] = desired_genome
+    logger.info("IGV commands sent=%s error=%s commands=%s responses=%s", sent, err, sent_commands, responses)
     return {
         "session": str(session_path),
         "igv_commands_sent": sent,
@@ -1067,9 +1072,10 @@ def _send_igv_commands(
     contig: str,
     include_genome: bool = True,
     retries: int = 1
-) -> tuple[bool, str, List[str]]:
+) -> tuple[bool, str, List[str], List[str]]:
     commands = []
     if include_genome:
+        commands.append("new")
         commands.append(f"genome {ref_fasta}")
     commands.append(f"load {bam_path}")
     if contig:
@@ -1077,15 +1083,23 @@ def _send_igv_commands(
     last_error = ""
     for _ in range(retries):
         try:
-            with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
-                payload = "\n".join(commands) + "\n"
-                sock.sendall(payload.encode("utf-8"))
-            return True, "", commands
+            responses = []
+            with socket.create_connection(("127.0.0.1", 60151), timeout=2) as sock:
+                file = sock.makefile("rwb")
+                for cmd in commands:
+                    file.write((cmd + "\n").encode("utf-8"))
+                    file.flush()
+                    resp = file.readline().decode("utf-8").strip()
+                    responses.append(resp)
+                    if resp and "OK" not in resp:
+                        last_error = resp
+                        return False, last_error, commands, responses
+            return True, "", commands, responses
         except OSError as exc:
             last_error = str(exc)
             time.sleep(1.5)
             continue
-    return False, last_error, commands
+    return False, last_error, commands, []
 
 
 def _wait_for_igv(timeout: float = 10.0) -> None:

@@ -1008,8 +1008,7 @@ def step1_igv_session(project: str, payload: OpenRequest):
     batch_lines = [f"genome {ref_fasta}", f"load {bam_path}"]
     if contig:
         batch_lines.append(f"goto {contig}:1-10000")
-    batch_lines.append("collapse")
-    batch_lines.append("exit")
+    # Avoid exit/collapse here; leave IGV open and visible.
     batch_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     _open_igv(session_path, igv_app_path, batch_path)

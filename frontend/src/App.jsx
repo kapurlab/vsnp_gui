@@ -75,6 +75,10 @@ export default function App() {
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
+  const settingsReady = Boolean(
+    settings.vsnp3_path && settings.projects_root && (settings.conda_env || settings.conda_env_path)
+  );
+
   const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
   const excludeKey = (row) => row?._file || sampleKey(row);
 
@@ -147,7 +151,7 @@ export default function App() {
   }, [jobId]);
 
   useEffect(() => {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     setExcluded({});
     loadQC();
     loadStep1Status();
@@ -158,7 +162,7 @@ export default function App() {
   }, [selectedProject]);
 
   useEffect(() => {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     if (jobStatus !== "running") return;
     const id = setInterval(() => {
       loadStep1Status();
@@ -167,14 +171,14 @@ export default function App() {
   }, [jobStatus, selectedProject]);
 
   useEffect(() => {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     if (jobStatus === "succeeded" || jobStatus === "failed") {
       loadStep1Status();
     }
   }, [jobStatus, selectedProject]);
 
   useEffect(() => {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     if (!step2AutoRefreshPending) return;
     if (jobStatus !== "succeeded") return;
     loadStep2Outputs();
@@ -277,7 +281,7 @@ export default function App() {
   }
 
   async function loadQC() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     setQcLoading(true);
     setQcError("");
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary`);
@@ -397,7 +401,7 @@ export default function App() {
   }
 
   async function linkLocal() {
-    if (!selectedProject || !localPath) return;
+    if (!selectedProject || !settingsReady || !localPath) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/link-local`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -412,7 +416,7 @@ export default function App() {
   }
 
   async function uploadFiles(fileList) {
-    if (!selectedProject || !fileList?.length) return;
+    if (!selectedProject || !settingsReady || !fileList?.length) return;
     setUploadStatus("Uploading...");
     const formData = new FormData();
     Array.from(fileList).forEach((file) => formData.append("files", file));
@@ -431,7 +435,7 @@ export default function App() {
   }
 
   async function sraDownload() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     const accessions = parseAccessions(sraText);
     if (!accessions.length) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/sra/download`, {
@@ -444,7 +448,7 @@ export default function App() {
   }
 
   async function importVcfs() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     const sources = parseAccessions(importSourcesText);
     if (!sources.length && !importIncludeStep1) {
       setImportStatus("Provide at least one source path or include Step 1.");
@@ -509,14 +513,14 @@ export default function App() {
   }
 
   async function step1Setup() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, { method: "POST" });
     await loadAll();
     await loadStep1Status();
   }
 
   async function step1Run() {
-    if (!selectedProject || !reference) return;
+    if (!selectedProject || !settingsReady || !reference) return;
     const refValue = reference === "__auto__" ? null : reference;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
@@ -529,7 +533,7 @@ export default function App() {
   }
 
   async function step2Setup() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/setup`, { method: "POST" });
     if (res.ok) {
       const data = await res.json();
@@ -540,7 +544,7 @@ export default function App() {
   }
 
   async function step2Clear() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/clear`, { method: "POST" });
     if (res.ok) {
       setStep2SetupMsg("VCF set cleared");
@@ -553,7 +557,7 @@ export default function App() {
   }
 
   async function step2Run() {
-    if (!selectedProject) return;
+    if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -633,6 +637,12 @@ export default function App() {
             <option key={ref.name} value={ref.name} />
           ))}
         </datalist>
+        {!settingsReady ? (
+          <div className="panel alert-banner">
+            <strong>Setup required:</strong> Set vSNP3 path, projects root, and conda env in Settings,
+            then click Save + Preflight.
+          </div>
+        ) : null}
         <section className="status-strip">
           <div className="status-item">
             <span className="status-label">Project</span>
@@ -930,7 +940,7 @@ export default function App() {
                   value={localPath}
                   onChange={(e) => setLocalPath(e.target.value)}
                 />
-                <button onClick={linkLocal} disabled={!selectedProject}>Link Local Files</button>
+                <button onClick={linkLocal} disabled={!selectedProject || !settingsReady}>Link Local Files</button>
                 <div className="block">
                   <h3>Upload / Drag & Drop</h3>
                   <div
@@ -964,7 +974,7 @@ export default function App() {
                   value={sraFolder}
                   onChange={(e) => setSraFolder(e.target.value)}
                 />
-                <button onClick={sraDownload} disabled={!selectedProject}>Download</button>
+                <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
               </div>
             </div>
           </section>
@@ -1011,8 +1021,8 @@ export default function App() {
               ) : null}
             </div>
             <div className="block">
-              <button onClick={step1Setup} disabled={!selectedProject}>Setup</button>
-              <button onClick={step1Run} disabled={!selectedProject || !reference}>Run</button>
+              <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
+              <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference}>Run</button>
               <label className="checkbox">
                 <input
                   type="checkbox"
@@ -1311,8 +1321,8 @@ export default function App() {
                   </button>
                 </div>
                 <div className="row">
-                  <button onClick={importVcfs} disabled={!selectedProject}>Build VCF set</button>
-                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject}>Clear VCF set</button>
+                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady}>Build VCF set</button>
+                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady}>Clear VCF set</button>
                   <button
                     className="ghost action"
                     onClick={() => openOutput(`${settings.projects_root}/${selectedProject}/step2/vcf_source`)}
@@ -1350,17 +1360,18 @@ export default function App() {
 
             <div className="block">
               {step2Mode === "step1" ? (
-                <button onClick={step2Setup} disabled={!selectedProject}>Setup</button>
+                <button onClick={step2Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
               ) : null}
-              <button
-                onClick={step2Run}
-                disabled={
-                  !selectedProject ||
-                  !reference ||
-                  (selected && selected.step2_vcfs === 0) ||
-                  (refLock.references && refLock.references.length > 1)
-                }
-              >
+                <button
+                  onClick={step2Run}
+                  disabled={
+                    !selectedProject ||
+                    !settingsReady ||
+                    !reference ||
+                    (selected && selected.step2_vcfs === 0) ||
+                    (refLock.references && refLock.references.length > 1)
+                  }
+                >
                 Run
               </button>
               <div className="note">

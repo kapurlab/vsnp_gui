@@ -145,6 +145,15 @@ p {
   color: var(--accent-2);
 }
 
+.alert-banner {
+  border: 1px solid rgba(217, 161, 140, 0.6);
+  background: rgba(255, 237, 213, 0.85);
+  color: #7a3b2c;
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
 .row-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(280px, 1fr));

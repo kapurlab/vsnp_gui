@@ -549,6 +549,9 @@ export default function App() {
     if (res.ok) {
       setStep2SetupMsg("VCF set cleared");
       setStep2BuiltAt("");
+      setStep2VcfCount(0);
+      setImportStatus("");
+      setImportMismatchReport("");
       setStep2Outputs([]);
       setStep2Groups([]);
       setStep2OutputsError("");
@@ -1368,7 +1371,9 @@ export default function App() {
                     !selectedProject ||
                     !settingsReady ||
                     !reference ||
-                    (selected && selected.step2_vcfs === 0) ||
+                    (step2Mode === "custom"
+                      ? step2VcfCount === 0
+                      : selected && selected.step2_vcfs === 0) ||
                     (refLock.references && refLock.references.length > 1)
                   }
                 >

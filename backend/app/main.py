@@ -1074,7 +1074,9 @@ def _send_igv_commands(
     retries: int = 1
 ) -> tuple[bool, str, List[str], List[str]]:
     commands = []
+    responses: List[str] = []
     if include_genome:
+        commands.append("new")
         if str(ref_fasta).endswith(".genome"):
             commands.append(f"genome {ref_fasta}")
         else:
@@ -1085,17 +1087,9 @@ def _send_igv_commands(
     last_error = ""
     for _ in range(retries):
         try:
-            responses = []
-            with socket.create_connection(("127.0.0.1", 60151), timeout=2) as sock:
-                file = sock.makefile("rwb")
-                for cmd in commands:
-                    file.write((cmd + "\n").encode("utf-8"))
-                    file.flush()
-                    resp = file.readline().decode("utf-8").strip()
-                    responses.append(resp)
-                    if resp and "OK" not in resp:
-                        last_error = resp
-                        return False, last_error, commands, responses
+            with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
+                payload = "\n".join(commands) + "\n"
+                sock.sendall(payload.encode("utf-8"))
             return True, "", commands, responses
         except OSError as exc:
             last_error = str(exc)

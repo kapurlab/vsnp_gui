@@ -820,6 +820,32 @@ button:hover:not(:disabled) {
   justify-content: flex-end;
 }
 
+.inline-details {
+  display: inline-block;
+  font-size: 12px;
+}
+
+.inline-details summary {
+  cursor: pointer;
+  color: var(--accent);
+  list-style: none;
+}
+
+.inline-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.inline-files {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inline-files button {
+  padding: 4px 8px;
+  font-size: 11px;
+}
 .scroll-hint {
   margin-top: 8px;
   font-size: 12px;

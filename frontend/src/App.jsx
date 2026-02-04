@@ -42,6 +42,7 @@ export default function App() {
   const [step1LogSample, setStep1LogSample] = useState("");
   const [step1LogText, setStep1LogText] = useState("");
   const [step1LogLoading, setStep1LogLoading] = useState(false);
+  const [step1FilesCache, setStep1FilesCache] = useState({});
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [step2Outputs, setStep2Outputs] = useState([]);
@@ -384,6 +385,19 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
+  async function downloadQcXlsx() {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.xlsx`);
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${selectedProject}_combined_excelworksheets.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function saveExclusions() {
     if (!selectedProject) return;
     const samples = new Set();
@@ -625,6 +639,25 @@ export default function App() {
       setStep1LogText("Failed to load log");
     } finally {
       setStep1LogLoading(false);
+    }
+  }
+
+  async function getStep1Files(sample) {
+    if (!selectedProject) return null;
+    if (step1FilesCache[sample]) return step1FilesCache[sample];
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/files?sample=${encodeURIComponent(sample)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    setStep1FilesCache((prev) => ({ ...prev, [sample]: data }));
+    return data;
+  }
+
+  async function openStep1File(sample, type) {
+    const data = await getStep1Files(sample);
+    if (!data) return;
+    const path = data[type];
+    if (path) {
+      await openOutput(path);
     }
   }
 
@@ -1085,6 +1118,7 @@ export default function App() {
                   {qcLoading ? "Loading..." : "Refresh"}
                 </button>
                 <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
+                <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
                 <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
               </div>
             </div>
@@ -1106,6 +1140,7 @@ export default function App() {
                   <tr>
                     <th>Exclude</th>
                     <th>Sample</th>
+                    <th>Files</th>
                     <th>Reference</th>
                     <th>Avg Depth</th>
                     <th>Zero Cov %</th>
@@ -1131,6 +1166,28 @@ export default function App() {
                           />
                         </td>
                         <td>{row._sample || row.sample || "-"}</td>
+                        <td>
+                          <details className="inline-details">
+                            <summary>Files</summary>
+                            <div className="inline-files">
+                              {row._file ? (
+                                <button onClick={() => openOutput(row._file)}>Stats</button>
+                              ) : null}
+                              <button
+                                onClick={() => openStep1File(sampleKey(row), "bam")}
+                                disabled={!sampleKey(row)}
+                              >
+                                BAM
+                              </button>
+                              <button
+                                onClick={() => openStep1File(sampleKey(row), "sample_dir")}
+                                disabled={!sampleKey(row)}
+                              >
+                                Folder
+                              </button>
+                            </div>
+                          </details>
+                        </td>
                         <td>{row.Reference || "-"}</td>
                         <td>{row["Average Depth"] || "-"}</td>
                         <td>{row["Percent Ref with Zero Coverage"] || "-"}</td>

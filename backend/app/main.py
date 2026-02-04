@@ -778,6 +778,56 @@ def qc_summary_csv(project: str):
     return Response(content=result.stdout, media_type="text/csv")
 
 
+@app.get("/api/projects/{project}/qc_summary.xlsx")
+def qc_summary_xlsx(project: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step1_dir = project_dir / "step1"
+    if not step1_dir.exists():
+        raise HTTPException(status_code=404, detail="Step1 directory not found")
+    output_path = step1_dir / "combined_excelworksheets.xlsx"
+    code = (
+        "import pandas as pd, glob, os, sys\n"
+        "step1=sys.argv[1]\n"
+        "out=sys.argv[2]\n"
+        "rows=[]\n"
+        "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
+        "    try:\n"
+        "        df=pd.read_excel(f)\n"
+        "    except Exception:\n"
+        "        continue\n"
+        "    if df.empty:\n"
+        "        continue\n"
+        "    row=df.iloc[0]\n"
+        "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
+        "    row['_sample']=sample\n"
+        "    rows.append(row)\n"
+        "latest={}\n"
+        "for row in rows:\n"
+        "    sample=row.get('_sample')\n"
+        "    date=row.get('date','') or ''\n"
+        "    if sample not in latest:\n"
+        "        latest[sample]=row\n"
+        "    else:\n"
+        "        if date > (latest[sample].get('date','') or ''):\n"
+        "            latest[sample]=row\n"
+        "if not latest:\n"
+        "    out_df=pd.DataFrame()\n"
+        "else:\n"
+        "    out_df=pd.DataFrame(list(latest.values()))\n"
+        "out_df.to_excel(out, index=False)\n"
+    )
+    cmd_list = conda_python_cmd(cfg, code, [str(step1_dir), str(output_path)])
+    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"QC summary XLSX failed: {result.stderr.strip()}")
+    content = output_path.read_bytes()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 @app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
@@ -878,6 +928,26 @@ def step2_clear(project: str):
         shutil.rmtree(vcf_source_dir)
     vcf_source_dir.mkdir(parents=True, exist_ok=True)
     return {"cleared": True}
+
+
+@app.get("/api/projects/{project}/step1/files")
+def step1_files(project: str, sample: str = Query(...)):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    sample_dir = project_dir / "step1" / sample
+    if not sample_dir.exists():
+        raise HTTPException(status_code=404, detail="Sample not found")
+    stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
+    stats_path = str(stats_files[-1]) if stats_files else ""
+    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    bam_path = str(bam_files[-1]) if bam_files else ""
+    align_dir = str(bam_files[-1].parent) if bam_files else ""
+    return {
+        "stats": stats_path,
+        "bam": bam_path,
+        "alignment_dir": align_dir,
+        "sample_dir": str(sample_dir)
+    }
 
 
 @app.get("/api/projects/{project}/step2_outputs")

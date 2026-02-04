@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
 from typing import List, Optional, Dict
+import zipfile
 import socket
 import json
 import os
@@ -982,6 +983,12 @@ def step1_igv_session(project: str, payload: OpenRequest):
         raise HTTPException(status_code=404, detail="BAM not found")
     bam_path = bam_files[-1]
     align_dir = bam_path.parent
+    # Clean up legacy per-alignment .genome files now that we use shared project genomes.
+    try:
+        for legacy_genome in align_dir.glob("*.genome"):
+            legacy_genome.unlink(missing_ok=True)
+    except Exception:
+        pass
     fasta_files = sorted(align_dir.glob("*.fasta"))
     if not fasta_files:
         raise HTTPException(status_code=404, detail="Reference FASTA not found")
@@ -995,11 +1002,14 @@ def step1_igv_session(project: str, payload: OpenRequest):
     except Exception:
         contig = ""
     session_path = sample_dir / f"{sample}.igv.xml"
+    genome_id = ref_fasta.stem
+    genome_store_dir = project_dir / ".igv_genomes"
+    genome_path = _ensure_genome_file(ref_fasta, genome_store_dir, genome_id)
     locus_attr = f' locus="{contig}:1-10000"' if contig else ""
     session_xml = (
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
-        f"<Session genome=\"{ref_fasta}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
-        f"  <Genome path=\"{ref_fasta}\"/>\n"
+        f"<Session genome=\"{genome_path}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
+        f"  <Genome path=\"{genome_path}\"/>\n"
         "  <Resources>\n"
         f"    <Resource path=\"{ref_fasta}\"/>\n"
         f"    <Resource path=\"{bam_path}\"/>\n"
@@ -1009,17 +1019,21 @@ def step1_igv_session(project: str, payload: OpenRequest):
     session_path.write_text(session_xml, encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     igv_running = _igv_running()
-    desired_genome = str(ref_fasta)
+    desired_genome = genome_id
     include_genome = not igv_running or _IGV_STATE["genome"] != desired_genome
     if not igv_running:
         _open_igv(session_path, igv_app_path, None)
         _wait_for_igv()
+    send_goto = include_genome
     sent, err, sent_commands, responses = _send_igv_commands(
-        ref_fasta,
+        genome_path,
         bam_path,
         contig,
         include_genome=include_genome,
-        retries=10
+        send_goto=send_goto,
+        retries=10,
+        wait_before_genome=3.0 if not igv_running else 0.0,
+        repeat_genome=not igv_running
     )
     if sent and include_genome:
         _IGV_STATE["genome"] = desired_genome
@@ -1067,35 +1081,90 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
 
 
 def _send_igv_commands(
-    ref_fasta: Path,
+    genome_path: Path,
     bam_path: Path,
     contig: str,
     include_genome: bool = True,
-    retries: int = 1
+    send_goto: bool = True,
+    retries: int = 1,
+    wait_before_genome: float = 0.0,
+    repeat_genome: bool = False
 ) -> tuple[bool, str, List[str], List[str]]:
-    commands = []
+    commands: List[str] = []
     responses: List[str] = []
+
+    def _send(payload_commands: List[str]) -> tuple[bool, str]:
+        last_error = ""
+        for _ in range(retries):
+            try:
+                with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
+                    payload = "\n".join(payload_commands) + "\n"
+                    sock.sendall(payload.encode("utf-8"))
+                return True, ""
+            except OSError as exc:
+                last_error = str(exc)
+                time.sleep(1.0)
+                continue
+        return False, last_error
+
+    # Phase 1: set genome (separate session avoids IGV dropping subsequent commands).
     if include_genome:
-        commands.append("new")
-        if str(ref_fasta).endswith(".genome"):
-            commands.append(f"genome {ref_fasta}")
-        else:
-            commands.append(f"load {ref_fasta}")
-    commands.append(f"load {bam_path}")
-    if contig:
-        commands.append(f"goto {contig}:1-10000")
-    last_error = ""
-    for _ in range(retries):
-        try:
-            with socket.create_connection(("127.0.0.1", 60151), timeout=1) as sock:
-                payload = "\n".join(commands) + "\n"
-                sock.sendall(payload.encode("utf-8"))
-            return True, "", commands, responses
-        except OSError as exc:
-            last_error = str(exc)
+        if wait_before_genome > 0:
+            time.sleep(wait_before_genome)
+        genome_cmds = [f"genome {genome_path}"]
+        commands.extend(genome_cmds)
+        ok, err = _send(genome_cmds)
+        if not ok:
+            return False, err, commands, []
+        time.sleep(1.5)
+        if repeat_genome:
+            commands.extend(genome_cmds)
+            ok, err = _send(genome_cmds)
+            if not ok:
+                return False, err, commands, []
             time.sleep(1.5)
-            continue
-    return False, last_error, commands, []
+
+    # Phase 2: load BAM and go to locus.
+    load_cmds = [f"load {bam_path}"]
+    if contig and send_goto:
+        load_cmds.append(f"goto {contig}:1-10000")
+    commands.extend(load_cmds)
+    ok, err = _send(load_cmds)
+    if not ok:
+        return False, err, commands, []
+    return True, "", commands, responses
+
+
+def _ensure_genome_file(ref_fasta: Path, out_dir: Path, genome_id: str) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    genome_path = out_dir / f"{genome_id}.genome"
+    props_lines = [
+        f"id={genome_id}",
+        f"name={genome_id}",
+        "fasta=true",
+        f"sequenceLocation={ref_fasta}"
+    ]
+    props = "\n".join(props_lines) + "\n"
+
+    def needs_write() -> bool:
+        if not genome_path.exists():
+            return True
+        try:
+            if genome_path.stat().st_mtime < ref_fasta.stat().st_mtime:
+                return True
+        except OSError:
+            return True
+        try:
+            with zipfile.ZipFile(genome_path, "r") as zf:
+                existing = zf.read("property.txt").decode("utf-8")
+            return existing != props
+        except Exception:
+            return True
+
+    if needs_write():
+        with zipfile.ZipFile(genome_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("property.txt", props)
+    return genome_path
 
 
 def _wait_for_igv(timeout: float = 10.0) -> None:

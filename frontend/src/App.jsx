@@ -697,8 +697,6 @@ export default function App() {
       if (!payload.igv_commands_sent) {
         const detail = payload.igv_error ? ` (${payload.igv_error})` : "";
         window.alert(`IGV command server did not accept commands${detail}.`);
-      } else if (payload.igv_commands?.length) {
-        window.alert(`IGV commands sent:\n${payload.igv_commands.join("\n")}`);
       }
     }
   }

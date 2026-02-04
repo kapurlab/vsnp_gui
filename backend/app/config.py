@@ -6,10 +6,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+HOME_DIR = Path.home()
 DEFAULTS: Dict[str, Any] = {
-    "vsnp3_path": "/Users/vivekkapur/vsnp3",
-    "projects_root": "/Users/vivekkapur/vsnp3/projects",
-    "conda_env": "vsnp3",
+    "vsnp3_path": str(HOME_DIR / "vsnp3"),
+    "projects_root": str(HOME_DIR / "vsnp3" / "projects"),
+    "conda_env": "",
     "conda_exe": "",
     "conda_env_path": "",
     "sra": {
@@ -25,7 +26,14 @@ def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         save_config(DEFAULTS)
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+    projects_root = Path(cfg.get("projects_root", ""))
+    if str(vsnp3_path).startswith("/Users/vivekkapur") and not vsnp3_path.exists():
+        cfg["vsnp3_path"] = DEFAULTS["vsnp3_path"]
+    if str(projects_root).startswith("/Users/vivekkapur") and not projects_root.exists():
+        cfg["projects_root"] = DEFAULTS["projects_root"]
+    return cfg
 
 
 def save_config(cfg: Dict[str, Any]) -> None:

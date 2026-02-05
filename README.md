@@ -101,6 +101,24 @@ cd electron && npm install && VITE_DEV_SERVER_URL="http://localhost:5173" npm ru
 
 Both versions use the same backend and frontend code. The Electron version adds native file dialogs via `window.vsnp.selectPath()`.
 
+## Changelog (Unreleased)
+
+### Post-hoc Step 1 (feature/posthoc-step1)
+
+- Adds a Post-hoc tab in Step 1 Results to merge QC summaries across multiple Step 1 folders.
+- Folder picker defaults to projects root; toggle to include the current project’s Step 1.
+- Post-hoc table supports Open Folder, IGV, and Stats links using original paths (no duplication).
+- Step 1 list height/scrolling aligned with Step 2 panel; clearer “scroll for more” UX.
+
+### VCF Edit Workflow (feature/vcf-edit)
+
+- Adds per-sample VCF editing with audit trail (patched VCF + JSONL log).
+- Edit modal can fetch current REF/ALT, auto-fills ALT, and requires an edit reason.
+- Step 1 + Post-hoc tables show Edited badges and Edit Log links.
+- Step 2 prefers patched VCFs; warns when edits exist and writes `edited_samples.json`.
+- Robust handling of corrupt patched VCFs with automatic rebuild from source.
+- Settings include `bcftools` path for edits; text logs open in TextEdit on macOS.
+
 ## Citation
 
 Hicks J, Stuber T, Lantz K, Torchetti M, Robbe-Austerman S. vSNP: a SNP pipeline for the generation of transparent SNP matrices and phylogenetic trees from whole genome sequencing data sets. *BMC Genomics*. 2024;25:545. PMID: 38822271

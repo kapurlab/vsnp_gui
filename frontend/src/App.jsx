@@ -52,6 +52,9 @@ export default function App() {
   const [posthocRows, setPosthocRows] = useState([]);
   const [posthocLoading, setPosthocLoading] = useState(false);
   const [posthocError, setPosthocError] = useState("");
+  const [posthocSampleInput, setPosthocSampleInput] = useState("");
+  const [posthocSampleList, setPosthocSampleList] = useState("");
+  const [posthocResolveMsg, setPosthocResolveMsg] = useState("");
   const [step1Edits, setStep1Edits] = useState({});
   const [step1EditedCount, setStep1EditedCount] = useState(0);
   const [editVcfOpen, setEditVcfOpen] = useState(false);
@@ -898,6 +901,44 @@ export default function App() {
     );
   }
 
+  async function resolvePosthocSamples(samples) {
+    if (!samples.length) return;
+    setPosthocResolveMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/api/posthoc/step1/resolve_samples`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ samples })
+      });
+      if (!res.ok) {
+        const msg = await res.json();
+        setPosthocResolveMsg(msg.detail || "Sample lookup failed");
+        return;
+      }
+      const data = await res.json();
+      const foundDirs = (data.found || []).map((row) => row.sample_dir).filter(Boolean);
+      setPosthocFolders((prev) => {
+        const merged = [...prev];
+        for (const dir of foundDirs) {
+          if (!merged.includes(dir)) {
+            merged.push(dir);
+          }
+        }
+        return merged;
+      });
+      const missing = data.missing || [];
+      const noteParts = [];
+      if (foundDirs.length) noteParts.push(`Added ${foundDirs.length}`);
+      if (missing.length) noteParts.push(`Missing ${missing.length}`);
+      setPosthocResolveMsg(noteParts.join(" · "));
+      if (missing.length) {
+        setPosthocResolveMsg(`${noteParts.join(" · ")} (e.g., ${missing.slice(0, 3).join(", ")})`);
+      }
+    } catch {
+      setPosthocResolveMsg("Sample lookup failed");
+    }
+  }
+
   async function loadPosthoc() {
     if (!posthocFolders.length) return;
     setPosthocLoading(true);
@@ -1595,6 +1636,48 @@ export default function App() {
               <>
                 <div className="note">
                   Add Step 1 folders to build a temporary merged view for IGV sanity checks.
+                </div>
+                <div className="posthoc-inputs">
+                  <div className="inline-fields">
+                    <input
+                      placeholder="Sample ID (e.g., SRR10321141)"
+                      value={posthocSampleInput}
+                      onChange={(e) => setPosthocSampleInput(e.target.value)}
+                    />
+                    <button
+                      className="ghost"
+                      onClick={() => {
+                        const sample = posthocSampleInput.trim();
+                        if (sample) {
+                          resolvePosthocSamples([sample]);
+                          setPosthocSampleInput("");
+                        }
+                      }}
+                    >
+                      Add sample
+                    </button>
+                  </div>
+                  <textarea
+                    placeholder="Paste sample IDs (one per line)"
+                    value={posthocSampleList}
+                    onChange={(e) => setPosthocSampleList(e.target.value)}
+                    rows={3}
+                  />
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      const samples = posthocSampleList
+                        .split(/[\n,]+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                      if (samples.length) {
+                        resolvePosthocSamples(samples);
+                      }
+                    }}
+                  >
+                    Add list
+                  </button>
+                  {posthocResolveMsg ? <div className="note">{posthocResolveMsg}</div> : null}
                 </div>
                 {posthocFolders.length ? (
                   <ul className="posthoc-list">

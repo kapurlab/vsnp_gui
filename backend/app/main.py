@@ -124,6 +124,11 @@ class PosthocScanRequest(BaseModel):
     folders: List[str]
 
 
+class PosthocResolveRequest(BaseModel):
+    samples: List[str]
+    roots: Optional[List[str]] = None
+
+
 class VcfEditRequest(BaseModel):
     sample: str
     locus: str
@@ -902,7 +907,9 @@ def posthoc_step1_scan(payload: PosthocScanRequest):
         "folders=sys.argv[1:]\n"
         "rows=[]\n"
         "for step1 in folders:\n"
-        "    for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
+        "    direct=glob.glob(os.path.join(step1,'*_stats.xlsx'))\n"
+        "    nested=glob.glob(os.path.join(step1,'*','*_stats.xlsx'))\n"
+        "    for f in direct + nested:\n"
         "        try:\n"
         "            df=pd.read_excel(f)\n"
         "        except Exception:\n"
@@ -915,8 +922,9 @@ def posthoc_step1_scan(payload: PosthocScanRequest):
         "        row['_sample']=sample\n"
         "        sample_dir=os.path.dirname(f)\n"
         "        row['_sample_dir']=sample_dir\n"
-        "        row['_step1_dir']=step1\n"
-        "        row['_project']=os.path.basename(os.path.dirname(step1))\n"
+        "        step1_dir=os.path.dirname(sample_dir)\n"
+        "        row['_step1_dir']=step1_dir\n"
+        "        row['_project']=os.path.basename(os.path.dirname(step1_dir))\n"
         "        edits_dir=os.path.join(sample_dir,'vcf_edits')\n"
         "        patched=''\n"
         "        if os.path.isdir(edits_dir):\n"
@@ -948,6 +956,40 @@ def posthoc_step1_scan(payload: PosthocScanRequest):
         return json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Post-hoc scan parse failed")
+
+
+@app.post("/api/posthoc/step1/resolve_samples")
+def posthoc_resolve_samples(payload: PosthocResolveRequest):
+    cfg = load_config()
+    samples = [s.strip() for s in payload.samples if s and s.strip()]
+    if not samples:
+        raise HTTPException(status_code=400, detail="Samples are required")
+    roots = payload.roots or []
+    if roots:
+        root_dirs = [Path(r).expanduser() for r in roots]
+    else:
+        projects_root = Path(cfg["projects_root"])
+        root_dirs = list(projects_root.glob("*/step1"))
+    found = []
+    missing = []
+    for sample in samples:
+        hit = None
+        for root in root_dirs:
+            candidate = root / sample
+            if candidate.is_dir():
+                hit = candidate
+                break
+        if hit:
+            step1_dir = hit.parent
+            found.append({
+                "sample": sample,
+                "sample_dir": str(hit),
+                "step1_dir": str(step1_dir),
+                "project": step1_dir.parent.name
+            })
+        else:
+            missing.append(sample)
+    return {"found": found, "missing": missing}
 
 
 @app.get("/api/projects/{project}/reference_lock")

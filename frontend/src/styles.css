@@ -799,6 +799,16 @@ button:hover:not(:disabled) {
   gap: 8px;
 }
 
+.posthoc-inputs {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.posthoc-inputs textarea {
+  width: 100%;
+}
+
 .posthoc-list li {
   display: flex;
   justify-content: space-between;

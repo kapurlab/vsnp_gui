@@ -82,6 +82,7 @@ class ConfigUpdate(BaseModel):
     conda_env_path: Optional[str] = None
     igv_app_path: Optional[str] = None
     bcftools_path: Optional[str] = None
+    step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
 
 
@@ -173,6 +174,8 @@ def update_config(update: ConfigUpdate):
         cfg["igv_app_path"] = update.igv_app_path
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
+    if update.step1_max_parallel is not None:
+        cfg["step1_max_parallel"] = update.step1_max_parallel
     if update.sra is not None:
         cfg["sra"].update(update.sra)
     save_config(cfg)
@@ -480,50 +483,72 @@ def step1_run(project: str, payload: Step1Request):
             "reference": payload.reference,
             "display_name": f"{project}_{payload.reference}"
         })
+    max_parallel = cfg.get("step1_max_parallel", 1) or 1
+    try:
+        max_parallel = max(1, int(max_parallel))
+    except (TypeError, ValueError):
+        max_parallel = 1
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
             "set -uo pipefail",
             "FAIL=0",
-            "for d in */; do",
-            "  if [ -d \"$d\" ]; then",
-            "    echo \"== Running step1 in $d ==\"",
-            "    cd \"$d\"",
-            "    LOG=run_step1.log",
-            "    echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
-            "    echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
-            "    if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
-            "      for dir in alignment_*; do",
-            "        if [ -d \"$dir\" ]; then",
-            "          rm -rf \"$dir\"",
-            "        fi",
-            "      done",
-            "      if [ -d \"unmapped_reads\" ]; then",
-            "        rm -rf \"unmapped_reads\"",
-            "      fi",
-            "      if [ -d \"sourmash\" ]; then",
-            "        rm -rf \"sourmash\"",
-            "      fi",
-            "    fi",
-            "    R1=$(ls *_R1*.fastq.gz 2>/dev/null | head -n1 || true)",
-            "    R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
-            "    if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "    if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "    if [ -z \"$R1\" ] || [ -z \"$R2\" ]; then",
-            "      echo \"Missing R1/R2 in $d\" | tee -a \"$LOG\"",
-            "      cd ..",
-            "      continue",
-            "    fi",
-            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} >> \"$LOG\" 2>&1",
-            "    STATUS=$?",
-            "    if [ \"$STATUS\" -eq 0 ]; then",
-            "      echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
-            "    else",
-            "      echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
-            "      FAIL=1",
-            "    fi",
-            "    cd ..",
+            f"MAX_PARALLEL={max_parallel}",
+            "run_sample() {",
+            "  local d=\"$1\"",
+            "  if [ ! -d \"$d\" ]; then",
+            "    return 0",
             "  fi",
+            "  echo \"== Running step1 in $d ==\"",
+            "  cd \"$d\"",
+            "  LOG=run_step1.log",
+            "  echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
+            "  echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+            "  if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
+            "    for dir in alignment_*; do",
+            "      if [ -d \"$dir\" ]; then",
+            "        rm -rf \"$dir\"",
+            "      fi",
+            "    done",
+            "    if [ -d \"unmapped_reads\" ]; then",
+            "      rm -rf \"unmapped_reads\"",
+            "    fi",
+            "    if [ -d \"sourmash\" ]; then",
+            "      rm -rf \"sourmash\"",
+            "    fi",
+            "  fi",
+            "  R1=$(ls *_R1*.fastq.gz 2>/dev/null | head -n1 || true)",
+            "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
+            "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
+            "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
+            "  if [ -z \"$R1\" ] || [ -z \"$R2\" ]; then",
+            "    echo \"Missing R1/R2 in $d\" | tee -a \"$LOG\"",
+            "    cd ..",
+            "    return 0",
+            "  fi",
+            f"  vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} >> \"$LOG\" 2>&1",
+            "  STATUS=$?",
+            "  if [ \"$STATUS\" -eq 0 ]; then",
+            "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+            "  else",
+            "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
+            "    FAIL=1",
+            "  fi",
+            "  cd ..",
+            "  return $STATUS",
+            "}",
+            "pids=()",
+            "for d in */; do",
+            "  run_sample \"$d\" &",
+            "  pids+=(\"$!\")",
+            "  if [ ${#pids[@]} -ge \"$MAX_PARALLEL\" ]; then",
+            "    pid=${pids[0]}",
+            "    wait \"$pid\" || FAIL=1",
+            "    pids=(\"${pids[@]:1}\")",
+            "  fi",
+            "done",
+            "for pid in \"${pids[@]}\"; do",
+            "  wait \"$pid\" || FAIL=1",
             "done",
             "exit $FAIL",
         ]),

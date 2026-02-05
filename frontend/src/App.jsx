@@ -24,6 +24,7 @@ export default function App() {
     conda_env_path: "",
     igv_app_path: "",
     bcftools_path: "",
+    step1_max_parallel: 3,
     sra_allow_insecure_https: false
   });
   const [sraText, setSraText] = useState("");
@@ -164,6 +165,7 @@ export default function App() {
       conda_env_path: cfg.conda_env_path || "",
       igv_app_path: cfg.igv_app_path || "",
       bcftools_path: cfg.bcftools_path || "",
+      step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
     });
     if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
@@ -316,6 +318,7 @@ export default function App() {
         conda_env_path: settings.conda_env_path,
         igv_app_path: settings.igv_app_path,
         bcftools_path: settings.bcftools_path,
+        step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
       })
     });
@@ -529,12 +532,13 @@ export default function App() {
     window.alert("Exclusions saved");
   }
 
-  async function linkLocal() {
-    if (!selectedProject || !settingsReady || !localPath) return;
+  async function linkLocal(pathOverride = "") {
+    const pathToUse = pathOverride || localPath;
+    if (!selectedProject || !settingsReady || !pathToUse) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/link-local`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: localPath })
+      body: JSON.stringify({ path: pathToUse })
     });
     if (!res.ok) {
       const msg = await res.json();
@@ -1215,6 +1219,16 @@ export default function App() {
                     </button>
                   ) : null}
                 </div>
+                <label className="label">Step 1 max parallel</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="8"
+                  value={settings.step1_max_parallel}
+                  onChange={(e) =>
+                    setSettings({ ...settings, step1_max_parallel: Number(e.target.value) || 1 })
+                  }
+                />
               </div>
               <div className="block">
                 {preflightError ? (
@@ -1353,12 +1367,31 @@ export default function App() {
             <div className="input-columns">
               <div className="input-column">
                 <h3>Bring Your Own FASTQ</h3>
-                <input
-                  placeholder="/path/to/fastq_dir"
-                  value={localPath}
-                  onChange={(e) => setLocalPath(e.target.value)}
-                />
-                <button onClick={linkLocal} disabled={!selectedProject || !settingsReady}>Link Local Files</button>
+                <button
+                  onClick={async () => {
+                    if (window?.vsnp?.selectPath) {
+                      const picked = await window.vsnp.selectPath({
+                        kind: "folder",
+                        title: "Select FASTQ folder",
+                        defaultPath: settings.projects_root || undefined
+                      });
+                      if (picked) {
+                        setLocalPath(picked);
+                        await linkLocal(picked);
+                      }
+                    } else {
+                      const picked = window.prompt("Enter FASTQ folder path:");
+                      if (picked) {
+                        setLocalPath(picked);
+                        await linkLocal(picked);
+                      }
+                    }
+                  }}
+                  disabled={!selectedProject || !settingsReady}
+                >
+                  Choose Folder
+                </button>
+                {localPath ? <div className="note">Selected: {localPath}</div> : null}
                 <div className="block">
                   <h3>Upload / Drag & Drop</h3>
                   <div

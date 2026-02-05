@@ -1005,17 +1005,23 @@ def step1_igv_session(project: str, payload: OpenRequest):
     genome_id = ref_fasta.stem
     genome_store_dir = project_dir / ".igv_genomes"
     genome_path = _ensure_genome_file(ref_fasta, genome_store_dir, genome_id)
+    gbk_path = _find_gbk_for_fasta(ref_fasta)
     locus_attr = f' locus="{contig}:1-10000"' if contig else ""
-    session_xml = (
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
-        f"<Session genome=\"{genome_path}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n"
-        f"  <Genome path=\"{genome_path}\"/>\n"
-        "  <Resources>\n"
-        f"    <Resource path=\"{ref_fasta}\"/>\n"
-        f"    <Resource path=\"{bam_path}\"/>\n"
-        "  </Resources>\n"
-        "</Session>\n"
-    )
+    session_lines = [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n",
+        f"<Session genome=\"{genome_path}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n",
+        f"  <Genome path=\"{genome_path}\"/>\n",
+        "  <Resources>\n",
+        f"    <Resource path=\"{ref_fasta}\"/>\n",
+        f"    <Resource path=\"{bam_path}\"/>\n",
+    ]
+    if gbk_path:
+        session_lines.append(f"    <Resource path=\"{gbk_path}\"/>\n")
+    session_lines.extend([
+        "  </Resources>\n",
+        "</Session>\n",
+    ])
+    session_xml = "".join(session_lines)
     session_path.write_text(session_xml, encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
     igv_running = _igv_running()
@@ -1025,10 +1031,13 @@ def step1_igv_session(project: str, payload: OpenRequest):
         _open_igv(session_path, igv_app_path, None)
         _wait_for_igv()
     send_goto = include_genome
+    # Only load annotation on genome switch to avoid duplicate tracks.
+    extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
     sent, err, sent_commands, responses = _send_igv_commands(
         genome_path,
         bam_path,
         contig,
+        extra_tracks=extra_tracks,
         include_genome=include_genome,
         send_goto=send_goto,
         retries=10,
@@ -1086,6 +1095,7 @@ def _send_igv_commands(
     contig: str,
     include_genome: bool = True,
     send_goto: bool = True,
+    extra_tracks: Optional[List[Path]] = None,
     retries: int = 1,
     wait_before_genome: float = 0.0,
     repeat_genome: bool = False
@@ -1126,6 +1136,9 @@ def _send_igv_commands(
 
     # Phase 2: load BAM and go to locus.
     load_cmds = [f"load {bam_path}"]
+    if extra_tracks:
+        for track in extra_tracks:
+            load_cmds.append(f"load {track}")
     if contig and send_goto:
         load_cmds.append(f"goto {contig}:1-10000")
     commands.extend(load_cmds)
@@ -1165,6 +1178,22 @@ def _ensure_genome_file(ref_fasta: Path, out_dir: Path, genome_id: str) -> Path:
         with zipfile.ZipFile(genome_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("property.txt", props)
     return genome_path
+
+
+def _find_gbk_for_fasta(ref_fasta: Path) -> Optional[Path]:
+    candidates: List[Path] = []
+    candidates.extend(ref_fasta.parent.glob("*.gbk"))
+    default_test = Path.home() / "vsnp3_test_dataset" / "vsnp_dependencies"
+    if default_test.exists():
+        candidates.extend(default_test.rglob("*.gbk"))
+    if not candidates:
+        return None
+    stem = ref_fasta.stem
+    for c in candidates:
+        cstem = c.stem
+        if cstem == stem or cstem.startswith(stem) or stem.startswith(cstem):
+            return c
+    return candidates[0]
 
 
 def _wait_for_igv(timeout: float = 10.0) -> None:

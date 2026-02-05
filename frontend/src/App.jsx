@@ -45,6 +45,11 @@ export default function App() {
   const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step1FilesCache, setStep1FilesCache] = useState({});
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
+  const [step1ResultsTab, setStep1ResultsTab] = useState("results");
+  const [posthocFolders, setPosthocFolders] = useState([]);
+  const [posthocRows, setPosthocRows] = useState([]);
+  const [posthocLoading, setPosthocLoading] = useState(false);
+  const [posthocError, setPosthocError] = useState("");
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [step2Outputs, setStep2Outputs] = useState([]);
@@ -108,6 +113,13 @@ export default function App() {
     () => projects.find((p) => p.name === selectedProject),
     [projects, selectedProject]
   );
+
+  const posthocFilteredRows = useMemo(() => {
+    if (!posthocRows.length) return [];
+    if (!reference) return posthocRows;
+    const refNorm = normalizeReferenceName(reference);
+    return posthocRows.filter((r) => normalizeReferenceName(r.Reference) === refNorm);
+  }, [posthocRows, reference]);
 
   async function pickPath(kind, title, currentValue, onPick) {
     if (!window?.vsnp?.selectPath) return;
@@ -401,6 +413,15 @@ export default function App() {
   async function openOutput(path) {
     if (!selectedProject) return;
     await fetch(`${API_BASE}/api/projects/${selectedProject}/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path })
+    });
+  }
+
+  async function openPosthocOutput(path) {
+    if (!path) return;
+    await fetch(`${API_BASE}/api/posthoc/open`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path })
@@ -716,6 +737,75 @@ export default function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: data.sample_dir })
+    });
+    if (res.ok) {
+      const payload = await res.json();
+      if (!payload.igv_commands_sent) {
+        const detail = payload.igv_error ? ` (${payload.igv_error})` : "";
+        window.alert(`IGV command server did not accept commands${detail}.`);
+      }
+    }
+  }
+
+  async function addPosthocFolder() {
+    let picked = "";
+    if (window?.vsnp?.selectPath) {
+      picked = await window.vsnp.selectPath({
+        kind: "folder",
+        title: "Select Step 1 folder",
+        defaultPath: settings.projects_root || undefined
+      });
+    } else {
+      picked = window.prompt("Enter Step 1 folder path:");
+    }
+    if (!picked) return;
+    setPosthocFolders((prev) => (prev.includes(picked) ? prev : [...prev, picked]));
+  }
+
+  function removePosthocFolder(path) {
+    setPosthocFolders((prev) => prev.filter((p) => p !== path));
+  }
+
+  function togglePosthocCurrentProject() {
+    if (!selectedProject || !settings.projects_root) return;
+    const step1Path = `${settings.projects_root}/${selectedProject}/step1`;
+    setPosthocFolders((prev) =>
+      prev.includes(step1Path) ? prev.filter((p) => p !== step1Path) : [...prev, step1Path]
+    );
+  }
+
+  async function loadPosthoc() {
+    if (!posthocFolders.length) return;
+    setPosthocLoading(true);
+    setPosthocError("");
+    try {
+      const res = await fetch(`${API_BASE}/api/posthoc/step1/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folders: posthocFolders })
+      });
+      if (!res.ok) {
+        const msg = await res.json();
+        setPosthocError(msg.detail || "Post-hoc scan failed");
+        setPosthocRows([]);
+      } else {
+        const data = await res.json();
+        setPosthocRows(data || []);
+      }
+    } catch {
+      setPosthocError("Post-hoc scan failed");
+      setPosthocRows([]);
+    } finally {
+      setPosthocLoading(false);
+    }
+  }
+
+  async function openPosthocIgv(sampleDir) {
+    if (!sampleDir) return;
+    const res = await fetch(`${API_BASE}/api/posthoc/igv_session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: sampleDir })
     });
     if (res.ok) {
       const payload = await res.json();
@@ -1201,107 +1291,231 @@ export default function App() {
 
           <section className="panel qc-panel">
             <div className="qc-header">
-              <h2>QC Summary (Step 1)</h2>
+              <h2>Step 1 Results</h2>
               <div className="qc-actions">
-                <button onClick={loadQC} disabled={!selectedProject || qcLoading}>
-                  {qcLoading ? "Loading..." : "Refresh"}
-                </button>
-                <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
-                <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
-                <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
+                <div className="mode-toggle">
+                  <button
+                    className={step1ResultsTab === "results" ? "active" : ""}
+                    onClick={() => setStep1ResultsTab("results")}
+                  >
+                    Results
+                  </button>
+                  <button
+                    className={step1ResultsTab === "posthoc" ? "active" : ""}
+                    onClick={() => setStep1ResultsTab("posthoc")}
+                  >
+                    Post-hoc
+                  </button>
+                </div>
+                {step1ResultsTab === "results" ? (
+                  <>
+                    <button onClick={loadQC} disabled={!selectedProject || qcLoading}>
+                      {qcLoading ? "Loading..." : "Refresh"}
+                    </button>
+                    <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
+                    <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
+                    <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      className={posthocFolders.includes(`${settings.projects_root}/${selectedProject}/step1`) ? "ghost active" : "ghost"}
+                      onClick={togglePosthocCurrentProject}
+                      disabled={!selectedProject || !settings.projects_root}
+                    >
+                      Current Project
+                    </button>
+                    <button onClick={addPosthocFolder}>Add Step 1 Folder</button>
+                    <button onClick={loadPosthoc} disabled={!posthocFolders.length || posthocLoading}>
+                      {posthocLoading ? "Loading..." : "Load"}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
-            <div className="note">
-              {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
-            </div>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={showFlaggedOnly}
-                onChange={(e) => setShowFlaggedOnly(e.target.checked)}
-              />
-              Show only flagged samples
-            </label>
-            {qcError ? <div className="note error">{qcError}</div> : null}
-            <div className="qc-table scrollable">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Exclude</th>
-                    <th>Sample</th>
-                    <th>Files</th>
-                    <th>Reference</th>
-                    <th>Avg Depth</th>
-                    <th>Zero Cov %</th>
-                    <th>Dup %</th>
-                    <th>R1 Q20</th>
-                    <th>R2 Q20</th>
-                    <th>Genome Cov</th>
-                    <th>Quality SNPs</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {qcRows
-                    .filter((r) => !showFlaggedOnly || isFlagged(r))
-                    .map((row) => (
-                      <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
-                        <td>
-                          <input
-                            type="checkbox"
-                            checked={Boolean(excluded[excludeKey(row)])}
-                            onChange={(e) =>
-                              setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
-                            }
-                          />
-                        </td>
-                        <td>{row._sample || row.sample || "-"}</td>
-                        <td>
-                          <details
-                            className="inline-details"
-                            open={openStep1FilesRow === sampleKey(row)}
-                          >
-                            <summary
-                              onClick={(e) => {
-                                e.preventDefault();
-                                const key = sampleKey(row);
-                                setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
-                              }}
-                            >
-                              Files
-                            </summary>
-                            <div className="inline-files">
-                              <button
-                                onClick={() => openStep1File(sampleKey(row), "sample_dir")}
-                                disabled={!sampleKey(row)}
-                              >
-                                Open Folder
-                              </button>
-                              <button
-                                onClick={() => openStep1Igv(sampleKey(row))}
-                                disabled={!sampleKey(row)}
-                              >
-                                IGV
-                              </button>
-                              {row._file ? (
-                                <button onClick={() => openOutput(row._file)}>Stats</button>
-                              ) : null}
-                            </div>
-                          </details>
-                        </td>
-                        <td>{row.Reference || "-"}</td>
-                        <td>{row["Average Depth"] || "-"}</td>
-                        <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
-                        <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
-                        <td>{formatPercent(row["R1 Passing Q20"])}</td>
-                        <td>{formatPercent(row["R2 Passing Q20"])}</td>
-                        <td>{formatPercent(row["Genome with Coverage"])}</td>
-                        <td>{row["Quality SNPs"] || "-"}</td>
+            {step1ResultsTab === "results" ? (
+              <>
+                <div className="note">
+                  {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
+                </div>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={showFlaggedOnly}
+                    onChange={(e) => setShowFlaggedOnly(e.target.checked)}
+                  />
+                  Show only flagged samples
+                </label>
+                {qcError ? <div className="note error">{qcError}</div> : null}
+                <div className="qc-table scrollable">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Exclude</th>
+                        <th>Sample</th>
+                        <th>Files</th>
+                        <th>Reference</th>
+                        <th>Avg Depth</th>
+                        <th>Zero Cov %</th>
+                        <th>Dup %</th>
+                        <th>R1 Q20</th>
+                        <th>R2 Q20</th>
+                        <th>Genome Cov</th>
+                        <th>Quality SNPs</th>
                       </tr>
+                    </thead>
+                    <tbody>
+                      {qcRows
+                        .filter((r) => !showFlaggedOnly || isFlagged(r))
+                        .map((row) => (
+                          <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(excluded[excludeKey(row)])}
+                                onChange={(e) =>
+                                  setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
+                                }
+                              />
+                            </td>
+                            <td>{row._sample || row.sample || "-"}</td>
+                            <td>
+                              <details
+                                className="inline-details"
+                                open={openStep1FilesRow === sampleKey(row)}
+                              >
+                                <summary
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    const key = sampleKey(row);
+                                    setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
+                                  }}
+                                >
+                                  Files
+                                </summary>
+                                <div className="inline-files">
+                                  <button
+                                    onClick={() => openStep1File(sampleKey(row), "sample_dir")}
+                                    disabled={!sampleKey(row)}
+                                  >
+                                    Open Folder
+                                  </button>
+                                  <button
+                                    onClick={() => openStep1Igv(sampleKey(row))}
+                                    disabled={!sampleKey(row)}
+                                  >
+                                    IGV
+                                  </button>
+                                  {row._file ? (
+                                    <button onClick={() => openOutput(row._file)}>Stats</button>
+                                  ) : null}
+                                </div>
+                              </details>
+                            </td>
+                            <td>{row.Reference || "-"}</td>
+                            <td>{row["Average Depth"] || "-"}</td>
+                            <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                            <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                            <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                            <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                            <td>{formatPercent(row["Genome with Coverage"])}</td>
+                            <td>{row["Quality SNPs"] || "-"}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+                {qcRows.length > 8 ? <div className="scroll-note">Scroll for more samples.</div> : null}
+              </>
+            ) : (
+              <>
+                <div className="note">
+                  Add Step 1 folders to build a temporary merged view for IGV sanity checks.
+                </div>
+                {posthocFolders.length ? (
+                  <ul className="posthoc-list">
+                    {posthocFolders.map((p) => (
+                      <li key={p}>
+                        <span>{p}</span>
+                        <button className="ghost" onClick={() => removePosthocFolder(p)}>Remove</button>
+                      </li>
                     ))}
-                </tbody>
-              </table>
-            </div>
-            {qcRows.length > 8 ? <div className="scroll-note">Scroll for more samples.</div> : null}
+                  </ul>
+                ) : (
+                  <div className="muted">No folders added yet.</div>
+                )}
+                {posthocError ? <div className="note error">{posthocError}</div> : null}
+                {reference ? (
+                  <div className="note">Filtering to reference: {reference}</div>
+                ) : null}
+                {posthocFilteredRows.length ? (
+                  <div className="qc-table scrollable">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Source</th>
+                          <th>Sample</th>
+                          <th>Files</th>
+                          <th>Reference</th>
+                          <th>Avg Depth</th>
+                          <th>Zero Cov %</th>
+                          <th>Dup %</th>
+                          <th>R1 Q20</th>
+                          <th>R2 Q20</th>
+                          <th>Genome Cov</th>
+                          <th>Quality SNPs</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {posthocFilteredRows.map((row) => {
+                          const sampleDir = row._sample_dir || (row._file ? row._file.replace(/\/[^/]+$/, "") : "");
+                          return (
+                          <tr key={row._file}>
+                            <td>{row._project || "-"}</td>
+                            <td>{row._sample || row.sample || "-"}</td>
+                            <td>
+                              <details
+                                className="inline-details"
+                                open={openStep1FilesRow === sampleKey(row)}
+                              >
+                                <summary
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    const key = sampleKey(row);
+                                    setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
+                                  }}
+                                >
+                                  Files
+                                </summary>
+                                <div className="inline-files">
+                                  <button onClick={() => openPosthocOutput(sampleDir)} disabled={!sampleDir}>
+                                    Open Folder
+                                  </button>
+                                  <button onClick={() => openPosthocIgv(sampleDir)} disabled={!sampleDir}>
+                                    IGV
+                                  </button>
+                                  {row._file ? <button onClick={() => openPosthocOutput(row._file)}>Stats</button> : null}
+                                </div>
+                              </details>
+                            </td>
+                            <td>{row.Reference || "-"}</td>
+                            <td>{row["Average Depth"] || "-"}</td>
+                            <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                            <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                            <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                            <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                            <td>{formatPercent(row["Genome with Coverage"])}</td>
+                            <td>{row["Quality SNPs"] || "-"}</td>
+                          </tr>
+                        )})}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="note">No post-hoc results loaded yet.</div>
+                )}
+              </>
+            )}
           </section>
         </div>
         ) : null}

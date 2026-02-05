@@ -130,6 +130,12 @@ p {
   box-shadow: 0 8px 18px rgba(76, 140, 138, 0.25);
 }
 
+.ghost.active {
+  background: var(--panel-2);
+  border-color: rgba(76, 140, 138, 0.6);
+  color: var(--accent);
+}
+
 .panel-actions .ghost {
   padding: 6px 10px;
   font-size: 12px;
@@ -701,6 +707,26 @@ button:hover:not(:disabled) {
   margin-top: 8px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.posthoc-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.posthoc-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 12px;
 }
 
 .qc-table.scrollable table {

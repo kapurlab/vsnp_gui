@@ -119,6 +119,10 @@ class Step2Request(BaseModel):
     reference: Optional[str] = None
 
 
+class PosthocScanRequest(BaseModel):
+    folders: List[str]
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -837,6 +841,53 @@ def qc_summary_xlsx(project: str):
     )
 
 
+@app.post("/api/posthoc/step1/scan")
+def posthoc_step1_scan(payload: PosthocScanRequest):
+    cfg = load_config()
+    folders = [str(Path(p).expanduser()) for p in payload.folders]
+    if not folders:
+        return []
+    code = (
+        "import pandas as pd, glob, json, os, sys\n"
+        "folders=sys.argv[1:]\n"
+        "rows=[]\n"
+        "for step1 in folders:\n"
+        "    for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
+        "        try:\n"
+        "            df=pd.read_excel(f)\n"
+        "        except Exception:\n"
+        "            continue\n"
+        "        if df.empty:\n"
+        "            continue\n"
+        "        row=df.iloc[0].to_dict()\n"
+        "        row['_file']=f\n"
+        "        sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
+        "        row['_sample']=sample\n"
+        "        row['_sample_dir']=os.path.dirname(f)\n"
+        "        row['_step1_dir']=step1\n"
+        "        row['_project']=os.path.basename(os.path.dirname(step1))\n"
+        "        rows.append(row)\n"
+        "latest={}\n"
+        "for row in rows:\n"
+        "    key=(row.get('_project'), row.get('_sample'))\n"
+        "    date=row.get('date','') or ''\n"
+        "    if key not in latest:\n"
+        "        latest[key]=row\n"
+        "    else:\n"
+        "        if date > (latest[key].get('date','') or ''):\n"
+        "            latest[key]=row\n"
+        "print(json.dumps(list(latest.values())))\n"
+    )
+    cmd_list = conda_python_cmd(cfg, code, folders)
+    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Post-hoc scan failed: {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Post-hoc scan parse failed")
+
+
 @app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
@@ -1032,6 +1083,94 @@ def step1_igv_session(project: str, payload: OpenRequest):
         _wait_for_igv()
     send_goto = include_genome
     # Only load annotation on genome switch to avoid duplicate tracks.
+    extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
+    sent, err, sent_commands, responses = _send_igv_commands(
+        genome_path,
+        bam_path,
+        contig,
+        extra_tracks=extra_tracks,
+        include_genome=include_genome,
+        send_goto=send_goto,
+        retries=10,
+        wait_before_genome=3.0 if not igv_running else 0.0,
+        repeat_genome=not igv_running
+    )
+    if sent and include_genome:
+        _IGV_STATE["genome"] = desired_genome
+    logger.info("IGV commands sent=%s error=%s commands=%s responses=%s", sent, err, sent_commands, responses)
+    return {
+        "session": str(session_path),
+        "igv_commands_sent": sent,
+        "igv_error": err,
+        "igv_commands": sent_commands
+    }
+
+
+@app.post("/api/posthoc/igv_session")
+def posthoc_igv_session(payload: OpenRequest):
+    cfg = load_config()
+    projects_root = Path(cfg["projects_root"]).resolve()
+    target = Path(payload.path).resolve()
+    if not str(target).startswith(str(projects_root)):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    sample = target.name
+    sample_dir = target
+    step1_dir = sample_dir.parent
+    project_dir = step1_dir.parent
+    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    if not bam_files:
+        raise HTTPException(status_code=404, detail="BAM not found")
+    bam_path = bam_files[-1]
+    align_dir = bam_path.parent
+    try:
+        for legacy_genome in align_dir.glob("*.genome"):
+            legacy_genome.unlink(missing_ok=True)
+    except Exception:
+        pass
+    fasta_files = sorted(align_dir.glob("*.fasta"))
+    if not fasta_files:
+        raise HTTPException(status_code=404, detail="Reference FASTA not found")
+    ref_fasta = fasta_files[0]
+    contig = ""
+    try:
+        with ref_fasta.open("r", encoding="utf-8") as fh:
+            header = fh.readline().strip()
+        if header.startswith(">"):
+            contig = header[1:].split()[0]
+    except Exception:
+        contig = ""
+    session_path = sample_dir / f"{sample}.igv.xml"
+    genome_id = ref_fasta.stem
+    genome_store_dir = project_dir / ".igv_genomes"
+    genome_path = _ensure_genome_file(ref_fasta, genome_store_dir, genome_id)
+    gbk_path = _find_gbk_for_fasta(ref_fasta)
+    locus_attr = f' locus="{contig}:1-10000"' if contig else ""
+    session_lines = [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n",
+        f"<Session genome=\"{genome_path}\"{locus_attr} hasGeneTrack=\"true\" hasSequenceTrack=\"true\" version=\"8\">\n",
+        f"  <Genome path=\"{genome_path}\"/>\n",
+        "  <Resources>\n",
+        f"    <Resource path=\"{ref_fasta}\"/>\n",
+        f"    <Resource path=\"{bam_path}\"/>\n",
+    ]
+    if gbk_path:
+        session_lines.append(f"    <Resource path=\"{gbk_path}\"/>\n")
+    session_lines.extend([
+        "  </Resources>\n",
+        "</Session>\n",
+    ])
+    session_xml = "".join(session_lines)
+    session_path.write_text(session_xml, encoding="utf-8")
+    igv_app_path = cfg.get("igv_app_path", "")
+    igv_running = _igv_running()
+    desired_genome = genome_id
+    include_genome = not igv_running or _IGV_STATE["genome"] != desired_genome
+    if not igv_running:
+        _open_igv(session_path, igv_app_path, None)
+        _wait_for_igv()
+    send_goto = include_genome
     extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
     sent, err, sent_commands, responses = _send_igv_commands(
         genome_path,
@@ -1285,6 +1424,19 @@ def open_path(project: str, payload: OpenRequest):
     project_dir = Path(cfg["projects_root"]) / project
     target = Path(payload.path).resolve()
     if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    _open_path(target)
+    return {"opened": str(target)}
+
+
+@app.post("/api/posthoc/open")
+def posthoc_open_path(payload: OpenRequest):
+    cfg = load_config()
+    projects_root = Path(cfg["projects_root"]).resolve()
+    target = Path(payload.path).resolve()
+    if not str(target).startswith(str(projects_root)):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")

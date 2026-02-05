@@ -545,7 +545,14 @@ export default function App() {
   }
 
   async function uploadFiles(fileList) {
-    if (!selectedProject || !settingsReady || !fileList?.length) return;
+    if (!selectedProject || !settingsReady) {
+      setUploadStatus("Select a project and complete Settings before uploading.");
+      return;
+    }
+    if (!fileList?.length) {
+      setUploadStatus("No files selected.");
+      return;
+    }
     setUploadStatus("Uploading...");
     const formData = new FormData();
     Array.from(fileList).forEach((file) => formData.append("files", file));
@@ -1369,6 +1376,9 @@ export default function App() {
                     />
                     <span>Drop FASTQ.GZ files here or click to select</span>
                   </div>
+                  {!selectedProject || !settingsReady ? (
+                    <div className="note warning">Select a project and complete Settings to enable uploads.</div>
+                  ) : null}
                   {uploadStatus ? <div className="note">{uploadStatus}</div> : null}
                 </div>
               </div>

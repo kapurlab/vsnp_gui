@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { APP_VERSION } from "./version";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -169,6 +170,10 @@ export default function App() {
 
   useEffect(() => {
     loadAll();
+  }, []);
+
+  useEffect(() => {
+    document.title = `vSNP GUI ${APP_VERSION}`;
   }, []);
 
   useEffect(() => {
@@ -942,7 +947,7 @@ export default function App() {
           <img className="app-logo" src="/vSNP_icon_align_256.png" alt="vSNP alignment icon" />
           <div>
             <h1>
-              vSNP GUI <span className="version-tag">v0.01-alpha</span>
+              vSNP GUI <span className="version-tag">{APP_VERSION}</span>
             </h1>
             <p>Local workflows for vSNP3 implementation</p>
           </div>

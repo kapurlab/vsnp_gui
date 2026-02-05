@@ -147,6 +147,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setReference("");
+    setImportReference("");
+    setRefLock({ references: [] });
+    if (!selectedProject) return () => { cancelled = true; };
+    (async () => {
+      try {
+        const lockRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/reference_lock`);
+        if (!lockRes.ok) return;
+        const lock = await lockRes.json();
+        if (cancelled) return;
+        setRefLock(lock);
+        if (lock.references && lock.references.length === 1) {
+          setReference(lock.references[0]);
+          setImportReference(lock.references[0]);
+        }
+      } catch {
+        // keep defaults
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProject]);
+
+  useEffect(() => {
     if (!settings.conda_env) return;
     runPreflight();
   }, [settings.conda_env]);

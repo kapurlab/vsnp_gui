@@ -89,12 +89,12 @@ conda install vsnp3 -c conda-forge -c bioconda
 
 **2. Required Python packages:**
 ```bash
-conda install -n vsnp3 pandas biopython pysam -c conda-forge
+conda install -n vsnp3 pandas biopython -c conda-forge
 ```
 
 **Important:** vSNP3 requires pandas <2.0. If you have pandas >=2.0:
 ```bash
-conda install -n vsnp3 "pandas<2" -c conda-forge
+conda install -n vsnp3 pandas biopython -c conda-forge
 ```
 
 **3. Reference Genomes:**
@@ -130,7 +130,7 @@ Click **Save Settings**
 1. Click the **Preflight** button
 2. Verify output shows:
    ```
-   Checked: pandas, Bio, pysam | Missing: none
+   Checked: pandas, Bio | Missing: none
    ```
 3. If packages are missing, install them (see Prerequisites above)
 4. ✅ Green "All good" indicator means you're ready!
@@ -1116,7 +1116,7 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to:
 
 **Initial Setup (Once):**
 - [ ] Install vSNP3 in conda environment
-- [ ] Install pandas, biopython, pysam
+- [ ] Install pandas, biopython
 - [ ] Configure GUI settings
 - [ ] Run preflight check (all good)
 

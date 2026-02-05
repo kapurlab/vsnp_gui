@@ -54,17 +54,17 @@ pip install -r requirements.txt
 
 ### Issue: Preflight fails with missing packages
 
-**Error:** `Missing: pandas` or `Missing: Bio, pysam`
+**Error:** `Missing: pandas` or `Missing: Bio`
 
 **Solution:**
 ```bash
 conda activate vsnp3  # or your environment name
-conda install -n vsnp3 pandas biopython pysam -c conda-forge
+conda install -n vsnp3 pandas biopython -c conda-forge
 ```
 
 **Alternative (if not using conda):**
 ```bash
-pip install pandas biopython pysam
+pip install pandas biopython
 ```
 
 ### Issue: vSNP3 scripts not found
@@ -266,7 +266,7 @@ conda list pandas
 # vSNP3 requires pandas <2.0
 
 # If pandas >=2.0, downgrade:
-conda install "pandas<2" -c conda-forge
+conda install pandas -c conda-forge
 ```
 
 ---

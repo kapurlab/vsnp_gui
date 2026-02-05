@@ -64,7 +64,7 @@ For Step 2 testing, you can use the built‑in **VCF Lite Pack**:
 Create a conda environment and install dependencies:
 ```
 conda create -n vsnp3 python=3.9 -y
-conda install -n vsnp3 -c conda-forge pandas biopython pysam -y
+conda install -n vsnp3 -c conda-forge pandas biopython -y
 ```
 Set **Conda env** in the GUI to `vsnp3` and run **Preflight**.
 

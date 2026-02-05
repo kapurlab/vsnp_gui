@@ -1230,13 +1230,7 @@ export default function App() {
                 {preflight?.missing?.length ? (
                   <div className="note error">
                     Install missing deps with:
-                    <div className="code-line">conda install -n {settings.conda_env || "<env>"} pandas biopython pysam</div>
-                  </div>
-                ) : null}
-                {preflight?.issues?.length ? (
-                  <div className="note error">
-                    {preflight.issues.join("; ")}. Fix with:
-                    <div className="code-line">conda run -n {settings.conda_env || "<env>"} python -m pip install "pandas&lt;2"</div>
+                    <div className="code-line">conda install -n {settings.conda_env || "<env>"} pandas biopython</div>
                   </div>
                 ) : null}
               </div>

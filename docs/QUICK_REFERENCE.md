@@ -23,7 +23,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 2. **Preflight Check:**
    - Click **Preflight**
    - Should show: `Missing: none`
-   - If missing packages: `conda install -n vsnp3 pandas biopython pysam`
+   - If missing packages: `conda install -n vsnp3 pandas biopython`
 
 ---
 
@@ -189,7 +189,7 @@ SampleName_1.fastq.gz + SampleName_2.fastq.gz
 3. **Conda environment issues:**
    ```bash
    conda activate vsnp3
-   conda install pandas biopython pysam -c conda-forge
+   conda install pandas biopython -c conda-forge
    ```
 
 4. **Check running processes:**

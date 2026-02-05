@@ -9,6 +9,20 @@ A local web interface for running [vSNP3](https://github.com/USDA-VS/vSNP3) SNP 
 - Node.js 18+
 - vSNP3 installed via conda
 
+## Recommended Conda/Mamba Environment
+
+Create a single environment that includes vSNP3 runtime deps plus tools needed for the GUI:
+
+```bash
+mamba create -n vsnp3 -c conda-forge -c bioconda \
+  python=3.10 pandas biopython samtools bcftools nodejs
+```
+
+Notes:
+- The environment name can be anything. If you use a different name, set **Conda env** in Settings, or use **Conda env path**.
+- `nodejs` is required for running the Electron app in dev mode; browser-only usage can omit it.
+- `bcftools` is required for the VCF edit workflow.
+
 ## Quick Start (5 minutes)
 
 ### 1. Clone and launch
@@ -36,6 +50,7 @@ On first launch, a yellow banner appears and all actions are disabled until you 
 | vSNP3 path | `~/vsnp3` |
 | Projects root | `~/vsnp3/projects` |
 | Conda env | `vsnp3` |
+| (Optional) Conda env path | `~/miniconda3/envs/vsnp3` |
 
 Click **Save** → **Preflight** (banner disappears, buttons enable)
 

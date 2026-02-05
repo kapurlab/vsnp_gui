@@ -16,6 +16,18 @@ Before starting, ensure you have:
 | Conda | `conda --version` | [miniconda](https://docs.conda.io/en/latest/miniconda.html) |
 | vSNP3 | `conda list -n vsnp3` | See below |
 
+### Recommended Conda/Mamba Environment
+
+```bash
+mamba create -n vsnp3 -c conda-forge -c bioconda \
+  python=3.10 pandas biopython samtools bcftools nodejs
+```
+
+Notes:
+- The environment name can be anything. Set **Conda env** or **Conda env path** in Settings.
+- `nodejs` is required for Electron dev; browser-only usage can omit it.
+- `bcftools` is required for the VCF edit workflow.
+
 ### Install vSNP3 (if needed)
 
 ```bash
@@ -97,11 +109,11 @@ In the **Settings** panel (top-left):
 1. Click **Save**
 2. Click **Preflight**
 
-You should see: `Checked: pandas, Bio, pysam | Missing: none`
+You should see: `Checked: pandas, Bio | Missing: none`
 
 If you see missing dependencies:
 ```bash
-conda install -n vsnp3 pandas biopython pysam -y
+conda install -n vsnp3 pandas biopython -y
 ```
 
 ---
@@ -230,7 +242,7 @@ Click **Open** to view any file in your default application.
 
 ### "Preflight failed"
 - Verify conda env name is correct
-- Run: `conda install -n vsnp3 pandas biopython pysam`
+- Run: `conda install -n vsnp3 pandas biopython`
 
 ### "No FASTQ files found"
 - Check your path contains `*.fastq.gz` files

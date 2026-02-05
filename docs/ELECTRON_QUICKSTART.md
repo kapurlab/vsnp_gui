@@ -33,4 +33,4 @@ For a quick Step 2 demo:
 ## 4) Troubleshooting
 - If the Electron window is blank, check that the frontend dev server is running.
 - If Preflight fails, install dependencies in the selected conda env:
-  - `conda install -n <env> pandas biopython pysam`
+  - `conda install -n <env> pandas biopython`

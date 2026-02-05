@@ -720,17 +720,14 @@ def preflight(debug: bool = Query(False)):
         raise HTTPException(status_code=400, detail=f"Conda executable not found: {conda_exe}")
     check_code = (
         "import importlib.util, json; "
-        "mods=['pandas','Bio','pysam']; "
+        "mods=['pandas','Bio']; "
         "missing=[m for m in mods if importlib.util.find_spec(m) is None]; "
         "issues=[]; "
-        "spec=importlib.util.find_spec('pandas'); "
-        "ver=(__import__('pandas').__version__.split('.')[0] if spec else '0'); "
-        "issues.append('pandas>=2 not supported') if ver.isdigit() and int(ver) >= 2 else None; "
         "print(json.dumps({'missing': missing, 'checked': mods, 'issues': issues}))"
     )
     debug_code = (
         "import importlib.util, json, sys, site; "
-        "mods=['pandas','Bio','pysam']; "
+        "mods=['pandas','Bio']; "
         "result={m: bool(importlib.util.find_spec(m)) for m in mods}; "
         "print(json.dumps({"
         "'executable': sys.executable, "
@@ -1600,75 +1597,28 @@ def vcf_edit(project: str, payload: VcfEditRequest):
         if not _scan_vcf_for_locus(base_vcf, contig, pos):
             base_vcf = source_vcf
 
-    # Edit with pysam via conda python
-    edit_code = (
-        "import json, sys\n"
-        "import pysam\n"
-        "base=sys.argv[1]\n"
-        "out=sys.argv[2]\n"
-        "contig=sys.argv[3]\n"
-        "pos=int(sys.argv[4])\n"
-        "new_alt=sys.argv[5]\n"
-        "vcf=pysam.VariantFile(base)\n"
-        "out_vcf=pysam.VariantFile(out, 'wz', header=vcf.header)\n"
-        "found=False\n"
-        "old_ref=''\n"
-        "old_alt=''\n"
-        "old_dp=None\n"
-        "old_ad=None\n"
-        "for rec in vcf:\n"
-        "    if rec.contig==contig and rec.pos==pos:\n"
-        "        if rec.alts is None or len(rec.alts)!=1:\n"
-        "            raise SystemExit('Record must have exactly one ALT')\n"
-        "        old_ref=rec.ref\n"
-        "        old_alt=rec.alts[0]\n"
-        "        if old_alt==new_alt:\n"
-        "            raise SystemExit('ALT is unchanged')\n"
-        "        rec.alts=(new_alt,)\n"
-        "        found=True\n"
-        "        if 'DP' in rec.info:\n"
-        "            old_dp=rec.info.get('DP')\n"
-        "        if rec.samples:\n"
-        "            sm=next(iter(rec.samples.values()))\n"
-        "            if 'AD' in sm:\n"
-        "                old_ad=sm.get('AD')\n"
-        "    out_vcf.write(rec)\n"
-        "out_vcf.close()\n"
-        "if not found:\n"
-        "    raise SystemExit('Record not found at locus')\n"
-        "print(json.dumps({'old_ref': old_ref, 'old_alt': old_alt, 'old_dp': old_dp, 'old_ad': old_ad}))\n"
-    )
     tbi_path = patched_vcf.with_suffix(patched_vcf.suffix + ".tbi")
     if tbi_path.exists():
         tbi_path.unlink()
-    cmd_list = conda_python_cmd(cfg, edit_code, [str(base_vcf), str(patched_vcf), contig, str(pos), new_alt])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        err_text = (result.stderr.strip() or result.stdout.strip())
-        if base_vcf == patched_vcf and any(token in err_text.lower() for token in ["truncated file", "bgzf", "exec format"]):
-            try:
-                corrupt_path = patched_vcf.with_suffix(patched_vcf.suffix + ".corrupt")
-                patched_vcf.rename(corrupt_path)
-                tbi_path = patched_vcf.with_suffix(patched_vcf.suffix + ".tbi")
-                if tbi_path.exists():
-                    tbi_path.unlink()
-            except OSError:
-                pass
-            if source_vcf:
-                cmd_list = conda_python_cmd(cfg, edit_code, [str(source_vcf), str(patched_vcf), contig, str(pos), new_alt])
-                result = subprocess.run(cmd_list, text=True, capture_output=True)
-        if result.returncode != 0:
-            raise HTTPException(status_code=400, detail=f"Edit failed: {result.stderr.strip() or result.stdout.strip()}")
+    tmp_vcf = edits_dir / f".{payload.sample}_edit_{int(time.time())}.vcf"
+    try:
+        edit_meta = _rewrite_vcf_with_alt(base_vcf, tmp_vcf, contig, pos, new_alt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    compress = subprocess.run([bcftools, "view", "-Oz", "-o", str(patched_vcf), str(tmp_vcf)], text=True, capture_output=True)
+    try:
+        tmp_vcf.unlink()
+    except OSError:
+        pass
+    if compress.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"VCF compression failed: {compress.stderr.strip()}")
 
     # Index patched VCF
     idx = subprocess.run([bcftools, "index", "-t", str(patched_vcf)], text=True, capture_output=True)
     if idx.returncode != 0:
         raise HTTPException(status_code=500, detail=f"Index failed: {idx.stderr.strip()}")
 
-    try:
-        edit_meta = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        edit_meta = {}
+    edit_meta = edit_meta or {}
 
     log_path = _edit_log_path(sample_dir, payload.sample)
     entry = {
@@ -1874,6 +1824,64 @@ def _scan_vcf_for_locus(path: Path, contig: str, pos: int) -> Optional[Dict[str,
     except OSError:
         return None
     return None
+
+
+def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int, new_alt: str) -> Dict[str, object]:
+    opener = gzip.open if str(base_vcf).endswith(".gz") else open
+    found = False
+    old_ref = ""
+    old_alt = ""
+    old_dp = None
+    old_ad = None
+    with opener(base_vcf, "rt", encoding="utf-8", errors="ignore") as src, out_vcf.open("w", encoding="utf-8") as dst:
+        for line in src:
+            if not line or line[0] == "#":
+                dst.write(line)
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 5:
+                dst.write(line)
+                continue
+            try:
+                lpos = int(parts[1])
+            except ValueError:
+                dst.write(line)
+                continue
+            if parts[0] == contig and lpos == pos:
+                alt_field = parts[4]
+                if not alt_field:
+                    raise ValueError("Record has no ALT")
+                if "," in alt_field:
+                    raise ValueError("Record must have exactly one ALT")
+                old_ref = parts[3]
+                old_alt = alt_field
+                if old_alt == new_alt:
+                    raise ValueError("ALT is unchanged")
+                parts[4] = new_alt
+                if len(parts) > 7:
+                    for field in parts[7].split(";"):
+                        if field.startswith("DP="):
+                            try:
+                                old_dp = int(field.split("=", 1)[1])
+                            except ValueError:
+                                old_dp = None
+                            break
+                if len(parts) > 9:
+                    fmt = parts[8].split(":")
+                    sample = parts[9].split(":")
+                    if "AD" in fmt:
+                        try:
+                            idx = fmt.index("AD")
+                            ad_val = sample[idx] if idx < len(sample) else ""
+                            old_ad = [int(x) for x in ad_val.split(",") if x != ""] if ad_val else None
+                        except Exception:
+                            old_ad = None
+                found = True
+                line = "\t".join(parts) + "\n"
+            dst.write(line)
+    if not found:
+        raise ValueError("Record not found at locus")
+    return {"old_ref": old_ref, "old_alt": old_alt, "old_dp": old_dp, "old_ad": old_ad}
 
 
 def _scan_vcf_first_record(path: Optional[Path]) -> Optional[Dict[str, object]]:

@@ -14,7 +14,7 @@
 │     └─ Save                                                          │
 │                                                                       │
 │  2. Run Preflight Check                                             │
-│     └─ Verify: pandas, biopython, pysam installed                   │
+│     └─ Verify: pandas, biopython installed                           │
 │                                                                       │
 └─────────────────────────────────────────────────────────────────────┘
                                   │

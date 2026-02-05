@@ -18,7 +18,7 @@ import logging
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
-from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project
+from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project, update_project_meta
 from app.refs import list_references
 from app.sra import expand_accessions, build_download_script
 
@@ -475,6 +475,11 @@ def step1_run(project: str, payload: Step1Request):
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
+    if payload.reference:
+        update_project_meta(project_dir, {
+            "reference": payload.reference,
+            "display_name": f"{project}_{payload.reference}"
+        })
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -1039,6 +1044,11 @@ def reference_lock(project: str):
         refs = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Reference lock parse failed")
+    if len(refs) == 1:
+        update_project_meta(project_dir, {
+            "reference": refs[0],
+            "display_name": f"{project}_{refs[0]}"
+        })
     return {"references": refs}
 
 

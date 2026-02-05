@@ -1014,7 +1014,7 @@ export default function App() {
         <section className="status-strip">
           <div className="status-item">
             <span className="status-label">Project</span>
-            <span className="status-value">{selected?.name || "None"}</span>
+            <span className="status-value">{selected?.display_name || selected?.name || "None"}</span>
           </div>
           <div className="status-item">
             <span className="status-label">FASTQ</span>
@@ -1311,7 +1311,7 @@ export default function App() {
                   }}
                 >
                   <div className="list-details">
-                    <div className="list-title">{p.name}</div>
+                    <div className="list-title">{p.display_name || p.name}</div>
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
                     </div>

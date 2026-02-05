@@ -29,6 +29,18 @@ def create_project(projects_root: Path, name: str) -> Path:
     return project_dir
 
 
+def update_project_meta(project_dir: Path, updates: Dict) -> Dict:
+    meta_path = project_meta_path(project_dir)
+    meta = {}
+    if meta_path.exists():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+    meta.update(updates)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, sort_keys=True)
+    return meta
+
+
 def list_projects(projects_root: Path) -> List[Dict]:
     if not projects_root.exists():
         return []

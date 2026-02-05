@@ -103,6 +103,8 @@ Both versions use the same backend and frontend code. The Electron version adds 
 
 ## Changelog (Unreleased)
 
+> **Alpha 0.01**: This is an early alpha release. It is intended for local, controlled deployments and internal testing only.
+
 ### Post-hoc Step 1 (feature/posthoc-step1)
 
 - Adds a Post-hoc tab in Step 1 Results to merge QC summaries across multiple Step 1 folders.

@@ -941,7 +941,9 @@ export default function App() {
         <div className="app-brand">
           <img className="app-logo" src="/vSNP_icon_align_256.png" alt="vSNP alignment icon" />
           <div>
-            <h1>vSNP GUI</h1>
+            <h1>
+              vSNP GUI <span className="version-tag">v0.01-alpha</span>
+            </h1>
             <p>Local workflows for vSNP3 implementation</p>
           </div>
         </div>

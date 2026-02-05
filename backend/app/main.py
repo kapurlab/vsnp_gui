@@ -81,6 +81,7 @@ class ConfigUpdate(BaseModel):
     conda_exe: Optional[str] = None
     conda_env_path: Optional[str] = None
     igv_app_path: Optional[str] = None
+    bcftools_path: Optional[str] = None
     sra: Optional[Dict] = None
 
 
@@ -123,6 +124,20 @@ class PosthocScanRequest(BaseModel):
     folders: List[str]
 
 
+class VcfEditRequest(BaseModel):
+    sample: str
+    locus: str
+    new_alt: str
+    note: Optional[str] = ""
+    reason: Optional[str] = ""
+    user: Optional[str] = ""
+
+
+class VcfLookupRequest(BaseModel):
+    sample: str
+    locus: str
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -151,6 +166,8 @@ def update_config(update: ConfigUpdate):
         cfg["conda_env_path"] = update.conda_env_path
     if update.igv_app_path is not None:
         cfg["igv_app_path"] = update.igv_app_path
+    if update.bcftools_path is not None:
+        cfg["bcftools_path"] = update.bcftools_path
     if update.sra is not None:
         cfg["sra"].update(update.sra)
     save_config(cfg)
@@ -246,6 +263,24 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             vcfs.extend(list(step1_dir.rglob("*_zc.vcf")))
             vcfs.extend(list(step1_dir.rglob("*_zc.vcf.gz")))
 
+    step1_dir = project_dir / "step1"
+    resolved_vcfs = []
+    vcf_sample_override = {}
+    for vcf in vcfs:
+        try:
+            if step1_dir.exists() and str(vcf.resolve()).startswith(str(step1_dir.resolve())):
+                sample = _sample_from_vcf(vcf)
+                sample_dir = step1_dir / sample
+                patched = _find_patched_vcf(sample_dir, sample, vcf)
+                if patched:
+                    resolved_vcfs.append(patched)
+                    vcf_sample_override[patched] = sample
+                    continue
+        except FileNotFoundError:
+            pass
+        resolved_vcfs.append(vcf)
+    vcfs = resolved_vcfs
+
     if not vcfs:
         raise HTTPException(status_code=400, detail="No *_zc.vcf files found in provided sources")
     if len(vcfs) > 500 and not payload.confirm_large:
@@ -285,7 +320,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
                 skipped += 1
                 continue
         if payload.dedupe:
-            sample = _sample_from_vcf(vcf)
+            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
             if sample in seen_samples:
                 prev = seen_samples[sample]
                 if vcf.stat().st_mtime <= prev.stat().st_mtime:
@@ -321,6 +356,9 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             for row in mismatched:
                 f.write(f"\"{row['path']}\",\"{row['reference']}\"\n")
         mismatch_report = str(report_path)
+
+    edited_in_source = _edited_samples_in_dir(vcf_source_dir)
+    _write_step2_edit_summary(vcf_source_dir.parent, edited_in_source)
 
     return {
         "imported": imported,
@@ -566,20 +604,34 @@ def step2_setup(project: str):
     step2_dir = project_dir / "step2" / "vcf_source"
     step2_dir.mkdir(parents=True, exist_ok=True)
     # Clean existing VCFs so the source matches the selected workflow
-    for existing in step2_dir.glob("*.vcf"):
+    for existing in step2_dir.glob("*.vcf*"):
         try:
             existing.unlink()
         except FileNotFoundError:
             pass
     count = 0
-    for vcf in step1_dir.glob("**/*_zc.vcf"):
-        target = step2_dir / vcf.name
+    edited_samples = []
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir():
+            continue
+        sample = sample_dir.name
+        vcf_candidates = sorted(sample_dir.glob("**/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
+        if not vcf_candidates:
+            continue
+        source_vcf = vcf_candidates[-1]
+        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+        chosen_vcf = patched_vcf or source_vcf
+        target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
+        target = step2_dir / target_name
         if target.exists():
             continue
-        target.symlink_to(vcf)
+        target.symlink_to(chosen_vcf)
         count += 1
-    total = len(list(step2_dir.glob("*_zc.vcf")))
-    return {"linked": count, "total": total}
+        if patched_vcf:
+            edited_samples.append(sample)
+    _write_step2_edit_summary(step2_dir.parent, edited_samples)
+    total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
+    return {"linked": count, "total": total, "edited": len(set(edited_samples))}
 
 
 @app.post("/api/projects/{project}/step2/run")
@@ -609,6 +661,7 @@ def step2_run(project: str, payload: Step2Request):
             shutil.rmtree(child)
     remove_file = step2_dir / "remove_from_analysis.xlsx"
     remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
+    _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
     cmd = f"vsnp3_step2.py -wd {vcf_source_dir} -a -t {payload.reference}{remove_arg}"
     job_id = job_manager.start_job(
         name="step2",
@@ -863,9 +916,21 @@ def posthoc_step1_scan(payload: PosthocScanRequest):
         "        row['_file']=f\n"
         "        sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
         "        row['_sample']=sample\n"
-        "        row['_sample_dir']=os.path.dirname(f)\n"
+        "        sample_dir=os.path.dirname(f)\n"
+        "        row['_sample_dir']=sample_dir\n"
         "        row['_step1_dir']=step1\n"
         "        row['_project']=os.path.basename(os.path.dirname(step1))\n"
+        "        edits_dir=os.path.join(sample_dir,'vcf_edits')\n"
+        "        patched=''\n"
+        "        if os.path.isdir(edits_dir):\n"
+        "            candidates=[c for c in glob.glob(os.path.join(edits_dir,'*.vcf*')) if not c.endswith('.tbi')]\n"
+        "            if candidates:\n"
+        "                candidates=sorted(candidates, key=os.path.getmtime)\n"
+        "                patched=candidates[-1]\n"
+        "        edit_log=os.path.join(edits_dir, f\"{sample}_patchlog.jsonl\")\n"
+        "        row['_patched_vcf']=patched\n"
+        "        row['_edit_log']=edit_log if os.path.exists(edit_log) else ''\n"
+        "        row['_edited']=bool(patched) and os.path.exists(edit_log)\n"
         "        rows.append(row)\n"
         "latest={}\n"
         "for row in rows:\n"
@@ -953,8 +1018,16 @@ def step2_vcf_count(project: str):
     vcf_source_dir = project_dir / "step2" / "vcf_source"
     if not vcf_source_dir.exists():
         return {"count": 0}
-    count = len(list(vcf_source_dir.glob("*.vcf"))) + len(list(vcf_source_dir.glob("*.vcf.gz")))
-    return {"count": count, "path": str(vcf_source_dir)}
+    vcfs = list(vcf_source_dir.glob("*.vcf")) + list(vcf_source_dir.glob("*.vcf.gz"))
+    edited_samples = set()
+    for vcf in vcfs:
+        if _vcf_is_edited(vcf):
+            edited_samples.add(_sample_from_vcf(vcf))
+    return {
+        "count": len(vcfs),
+        "path": str(vcf_source_dir),
+        "edited_count": len(edited_samples)
+    }
 
 
 @app.post("/api/projects/{project}/qc_exclude")
@@ -987,6 +1060,9 @@ def step2_clear(project: str):
     if vcf_source_dir.exists():
         shutil.rmtree(vcf_source_dir)
     vcf_source_dir.mkdir(parents=True, exist_ok=True)
+    edited_summary = step2_dir / "edited_samples.json"
+    if edited_summary.exists():
+        edited_summary.unlink()
     return {"cleared": True}
 
 
@@ -1007,13 +1083,46 @@ def step1_files(project: str, sample: str = Query(...)):
         fasta_files = sorted(Path(align_dir).glob("*.fasta"))
         if fasta_files:
             ref_fasta = str(fasta_files[0])
+    vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
+    source_vcf = vcf_candidates[-1] if vcf_candidates else None
+    patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+    edit_log = _edit_log_path(sample_dir, sample)
     return {
         "stats": stats_path,
         "bam": bam_path,
         "alignment_dir": align_dir,
         "reference_fasta": ref_fasta,
-        "sample_dir": str(sample_dir)
+        "sample_dir": str(sample_dir),
+        "source_vcf": str(source_vcf) if source_vcf else "",
+        "patched_vcf": str(patched_vcf) if patched_vcf else "",
+        "edit_log": str(edit_log) if edit_log.exists() else "",
+        "edited": bool(patched_vcf) and edit_log.exists()
     }
+
+
+@app.get("/api/projects/{project}/step1/edits")
+def step1_edits(project: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step1_dir = project_dir / "step1"
+    if not step1_dir.exists():
+        raise HTTPException(status_code=404, detail="Step1 directory not found")
+    edits = {}
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir():
+            continue
+        sample = sample_dir.name
+        vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
+        source_vcf = vcf_candidates[-1] if vcf_candidates else None
+        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+        edit_log = _edit_log_path(sample_dir, sample)
+        if patched_vcf or edit_log.exists():
+            edits[sample] = {
+                "patched_vcf": str(patched_vcf) if patched_vcf else "",
+                "edit_log": str(edit_log) if edit_log.exists() else "",
+                "edited": bool(patched_vcf) and edit_log.exists()
+            }
+    return edits
 
 
 @app.post("/api/projects/{project}/step1/igv_session")
@@ -1444,9 +1553,367 @@ def posthoc_open_path(payload: OpenRequest):
     return {"opened": str(target)}
 
 
+@app.post("/api/projects/{project}/vcf_edit")
+def vcf_edit(project: str, payload: VcfEditRequest):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    sample_dir = project_dir / "step1" / payload.sample
+    if not sample_dir.exists():
+        raise HTTPException(status_code=404, detail="Sample not found")
+
+    bcftools = _resolve_bcftools(cfg)
+    if not bcftools or not Path(bcftools).exists():
+        raise HTTPException(status_code=400, detail="bcftools not configured or not found")
+
+    # Find source VCF (prefer *_zc.vcf[.gz])
+    source_vcf = _find_source_vcf(sample_dir, payload.sample)
+    if not source_vcf:
+        raise HTTPException(status_code=404, detail="Source VCF not found")
+
+    edits_dir = sample_dir / "vcf_edits"
+    edits_dir.mkdir(parents=True, exist_ok=True)
+    expected_patched = _expected_patched_vcf_path(edits_dir, source_vcf)
+    legacy_patched = edits_dir / f"{payload.sample}_patched.vcf.gz"
+    if legacy_patched.exists() and not expected_patched.exists():
+        patched_vcf = legacy_patched
+    else:
+        patched_vcf = expected_patched
+    if ":" not in payload.locus:
+        raise HTTPException(status_code=400, detail="Locus must be in contig:pos format")
+    contig, pos_str = payload.locus.split(":", 1)
+    contig = contig.strip()
+    if not contig:
+        raise HTTPException(status_code=400, detail="Contig is required")
+    try:
+        pos = int(pos_str.replace(",", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Position must be an integer")
+    new_alt = payload.new_alt.strip().upper()
+    if not new_alt or not all(c in "ACGTN" for c in new_alt):
+        raise HTTPException(status_code=400, detail="ALT must be A/C/G/T/N (no commas)")
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Reason is required")
+
+    base_vcf = patched_vcf if patched_vcf.exists() else (legacy_patched if legacy_patched.exists() else source_vcf)
+    if base_vcf and base_vcf != source_vcf:
+        if not _scan_vcf_for_locus(base_vcf, contig, pos):
+            base_vcf = source_vcf
+
+    # Edit with pysam via conda python
+    edit_code = (
+        "import json, sys\n"
+        "import pysam\n"
+        "base=sys.argv[1]\n"
+        "out=sys.argv[2]\n"
+        "contig=sys.argv[3]\n"
+        "pos=int(sys.argv[4])\n"
+        "new_alt=sys.argv[5]\n"
+        "vcf=pysam.VariantFile(base)\n"
+        "out_vcf=pysam.VariantFile(out, 'wz', header=vcf.header)\n"
+        "found=False\n"
+        "old_ref=''\n"
+        "old_alt=''\n"
+        "old_dp=None\n"
+        "old_ad=None\n"
+        "for rec in vcf:\n"
+        "    if rec.contig==contig and rec.pos==pos:\n"
+        "        if rec.alts is None or len(rec.alts)!=1:\n"
+        "            raise SystemExit('Record must have exactly one ALT')\n"
+        "        old_ref=rec.ref\n"
+        "        old_alt=rec.alts[0]\n"
+        "        if old_alt==new_alt:\n"
+        "            raise SystemExit('ALT is unchanged')\n"
+        "        rec.alts=(new_alt,)\n"
+        "        found=True\n"
+        "        if 'DP' in rec.info:\n"
+        "            old_dp=rec.info.get('DP')\n"
+        "        if rec.samples:\n"
+        "            sm=next(iter(rec.samples.values()))\n"
+        "            if 'AD' in sm:\n"
+        "                old_ad=sm.get('AD')\n"
+        "    out_vcf.write(rec)\n"
+        "out_vcf.close()\n"
+        "if not found:\n"
+        "    raise SystemExit('Record not found at locus')\n"
+        "print(json.dumps({'old_ref': old_ref, 'old_alt': old_alt, 'old_dp': old_dp, 'old_ad': old_ad}))\n"
+    )
+    tbi_path = patched_vcf.with_suffix(patched_vcf.suffix + ".tbi")
+    if tbi_path.exists():
+        tbi_path.unlink()
+    cmd_list = conda_python_cmd(cfg, edit_code, [str(base_vcf), str(patched_vcf), contig, str(pos), new_alt])
+    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    if result.returncode != 0:
+        err_text = (result.stderr.strip() or result.stdout.strip())
+        if base_vcf == patched_vcf and any(token in err_text.lower() for token in ["truncated file", "bgzf", "exec format"]):
+            try:
+                corrupt_path = patched_vcf.with_suffix(patched_vcf.suffix + ".corrupt")
+                patched_vcf.rename(corrupt_path)
+                tbi_path = patched_vcf.with_suffix(patched_vcf.suffix + ".tbi")
+                if tbi_path.exists():
+                    tbi_path.unlink()
+            except OSError:
+                pass
+            if source_vcf:
+                cmd_list = conda_python_cmd(cfg, edit_code, [str(source_vcf), str(patched_vcf), contig, str(pos), new_alt])
+                result = subprocess.run(cmd_list, text=True, capture_output=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=400, detail=f"Edit failed: {result.stderr.strip() or result.stdout.strip()}")
+
+    # Index patched VCF
+    idx = subprocess.run([bcftools, "index", "-t", str(patched_vcf)], text=True, capture_output=True)
+    if idx.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Index failed: {idx.stderr.strip()}")
+
+    try:
+        edit_meta = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        edit_meta = {}
+
+    log_path = _edit_log_path(sample_dir, payload.sample)
+    entry = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "user": payload.user or "",
+        "project": project,
+        "sample": payload.sample,
+        "reference": contig,
+        "locus": f"{contig}:{pos}",
+        "original": {
+            "ref": edit_meta.get("old_ref", ""),
+            "alt": edit_meta.get("old_alt", ""),
+            "dp": edit_meta.get("old_dp", None),
+            "ad": edit_meta.get("old_ad", None),
+        },
+        "updated": {
+            "ref": edit_meta.get("old_ref", ""),
+            "alt": new_alt,
+            "note": payload.note or "",
+            "reason": reason
+        },
+        "source_vcf": str(source_vcf),
+        "base_vcf": str(base_vcf),
+        "patched_vcf": str(patched_vcf)
+    }
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+    return {
+        "patched_vcf": str(patched_vcf),
+        "log": str(log_path),
+        "entry": entry
+    }
+
+
+@app.post("/api/projects/{project}/vcf_lookup")
+def vcf_lookup(project: str, payload: VcfLookupRequest):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    sample = (payload.sample or "").strip()
+    if not sample:
+        raise HTTPException(status_code=400, detail="Sample is required")
+    sample_dir = project_dir / "step1" / sample
+    if not sample_dir.exists():
+        raise HTTPException(status_code=404, detail="Sample not found")
+    if ":" not in payload.locus:
+        raise HTTPException(status_code=400, detail="Locus must be in contig:pos format")
+    contig, pos_str = payload.locus.split(":", 1)
+    contig = contig.strip()
+    if not contig:
+        raise HTTPException(status_code=400, detail="Contig is required")
+    try:
+        pos = int(pos_str.replace(",", ""))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Position must be an integer")
+    source_vcf = _find_source_vcf(sample_dir, sample)
+    if not source_vcf:
+        raise HTTPException(status_code=404, detail="Source VCF not found")
+    edits_dir = sample_dir / "vcf_edits"
+    patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+    base_vcf = patched_vcf or source_vcf
+    record = _scan_vcf_for_locus(base_vcf, contig, pos)
+    if not record and patched_vcf and source_vcf and patched_vcf != source_vcf:
+        record = _scan_vcf_for_locus(source_vcf, contig, pos)
+    if not record:
+        logger.warning(
+            "VCF lookup miss contig=%s pos=%s base=%s fallback=%s",
+            contig,
+            pos,
+            base_vcf,
+            source_vcf
+        )
+        raise HTTPException(status_code=400, detail="Record not found at locus")
+    return {
+        "ref": record.get("ref", ""),
+        "alt": record.get("alt", ""),
+        "dp": record.get("dp", None),
+        "ad": record.get("ad", None),
+        "base_vcf": record.get("path", str(base_vcf))
+    }
+
+
+def _edit_log_path(sample_dir: Path, sample: str) -> Path:
+    return sample_dir / "vcf_edits" / f"{sample}_patchlog.jsonl"
+
+
+def _expected_patched_vcf_path(edits_dir: Path, source_vcf: Path) -> Path:
+    suffixes = source_vcf.suffixes
+    if suffixes[-2:] == [".vcf", ".gz"]:
+        return edits_dir / source_vcf.name
+    if suffixes and suffixes[-1] == ".vcf":
+        return edits_dir / f"{source_vcf.name}.gz"
+    return edits_dir / f"{source_vcf.name}.gz"
+
+
+def _find_patched_vcf(sample_dir: Path, sample: str, source_vcf: Optional[Path]) -> Optional[Path]:
+    edits_dir = sample_dir / "vcf_edits"
+    if not edits_dir.exists():
+        return None
+    legacy = edits_dir / f"{sample}_patched.vcf.gz"
+    if source_vcf:
+        expected = _expected_patched_vcf_path(edits_dir, source_vcf)
+        if expected.exists():
+            return expected
+    if legacy.exists():
+        return legacy
+    candidates = sorted(
+        [p for p in edits_dir.glob("*.vcf*") if p.suffix != ".tbi"],
+        key=lambda p: p.stat().st_mtime
+    )
+    return candidates[-1] if candidates else None
+
+
+def _target_name_for_vcf(source_vcf: Path, chosen_vcf: Path) -> str:
+    source_name = source_vcf.name
+    chosen_suffixes = chosen_vcf.suffixes
+    if chosen_suffixes[-2:] == [".vcf", ".gz"]:
+        if source_name.endswith(".gz"):
+            return source_name
+        return f"{source_name}.gz"
+    return source_name
+
+
+def _vcf_is_edited(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except FileNotFoundError:
+        return False
+    return "vcf_edits" in resolved.parts
+
+
+def _edited_samples_in_dir(vcf_source_dir: Path) -> List[str]:
+    edited = set()
+    if not vcf_source_dir.exists():
+        return []
+    vcfs = list(vcf_source_dir.glob("*.vcf")) + list(vcf_source_dir.glob("*.vcf.gz"))
+    for vcf in vcfs:
+        if _vcf_is_edited(vcf):
+            edited.add(_sample_from_vcf(vcf))
+    return sorted(edited)
+
+
+def _write_step2_edit_summary(step2_dir: Path, edited_samples: List[str]) -> None:
+    payload = {
+        "edited_samples": sorted(set(edited_samples)),
+        "edited_count": len(set(edited_samples)),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        (step2_dir / "edited_samples.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _scan_vcf_for_locus(path: Path, contig: str, pos: int) -> Optional[Dict[str, object]]:
+    if not path or not path.exists():
+        return None
+    opener = gzip.open if str(path).endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if not line or line[0] == "#":
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 8:
+                    continue
+                if parts[0] != contig:
+                    continue
+                try:
+                    lpos = int(parts[1])
+                except ValueError:
+                    continue
+                if lpos != pos:
+                    continue
+                ref = parts[3]
+                alt = parts[4].split(",")[0] if parts[4] else ""
+                dp = None
+                ad = None
+                for field in parts[7].split(";"):
+                    if field.startswith("DP="):
+                        try:
+                            dp = int(field.split("=", 1)[1])
+                        except ValueError:
+                            dp = None
+                        break
+                if len(parts) >= 10:
+                    fmt = parts[8].split(":")
+                    sample = parts[9].split(":")
+                    if "AD" in fmt:
+                        try:
+                            idx = fmt.index("AD")
+                            ad_val = sample[idx] if idx < len(sample) else ""
+                            ad = [int(x) for x in ad_val.split(",") if x != ""] if ad_val else None
+                        except Exception:
+                            ad = None
+                return {
+                    "ref": ref,
+                    "alt": alt,
+                    "dp": dp,
+                    "ad": ad,
+                    "path": str(path)
+                }
+    except OSError:
+        return None
+    return None
+
+
+def _scan_vcf_first_record(path: Optional[Path]) -> Optional[Dict[str, object]]:
+    if not path or not Path(path).exists():
+        return None
+    opener = gzip.open if str(path).endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if not line or line[0] == "#":
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2:
+                    continue
+                return {"contig": parts[0], "pos": parts[1]}
+    except OSError:
+        return None
+    return None
+
+
+def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
+    candidates = []
+    for vcf in sample_dir.glob(f"**/{sample}*zc.vcf*"):
+        if vcf.suffix == ".tbi":
+            continue
+        if "vcf_edits" in vcf.parts:
+            continue
+        candidates.append(vcf)
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda p: p.stat().st_mtime)[-1]
+
+
 def _open_path(target: Path) -> None:
     if sys.platform.startswith("darwin"):
-        subprocess.run(["open", str(target)])
+        suffix = target.suffix.lower()
+        if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:
+            subprocess.run(["open", "-e", str(target)])
+        else:
+            subprocess.run(["open", str(target)])
         return
     if sys.platform.startswith("linux"):
         opener = shutil.which("xdg-open")
@@ -1456,6 +1923,14 @@ def _open_path(target: Path) -> None:
     if sys.platform.startswith("win"):
         subprocess.run(["explorer", str(target)])
         return
+
+
+def _resolve_bcftools(cfg: Dict) -> str:
+    path = cfg.get("bcftools_path", "").strip()
+    if path:
+        return path
+    found = shutil.which("bcftools")
+    return found or ""
     subprocess.run(["open", str(target)])
 
 

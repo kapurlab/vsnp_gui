@@ -141,6 +141,44 @@ p {
   font-size: 12px;
 }
 
+.inline-fields {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.cell-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  width: min(520px, 90vw);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
+  display: grid;
+  gap: 10px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .panel-actions .action {
   border-color: rgba(76, 140, 138, 0.6);
   color: var(--accent);
@@ -432,6 +470,13 @@ label {
   border-color: #fecaca;
 }
 
+.badge.edited {
+  background: #e0f2fe;
+  color: #075985;
+  border-color: #bae6fd;
+  text-transform: none;
+}
+
 .log-viewer {
   margin-top: 10px;
   border-top: 1px dashed var(--border);
@@ -451,6 +496,14 @@ label {
 
 .note.error {
   color: var(--danger);
+}
+
+.note.warning {
+  color: #9a3412;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  padding: 8px 10px;
+  border-radius: 10px;
 }
 
 .checklist {
@@ -565,6 +618,22 @@ button:disabled {
 button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 6px 20px rgba(76, 140, 138, 0.25);
+}
+
+.link-button {
+  background: none;
+  color: var(--accent);
+  border: none;
+  padding: 0;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.link-button:hover:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  text-decoration: underline;
 }
 
 .list {

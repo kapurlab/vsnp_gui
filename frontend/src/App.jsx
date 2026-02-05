@@ -22,6 +22,7 @@ export default function App() {
     conda_exe: "",
     conda_env_path: "",
     igv_app_path: "",
+    bcftools_path: "",
     sra_allow_insecure_https: false
   });
   const [sraText, setSraText] = useState("");
@@ -50,11 +51,22 @@ export default function App() {
   const [posthocRows, setPosthocRows] = useState([]);
   const [posthocLoading, setPosthocLoading] = useState(false);
   const [posthocError, setPosthocError] = useState("");
+  const [step1Edits, setStep1Edits] = useState({});
+  const [step1EditedCount, setStep1EditedCount] = useState(0);
+  const [editVcfOpen, setEditVcfOpen] = useState(false);
+  const [editVcfSample, setEditVcfSample] = useState("");
+  const [editVcfProject, setEditVcfProject] = useState("");
+  const [editVcfLocus, setEditVcfLocus] = useState("");
+  const [editVcfAlt, setEditVcfAlt] = useState("");
+  const [editVcfNote, setEditVcfNote] = useState("");
+  const [editVcfReason, setEditVcfReason] = useState("");
+  const [editVcfCurrent, setEditVcfCurrent] = useState(null);
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
+  const [step2EditedCount, setStep2EditedCount] = useState(0);
   const [step2Mode, setStep2Mode] = useState("custom");
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
@@ -147,6 +159,7 @@ export default function App() {
       conda_exe: cfg.conda_exe || "",
       conda_env_path: cfg.conda_env_path || "",
       igv_app_path: cfg.igv_app_path || "",
+      bcftools_path: cfg.bcftools_path || "",
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
     });
     if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
@@ -294,6 +307,7 @@ export default function App() {
         conda_exe: settings.conda_exe,
         conda_env_path: settings.conda_env_path,
         igv_app_path: settings.igv_app_path,
+        bcftools_path: settings.bcftools_path,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
       })
     });
@@ -383,6 +397,21 @@ export default function App() {
     } catch {
       setRefLock({ references: [] });
     }
+    try {
+      const editsRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/edits`);
+      if (editsRes.ok) {
+        const edits = await editsRes.json();
+        setStep1Edits(edits || {});
+        const editedCount = Object.values(edits || {}).filter((e) => e?.edited).length;
+        setStep1EditedCount(editedCount);
+      } else {
+        setStep1Edits({});
+        setStep1EditedCount(0);
+      }
+    } catch {
+      setStep1Edits({});
+      setStep1EditedCount(0);
+    }
     setQcLoading(false);
   }
 
@@ -407,6 +436,9 @@ export default function App() {
     if (countRes.ok) {
       const countData = await countRes.json();
       setStep2VcfCount(countData.count || 0);
+      setStep2EditedCount(countData.edited_count || 0);
+    } else {
+      setStep2EditedCount(0);
     }
   }
 
@@ -747,6 +779,93 @@ export default function App() {
     }
   }
 
+  function openEditVcf(sample, project = "") {
+    if (!sample) return;
+    setEditVcfSample(sample);
+    setEditVcfProject(project || selectedProject || "");
+    setEditVcfLocus("");
+    setEditVcfAlt("");
+    setEditVcfNote("");
+    setEditVcfReason("");
+    setEditVcfCurrent(null);
+    setEditVcfOpen(true);
+  }
+
+  async function fetchCurrentVcfCall() {
+    const project = editVcfProject || selectedProject;
+    if (!project || !editVcfSample || !editVcfLocus) {
+      window.alert("Select a sample and locus first.");
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/projects/${project}/vcf_lookup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sample: editVcfSample,
+        locus: editVcfLocus
+      })
+    });
+    if (!res.ok) {
+      const msg = await res.json();
+      window.alert(typeof msg.detail === "string" ? msg.detail : "Lookup failed");
+      return;
+    }
+    const data = await res.json();
+    setEditVcfCurrent(data);
+    if (data?.alt) {
+      setEditVcfAlt(String(data.alt).toUpperCase());
+    }
+  }
+
+  async function submitEditVcf() {
+    const project = editVcfProject || selectedProject;
+    if (!project || !editVcfSample) {
+      window.alert("Select a project to edit this sample.");
+      return;
+    }
+    if (!settings.bcftools_path) {
+      window.alert("bcftools path is not configured in Settings.");
+      return;
+    }
+    if (!editVcfLocus || !editVcfAlt) {
+      window.alert("Locus and ALT are required.");
+      return;
+    }
+    if (!editVcfReason) {
+      window.alert("Please select a reason for the edit.");
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/projects/${project}/vcf_edit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sample: editVcfSample,
+        locus: editVcfLocus,
+        new_alt: editVcfAlt,
+        note: editVcfNote,
+        reason: editVcfReason
+      })
+    });
+    if (!res.ok) {
+      const msg = await res.json();
+      window.alert(msg.detail || "VCF edit failed");
+      return;
+    }
+    const data = await res.json();
+    window.alert(`VCF patched:\\n${data.patched_vcf}`);
+    setEditVcfOpen(false);
+    if (project === selectedProject) {
+      await loadQC();
+      setEditVcfCurrent(null);
+      if (step2Mode === "step1") {
+        await step2Setup();
+      } else {
+        setStep2SetupMsg("Patched VCF created. Rebuild the Step 2 VCF set to use it.");
+      }
+      await loadStep2Outputs();
+    }
+  }
+
   async function addPosthocFolder() {
     let picked = "";
     if (window?.vsnp?.selectPath) {
@@ -1021,6 +1140,26 @@ export default function App() {
                   />
                   Allow insecure HTTPS fallback for ENA
                 </label>
+                <label className="label">bcftools path (for VCF edits)</label>
+                <div className="inline-fields">
+                  <input
+                    placeholder="/path/to/bcftools"
+                    value={settings.bcftools_path}
+                    onChange={(e) => setSettings({ ...settings, bcftools_path: e.target.value })}
+                  />
+                  {canPickPath ? (
+                    <button
+                      className="ghost"
+                      onClick={() =>
+                        pickPath("file", "Select bcftools", settings.bcftools_path, (value) =>
+                          setSettings({ ...settings, bcftools_path: value })
+                        )
+                      }
+                    >
+                      Choose
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <div className="block">
                 {preflightError ? (
@@ -1074,6 +1213,12 @@ export default function App() {
                   ) : (
                     <span className="muted">Not run</span>
                   )}
+                </div>
+                <div className="checklist-item">
+                  <span className="check-title">bcftools</span>
+                  <span className={settings.bcftools_path ? "ok" : "warn"}>
+                    {settings.bcftools_path ? "Configured" : "Missing"}
+                  </span>
                 </div>
                 {preflight?.missing?.length ? (
                   <div className="note error">
@@ -1367,61 +1512,79 @@ export default function App() {
                     <tbody>
                       {qcRows
                         .filter((r) => !showFlaggedOnly || isFlagged(r))
-                        .map((row) => (
-                          <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
-                            <td>
-                              <input
-                                type="checkbox"
-                                checked={Boolean(excluded[excludeKey(row)])}
-                                onChange={(e) =>
-                                  setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
-                                }
-                              />
-                            </td>
-                            <td>{row._sample || row.sample || "-"}</td>
-                            <td>
-                              <details
-                                className="inline-details"
-                                open={openStep1FilesRow === sampleKey(row)}
-                              >
-                                <summary
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    const key = sampleKey(row);
-                                    setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
-                                  }}
-                                >
-                                  Files
-                                </summary>
-                                <div className="inline-files">
-                                  <button
-                                    onClick={() => openStep1File(sampleKey(row), "sample_dir")}
-                                    disabled={!sampleKey(row)}
-                                  >
-                                    Open Folder
-                                  </button>
-                                  <button
-                                    onClick={() => openStep1Igv(sampleKey(row))}
-                                    disabled={!sampleKey(row)}
-                                  >
-                                    IGV
-                                  </button>
-                                  {row._file ? (
-                                    <button onClick={() => openOutput(row._file)}>Stats</button>
-                                  ) : null}
+                        .map((row) => {
+                          const key = sampleKey(row);
+                          const editInfo = step1Edits[key];
+                          return (
+                            <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(excluded[excludeKey(row)])}
+                                  onChange={(e) =>
+                                    setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
+                                  }
+                                />
+                              </td>
+                              <td>
+                                <div className="cell-inline">
+                                  <span>{row._sample || row.sample || "-"}</span>
+                                  {editInfo?.edited ? <span className="badge edited">Edited</span> : null}
                                 </div>
-                              </details>
-                            </td>
-                            <td>{row.Reference || "-"}</td>
-                            <td>{row["Average Depth"] || "-"}</td>
-                            <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
-                            <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
-                            <td>{formatPercent(row["R1 Passing Q20"])}</td>
-                            <td>{formatPercent(row["R2 Passing Q20"])}</td>
-                            <td>{formatPercent(row["Genome with Coverage"])}</td>
-                            <td>{row["Quality SNPs"] || "-"}</td>
-                          </tr>
-                        ))}
+                              </td>
+                              <td>
+                                <details
+                                  className="inline-details"
+                                  open={openStep1FilesRow === sampleKey(row)}
+                                >
+                                  <summary
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      const key = sampleKey(row);
+                                      setOpenStep1FilesRow((prev) => (prev === key ? "" : key));
+                                    }}
+                                  >
+                                    Files
+                                  </summary>
+                                  <div className="inline-files">
+                                    <button
+                                      onClick={() => openStep1File(sampleKey(row), "sample_dir")}
+                                      disabled={!sampleKey(row)}
+                                    >
+                                      Open Folder
+                                    </button>
+                                    <button
+                                      onClick={() => openStep1Igv(sampleKey(row))}
+                                      disabled={!sampleKey(row)}
+                                    >
+                                      IGV
+                                    </button>
+                                    <button
+                                      onClick={() => openEditVcf(sampleKey(row), selectedProject)}
+                                      disabled={!sampleKey(row)}
+                                    >
+                                      Edit VCF
+                                    </button>
+                                    {editInfo?.edit_log ? (
+                                      <button onClick={() => openOutput(editInfo.edit_log)}>Edit Log</button>
+                                    ) : null}
+                                    {row._file ? (
+                                      <button onClick={() => openOutput(row._file)}>Stats</button>
+                                    ) : null}
+                                  </div>
+                                </details>
+                              </td>
+                              <td>{row.Reference || "-"}</td>
+                              <td>{row["Average Depth"] || "-"}</td>
+                              <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                              <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                              <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                              <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                              <td>{formatPercent(row["Genome with Coverage"])}</td>
+                              <td>{row["Quality SNPs"] || "-"}</td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
@@ -1469,10 +1632,18 @@ export default function App() {
                       <tbody>
                         {posthocFilteredRows.map((row) => {
                           const sampleDir = row._sample_dir || (row._file ? row._file.replace(/\/[^/]+$/, "") : "");
+                          const sampleName = row._sample || row.sample || "-";
+                          const isEdited = Boolean(row._edited);
+                          const editLog = row._edit_log || "";
                           return (
                           <tr key={row._file}>
                             <td>{row._project || "-"}</td>
-                            <td>{row._sample || row.sample || "-"}</td>
+                            <td>
+                              <div className="cell-inline">
+                                <span>{sampleName}</span>
+                                {isEdited ? <span className="badge edited">Edited</span> : null}
+                              </div>
+                            </td>
                             <td>
                               <details
                                 className="inline-details"
@@ -1494,6 +1665,16 @@ export default function App() {
                                   <button onClick={() => openPosthocIgv(sampleDir)} disabled={!sampleDir}>
                                     IGV
                                   </button>
+                                  <button
+                                    onClick={() =>
+                                      openEditVcf(row._sample || row.sample || "", row._project || "")
+                                    }
+                                  >
+                                    Edit VCF
+                                  </button>
+                                  {editLog ? (
+                                    <button onClick={() => openPosthocOutput(editLog)}>Edit Log</button>
+                                  ) : null}
                                   {row._file ? <button onClick={() => openPosthocOutput(row._file)}>Stats</button> : null}
                                 </div>
                               </details>
@@ -1518,6 +1699,59 @@ export default function App() {
             )}
           </section>
         </div>
+        ) : null}
+
+        {editVcfOpen ? (
+          <div className="modal-backdrop">
+            <div className="modal">
+              <h3>Edit VCF</h3>
+              <div className="note">
+                Editing sample: <strong>{editVcfSample}</strong>
+                {editVcfProject || selectedProject ? (
+                  <span> (Project: {editVcfProject || selectedProject})</span>
+                ) : null}
+              </div>
+              <label className="label">Locus (contig:pos)</label>
+              <input
+                placeholder="MTBC0:123456"
+                value={editVcfLocus}
+                onChange={(e) => setEditVcfLocus(e.target.value)}
+              />
+              <div className="inline-fields">
+                <button className="ghost" onClick={fetchCurrentVcfCall}>Fetch current</button>
+                {editVcfCurrent ? (
+                  <span className="muted">
+                    Current: {editVcfCurrent.ref} → {editVcfCurrent.alt}
+                  </span>
+                ) : null}
+              </div>
+              <label className="label">Correct ALT</label>
+              <input
+                placeholder="A/C/G/T/N"
+                value={editVcfAlt}
+                onChange={(e) => setEditVcfAlt(e.target.value.toUpperCase())}
+              />
+              <label className="label">Reason</label>
+              <select value={editVcfReason} onChange={(e) => setEditVcfReason(e.target.value)}>
+                <option value="">Select reason</option>
+                <option value="low_support">Low support in IGV</option>
+                <option value="mixed_signal">Mixed signal</option>
+                <option value="mapping_issue">Mapping issue</option>
+                <option value="contamination">Contamination/mixture</option>
+                <option value="other">Other</option>
+              </select>
+              <label className="label">Note (optional)</label>
+              <input
+                placeholder="Reason for edit"
+                value={editVcfNote}
+                onChange={(e) => setEditVcfNote(e.target.value)}
+              />
+              <div className="modal-actions">
+                <button className="ghost" onClick={() => setEditVcfOpen(false)}>Cancel</button>
+                <button onClick={submitEditVcf}>Apply</button>
+              </div>
+            </div>
+          </div>
         ) : null}
 
         <div className="row-header">
@@ -1767,6 +2001,15 @@ export default function App() {
               <div className="note">
                 {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
               </div>
+              {step2EditedCount > 0 ? (
+                <div className="note warning">
+                  Edited samples detected: {step2EditedCount}. Step 2 will use patched VCFs when available.
+                </div>
+              ) : step1EditedCount > 0 ? (
+                <div className="note warning">
+                  Edited samples available: {step1EditedCount}. Rebuild the Step 2 VCF set to include them.
+                </div>
+              ) : null}
               {selected ? (
                 <div className="note">
                   Outputs will be written to: {settings.projects_root}/{selected.name}/step2
@@ -1782,6 +2025,19 @@ export default function App() {
                 <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
               </div>
             </div>
+            {step2EditedCount > 0 && settings.projects_root && selectedProject ? (
+              <div className="note">
+                Edited samples included in this run.{" "}
+                <button
+                  className="link-button"
+                  onClick={() =>
+                    openOutput(`${settings.projects_root}/${selectedProject}/step2/edited_samples.json`)
+                  }
+                >
+                  View edited sample list
+                </button>
+              </div>
+            ) : null}
             {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
             {(() => {

@@ -21,7 +21,7 @@ This starts:
 In **Settings**, use **Choose** buttons to pick:
 - vSNP3 path
 - Projects root
-- Conda env or env path
+- vSNP3 path (conda environment directory, e.g. `~/miniconda3/envs/vsnp3`)
 
 Click **Save** and **Preflight**.
 
@@ -32,5 +32,5 @@ For a quick Step 2 demo:
 
 ## 4) Troubleshooting
 - If the Electron window is blank, check that the frontend dev server is running.
-- If Preflight fails, install dependencies in the selected conda env:
-  - `conda install -n <env> pandas biopython`
+- If Preflight fails, install dependencies in the vSNP3 environment:
+  - `conda install -n vsnp3 pandas biopython`

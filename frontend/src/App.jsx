@@ -19,9 +19,6 @@ export default function App() {
   const [settings, setSettings] = useState({
     vsnp3_path: "",
     projects_root: "",
-    conda_env: "",
-    conda_exe: "",
-    conda_env_path: "",
     igv_app_path: "",
     bcftools_path: "",
     step1_max_parallel: 3,
@@ -132,7 +129,7 @@ export default function App() {
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
   const settingsReady = Boolean(
-    settings.vsnp3_path && settings.projects_root && (settings.conda_env || settings.conda_env_path)
+    settings.vsnp3_path && settings.projects_root
   );
 
   const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
@@ -296,9 +293,6 @@ export default function App() {
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
-      conda_env: cfg.conda_env || "",
-      conda_exe: cfg.conda_exe || "",
-      conda_env_path: cfg.conda_env_path || "",
       igv_app_path: cfg.igv_app_path || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
@@ -342,9 +336,9 @@ export default function App() {
   }, [selectedProject]);
 
   useEffect(() => {
-    if (!settings.conda_env && !settings.conda_env_path) return;
+    if (!settings.vsnp3_path) return;
     runPreflight();
-  }, [settings.conda_env, settings.conda_env_path]);
+  }, [settings.vsnp3_path]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -462,9 +456,6 @@ export default function App() {
       body: JSON.stringify({
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
-        conda_env: settings.conda_env,
-        conda_exe: settings.conda_exe,
-        conda_env_path: settings.conda_env_path,
         igv_app_path: settings.igv_app_path,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
@@ -1277,60 +1268,6 @@ export default function App() {
                   ) : null}
                 </div>
                 <div className="settings-row">
-                  <label className="label">Conda env for vSNP3</label>
-                  <input
-                    placeholder="vsnp3"
-                    value={settings.conda_env}
-                    onChange={(e) => setSettings({ ...settings, conda_env: e.target.value })}
-                  />
-                </div>
-                <div className="settings-row">
-                  <label className="label">Conda executable (optional)</label>
-                  <input
-                    placeholder="/Users/vivekkapur/anaconda3/bin/conda"
-                    value={settings.conda_exe}
-                    onChange={(e) => setSettings({ ...settings, conda_exe: e.target.value })}
-                  />
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "file",
-                          "Select conda executable",
-                          settings.conda_exe,
-                          (value) => setSettings({ ...settings, conda_exe: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
-                </div>
-                <div className="settings-row">
-                  <label className="label">Conda env path (optional)</label>
-                  <input
-                    placeholder="/Users/vivekkapur/anaconda3/envs/vivek"
-                    value={settings.conda_env_path}
-                    onChange={(e) => setSettings({ ...settings, conda_env_path: e.target.value })}
-                  />
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "directory",
-                          "Select conda env folder",
-                          settings.conda_env_path,
-                          (value) => setSettings({ ...settings, conda_env_path: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
-                </div>
-                <div className="settings-row">
                   <label className="label">IGV app (optional)</label>
                   <input
                     placeholder="/Applications/IGV_2.14.0.app"
@@ -1430,12 +1367,6 @@ export default function App() {
                   </span>
                 </div>
                 <div className="checklist-item">
-                  <span className="check-title">Conda env</span>
-                  <span className={(settings.conda_env || settings.conda_env_path) ? "ok" : "warn"}>
-                    {settings.conda_env || settings.conda_env_path || "Missing"}
-                  </span>
-                </div>
-                <div className="checklist-item">
                   <span className="check-title">Preflight</span>
                   {preflightError ? (
                     <span className="warn">{preflightError}</span>
@@ -1458,7 +1389,7 @@ export default function App() {
                 {preflight?.missing?.length ? (
                   <div className="note error">
                     Install missing deps with:
-                    <div className="code-line">conda install -n {settings.conda_env || "<env>"} pandas biopython</div>
+                    <div className="code-line">conda install pandas biopython</div>
                   </div>
                 ) : null}
               </div>

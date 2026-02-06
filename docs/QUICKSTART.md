@@ -24,7 +24,7 @@ mamba create -n vsnp3 -c conda-forge -c bioconda \
 ```
 
 Notes:
-- The environment name can be anything. Set **Conda env** or **Conda env path** in Settings.
+- Point the **vSNP3 path** setting to this environment directory (e.g. `~/miniconda3/envs/vsnp3`).
 - `nodejs` is required for Electron dev; browser-only usage can omit it.
 - `bcftools` is required for the VCF edit workflow.
 
@@ -84,7 +84,7 @@ You should see:
 
 ## Part 2: Configure Settings
 
-On first launch, you'll see a yellow banner: **"Setup required: Set vSNP3 path, projects root, and conda env in Settings, then click Save + Preflight."**
+On first launch, you'll see a yellow banner: **"Setup required: Set vSNP3 path, projects root, and vSNP3 path in Settings, then click Save + Preflight."**
 
 All action buttons (Setup, Run, Build VCF set, etc.) remain disabled until these three settings are configured. The banner disappears once you've saved valid settings.
 
@@ -96,13 +96,9 @@ In the **Settings** panel (top-left):
 |-------|-------|-------|
 | **vSNP3 path** | `~/vsnp3` or wherever vSNP3 is installed | Contains `dependencies/` folder |
 | **Projects root** | `~/vsnp3/projects` | Where your analyses will be saved |
-| **Conda env** | `vsnp3` | The conda environment name |
+| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts and Python runtime |
 
 **Electron users**: Click the folder icon next to each path field to open a native folder picker dialog.
-
-**Alternative**: If you know the full path to your conda environment:
-- Leave "Conda env" blank
-- Set **Conda env path** to `/Users/yourname/anaconda3/envs/vsnp3`
 
 ### Step 2.2: Save and verify
 
@@ -241,7 +237,7 @@ Click **Open** to view any file in your default application.
 ## Troubleshooting
 
 ### "Preflight failed"
-- Verify conda env name is correct
+- Verify vSNP3 path points to the correct conda environment directory
 - Run: `conda install -n vsnp3 pandas biopython`
 
 ### "No FASTQ files found"

@@ -17,7 +17,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 1. **Settings Panel:**
    - vSNP3 path: `/path/to/vsnp3`
    - Projects root: `/path/to/projects`
-   - Conda env: `vsnp3`
+   - vSNP3 path: `~/miniconda3/envs/vsnp3`
    - Click **Save**
 
 2. **Preflight Check:**
@@ -115,7 +115,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 | **High zero coverage (>10%)** | Try different reference |
 | **Too many SNPs (>10% genome)** | Reference too distant |
 | **Mixed reference error (Step 2)** | Split into separate projects |
-| **Job fails** | Check logs, verify conda env |
+| **Job fails** | Check logs, verify vSNP3 path |
 | **No samples showing** | Check Step 1 Setup ran |
 
 ---

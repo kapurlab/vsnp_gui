@@ -543,9 +543,9 @@ top  # or Activity Monitor on Mac
 
 ## Common Error Messages
 
-### `Conda env is not set`
+### `vSNP3 path is not set`
 
-**Solution:** Configure conda environment in Settings panel
+**Solution:** Set the vSNP3 path in Settings to the conda environment directory (e.g. `~/miniconda3/envs/vsnp3`)
 
 ### `vsnp3_step1.py not found`
 

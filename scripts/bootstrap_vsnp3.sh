@@ -15,37 +15,26 @@ import json, sys
 cfg = json.load(open(sys.argv[1]))
 print(cfg.get("vsnp3_path",""))
 print(cfg.get("projects_root",""))
-print(cfg.get("conda_env",""))
-print(cfg.get("conda_exe",""))
-print(cfg.get("conda_env_path",""))
 PY
 }
 
 mapfile -t CFG < <(read_config)
 VSNP3_PATH="${CFG[0]}"
 PROJECTS_ROOT="${CFG[1]}"
-CONDA_ENV="${CFG[2]:-vsnp3}"
-CONDA_EXE="${CFG[3]:-conda}"
-CONDA_ENV_PATH="${CFG[4]}"
 
-if [ -n "$CONDA_ENV_PATH" ]; then
-  CONDA_BIN="${CONDA_ENV_PATH}/bin/conda"
-else
-  CONDA_BIN="$CONDA_EXE"
-fi
-
-if ! command -v "$CONDA_BIN" >/dev/null 2>&1; then
-  echo "Conda not found: $CONDA_BIN"
+if [ -z "$VSNP3_PATH" ] || [ ! -d "$VSNP3_PATH" ]; then
+  echo "vSNP3 path not set or does not exist: $VSNP3_PATH"
   exit 1
 fi
 
-if ! "$CONDA_BIN" env list | awk '{print $1}' | grep -qx "$CONDA_ENV"; then
-  echo "Creating conda env: $CONDA_ENV"
-  "$CONDA_BIN" create -y -n "$CONDA_ENV" python=3.9
+CONDA_BIN="${VSNP3_PATH}/bin/conda"
+if ! command -v "$CONDA_BIN" >/dev/null 2>&1; then
+  echo "Conda not found at: $CONDA_BIN"
+  exit 1
 fi
 
-echo "Installing vSNP3 dependencies into $CONDA_ENV"
-"$CONDA_BIN" install -y -n "$CONDA_ENV" -c conda-forge \
+echo "Installing vSNP3 dependencies into $VSNP3_PATH"
+"$CONDA_BIN" install -y --prefix "$VSNP3_PATH" -c conda-forge \
   biopython minimap2 cairosvg dask freebayes humanize numpy openpyxl pandas \
   parallel pigz regex samtools=1.14 seqkit sourmash spades svgwrite pyvcf \
   py-cpuinfo scikit-allel vcflib

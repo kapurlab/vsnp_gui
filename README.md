@@ -35,7 +35,7 @@ mamba create -n vsnp3 -c conda-forge -c bioconda \
 ```
 
 Notes:
-- The environment name can be anything. If you use a different name, set **Conda env** in Settings, or use **Conda env path**.
+- The environment name can be anything. Set the full path in **vSNP3 path** in Settings (e.g. `~/miniconda3/envs/vsnp3`).
 - `nodejs` is required for running the Electron app in dev mode; browser-only usage can omit it.
 - `bcftools` is required for the VCF edit workflow.
 
@@ -63,11 +63,10 @@ On startup, the script will auto-detect your conda installation and print the de
   vSNP GUI — Detected Paths
 ================================================
   GUI root:        /Users/you/vsnp_gui
-  Conda base:      /Users/you/miniconda3
-  Conda env path:  /Users/you/miniconda3/envs/vsnp3
+  vSNP3 path:      /Users/you/miniconda3/envs/vsnp3
 ================================================
 ```
-Copy these values into the Settings panel.
+Copy the vSNP3 path into the Settings panel.
 
 ### 2. Configure (Settings panel)
 
@@ -75,10 +74,8 @@ On first launch, a yellow banner appears and all actions are disabled until you 
 
 | Setting | Example | Description |
 |---------|---------|-------------|
-| vSNP3 path | `~/vsnp3` | Path to the cloned vSNP3 repo |
+| vSNP3 path | `~/miniconda3/envs/vsnp3` | Path to the vSNP3 conda environment (contains scripts, references, and runtime) |
 | Projects root | `~/vsnp3/projects` | Where project data is stored |
-| Conda env | `vsnp3` | Name of your conda environment |
-| (Optional) Conda env path | `~/miniconda3/envs/vsnp3` | Direct path to conda env (overrides Conda env name) |
 
 Click **Save** → **Preflight** (banner disappears, buttons enable)
 

@@ -119,9 +119,7 @@ Navigate to the **Settings** panel and enter:
 |---------|---------|-------------|
 | **vSNP3 path** | `/Users/yourname/vsnp3` | Directory containing `bin/vsnp3_step1.py` |
 | **Projects root** | `/Users/yourname/vsnp3/projects` | Where project folders will be created |
-| **Conda env** | `vsnp3` | Name of your conda environment |
-| **Conda executable** | `/Users/yourname/anaconda3/bin/conda` | (Optional) Full path to conda |
-| **Conda env path** | `/Users/yourname/anaconda3/envs/vsnp3` | (Optional) Direct path to env |
+| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts and Python runtime |
 
 Click **Save Settings**
 

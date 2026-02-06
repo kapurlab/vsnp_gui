@@ -344,7 +344,7 @@ The codebase has received substantial updates since the initial review. Here's a
 
 #### Path Picker Integration
 - `window.vsnp?.selectPath` API for native folder/file dialogs
-- "Choose" buttons for vSNP3 path, projects root, conda exe, conda env path
+- "Choose" buttons for vSNP3 path, projects root, vSNP3 path
 - "Add Folder" button for VCF sources
 
 #### Enhanced UX

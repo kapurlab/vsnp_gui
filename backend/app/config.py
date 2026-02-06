@@ -10,9 +10,6 @@ HOME_DIR = Path.home()
 DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(HOME_DIR / "vsnp3"),
     "projects_root": str(HOME_DIR / "vsnp3" / "projects"),
-    "conda_env": "",
-    "conda_exe": "",
-    "conda_env_path": "",
     "igv_app_path": "",
     "bcftools_path": "",
     "step1_max_parallel": 3,

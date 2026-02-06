@@ -43,43 +43,28 @@ job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
 def build_env(cfg: Dict) -> Dict[str, str]:
     vsnp_bin = Path(cfg["vsnp3_path"]) / "bin"
     current_path = os.environ.get("PATH", "")
-    env_path = cfg.get("conda_env_path", "").strip()
-    if env_path:
-        env_path_obj = Path(env_path)
-        bin_path = env_path_obj.parent if env_path_obj.name == "python" else (env_path_obj / "bin")
-        return {"PATH": f"{bin_path}:{vsnp_bin}:{current_path}"}
     return {"PATH": f"{vsnp_bin}:{current_path}"}
 
 
 def wrap_cmd(cfg: Dict, command: str) -> str:
-    env_path = cfg.get("conda_env_path", "").strip()
-    if env_path:
-        return f"PATH=\"{Path(env_path) / 'bin'}:$PATH\" {command}"
-    conda_env = cfg.get("conda_env", "").strip()
-    if conda_env:
-        conda_exe = cfg.get("conda_exe", "").strip() or "conda"
-        return f"{conda_exe} run -n {conda_env} {command}"
+    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    if vsnp3_path:
+        return f"PATH=\"{Path(vsnp3_path) / 'bin'}:$PATH\" {command}"
     return command
 
 
 def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> List[str]:
     args = args or []
-    env_path = cfg.get("conda_env_path", "").strip()
-    if env_path:
-        env_path_obj = Path(env_path)
-        python_exe = env_path_obj if env_path_obj.name == "python" else (env_path_obj / "bin" / "python")
+    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    if vsnp3_path:
+        python_exe = Path(vsnp3_path) / "bin" / "python"
         return [str(python_exe), "-c", code, *args]
-    conda_env = cfg.get("conda_env", "").strip()
-    conda_exe = cfg.get("conda_exe", "").strip() or "conda"
-    return [conda_exe, "run", "-n", conda_env, "python", "-c", code, *args]
+    return ["python", "-c", code, *args]
 
 
 class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
-    conda_env: Optional[str] = None
-    conda_exe: Optional[str] = None
-    conda_env_path: Optional[str] = None
     igv_app_path: Optional[str] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
@@ -177,12 +162,6 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
-    if update.conda_env is not None:
-        cfg["conda_env"] = update.conda_env
-    if update.conda_exe is not None:
-        cfg["conda_exe"] = update.conda_exe
-    if update.conda_env_path is not None:
-        cfg["conda_env_path"] = update.conda_env_path
     if update.igv_app_path is not None:
         cfg["igv_app_path"] = update.igv_app_path
     if update.bcftools_path is not None:
@@ -946,13 +925,12 @@ def job_events(job_id: str):
 @app.get("/api/preflight")
 def preflight(debug: bool = Query(False)):
     cfg = load_config()
-    conda_env = cfg.get("conda_env", "").strip()
-    conda_env_path = cfg.get("conda_env_path", "").strip()
-    conda_exe = cfg.get("conda_exe", "").strip() or "conda"
-    if not conda_env and not conda_env_path:
-        raise HTTPException(status_code=400, detail="Conda env is not set")
-    if conda_env and (shutil.which(conda_exe) is None and not Path(conda_exe).exists()):
-        raise HTTPException(status_code=400, detail=f"Conda executable not found: {conda_exe}")
+    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    if not vsnp3_path:
+        raise HTTPException(status_code=400, detail="vSNP3 path is not set")
+    vsnp3_dir = Path(vsnp3_path)
+    if not vsnp3_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"vSNP3 path not found: {vsnp3_path}")
     check_code = (
         "import importlib.util, json; "
         "mods=['pandas','Bio']; "

@@ -50,7 +50,7 @@ Electron app (native folder pickers):
 In the Settings panel:
 - **vSNP3 path**: the folder containing `vsnp3_step1.py` (e.g. `~/vsnp3`)
 - **Projects root**: where projects live (e.g. `~/vsnp3/projects`)
-- **Conda env** or **Conda env path** (if using conda)
+- **vSNP3 path**: the conda environment directory (e.g. `~/miniconda3/envs/vsnp3`)
 
 Then click **Save** and **Preflight**.
 
@@ -66,7 +66,7 @@ Create a conda environment and install dependencies:
 conda create -n vsnp3 python=3.9 -y
 conda install -n vsnp3 -c conda-forge pandas biopython -y
 ```
-Set **Conda env** in the GUI to `vsnp3` and run **Preflight**.
+Set **vSNP3 path** in the GUI to the environment directory (e.g. `~/miniconda3/envs/vsnp3`) and run **Preflight**.
 
 ## Venv path (if you do not use conda)
 Create a virtual environment and install dependencies:

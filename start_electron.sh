@@ -22,15 +22,14 @@ echo "  vSNP GUI — Detected Paths"
 echo "================================================"
 echo "  GUI root:        $ROOT_DIR"
 if [ -n "$CONDA_BASE" ]; then
-  echo "  Conda base:      $CONDA_BASE"
   VSNP_ENV="$CONDA_BASE/envs/vsnp3"
   if [ -d "$VSNP_ENV" ]; then
-    echo "  Conda env path:  $VSNP_ENV"
+    echo "  vSNP3 path:      $VSNP_ENV"
   else
-    echo "  Conda env path:  (vsnp3 env not found — set in Settings)"
+    echo "  vSNP3 path:      (vsnp3 env not found — set in Settings)"
   fi
 else
-  echo "  Conda base:      (not detected — open a conda-enabled shell)"
+  echo "  vSNP3 path:      (conda not detected — open a conda-enabled shell)"
 fi
 echo "================================================"
 echo ""

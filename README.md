@@ -27,11 +27,10 @@ This project consists of two separate repositories:
 
 ## Recommended Conda/Mamba Environment
 
-Create a single environment that includes vSNP3 runtime deps plus tools needed for the GUI:
+Create a single environment with vSNP3 and all dependencies:
 
 ```bash
-mamba create -n vsnp3 -c conda-forge -c bioconda \
-  python=3.10 pandas biopython samtools bcftools nodejs
+mamba create -n vsnp3 -c conda-forge -c bioconda vsnp3 bcftools nodejs
 ```
 
 Notes:

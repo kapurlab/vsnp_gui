@@ -1140,12 +1140,30 @@ def step2_clear(project: str):
     return {"cleared": True}
 
 
+def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
+    """Resolve sample name to its step1 subdirectory.
+
+    Tries exact match first, then falls back to matching directories
+    whose name starts with ``sample_`` (e.g. sample ``13-1941-6``
+    matches directory ``13-1941-6_S4_L001``).
+    """
+    exact = step1_dir / sample
+    if exact.is_dir():
+        return exact
+    candidates = sorted(
+        d for d in step1_dir.iterdir()
+        if d.is_dir() and d.name.startswith(f"{sample}_")
+    )
+    return candidates[0] if candidates else None
+
+
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
     project_dir = Path(cfg["projects_root"]) / project
-    sample_dir = project_dir / "step1" / sample
-    if not sample_dir.exists():
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
@@ -1209,10 +1227,11 @@ def step1_igv_session(project: str, payload: OpenRequest):
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     sample = target.name
-    sample_dir = project_dir / "step1" / sample
-    if not sample_dir.exists():
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
-    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    bam_files = sorted(sample_dir.glob(f"**/*_nodup.bam"), key=lambda p: p.stat().st_mtime)
     if not bam_files:
         raise HTTPException(status_code=404, detail="BAM not found")
     bam_path = bam_files[-1]
@@ -1302,7 +1321,7 @@ def posthoc_igv_session(payload: OpenRequest):
     sample_dir = target
     step1_dir = sample_dir.parent
     project_dir = step1_dir.parent
-    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    bam_files = sorted(sample_dir.glob(f"**/*_nodup.bam"), key=lambda p: p.stat().st_mtime)
     if not bam_files:
         raise HTTPException(status_code=404, detail="BAM not found")
     bam_path = bam_files[-1]
@@ -1631,8 +1650,9 @@ def posthoc_open_path(payload: OpenRequest):
 def vcf_edit(project: str, payload: VcfEditRequest):
     cfg = load_config()
     project_dir = Path(cfg["projects_root"]) / project
-    sample_dir = project_dir / "step1" / payload.sample
-    if not sample_dir.exists():
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, payload.sample) if step1_dir.is_dir() else None
+    if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
 
     bcftools = _resolve_bcftools(cfg)
@@ -1738,8 +1758,9 @@ def vcf_lookup(project: str, payload: VcfLookupRequest):
     sample = (payload.sample or "").strip()
     if not sample:
         raise HTTPException(status_code=400, detail="Sample is required")
-    sample_dir = project_dir / "step1" / sample
-    if not sample_dir.exists():
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
     if ":" not in payload.locus:
         raise HTTPException(status_code=400, detail="Locus must be in contig:pos format")

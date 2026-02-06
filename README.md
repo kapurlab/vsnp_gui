@@ -2,6 +2,22 @@
 
 A local web interface for running [vSNP3](https://github.com/USDA-VS/vSNP3) SNP analysis pipelines.
 
+## Two-Repo Setup
+
+This project consists of two separate repositories:
+
+1. **vSNP3** (the analysis pipeline) — installed separately via conda/git. This is the bioinformatics engine that performs alignment, SNP calling, and phylogenetic analysis.
+2. **vsnp_gui** (this repo) — provides a graphical interface that calls vSNP3 commands. It connects to vSNP3 via the paths you configure in Settings.
+
+### Typical directory layout
+
+```
+~/miniconda3/envs/vsnp3/     # Conda environment with Python + dependencies
+~/vsnp3/                      # vSNP3 pipeline repo (cloned from GitHub)
+~/vsnp_gui/                   # This GUI repo (cloned from GitHub)
+~/vsnp3/projects/             # Project data (configurable)
+```
+
 ## Requirements
 
 - macOS (tested) or Linux
@@ -41,16 +57,28 @@ Opens at http://localhost:5173
 ```
 Native file dialogs for easier path selection
 
+On startup, the script will auto-detect your conda installation and print the detected paths:
+```
+================================================
+  vSNP GUI — Detected Paths
+================================================
+  GUI root:        /Users/you/vsnp_gui
+  Conda base:      /Users/you/miniconda3
+  Conda env path:  /Users/you/miniconda3/envs/vsnp3
+================================================
+```
+Copy these values into the Settings panel.
+
 ### 2. Configure (Settings panel)
 
 On first launch, a yellow banner appears and all actions are disabled until you configure:
 
-| Setting | Example |
-|---------|---------|
-| vSNP3 path | `~/vsnp3` |
-| Projects root | `~/vsnp3/projects` |
-| Conda env | `vsnp3` |
-| (Optional) Conda env path | `~/miniconda3/envs/vsnp3` |
+| Setting | Example | Description |
+|---------|---------|-------------|
+| vSNP3 path | `~/vsnp3` | Path to the cloned vSNP3 repo |
+| Projects root | `~/vsnp3/projects` | Where project data is stored |
+| Conda env | `vsnp3` | Name of your conda environment |
+| (Optional) Conda env path | `~/miniconda3/envs/vsnp3` | Direct path to conda env (overrides Conda env name) |
 
 Click **Save** → **Preflight** (banner disappears, buttons enable)
 
@@ -123,9 +151,9 @@ Both versions use the same backend and frontend code. The Electron version adds 
 ### Post-hoc Step 1 (feature/posthoc-step1)
 
 - Adds a Post-hoc tab in Step 1 Results to merge QC summaries across multiple Step 1 folders.
-- Folder picker defaults to projects root; toggle to include the current project’s Step 1.
+- Folder picker defaults to projects root; toggle to include the current project's Step 1.
 - Post-hoc table supports Open Folder, IGV, and Stats links using original paths (no duplication).
-- Step 1 list height/scrolling aligned with Step 2 panel; clearer “scroll for more” UX.
+- Step 1 list height/scrolling aligned with Step 2 panel; clearer "scroll for more" UX.
 
 ### VCF Edit Workflow (feature/vcf-edit)
 

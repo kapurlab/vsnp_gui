@@ -32,6 +32,7 @@ export default function App() {
   const [localPath, setLocalPath] = useState("");
   const [reference, setReference] = useState("");
   const [debugMode, setDebugMode] = useState(false);
+  const [assembleUnmap, setAssembleUnmap] = useState(false);
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -73,6 +74,19 @@ export default function App() {
   const [step2OutputsError, setStep2OutputsError] = useState("");
   const [step2EditedCount, setStep2EditedCount] = useState(0);
   const [step2Mode, setStep2Mode] = useState("custom");
+  // Step 2 run options
+  const [s2NoFilters, setS2NoFilters] = useState(false);
+  const [s2QualThreshold, setS2QualThreshold] = useState(150);
+  const [s2NThreshold, setS2NThreshold] = useState(50);
+  const [s2MqThreshold, setS2MqThreshold] = useState(56);
+  const [s2AllVcf, setS2AllVcf] = useState(true);
+  const [s2FindNewFilters, setS2FindNewFilters] = useState(false);
+  const [s2HashGroups, setS2HashGroups] = useState(false);
+  const [s2ShowGroups, setS2ShowGroups] = useState(false);
+  const [s2HtmlTree, setS2HtmlTree] = useState(false);
+  const [s2Dp, setS2Dp] = useState(false);
+  const [s2DensityThreshold, setS2DensityThreshold] = useState("");
+  const [s2DensityWindow, setS2DensityWindow] = useState("");
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
@@ -97,6 +111,23 @@ export default function App() {
   const [showRowStep1, setShowRowStep1] = useState(true);
   const [showRowStep2, setShowRowStep2] = useState(true);
   const [showRowLogs, setShowRowLogs] = useState(true);
+  const [showRowRefEditor, setShowRowRefEditor] = useState(false);
+  // Item 2: Reference path management
+  const [refPaths, setRefPaths] = useState([]);
+  const [showRefPaths, setShowRefPaths] = useState(false);
+  // Item 3: Genome download
+  const [showGenomeDownload, setShowGenomeDownload] = useState(false);
+  const [genomeAccession, setGenomeAccession] = useState("");
+  const [genomeOutputDir, setGenomeOutputDir] = useState("");
+  const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
+  const [genomeJobId, setGenomeJobId] = useState("");
+  // Item 5: SRA download feedback
+  const [sraJobId, setSraJobId] = useState("");
+  const [sraStatus, setSraStatus] = useState("");
+  // Item 6: Reference Editor
+  const [refEditorRef, setRefEditorRef] = useState("");
+  const [refEditorFiles, setRefEditorFiles] = useState([]);
+  const [refEditorPath, setRefEditorPath] = useState("");
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -146,6 +177,111 @@ export default function App() {
       defaultPath: currentValue || undefined
     });
     if (picked) onPick(picked);
+  }
+
+  async function pickMultiPaths(kind, title, onPick) {
+    if (!window?.vsnp?.selectPath) return;
+    const picked = await window.vsnp.selectPath({
+      kind,
+      title,
+      multiSelect: true
+    });
+    if (picked && Array.isArray(picked) && picked.length) onPick(picked);
+  }
+
+  // Item 2: Reference path management
+  async function loadRefPaths() {
+    const res = await fetch(`${API_BASE}/api/references/paths`);
+    if (res.ok) {
+      const data = await res.json();
+      setRefPaths(data.paths || []);
+    }
+  }
+
+  async function addRefPath(dirPath) {
+    const res = await fetch(`${API_BASE}/api/references/paths`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: dirPath })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setRefPaths(data.paths || []);
+      setReferences(data.references || []);
+    }
+  }
+
+  async function removeRefPath(dirPath) {
+    const res = await fetch(`${API_BASE}/api/references/paths`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: dirPath })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setRefPaths(data.paths || []);
+      setReferences(data.references || []);
+    }
+  }
+
+  // Item 3: Genome download
+  async function downloadGenome() {
+    if (!genomeAccession.trim() || !genomeOutputDir.trim()) {
+      setGenomeDownloadStatus("Accession and output directory are required.");
+      return;
+    }
+    setGenomeDownloadStatus("Starting download...");
+    const res = await fetch(`${API_BASE}/api/references/download`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accession: genomeAccession.trim(), output_dir: genomeOutputDir.trim() })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      setGenomeDownloadStatus(`Error: ${data.detail || "Download failed"}`);
+      return;
+    }
+    const data = await res.json();
+    setGenomeJobId(data.job_id);
+    setGenomeDownloadStatus(`Downloading ${data.accession}...`);
+    setJobId(data.job_id);
+  }
+
+  // Item 6: Reference Editor
+  async function loadRefEditorFiles(refName) {
+    if (!refName) {
+      setRefEditorFiles([]);
+      setRefEditorPath("");
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/files`);
+    if (res.ok) {
+      const data = await res.json();
+      setRefEditorFiles(data.files || []);
+      setRefEditorPath(data.ref_path || "");
+    }
+  }
+
+  async function openRefFile(refName, filename) {
+    await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/open-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename })
+    });
+  }
+
+  async function createRefFile(refName, fileType) {
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/create-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_type: fileType })
+    });
+    if (res.ok) {
+      await loadRefEditorFiles(refName);
+    } else {
+      const data = await res.json();
+      window.alert(data.detail || "Failed to create file");
+    }
   }
 
   async function loadAll() {
@@ -220,6 +356,19 @@ export default function App() {
       if (line.startsWith("[job:")) {
         const status = line.replace("[job:", "").replace("]", "");
         setJobStatus(status);
+        // Update SRA status if this was an SRA job
+        if (sraJobId && jobId === sraJobId) {
+          setSraStatus(status === "succeeded" ? "Download complete" : `Download ${status}`);
+        }
+        // Update genome download status if this was a genome download job
+        if (genomeJobId && jobId === genomeJobId) {
+          if (status === "succeeded") {
+            setGenomeDownloadStatus("Download complete. Refreshing references...");
+            loadAll();
+          } else {
+            setGenomeDownloadStatus(`Download ${status}`);
+          }
+        }
         es.close();
         return;
       }
@@ -578,6 +727,8 @@ export default function App() {
     if (!selectedProject || !settingsReady) return;
     const accessions = parseAccessions(sraText);
     if (!accessions.length) return;
+    setSraStatus(`Downloading ${accessions.length} accession${accessions.length > 1 ? "s" : ""}...`);
+    setShowRowLogs(true);
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/sra/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -585,6 +736,7 @@ export default function App() {
     });
     const data = await res.json();
     setJobId(data.job_id);
+    setSraJobId(data.job_id);
   }
 
   async function importVcfs() {
@@ -668,7 +820,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: refValue, debug: debugMode })
+      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap })
     });
     const data = await res.json();
     setJobId(data.job_id);
@@ -707,7 +859,21 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: reference || null })
+      body: JSON.stringify({
+        reference: reference || null,
+        no_filters: s2NoFilters,
+        qual_threshold: s2QualThreshold,
+        n_threshold: s2NThreshold,
+        mq_threshold: s2MqThreshold,
+        all_vcf: s2AllVcf,
+        find_new_filters: s2FindNewFilters,
+        hash_groups: s2HashGroups,
+        show_groups: s2ShowGroups,
+        html_tree: s2HtmlTree,
+        dp: s2Dp,
+        density_threshold: s2DensityThreshold !== "" ? parseInt(s2DensityThreshold, 10) : null,
+        density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null
+      })
     });
     if (!res.ok) {
       const msg = await res.json();
@@ -1429,10 +1595,128 @@ export default function App() {
                   onChange={(e) => setSraFolder(e.target.value)}
                 />
                 <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
+                {sraStatus ? (
+                  <div className="note">
+                    {sraStatus.includes("Downloading") ? (
+                      <span className="pulse-dot" />
+                    ) : null}
+                    {sraStatus}
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
         </div>
+        ) : null}
+
+        <div className="row-header">
+          <h2>Reference Editor</h2>
+          <button className="ghost" onClick={() => setShowRowRefEditor(!showRowRefEditor)}>
+            {showRowRefEditor ? "Hide" : "Show"}
+          </button>
+        </div>
+
+        {showRowRefEditor ? (
+          <div className="row-grid row-grid-split">
+            <section className="panel">
+              <h2>Reference Selection</h2>
+              <div className="block">
+                <h3>Reference Type</h3>
+                <select
+                  value={refEditorRef}
+                  onChange={(e) => {
+                    setRefEditorRef(e.target.value);
+                    loadRefEditorFiles(e.target.value);
+                  }}
+                >
+                  <option value="">Choose a reference...</option>
+                  {references.map((r) => (
+                    <option key={r.name} value={r.name}>{r.name}</option>
+                  ))}
+                </select>
+                {refEditorPath ? (
+                  <div className="note" style={{wordBreak:"break-all", marginTop:"0.5em"}}>
+                    Directory: {refEditorPath}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+            <section className="panel">
+              <h2>Edit Filter / Exclusion Spreadsheets</h2>
+              {refEditorRef ? (
+                <div className="block">
+                  {(() => {
+                    const hasDefine = refEditorFiles.some((f) => f.type === "define_filter");
+                    const hasRemove = refEditorFiles.some((f) => f.type === "remove_from_analysis");
+                    const defineFile = refEditorFiles.find((f) => f.type === "define_filter");
+                    const removeFile = refEditorFiles.find((f) => f.type === "remove_from_analysis");
+                    return (
+                      <>
+                        <div className="ref-editor-card">
+                          <h3>Define Filter</h3>
+                          <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.4em"}}>
+                            Controls which positions are included in the SNP analysis.
+                          </div>
+                          {hasDefine && defineFile ? (
+                            <div className="ref-editor-file-row">
+                              <span className="ref-editor-filename">{defineFile.name}</span>
+                              <button onClick={() => openRefFile(refEditorRef, defineFile.name)}>
+                                Edit in Spreadsheet App
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="ref-editor-file-row">
+                              <span className="muted">No define_filter file found</span>
+                              <button onClick={() => createRefFile(refEditorRef, "define_filter")}>
+                                Create from Template
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="ref-editor-card">
+                          <h3>Remove from Analysis</h3>
+                          <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.4em"}}>
+                            Lists samples or regions to exclude from the analysis.
+                          </div>
+                          {hasRemove && removeFile ? (
+                            <div className="ref-editor-file-row">
+                              <span className="ref-editor-filename">{removeFile.name}</span>
+                              <button onClick={() => openRefFile(refEditorRef, removeFile.name)}>
+                                Edit in Spreadsheet App
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="ref-editor-file-row">
+                              <span className="muted">No remove_from_analysis file found</span>
+                              <button onClick={() => createRefFile(refEditorRef, "remove_from_analysis")}>
+                                Create from Template
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="note" style={{marginTop:"0.8em"}}>
+                          Clicking "Edit in Spreadsheet App" opens the .xlsx file in your default spreadsheet application (e.g. Excel, LibreOffice). Save and close the file before running Step 2.
+                        </div>
+                        <button
+                          className="ghost action"
+                          style={{marginTop:"0.4em"}}
+                          onClick={() => loadRefEditorFiles(refEditorRef)}
+                        >
+                          Refresh file list
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <div className="block">
+                  <div className="note">Select a reference type on the left to edit its filter and exclusion spreadsheets.</div>
+                </div>
+              )}
+            </section>
+          </div>
         ) : null}
 
         <div className="row-header">
@@ -1473,6 +1757,60 @@ export default function App() {
                   </span>
                 </div>
               ) : null}
+              <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
+                <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Reference Locations</summary>
+                <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
+                  {refPaths.length ? refPaths.map((p, i) => (
+                    <div key={i} className="ref-path-item" style={{display:"flex", alignItems:"center", gap:"0.3em", marginBottom:"0.2em"}}>
+                      <span className="muted" style={{wordBreak:"break-all", flex:1}}>{p}</span>
+                      <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
+                    </div>
+                  )) : <div className="muted">No custom reference paths configured.</div>}
+                  {canPickPath ? (
+                    <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
+                      Add Location
+                    </button>
+                  ) : null}
+                </div>
+              </details>
+              <details open={showGenomeDownload} onToggle={(e) => setShowGenomeDownload(e.target.open)}>
+                <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Download New Reference</summary>
+                <div style={{fontSize:"0.85em", marginTop:"0.3em"}}>
+                  <input
+                    placeholder="GenBank accession (e.g. AF2122/97)"
+                    value={genomeAccession}
+                    onChange={(e) => setGenomeAccession(e.target.value)}
+                    style={{width:"100%", marginBottom:"0.3em"}}
+                  />
+                  <div className="row" style={{gap:"0.3em", alignItems:"center"}}>
+                    <input
+                      placeholder="Output directory"
+                      value={genomeOutputDir}
+                      readOnly={canPickPath}
+                      onChange={(e) => setGenomeOutputDir(e.target.value)}
+                      style={{flex:1}}
+                    />
+                    {canPickPath ? (
+                      <button className="ghost action" style={{fontSize:"0.85em"}} onClick={() => pickPath("directory", "Select output folder", "", (dir) => setGenomeOutputDir(dir))}>
+                        Browse
+                      </button>
+                    ) : null}
+                  </div>
+                  <button
+                    onClick={downloadGenome}
+                    disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady}
+                    style={{marginTop:"0.3em"}}
+                  >
+                    Download
+                  </button>
+                  {genomeDownloadStatus ? (
+                    <div className="note" style={{marginTop:"0.3em"}}>
+                      {genomeDownloadStatus.includes("Downloading") ? <span className="pulse-dot" /> : null}
+                      {genomeDownloadStatus}
+                    </div>
+                  ) : null}
+                </div>
+              </details>
             </div>
             <div className="block">
               <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
@@ -1484,6 +1822,14 @@ export default function App() {
                   onChange={(e) => setDebugMode(e.target.checked)}
                 />
                 Debug (keep intermediates, skip cleanup)
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={assembleUnmap}
+                  onChange={(e) => setAssembleUnmap(e.target.checked)}
+                />
+                Assemble unmapped reads
               </label>
             </div>
             <div className="step1-status">
@@ -1912,20 +2258,47 @@ export default function App() {
             {step2Mode === "custom" ? (
               <div className="block">
                 <h3>
-                  VCF Sources (Step 2)
+                  VCF Databases (Step 2)
                   <span
                     className="help-icon"
-                    data-tooltip="Paste one or more folders (one per line). All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Use the same reference across all sources."
+                    data-tooltip="Select the reference type, then add one or more VCF database folders. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz."
                   >
                     ?
                   </span>
                 </h3>
+                <select
+                  value={importReference}
+                  onChange={(e) => setImportReference(e.target.value)}
+                >
+                  <option value="">Select reference</option>
+                  {references.map((r) => (
+                    <option key={r.name} value={r.name}>{r.name}</option>
+                  ))}
+                </select>
                 <textarea
                   placeholder="/path/to/step2/vcf_database (one per line, searched recursively)"
                   value={importSourcesText}
                   onChange={(e) => setImportSourcesText(e.target.value)}
                   rows={4}
                 />
+                {parseAccessions(importSourcesText).length > 0 ? (
+                  <div className="folder-chips">
+                    {parseAccessions(importSourcesText).map((p, i) => (
+                      <span key={i} className="chip">
+                        {p.split("/").pop() || p}
+                        <button
+                          className="chip-remove"
+                          onClick={() => {
+                            const lines = parseAccessions(importSourcesText).filter((_, j) => j !== i);
+                            setImportSourcesText(lines.join("\n"));
+                          }}
+                        >
+                          x
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="row">
                   <select
                     value={importPreset}
@@ -1978,12 +2351,14 @@ export default function App() {
                   <button
                     className="ghost action"
                     onClick={() =>
-                      pickPath(
+                      pickMultiPaths(
                         "directory",
-                        "Select Step 2 VCF database",
-                        "",
-                        (value) =>
-                          setImportSourcesText((prev) => (prev ? `${prev}\n${value}` : value))
+                        "Select Step 2 VCF database folder(s)",
+                        (paths) =>
+                          setImportSourcesText((prev) => {
+                            const joined = paths.join("\n");
+                            return prev ? `${prev}\n${joined}` : joined;
+                          })
                       )
                     }
                   >
@@ -2030,15 +2405,6 @@ export default function App() {
                   />
                   Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
                 </label>
-                <select
-                  value={importReference}
-                  onChange={(e) => setImportReference(e.target.value)}
-                >
-                  <option value="">Select reference</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
-                </select>
                 <div className="row">
                   <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
                     <option value="copy">Copy files</option>
@@ -2106,6 +2472,69 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            <details className="step2-options-panel">
+              <summary style={{cursor:"pointer", fontWeight:500, fontSize:"0.9em"}}>Step 2 Options</summary>
+              <div className="step2-options-grid">
+                <div className="step2-options-col">
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2AllVcf} onChange={(e) => setS2AllVcf(e.target.checked)} />
+                    All VCF table (-a)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2NoFilters} onChange={(e) => setS2NoFilters(e.target.checked)} />
+                    No filters (-n)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2FindNewFilters} onChange={(e) => setS2FindNewFilters(e.target.checked)} />
+                    Find new filters (-i)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2HashGroups} onChange={(e) => setS2HashGroups(e.target.checked)} />
+                    Hash groups (-hash)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2ShowGroups} onChange={(e) => setS2ShowGroups(e.target.checked)} />
+                    Show groups in table (--show_groups)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2HtmlTree} onChange={(e) => setS2HtmlTree(e.target.checked)} />
+                    HTML tree (-html_tree)
+                  </label>
+                  <label className="checkbox">
+                    <input type="checkbox" checked={s2Dp} onChange={(e) => setS2Dp(e.target.checked)} />
+                    Avg depth in tables (-dp)
+                  </label>
+                </div>
+                <div className="step2-options-col">
+                  <label className="option-field">
+                    <span>QUAL threshold (-w)</span>
+                    <input type="number" value={s2QualThreshold} onChange={(e) => setS2QualThreshold(parseInt(e.target.value, 10) || 0)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>default: 150</span>
+                  </label>
+                  <label className="option-field">
+                    <span>N threshold (-x)</span>
+                    <input type="number" value={s2NThreshold} onChange={(e) => setS2NThreshold(parseInt(e.target.value, 10) || 0)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>default: 50</span>
+                  </label>
+                  <label className="option-field">
+                    <span>MQ threshold (-y)</span>
+                    <input type="number" value={s2MqThreshold} onChange={(e) => setS2MqThreshold(parseInt(e.target.value, 10) || 0)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>default: 56</span>
+                  </label>
+                  <label className="option-field">
+                    <span>Density threshold</span>
+                    <input type="number" value={s2DensityThreshold} placeholder="3" onChange={(e) => setS2DensityThreshold(e.target.value)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>default: 3</span>
+                  </label>
+                  <label className="option-field">
+                    <span>Density window (bp)</span>
+                    <input type="number" value={s2DensityWindow} placeholder="20" onChange={(e) => setS2DensityWindow(e.target.value)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>default: 20</span>
+                  </label>
+                </div>
+              </div>
+            </details>
 
             <div className="block">
               {step2Mode === "step1" ? (

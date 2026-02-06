@@ -19,7 +19,7 @@ import logging
 from app.config import load_config, save_config
 from app.jobs import JobManager
 from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project, update_project_meta
-from app.refs import list_references
+from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
 from app.sra import expand_accessions, build_download_script
 
 app = FastAPI(title="vSNP GUI API")
@@ -115,10 +115,23 @@ class ImportVcfRequest(BaseModel):
 class Step1Request(BaseModel):
     reference: Optional[str] = None
     debug: bool = False
+    assemble_unmap: bool = False
 
 
 class Step2Request(BaseModel):
     reference: Optional[str] = None
+    no_filters: bool = False
+    qual_threshold: Optional[int] = 150
+    n_threshold: Optional[int] = 50
+    mq_threshold: Optional[int] = 56
+    all_vcf: bool = True
+    find_new_filters: bool = False
+    hash_groups: bool = False
+    show_groups: bool = False
+    html_tree: bool = False
+    dp: bool = False
+    density_threshold: Optional[int] = None
+    density_window: Optional[int] = None
 
 
 class PosthocScanRequest(BaseModel):
@@ -182,11 +195,170 @@ def update_config(update: ConfigUpdate):
     return cfg
 
 
+class RefPathRequest(BaseModel):
+    path: str
+
+
+class RefDownloadRequest(BaseModel):
+    accession: str
+    output_dir: str
+
+
+class RefOpenFileRequest(BaseModel):
+    filename: str
+
+
 @app.get("/api/references")
 def references():
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
     return list_references(vsnp3_path)
+
+
+@app.get("/api/references/paths")
+def ref_paths():
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    return {"paths": get_reference_paths(vsnp3_path)}
+
+
+@app.post("/api/references/paths")
+def ref_path_add(payload: RefPathRequest):
+    p = Path(payload.path).expanduser().resolve()
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Directory not found: {p}")
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    updated = add_reference_path(vsnp3_path, str(p))
+    refs = list_references(vsnp3_path)
+    return {"paths": updated, "references": refs}
+
+
+@app.delete("/api/references/paths")
+def ref_path_remove(payload: RefPathRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    updated = remove_reference_path(vsnp3_path, payload.path)
+    refs = list_references(vsnp3_path)
+    return {"paths": updated, "references": refs}
+
+
+@app.post("/api/references/download")
+def ref_download(payload: RefDownloadRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    accession = payload.accession.strip()
+    if not accession:
+        raise HTTPException(status_code=400, detail="Accession is required")
+    output_dir = Path(payload.output_dir).expanduser().resolve()
+    if not output_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Output directory not found: {output_dir}")
+    acc_dir = output_dir / accession
+    acc_dir.mkdir(parents=True, exist_ok=True)
+    # Build script: download then copy templates
+    template_dir = vsnp3_path / "dependencies"
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        f"cd \"{acc_dir}\"",
+        f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {accession} -fbg",
+    ]
+    for tpl in ["template_define_filter.xlsx", "template_remove_from_analysis.xlsx"]:
+        src = template_dir / tpl
+        dest_name = tpl.replace("template_", f"{accession}_")
+        dest = acc_dir / dest_name
+        lines.append(f"if [ -f \"{src}\" ] && [ ! -f \"{dest}\" ]; then cp \"{src}\" \"{dest}\"; fi")
+    script_content = "\n".join(lines) + "\n"
+    script_path = acc_dir / "download_ref.sh"
+    script_path.write_text(script_content, encoding="utf-8")
+    script_path.chmod(0o755)
+    # Add parent dir to reference paths
+    add_reference_path(vsnp3_path, str(output_dir))
+    job_id = job_manager.start_job(
+        name="ref_download",
+        command=wrap_cmd(cfg, f"bash {script_path}"),
+        cwd=acc_dir,
+        env=build_env(cfg)
+    )
+    return {"job_id": job_id, "accession": accession, "target_dir": str(acc_dir)}
+
+
+@app.get("/api/references/{ref_name}/files")
+def ref_files(ref_name: str):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    define_filter = list(ref_dir.glob("*define_filter*"))
+    remove_from = list(ref_dir.glob("*remove_from_analysis*"))
+    files = []
+    for f in define_filter:
+        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "define_filter"})
+    for f in remove_from:
+        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "remove_from_analysis"})
+    return {"ref_name": ref_name, "ref_path": str(ref_dir), "files": files}
+
+
+@app.post("/api/references/{ref_name}/open-file")
+def ref_open_file(ref_name: str, payload: RefOpenFileRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    target = (ref_dir / payload.filename).resolve()
+    if not str(target).startswith(str(ref_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    _open_path(target)
+    return {"opened": str(target)}
+
+
+class RefCreateFileRequest(BaseModel):
+    file_type: str  # "define_filter" or "remove_from_analysis"
+
+
+@app.post("/api/references/{ref_name}/create-file")
+def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    template_dir = vsnp3_path / "dependencies"
+    if payload.file_type == "define_filter":
+        template_name = "template_define_filter.xlsx"
+        dest_name = f"{ref_name}_define_filter.xlsx"
+    elif payload.file_type == "remove_from_analysis":
+        template_name = "template_remove_from_analysis.xlsx"
+        dest_name = f"{ref_name}_remove_from_analysis.xlsx"
+    else:
+        raise HTTPException(status_code=400, detail="file_type must be define_filter or remove_from_analysis")
+    dest = ref_dir / dest_name
+    if dest.exists():
+        raise HTTPException(status_code=400, detail=f"File already exists: {dest_name}")
+    template = template_dir / template_name
+    if template.exists():
+        shutil.copy2(template, dest)
+    else:
+        # Create an empty xlsx if no template exists
+        code = (
+            "import pandas as pd, sys; "
+            "pd.DataFrame().to_excel(sys.argv[1], index=False)"
+        )
+        cmd_list = conda_python_cmd(cfg, code, [str(dest)])
+        result = subprocess.run(cmd_list, text=True, capture_output=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Failed to create file: {result.stderr.strip()}")
+    return {"created": str(dest), "name": dest_name}
 
 
 @app.get("/api/projects")
@@ -477,6 +649,7 @@ def step1_run(project: str, payload: Step1Request):
     step1_dir = project_dir / "step1"
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
+    assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
@@ -526,7 +699,7 @@ def step1_run(project: str, payload: Step1Request):
             "    cd ..",
             "    return 0",
             "  fi",
-            f"  vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} >> \"$LOG\" 2>&1",
+            f"  vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} >> \"$LOG\" 2>&1",
             "  STATUS=$?",
             "  if [ \"$STATUS\" -eq 0 ]; then",
             "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
@@ -697,7 +870,34 @@ def step2_run(project: str, payload: Step2Request):
     remove_file = step2_dir / "remove_from_analysis.xlsx"
     remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
     _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
-    cmd = f"vsnp3_step2.py -wd {vcf_source_dir} -a -t {payload.reference}{remove_arg}"
+    # Build Step 2 command with options
+    step2_flags = []
+    if payload.all_vcf:
+        step2_flags.append("-a")
+    if payload.no_filters:
+        step2_flags.append("-n")
+    if payload.find_new_filters:
+        step2_flags.append("-i")
+    if payload.hash_groups:
+        step2_flags.append("-hash")
+    if payload.show_groups:
+        step2_flags.append("--show_groups")
+    if payload.html_tree:
+        step2_flags.append("-html_tree")
+    if payload.dp:
+        step2_flags.append("-dp")
+    if payload.qual_threshold is not None and payload.qual_threshold != 150:
+        step2_flags.append(f"-w {payload.qual_threshold}")
+    if payload.n_threshold is not None and payload.n_threshold != 50:
+        step2_flags.append(f"-x {payload.n_threshold}")
+    if payload.mq_threshold is not None and payload.mq_threshold != 56:
+        step2_flags.append(f"-y {payload.mq_threshold}")
+    if payload.density_threshold is not None:
+        step2_flags.append(f"--density_threshold {payload.density_threshold}")
+    if payload.density_window is not None:
+        step2_flags.append(f"--density_window {payload.density_window}")
+    flags_str = " ".join(step2_flags)
+    cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),

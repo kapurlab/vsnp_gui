@@ -1020,3 +1020,115 @@ button:hover:not(:disabled) {
     height: 50px;
   }
 }
+
+/* Folder chips for Step 2 VCF databases */
+.folder-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  margin: 0.3em 0;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  background: #e5e0d8;
+  color: #3c3028;
+  padding: 0.15em 0.5em;
+  border-radius: 1em;
+  font-size: 0.82em;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip-remove {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 0 0.2em;
+  font-size: 0.9em;
+  line-height: 1;
+}
+.chip-remove:hover {
+  color: #c0392b;
+}
+
+/* Pulsing dot for active downloads */
+.pulse-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #27ae60;
+  border-radius: 50%;
+  margin-right: 0.4em;
+  animation: pulse-anim 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+@keyframes pulse-anim {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+/* Reference Editor */
+.ref-editor-card {
+  background: #f6f2ec;
+  border: 1px solid #e5e0d8;
+  border-radius: 6px;
+  padding: 0.8em 1em;
+  margin-bottom: 0.6em;
+}
+.ref-editor-card h3 {
+  margin: 0 0 0.2em 0;
+  font-size: 0.95em;
+}
+.ref-editor-file-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  flex-wrap: wrap;
+}
+.ref-editor-filename {
+  font-family: monospace;
+  font-size: 0.85em;
+  color: #555;
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Step 2 options panel */
+.step2-options-panel {
+  background: #f6f2ec;
+  border: 1px solid #e5e0d8;
+  border-radius: 6px;
+  padding: 0.5em 0.8em;
+  margin-bottom: 0.5em;
+}
+.step2-options-panel[open] {
+  padding-bottom: 0.8em;
+}
+.step2-options-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.3em 1.5em;
+  margin-top: 0.5em;
+}
+.step2-options-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+.option-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.88em;
+  margin: 0.15em 0;
+}
+.option-field input[type="number"] {
+  width: 5em;
+  padding: 0.15em 0.3em;
+  font-size: 0.95em;
+}

@@ -32,12 +32,18 @@ ipcMain.handle("select-path", async (_event, opts = {}) => {
   } else {
     properties.push("openDirectory");
   }
+  if (opts.multiSelect) {
+    properties.push("multiSelections");
+  }
   const result = await dialog.showOpenDialog({
     title: opts.title || "Select",
     defaultPath: opts.defaultPath || undefined,
     properties
   });
   if (result.canceled) return null;
+  if (opts.multiSelect) {
+    return result.filePaths;
+  }
   return result.filePaths[0] || null;
 });
 

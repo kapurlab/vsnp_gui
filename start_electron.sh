@@ -2,12 +2,38 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONDA_BASE="/Users/vivekkapur/anaconda3"
 
-if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+# Auto-detect conda base
+CONDA_BASE=""
+if [ -n "${CONDA_EXE:-}" ]; then
+  CONDA_BASE="$(dirname "$(dirname "$CONDA_EXE")")"
+elif command -v conda >/dev/null 2>&1; then
+  CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+fi
+
+if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
   source "$CONDA_BASE/etc/profile.d/conda.sh"
   export PATH="$CONDA_BASE/bin:$PATH"
 fi
+
+# Print detected paths for easy copy/paste into Settings
+echo "================================================"
+echo "  vSNP GUI — Detected Paths"
+echo "================================================"
+echo "  GUI root:        $ROOT_DIR"
+if [ -n "$CONDA_BASE" ]; then
+  echo "  Conda base:      $CONDA_BASE"
+  VSNP_ENV="$CONDA_BASE/envs/vsnp3"
+  if [ -d "$VSNP_ENV" ]; then
+    echo "  Conda env path:  $VSNP_ENV"
+  else
+    echo "  Conda env path:  (vsnp3 env not found — set in Settings)"
+  fi
+else
+  echo "  Conda base:      (not detected — open a conda-enabled shell)"
+fi
+echo "================================================"
+echo ""
 
 if ! command -v conda >/dev/null 2>&1; then
   echo "Conda not found in PATH. Please open a conda-enabled shell." >&2

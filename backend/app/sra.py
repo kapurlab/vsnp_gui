@@ -64,21 +64,41 @@ ACCESSIONS=(
 {acc_block}
 )
 
+SRA_OK=0
 echo "== Attempt SRA Toolkit first =="
 if command -v prefetch >/dev/null 2>&1 && command -v fasterq-dump >/dev/null 2>&1; then
   for acc in "${{ACCESSIONS[@]}}"; do
+    # Skip if we already have gzipped reads for this accession
+    if ls "${{acc}}"*_1.fastq.gz "${{acc}}"*_R1*.fastq.gz 2>/dev/null | head -1 | grep -q .; then
+      echo "Already have reads for $acc, skipping"
+      continue
+    fi
     echo "Prefetch $acc"
     if prefetch "$acc"; then
-      echo "fasterq-dump $acc"
-      fasterq-dump --split-files "$acc" || true
+      echo "fasterq-dump --split-3 $acc"
+      if fasterq-dump --split-3 "$acc"; then
+        # fasterq-dump produces uncompressed .fastq — gzip them
+        for fq in "${{acc}}"*.fastq; do
+          if [ -f "$fq" ]; then
+            echo "Compressing $fq"
+            gzip "$fq"
+          fi
+        done
+        SRA_OK=1
+      fi
     fi
   done
 else
   echo "SRA toolkit not available, skipping"
 fi
 
-echo "== ENA fallback =="
+echo "== ENA fallback for any missing accessions =="
 for acc in "${{ACCESSIONS[@]}}"; do
+  # Skip if we already have reads (from SRA toolkit or prior download)
+  if ls "${{acc}}"*.fastq.gz 2>/dev/null | head -1 | grep -q .; then
+    echo "Already have reads for $acc, skipping ENA"
+    continue
+  fi
   echo "Fetching ENA URLs for $acc"
   URLS=$(curl -s {curl_insecure} "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=$acc&result=read_run&fields=fastq_ftp" | tail -n1 | cut -f2)
   if [ -n "$URLS" ] && [ "$URLS" != "fastq_ftp" ]; then
@@ -94,10 +114,20 @@ for acc in "${{ACCESSIONS[@]}}"; do
   else
     echo "ENA did not return URLs for $acc"
   fi
-
 done
 
+# Compress any remaining uncompressed .fastq files
+for fq in *.fastq; do
+  if [ -f "$fq" ]; then
+    echo "Compressing $fq"
+    gzip "$fq"
+  fi
+done
+
+echo "== Summary =="
 if ls *.fastq.gz >/dev/null 2>&1; then
   echo "Downloaded FASTQ.GZ files:"; ls -lh *.fastq.gz
+else
+  echo "WARNING: No .fastq.gz files found after download"
 fi
 """

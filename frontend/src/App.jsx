@@ -206,9 +206,9 @@ export default function App() {
   }, [selectedProject]);
 
   useEffect(() => {
-    if (!settings.conda_env) return;
+    if (!settings.conda_env && !settings.conda_env_path) return;
     runPreflight();
-  }, [settings.conda_env]);
+  }, [settings.conda_env, settings.conda_env_path]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -1265,8 +1265,8 @@ export default function App() {
                 </div>
                 <div className="checklist-item">
                   <span className="check-title">Conda env</span>
-                  <span className={settings.conda_env ? "ok" : "warn"}>
-                    {settings.conda_env || "Missing"}
+                  <span className={(settings.conda_env || settings.conda_env_path) ? "ok" : "warn"}>
+                    {settings.conda_env || settings.conda_env_path || "Missing"}
                   </span>
                 </div>
                 <div className="checklist-item">

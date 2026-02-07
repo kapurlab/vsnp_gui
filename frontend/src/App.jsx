@@ -87,6 +87,7 @@ export default function App() {
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
+  const [step1AutoRefreshPending, setStep1AutoRefreshPending] = useState(false);
   const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
   const [importReference, setImportReference] = useState("");
@@ -101,14 +102,16 @@ export default function App() {
   const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
+  const [vcfDbFolders, setVcfDbFolders] = useState([]);
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
+  const [pathValidation, setPathValidation] = useState({});
   const [showSetup, setShowSetup] = useState(true);
   const [showRowProjects, setShowRowProjects] = useState(true);
   const [showRowStep1, setShowRowStep1] = useState(true);
   const [showRowStep2, setShowRowStep2] = useState(true);
   const [showRowLogs, setShowRowLogs] = useState(true);
-  const [showRowRefEditor, setShowRowRefEditor] = useState(false);
+  const [showRowRefEditor, setShowRowRefEditor] = useState(true);
   // Item 2: Reference path management
   const [refPaths, setRefPaths] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
@@ -221,17 +224,63 @@ export default function App() {
     }
   }
 
+  // VCF DB folder management
+  async function loadVcfDbFolders() {
+    const res = await fetch(`${API_BASE}/api/vcf-db-folders`);
+    if (res.ok) {
+      const data = await res.json();
+      setVcfDbFolders(data || []);
+    }
+  }
+
+  async function addVcfDbFolder(path) {
+    const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "add", path })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setVcfDbFolders(data || []);
+    }
+  }
+
+  async function removeVcfDbFolder(index) {
+    const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "remove", index })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setVcfDbFolders(data || []);
+    }
+  }
+
+  async function toggleVcfDbFolder(index) {
+    const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "toggle", index })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setVcfDbFolders(data || []);
+    }
+  }
+
   // Item 3: Genome download
   async function downloadGenome() {
     if (!genomeAccession.trim() || !genomeOutputDir.trim()) {
       setGenomeDownloadStatus("Accession and output directory are required.");
       return;
     }
+    const finalDir = genomeOutputDir.trim();
     setGenomeDownloadStatus("Starting download...");
     const res = await fetch(`${API_BASE}/api/references/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accession: genomeAccession.trim(), output_dir: genomeOutputDir.trim() })
+      body: JSON.stringify({ accession: genomeAccession.trim(), output_dir: finalDir })
     });
     if (!res.ok) {
       const data = await res.json();
@@ -282,14 +331,16 @@ export default function App() {
   }
 
   async function loadAll() {
-    const [cfg, proj, refs] = await Promise.all([
+    const [cfg, proj, refs, dbFolders] = await Promise.all([
       fetch(`${API_BASE}/api/config`).then((r) => r.json()),
       fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/references`).then((r) => r.json())
+      fetch(`${API_BASE}/api/references`).then((r) => r.json()),
+      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => [])
     ]);
     setConfig(cfg);
     setProjects(proj);
     setReferences(refs);
+    setVcfDbFolders(dbFolders || []);
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
@@ -298,6 +349,9 @@ export default function App() {
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
     });
+    if (cfg._validation) {
+      setPathValidation(cfg._validation);
+    }
     if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
       setSelectedProject("");
     }
@@ -358,7 +412,7 @@ export default function App() {
         if (genomeJobId && jobId === genomeJobId) {
           if (status === "succeeded") {
             setGenomeDownloadStatus("Download complete. Refreshing references...");
-            loadAll();
+            loadAll().then(() => setGenomeDownloadStatus("Download complete."));
           } else {
             setGenomeDownloadStatus(`Download ${status}`);
           }
@@ -408,6 +462,14 @@ export default function App() {
       loadStep1Status();
     }
   }, [jobStatus, selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject || !settingsReady) return;
+    if (!step1AutoRefreshPending) return;
+    if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
+    loadQC();
+    setStep1AutoRefreshPending(false);
+  }, [jobStatus, selectedProject, step1AutoRefreshPending]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -732,7 +794,13 @@ export default function App() {
 
   async function importVcfs() {
     if (!selectedProject || !settingsReady) return;
-    const sources = parseAccessions(importSourcesText);
+    // Auto-populate from enabled vcfDbFolders
+    const enabledPaths = vcfDbFolders.filter((f) => f.enabled).map((f) => f.path);
+    const manualPaths = parseAccessions(importSourcesText);
+    const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
+    const sourcesText = allPaths.join("\n");
+    setImportSourcesText(sourcesText);
+    const sources = allPaths;
     if (!sources.length && !importIncludeStep1) {
       setImportStatus("Provide at least one source path or include Step 1.");
       return;
@@ -815,6 +883,7 @@ export default function App() {
     });
     const data = await res.json();
     setJobId(data.job_id);
+    setStep1AutoRefreshPending(true);
     await loadStep1Status();
   }
 
@@ -949,8 +1018,7 @@ export default function App() {
     if (res.ok) {
       const payload = await res.json();
       if (!payload.igv_commands_sent) {
-        const detail = payload.igv_error ? ` (${payload.igv_error})` : "";
-        window.alert(`IGV command server did not accept commands${detail}.`);
+        window.alert("IGV command server did not accept commands. Make sure IGV is running and port 60151 is enabled (View > Preferences > Advanced > Enable port).");
       }
     }
   }
@@ -1143,8 +1211,7 @@ export default function App() {
     if (res.ok) {
       const payload = await res.json();
       if (!payload.igv_commands_sent) {
-        const detail = payload.igv_error ? ` (${payload.igv_error})` : "";
-        window.alert(`IGV command server did not accept commands${detail}.`);
+        window.alert("IGV command server did not accept commands. Make sure IGV is running and port 60151 is enabled (View > Preferences > Advanced > Enable port).");
       }
     }
   }
@@ -1210,88 +1277,74 @@ export default function App() {
         </div>
 
         {showSetup ? (
-          <div className="row-grid">
+          <div className="row-grid" style={{gridTemplateColumns: "1fr"}}>
             <section className="panel">
             <div className="panel-header">
               <h2>Settings</h2>
-              <div className="panel-actions">
-                <button className="ghost action" onClick={runBootstrap} title="Run setup assistant">Setup</button>
-                <button className="ghost action" onClick={runPreflight} title="Run preflight">Preflight</button>
-                <button className="ghost action-primary" onClick={saveSettings} title="Save settings">Save</button>
-              </div>
             </div>
-            <div className="settings-grid">
+            <div className="input-columns">
+              <div className="input-column">
+                <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Required</label>
                 <div className="settings-row">
                   <label className="label">vSNP3 path</label>
                   <input
-                    placeholder="/Users/vivekkapur/vsnp3"
+                    placeholder="/path/to/vsnp3"
                     value={settings.vsnp3_path}
                     onChange={(e) => setSettings({ ...settings, vsnp3_path: e.target.value })}
                   />
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "directory",
-                          "Select vSNP3 folder",
-                          settings.vsnp3_path,
-                          (value) => setSettings({ ...settings, vsnp3_path: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath(
+                            "directory",
+                            "Select vSNP3 folder",
+                            settings.vsnp3_path,
+                            (value) => setSettings({ ...settings, vsnp3_path: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
+                    ) : null}
+                    {pathValidation.vsnp3_path === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    )}
+                  </span>
                 </div>
                 <div className="settings-row">
                   <label className="label">Projects root</label>
                   <input
-                    placeholder="/Users/vivekkapur/vsnp3/projects"
+                    placeholder="/path/to/projects"
                     value={settings.projects_root}
                     onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
                   />
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "directory",
-                          "Select projects root",
-                          settings.projects_root,
-                          (value) => setSettings({ ...settings, projects_root: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath(
+                            "directory",
+                            "Select projects root",
+                            settings.projects_root,
+                            (value) => setSettings({ ...settings, projects_root: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
+                    ) : null}
+                    {pathValidation.projects_root === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    )}
+                  </span>
                 </div>
-                <div className="settings-row">
-                  <label className="label">IGV app (optional)</label>
-                  <input
-                    placeholder="/Applications/IGV_2.14.0.app"
-                    value={settings.igv_app_path}
-                    onChange={(e) => setSettings({ ...settings, igv_app_path: e.target.value })}
-                  />
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "file",
-                          "Select IGV app",
-                          settings.igv_app_path,
-                          (value) => setSettings({ ...settings, igv_app_path: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              <div className="block">
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -1300,99 +1353,87 @@ export default function App() {
                       setSettings({ ...settings, sra_allow_insecure_https: e.target.checked })
                     }
                   />
-                  Allow insecure HTTPS fallback for ENA
+                  Allow insecure HTTPS for ENA
                 </label>
-                <label className="label">bcftools path (for VCF edits)</label>
-                <div className="inline-fields">
+              </div>
+              <div className="input-column">
+                <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Optional</label>
+                <div className="settings-row">
+                  <label className="label">IGV app</label>
+                  <input
+                    placeholder="/Applications/IGV.app"
+                    value={settings.igv_app_path}
+                    onChange={(e) => setSettings({ ...settings, igv_app_path: e.target.value })}
+                  />
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath(
+                            "file",
+                            "Select IGV app",
+                            settings.igv_app_path,
+                            (value) => setSettings({ ...settings, igv_app_path: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
+                    ) : null}
+                    {pathValidation.igv_app_path === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : pathValidation.igv_app_path === false ? (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="settings-row">
+                  <label className="label">bcftools</label>
                   <input
                     placeholder="/path/to/bcftools"
                     value={settings.bcftools_path}
                     onChange={(e) => setSettings({ ...settings, bcftools_path: e.target.value })}
                   />
-                  {canPickPath ? (
-                    <button
-                      className="ghost"
-                      onClick={() =>
-                        pickPath("file", "Select bcftools", settings.bcftools_path, (value) =>
-                          setSettings({ ...settings, bcftools_path: value })
-                        )
-                      }
-                    >
-                      Choose
-                    </button>
-                  ) : null}
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath("file", "Select bcftools", settings.bcftools_path, (value) =>
+                            setSettings({ ...settings, bcftools_path: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
+                    ) : null}
+                    {pathValidation.bcftools_path === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : pathValidation.bcftools_path === false ? (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    ) : null}
+                  </span>
                 </div>
-                <label className="label">Step 1 max parallel</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="8"
-                  value={settings.step1_max_parallel}
-                  onChange={(e) =>
-                    setSettings({ ...settings, step1_max_parallel: Number(e.target.value) || 1 })
-                  }
-                />
-              </div>
-              <div className="block">
-                {preflightError ? (
-                  <div className="note error">{preflightError}</div>
-                ) : null}
-                {preflight ? (
-                  <div className="note">
-                    Checked: {preflight.checked.join(", ")} | Missing:{" "}
-                    {preflight.missing.length ? preflight.missing.join(", ") : "none"}
-                  </div>
-                ) : null}
-              </div>
-            </section>
-
-            <section className="panel checklist">
-            <div className="panel-header">
-              <h2>Start-Up Checklist</h2>
-              <div className="panel-actions">
-                <button className="ghost" onClick={runPreflight} title="Run preflight">Preflight</button>
+                <div className="settings-row">
+                  <label className="label">Max parallel</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="8"
+                    style={{width:"60px"}}
+                    value={settings.step1_max_parallel}
+                    onChange={(e) =>
+                      setSettings({ ...settings, step1_max_parallel: Number(e.target.value) || 1 })
+                    }
+                  />
+                  <span />
+                </div>
               </div>
             </div>
-            <div className="checklist-body">
-                <div className="checklist-item">
-                  <span className="check-title">Set vSNP3 path</span>
-                  <span className={settings.vsnp3_path ? "ok" : "warn"}>
-                    {settings.vsnp3_path || "Missing"}
-                  </span>
-                </div>
-                <div className="checklist-item">
-                  <span className="check-title">Set projects root</span>
-                  <span className={settings.projects_root ? "ok" : "warn"}>
-                    {settings.projects_root || "Missing"}
-                  </span>
-                </div>
-                <div className="checklist-item">
-                  <span className="check-title">Preflight</span>
-                  {preflightError ? (
-                    <span className="warn">{preflightError}</span>
-                  ) : preflight ? (
-                    <span className={preflight.missing.length || preflight.issues?.length ? "warn" : "ok"}>
-                      {preflight.missing.length
-                        ? `Missing: ${preflight.missing.join(", ")}`
-                        : "All good"}
-                    </span>
-                  ) : (
-                    <span className="muted">Not run</span>
-                  )}
-                </div>
-                <div className="checklist-item">
-                  <span className="check-title">bcftools</span>
-                  <span className={settings.bcftools_path ? "ok" : "warn"}>
-                    {settings.bcftools_path ? "Configured" : "Missing"}
-                  </span>
-                </div>
-                {preflight?.missing?.length ? (
-                  <div className="note error">
-                    Install missing deps with:
-                    <div className="code-line">conda install pandas biopython</div>
-                  </div>
-                ) : null}
-              </div>
+            <div style={{display:"flex", justifyContent:"flex-end", marginTop:"12px"}}>
+              <button onClick={saveSettings} title="Save settings">Save</button>
+            </div>
             </section>
           </div>
         ) : null}
@@ -1527,7 +1568,7 @@ export default function App() {
                 />
                 <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
                 {sraStatus ? (
-                  <div className="note">
+                  <div className={`note${sraStatus.toLowerCase().includes("fail") ? " error" : ""}`}>
                     {sraStatus.includes("Downloading") ? (
                       <span className="pulse-dot" />
                     ) : null}
@@ -1551,6 +1592,62 @@ export default function App() {
           <div className="row-grid row-grid-split">
             <section className="panel">
               <h2>Reference Selection</h2>
+              <div className="block">
+                <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
+                  <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em"}}>Reference Locations</summary>
+                  <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
+                    {refPaths.length ? refPaths.map((p, i) => (
+                      <div key={i} className="ref-path-item" style={{display:"flex", alignItems:"center", gap:"0.3em", marginBottom:"0.2em"}}>
+                        <span className="muted" style={{wordBreak:"break-all", flex:1}}>{p}</span>
+                        <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
+                      </div>
+                    )) : <div className="muted">No custom reference paths configured.</div>}
+                    {canPickPath ? (
+                      <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
+                        Add Location
+                      </button>
+                    ) : null}
+                  </div>
+                </details>
+                <details open={showGenomeDownload} onToggle={(e) => setShowGenomeDownload(e.target.open)}>
+                  <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Download New Reference</summary>
+                  <div style={{fontSize:"0.85em", marginTop:"0.3em"}}>
+                    <input
+                      placeholder="GenBank accession (e.g. AF2122/97)"
+                      value={genomeAccession}
+                      onChange={(e) => setGenomeAccession(e.target.value)}
+                      style={{width:"100%", marginBottom:"0.3em"}}
+                    />
+                    <div className="row" style={{gap:"0.3em", alignItems:"center"}}>
+                      <input
+                        placeholder="Output directory"
+                        value={genomeOutputDir}
+                        readOnly={canPickPath}
+                        onChange={(e) => setGenomeOutputDir(e.target.value)}
+                        style={{flex:1}}
+                      />
+                      {canPickPath ? (
+                        <button className="ghost action" style={{fontSize:"0.85em"}} onClick={() => pickPath("directory", "Select output folder", "", (dir) => setGenomeOutputDir(dir))}>
+                          Browse
+                        </button>
+                      ) : null}
+                    </div>
+                    <button
+                      onClick={downloadGenome}
+                      disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady}
+                      style={{marginTop:"0.3em"}}
+                    >
+                      Download
+                    </button>
+                    {genomeDownloadStatus ? (
+                      <div className="note" style={{marginTop:"0.3em"}}>
+                        {genomeDownloadStatus.includes("Downloading") ? <span className="pulse-dot" /> : null}
+                        {genomeDownloadStatus}
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
+              </div>
               <div className="block">
                 <h3>Reference Type</h3>
                 <select
@@ -1688,64 +1785,8 @@ export default function App() {
                   </span>
                 </div>
               ) : null}
-              <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
-                <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Reference Locations</summary>
-                <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
-                  {refPaths.length ? refPaths.map((p, i) => (
-                    <div key={i} className="ref-path-item" style={{display:"flex", alignItems:"center", gap:"0.3em", marginBottom:"0.2em"}}>
-                      <span className="muted" style={{wordBreak:"break-all", flex:1}}>{p}</span>
-                      <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
-                    </div>
-                  )) : <div className="muted">No custom reference paths configured.</div>}
-                  {canPickPath ? (
-                    <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
-                      Add Location
-                    </button>
-                  ) : null}
-                </div>
-              </details>
-              <details open={showGenomeDownload} onToggle={(e) => setShowGenomeDownload(e.target.open)}>
-                <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Download New Reference</summary>
-                <div style={{fontSize:"0.85em", marginTop:"0.3em"}}>
-                  <input
-                    placeholder="GenBank accession (e.g. AF2122/97)"
-                    value={genomeAccession}
-                    onChange={(e) => setGenomeAccession(e.target.value)}
-                    style={{width:"100%", marginBottom:"0.3em"}}
-                  />
-                  <div className="row" style={{gap:"0.3em", alignItems:"center"}}>
-                    <input
-                      placeholder="Output directory"
-                      value={genomeOutputDir}
-                      readOnly={canPickPath}
-                      onChange={(e) => setGenomeOutputDir(e.target.value)}
-                      style={{flex:1}}
-                    />
-                    {canPickPath ? (
-                      <button className="ghost action" style={{fontSize:"0.85em"}} onClick={() => pickPath("directory", "Select output folder", "", (dir) => setGenomeOutputDir(dir))}>
-                        Browse
-                      </button>
-                    ) : null}
-                  </div>
-                  <button
-                    onClick={downloadGenome}
-                    disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady}
-                    style={{marginTop:"0.3em"}}
-                  >
-                    Download
-                  </button>
-                  {genomeDownloadStatus ? (
-                    <div className="note" style={{marginTop:"0.3em"}}>
-                      {genomeDownloadStatus.includes("Downloading") ? <span className="pulse-dot" /> : null}
-                      {genomeDownloadStatus}
-                    </div>
-                  ) : null}
-                </div>
-              </details>
             </div>
             <div className="block">
-              <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
-              <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference}>Run</button>
               <label className="checkbox">
                 <input
                   type="checkbox"
@@ -1762,6 +1803,10 @@ export default function App() {
                 />
                 Assemble unmapped reads
               </label>
+              <div className="step1-actions">
+                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
+                <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference}>Run</button>
+              </div>
             </div>
             <div className="step1-status">
               <div className="step1-status-header">
@@ -2192,7 +2237,7 @@ export default function App() {
                   VCF Databases (Step 2)
                   <span
                     className="help-icon"
-                    data-tooltip="Select the reference type, then add one or more VCF database folders. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz."
+                    data-tooltip="Select the reference type, then add one or more VCF database folders. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
                   >
                     ?
                   </span>
@@ -2206,96 +2251,52 @@ export default function App() {
                     <option key={r.name} value={r.name}>{r.name}</option>
                   ))}
                 </select>
-                <textarea
-                  placeholder="/path/to/step2/vcf_database (one per line, searched recursively)"
-                  value={importSourcesText}
-                  onChange={(e) => setImportSourcesText(e.target.value)}
-                  rows={4}
-                />
-                {parseAccessions(importSourcesText).length > 0 ? (
-                  <div className="folder-chips">
-                    {parseAccessions(importSourcesText).map((p, i) => (
-                      <span key={i} className="chip">
-                        {p.split("/").pop() || p}
-                        <button
-                          className="chip-remove"
-                          onClick={() => {
-                            const lines = parseAccessions(importSourcesText).filter((_, j) => j !== i);
-                            setImportSourcesText(lines.join("\n"));
-                          }}
-                        >
-                          x
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="row">
-                  <select
-                    value={importPreset}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      setImportPreset(value);
-                      const vsnpRoot = settings.vsnp3_path || "";
-                      const guiRoot = config?.gui_root || "";
-                      if (value === "mtbc0") {
-                        if (!vsnpRoot) {
-                          setImportStatus("Set vSNP3 path in Settings first.");
-                          return;
-                        }
-                        setImportSourcesText([
-                          `${vsnpRoot}/VCF_REFS/mtbc_representative`,
-                          `${vsnpRoot}/VCF_REFS/minimum_tree`,
-                          `${vsnpRoot}/VCF_REFS/faked_from_assembly`
-                        ].join("\n"));
-                        setImportReference("mtbc0_v1.1");
-                        setImportIncludeStep1(true);
-                        setImportAction("copy");
-                        setImportConflict("rename");
-                        setImportPrefixDupes(true);
-                        setImportDedupe(true);
-                        setImportFuzzyMatch(true);
-                      } else if (value === "lite") {
-                        if (!guiRoot) {
-                          setImportStatus("GUI root not available yet. Try again after reload.");
-                          return;
-                        }
-                        setImportSourcesText([
-                          `${guiRoot}/sample_data/vcf_lite`
-                        ].join("\n"));
-                        setImportReference("mtbc0_v1.1");
-                        setImportIncludeStep1(false);
-                        setImportAction("copy");
-                        setImportConflict("rename");
-                        setImportPrefixDupes(true);
-                        setImportDedupe(true);
-                        setImportFuzzyMatch(true);
+                <div style={{marginTop:"8px"}}>
+                  {vcfDbFolders.length ? (
+                    <div style={{display:"flex", flexDirection:"column", gap:"4px", marginBottom:"8px"}}>
+                      {vcfDbFolders.map((folder, i) => (
+                        <div key={i} style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"8px", fontSize:"12px"}}>
+                          <input
+                            type="checkbox"
+                            checked={folder.enabled !== false}
+                            onChange={() => toggleVcfDbFolder(i)}
+                            style={{width:"auto"}}
+                          />
+                          <span
+                            title={folder.path}
+                            style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", opacity: folder.enabled !== false ? 1 : 0.5}}
+                          >
+                            {folder.path.split("/").pop() || folder.path}
+                          </span>
+                          <button
+                            className="chip-remove"
+                            onClick={() => removeVcfDbFolder(i)}
+                            title="Remove folder"
+                          >
+                            x
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF database folders configured.</div>
+                  )}
+                  {canPickPath ? (
+                    <button
+                      className="ghost action"
+                      onClick={() =>
+                        pickPath(
+                          "directory",
+                          "Select VCF database folder",
+                          "",
+                          (path) => addVcfDbFolder(path)
+                        )
                       }
-                    }}
-                  >
-                    <option value="">Preset...</option>
-                    <option value="mtbc0">MTBC0 + VCF_REFS</option>
-                    <option value="lite">VCF Lite Pack (repo)</option>
-                  </select>
+                    >
+                      Add Folder
+                    </button>
+                  ) : null}
                 </div>
-                {canPickPath ? (
-                  <button
-                    className="ghost action"
-                    onClick={() =>
-                      pickMultiPaths(
-                        "directory",
-                        "Select Step 2 VCF database folder(s)",
-                        (paths) =>
-                          setImportSourcesText((prev) => {
-                            const joined = paths.join("\n");
-                            return prev ? `${prev}\n${joined}` : joined;
-                          })
-                      )
-                    }
-                  >
-                    Add Folder
-                  </button>
-                ) : null}
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -2346,25 +2347,6 @@ export default function App() {
                     <option value="rename">Rename conflicts</option>
                     <option value="overwrite">Overwrite conflicts</option>
                   </select>
-                </div>
-                <div className="selection-box">
-                  <div>
-                    <strong>Selections:</strong>
-                  </div>
-                  <div>Sources: {parseAccessions(importSourcesText).length || 0}</div>
-                  <div>Include Step 1: {importIncludeStep1 ? "Yes" : "No"}</div>
-                  <div>Reference: {importReference || "None"}</div>
-                  <div>Action: {importAction} | Conflicts: {importConflict}</div>
-                  <button
-                    className="ghost action"
-                    onClick={() => {
-                      setImportSourcesText("");
-                      setImportMismatchReport("");
-                      setImportStatus("");
-                    }}
-                  >
-                    Clear sources
-                  </button>
                 </div>
                 <div className="row">
                   <button onClick={importVcfs} disabled={!selectedProject || !settingsReady}>Build VCF set</button>
@@ -2590,7 +2572,12 @@ export default function App() {
             <h2>Live Logs</h2>
             <div className="log">
               {jobId ? (
-                logs.length ? logs.map((l, i) => <div key={i}>{l}</div>) : <div>Waiting for output...</div>
+                logs.length ? logs.map((l, i) => {
+                  let cls = "";
+                  if (l.includes("[MISSING]") || l.includes("[DEPENDENCY_ERROR]") || l.includes("[FAILED]")) cls = "log-error";
+                  else if (l.includes("[OK]")) cls = "log-success";
+                  return <div key={i} className={cls}>{l}</div>;
+                }) : <div>Waiting for output...</div>
               ) : (
                 <div>No job running</div>
               )}

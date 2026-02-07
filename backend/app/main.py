@@ -147,11 +147,22 @@ def health():
     return {"status": "ok"}
 
 
+def _path_is_executable(path_str: str) -> bool:
+    p = Path(path_str)
+    return p.is_file() and os.access(p, os.X_OK)
+
+
 @app.get("/api/config")
 def get_config():
     cfg = load_config()
     root_dir = Path(__file__).resolve().parent.parent.parent
     cfg["gui_root"] = str(root_dir)
+    cfg["_validation"] = {
+        "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
+        "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
+        "igv_app_path": Path(cfg.get("igv_app_path", "")).exists() if cfg.get("igv_app_path", "").strip() else None,
+        "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
+    }
     return cfg
 
 
@@ -172,6 +183,43 @@ def update_config(update: ConfigUpdate):
         cfg["sra"].update(update.sra)
     save_config(cfg)
     return cfg
+
+
+class VcfDbFolderAction(BaseModel):
+    action: str  # "add", "remove", "toggle"
+    path: Optional[str] = None
+    index: Optional[int] = None
+
+
+@app.get("/api/vcf-db-folders")
+def get_vcf_db_folders():
+    cfg = load_config()
+    return cfg.get("vcf_db_folders", [])
+
+
+@app.post("/api/vcf-db-folders")
+def update_vcf_db_folders(payload: VcfDbFolderAction):
+    cfg = load_config()
+    folders = cfg.get("vcf_db_folders", [])
+    if payload.action == "add":
+        if not payload.path:
+            raise HTTPException(status_code=400, detail="path is required for add")
+        p = str(Path(payload.path).expanduser().resolve())
+        if not any(f.get("path") == p for f in folders):
+            folders.append({"path": p, "enabled": True})
+    elif payload.action == "remove":
+        if payload.index is not None and 0 <= payload.index < len(folders):
+            folders.pop(payload.index)
+        elif payload.path:
+            folders = [f for f in folders if f.get("path") != payload.path]
+    elif payload.action == "toggle":
+        if payload.index is not None and 0 <= payload.index < len(folders):
+            folders[payload.index]["enabled"] = not folders[payload.index].get("enabled", True)
+    else:
+        raise HTTPException(status_code=400, detail="action must be add, remove, or toggle")
+    cfg["vcf_db_folders"] = folders
+    save_config(cfg)
+    return folders
 
 
 class RefPathRequest(BaseModel):
@@ -230,23 +278,27 @@ def ref_download(payload: RefDownloadRequest):
     if not accession:
         raise HTTPException(status_code=400, detail="Accession is required")
     output_dir = Path(payload.output_dir).expanduser().resolve()
-    if not output_dir.is_dir():
-        raise HTTPException(status_code=400, detail=f"Output directory not found: {output_dir}")
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Cannot create output directory: {e}")
     acc_dir = output_dir / accession
     acc_dir.mkdir(parents=True, exist_ok=True)
-    # Build script: download then copy templates
+    # Copy template files from dependencies, renaming "template" to accession
     template_dir = vsnp3_path / "dependencies"
+    for tpl in ["template_define_filter.xlsx", "template_remove_from_analysis.xlsx"]:
+        src = template_dir / tpl
+        dest_name = tpl.replace("template", accession)
+        dest = acc_dir / dest_name
+        if src.is_file() and not dest.exists():
+            shutil.copy2(str(src), str(dest))
+    # Build script: download fasta/gbk/gff
     lines = [
         "#!/bin/bash",
         "set -euo pipefail",
         f"cd \"{acc_dir}\"",
         f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {accession} -fbg",
     ]
-    for tpl in ["template_define_filter.xlsx", "template_remove_from_analysis.xlsx"]:
-        src = template_dir / tpl
-        dest_name = tpl.replace("template_", f"{accession}_")
-        dest = acc_dir / dest_name
-        lines.append(f"if [ -f \"{src}\" ] && [ ! -f \"{dest}\" ]; then cp \"{src}\" \"{dest}\"; fi")
     script_content = "\n".join(lines) + "\n"
     script_path = acc_dir / "download_ref.sh"
     script_path.write_text(script_content, encoding="utf-8")
@@ -1455,12 +1507,14 @@ def step1_igv_session(project: str, payload: OpenRequest):
     session_xml = "".join(session_lines)
     session_path.write_text(session_xml, encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
-    igv_running = _igv_running()
+    igv_status = _igv_running()
     desired_genome = genome_id
-    include_genome = not igv_running or _IGV_STATE["genome"] != desired_genome
-    if not igv_running:
+    include_genome = not igv_status or _IGV_STATE["genome"] != desired_genome
+    if not igv_status:
         _open_igv(session_path, igv_app_path, None)
-        _wait_for_igv()
+        _wait_for_igv(timeout=15.0)
+    elif igv_status == "process":
+        _wait_for_igv(timeout=15.0)
     send_goto = include_genome
     # Only load annotation on genome switch to avoid duplicate tracks.
     extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
@@ -1472,8 +1526,8 @@ def step1_igv_session(project: str, payload: OpenRequest):
         include_genome=include_genome,
         send_goto=send_goto,
         retries=10,
-        wait_before_genome=3.0 if not igv_running else 0.0,
-        repeat_genome=not igv_running
+        wait_before_genome=3.0 if not igv_status else 0.0,
+        repeat_genome=not igv_status
     )
     if sent and include_genome:
         _IGV_STATE["genome"] = desired_genome
@@ -1544,12 +1598,14 @@ def posthoc_igv_session(payload: OpenRequest):
     session_xml = "".join(session_lines)
     session_path.write_text(session_xml, encoding="utf-8")
     igv_app_path = cfg.get("igv_app_path", "")
-    igv_running = _igv_running()
+    igv_status = _igv_running()
     desired_genome = genome_id
-    include_genome = not igv_running or _IGV_STATE["genome"] != desired_genome
-    if not igv_running:
+    include_genome = not igv_status or _IGV_STATE["genome"] != desired_genome
+    if not igv_status:
         _open_igv(session_path, igv_app_path, None)
-        _wait_for_igv()
+        _wait_for_igv(timeout=15.0)
+    elif igv_status == "process":
+        _wait_for_igv(timeout=15.0)
     send_goto = include_genome
     extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
     sent, err, sent_commands, responses = _send_igv_commands(
@@ -1560,8 +1616,8 @@ def posthoc_igv_session(payload: OpenRequest):
         include_genome=include_genome,
         send_goto=send_goto,
         retries=10,
-        wait_before_genome=3.0 if not igv_running else 0.0,
-        repeat_genome=not igv_running
+        wait_before_genome=3.0 if not igv_status else 0.0,
+        repeat_genome=not igv_status
     )
     if sent and include_genome:
         _IGV_STATE["genome"] = desired_genome
@@ -1632,7 +1688,7 @@ def _send_igv_commands(
                 return True, ""
             except OSError as exc:
                 last_error = str(exc)
-                time.sleep(1.0)
+                time.sleep(1.5)
                 continue
         return False, last_error
 
@@ -1725,26 +1781,28 @@ def _wait_for_igv(timeout: float = 10.0) -> None:
             time.sleep(0.5)
 
 
-def _igv_running() -> bool:
-    # Prefer checking command server availability; it indicates a live IGV instance.
+def _igv_port_open() -> bool:
+    """Check if the IGV command port (60151) is accepting connections."""
     try:
         with socket.create_connection(("127.0.0.1", 60151), timeout=0.3):
             return True
     except OSError:
-        pass
-    if sys.platform.startswith("darwin"):
+        return False
+
+
+def _igv_running() -> str:
+    """Check IGV status. Returns 'port' if port is open, 'process' if only
+    the process is detected (port not ready yet), or '' if not running."""
+    if _igv_port_open():
+        return "port"
+    if sys.platform.startswith("darwin") or sys.platform.startswith("linux"):
         try:
             res = subprocess.run(["pgrep", "-f", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return res.returncode == 0
+            if res.returncode == 0:
+                return "process"
         except Exception:
-            return False
-    if sys.platform.startswith("linux"):
-        try:
-            res = subprocess.run(["pgrep", "-f", "IGV"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return res.returncode == 0
-        except Exception:
-            return False
-    return False
+            pass
+    return ""
 
 
 @app.get("/api/projects/{project}/step2_outputs")

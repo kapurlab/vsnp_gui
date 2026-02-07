@@ -17,7 +17,8 @@ DEFAULTS: Dict[str, Any] = {
         "use_sratoolkit_first": True,
         "allow_insecure_https": False,
         "max_parallel": 2
-    }
+    },
+    "vcf_db_folders": []
 }
 
 

@@ -1429,6 +1429,11 @@ export default function App() {
                         Choose
                       </button>
                     ) : null}
+                    {pathValidation.figtree_app_path === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : pathValidation.figtree_app_path === false ? (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    ) : null}
                   </span>
                 </div>
                 <div className="settings-row">

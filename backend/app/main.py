@@ -387,6 +387,7 @@ def get_config():
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
         "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
         "igv_app_path": Path(cfg.get("igv_app_path", "")).exists() if cfg.get("igv_app_path", "").strip() else None,
+        "figtree_app_path": Path(cfg.get("figtree_app_path", "")).exists() if cfg.get("figtree_app_path", "").strip() else None,
         "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
     }
     return cfg
@@ -401,6 +402,8 @@ def update_config(update: ConfigUpdate):
         cfg["projects_root"] = update.projects_root
     if update.igv_app_path is not None:
         cfg["igv_app_path"] = update.igv_app_path
+    if update.figtree_app_path is not None:
+        cfg["figtree_app_path"] = update.figtree_app_path
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
     if update.step1_max_parallel is not None:

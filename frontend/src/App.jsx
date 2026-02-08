@@ -2545,11 +2545,19 @@ export default function App() {
             {(() => {
               const groupCount = step2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
               const totalCount = step2Outputs.length + groupCount;
+              const sortedStep2Outputs = step2Outputs.slice().sort((a, b) => {
+                if (s2AllVcf) {
+                  const aIsAll = /-all$/i.test(a.label || "");
+                  const bIsAll = /-all$/i.test(b.label || "");
+                  if (aIsAll !== bIsAll) return aIsAll ? -1 : 1;
+                }
+                return (a.label || "").localeCompare(b.label || "");
+              });
               return (
                 <>
                   <div className="results-list">
-                  {step2Outputs.length ? (
-                    step2Outputs.map((item) => (
+                  {sortedStep2Outputs.length ? (
+                    sortedStep2Outputs.map((item) => (
                       <div key={item.path} className="results-item">
                         <div className="results-main">
                       <div className="results-name">{item.label}</div>

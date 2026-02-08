@@ -184,7 +184,7 @@ def short_label(name: str) -> str:
     if name.lower().startswith("lineage "):
         parts = name.split()
         if len(parts) > 1 and parts[1].isdigit():
-            return f"L{{parts[1]}}"
+            return "L{}".format(parts[1])
     if name.lower().startswith("m. "):
         name = name[3:]
     m = re.match(r"^(L\\d+)\\b", name, re.IGNORECASE)
@@ -221,7 +221,7 @@ def load_mapping(path: Path):
                 friendly = rich_label(label)
             else:
                 friendly = short_label(label)
-            out[ident] = f"{{friendly}}_{{ident}}"
+            out[ident] = friendly + "_" + ident
     return out
 
 mapping = load_mapping(mapping_csv)
@@ -260,7 +260,7 @@ def annotate_newick(text: str, color_map: dict) -> str:
         color = color_map.get(ident)
         if not color:
             return match.group(0)
-        return f\"{match.group(1)}{label}[&!color={color},!labelcolor={color}]:\"
+        return match.group(1) + label + "[&!color=" + color + ",!labelcolor=" + color + ",!namecolor=" + color + "]:"
     return re.sub(r"([,(])([^:(),]+):", repl, text)
 
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))

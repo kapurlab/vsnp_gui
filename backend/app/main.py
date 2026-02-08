@@ -58,6 +58,7 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
     mapping_csv = _find_vcf_refs_csv(cfg)
     if not mapping_csv:
         return {}
+    import re as _re
     def _short_label(name: str) -> str:
         name = name.strip()
         if name.lower().startswith("lineage "):
@@ -66,10 +67,10 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
                 return f"L{parts[1]}"
         if name.lower().startswith("m. "):
             name = name[3:]
-        m = re.match(r"^(L\\d+)\\b", name, re.IGNORECASE)
+        m = _re.match(r"^(L\\d+)\\b", name, _re.IGNORECASE)
         if m:
             return m.group(1).upper()
-        tokens = re.findall(r"[A-Za-z0-9]+", name)
+        tokens = _re.findall(r"[A-Za-z0-9]+", name)
         if not tokens:
             return name or "REF"
         first = tokens[0]
@@ -80,7 +81,7 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
         name = name.strip()
         if name.lower().startswith("m. "):
             name = name[3:]
-        tokens = re.findall(r"[A-Za-z0-9]+", name)
+        tokens = _re.findall(r"[A-Za-z0-9]+", name)
         if not tokens:
             return name or "REF"
         return "_".join(tokens)

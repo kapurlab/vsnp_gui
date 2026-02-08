@@ -93,10 +93,16 @@ def short_label(name: str) -> str:
             return f"L{{parts[1]}}"
     if name.lower().startswith("m. "):
         name = name[3:]
+    m = re.match(r"^(L\\d+)\\b", name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
     tokens = re.findall(r"[A-Za-z0-9]+", name)
     if not tokens:
         return name or "REF"
-    return "_".join(tokens)
+    first = tokens[0]
+    if first.lower().startswith("l") and first[1:].isdigit():
+        return first.upper()
+    return first[:1].upper() + first[1:]
 
 def load_mapping(path: Path):
     out = {{}}

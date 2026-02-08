@@ -406,7 +406,12 @@ export default function App() {
         setJobStatus(status);
         // Update SRA status if this was an SRA job
         if (sraJobId && jobId === sraJobId) {
-          setSraStatus(status === "succeeded" ? "Download complete" : `Download ${status}`);
+          if (status === "succeeded") {
+            setSraStatus("Download complete");
+            loadAll();
+          } else {
+            setSraStatus(`Download ${status}`);
+          }
         }
         // Update genome download status if this was a genome download job
         if (genomeJobId && jobId === genomeJobId) {

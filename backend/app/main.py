@@ -154,6 +154,11 @@ def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
     if vsnp3_path:
         candidates.append(vsnp3_path / "VCF_REFS" / "VCF_refs.csv")
         candidates.append(vsnp3_path / "VCF_REFS" / "vcf_refs.csv")
+    projects_root = Path(cfg.get("projects_root", ""))
+    if projects_root:
+        parent = projects_root.parent
+        candidates.append(parent / "VCF_REFS" / "VCF_refs.csv")
+        candidates.append(parent / "VCF_REFS" / "vcf_refs.csv")
     for c in candidates:
         if c.exists():
             return c
@@ -255,7 +260,7 @@ def annotate_newick(text: str, color_map: dict) -> str:
         color = color_map.get(ident)
         if not color:
             return match.group(0)
-        return f\"{match.group(1)}{label}[&!color={color}]:\"
+        return f\"{match.group(1)}{label}[&!color={color},!labelcolor={color}]:\"
     return re.sub(r"([,(])([^:(),]+):", repl, text)
 
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))

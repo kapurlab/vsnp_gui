@@ -222,6 +222,41 @@ mapping = load_mapping(mapping_csv)
 if not mapping:
     raise SystemExit(0)
 
+def load_color_map(step2_dir: Path):
+    # Map accession -> color based on source type (sample vs reference)
+    manifest = step2_dir / "vcf_source" / ".vcf_source_manifest.csv"
+    out = {{}}
+    if not manifest.exists():
+        return out
+    with manifest.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            name = (row.get("filename") or "").strip()
+            source_type = (row.get("source_type") or "").strip()
+            m = re.search(r"(SRR\\d+|ERR\\d+|DRR\\d+|SRX\\d+|ERX\\d+|DRX\\d+)", name)
+            if not m:
+                continue
+            ident = m.group(1)
+            out[ident] = "#d1495b" if source_type == "step1" else "#2b6cb0"
+    return out
+
+color_map = load_color_map(step2_dir)
+
+def annotate_newick(text: str, color_map: dict) -> str:
+    # Add FigTree-style color annotations to leaf labels.
+    # Match leaf labels before branch length ":".
+    def repl(match):
+        label = match.group(2)
+        m = re.search(r"(SRR\\d+|ERR\\d+|DRR\\d+|SRX\\d+|ERX\\d+|DRX\\d+)", label)
+        if not m:
+            return match.group(0)
+        ident = m.group(1)
+        color = color_map.get(ident)
+        if not color:
+            return match.group(0)
+        return f\"{match.group(1)}{label}[&!color={color}]:\"
+    return re.sub(r"([,(])([^:(),]+):", repl, text)
+
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))
 for path in tree_files:
     text = path.read_text(encoding="utf-8", errors="ignore")
@@ -230,6 +265,13 @@ for path in tree_files:
         text = re.sub(rf"\\b{{re.escape(ident)}}\\b", label, text)
     labeled = path.with_name(path.stem + "_labeled" + path.suffix)
     labeled.write_text(text, encoding="utf-8")
+    # Write a NEXUS file with color annotations for FigTree
+    annotated = annotate_newick(text, color_map)
+    nexus_path = labeled.with_suffix(".nexus")
+    nexus_path.write_text(
+        \"#NEXUS\\nbegin trees;\\n  tree tree1 = \" + annotated.strip() + \"\\nend;\\n\",
+        encoding=\"utf-8\"
+    )
 """
     script_path.write_text(script, encoding="utf-8")
     return script_path

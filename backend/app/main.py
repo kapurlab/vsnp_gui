@@ -254,7 +254,7 @@ def annotate_newick(text: str, color_map: dict) -> str:
         color = color_map.get(ident)
         if not color:
             return match.group(0)
-        return f\"{{match.group(1)}}{{label}}[&!color={{color}}]:\"
+        return f\"{{{{match.group(1)}}}}{{{{label}}}}[&!color={{{{color}}}}]:\"
     return re.sub(r"([,(])([^:(),]+):", repl, text)
 
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))

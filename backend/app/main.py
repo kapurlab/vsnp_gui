@@ -165,13 +165,13 @@ def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str], label_style: 
     if not mapping_csv:
         return None
     script_path = step2_dir / "_label_trees.py"
-    script = f"""\
+    script = """\
 import csv
 import re
 from pathlib import Path
 
-mapping_csv = Path({str(mapping_csv)!r})
-step2_dir = Path({str(step2_dir)!r})
+mapping_csv = Path("__MAPPING_CSV__")
+step2_dir = Path("__STEP2_DIR__")
 
 def short_label(name: str) -> str:
     name = name.strip()
@@ -254,7 +254,7 @@ def annotate_newick(text: str, color_map: dict) -> str:
         color = color_map.get(ident)
         if not color:
             return match.group(0)
-        return f\"{{{{match.group(1)}}}}{{{{label}}}}[&!color={{{{color}}}}]:\"
+        return f\"{match.group(1)}{label}[&!color={color}]:\"
     return re.sub(r"([,(])([^:(),]+):", repl, text)
 
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))
@@ -273,6 +273,7 @@ for path in tree_files:
         encoding=\"utf-8\"
     )
 """
+    script = script.replace("__MAPPING_CSV__", str(mapping_csv)).replace("__STEP2_DIR__", str(step2_dir))
     script_path.write_text(script, encoding="utf-8")
     return script_path
 

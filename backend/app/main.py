@@ -102,6 +102,7 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
 def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
     if not vcf_source_dir.exists():
         return
+    import re as _re
     manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
     source_map: Dict[str, str] = {}
     if manifest_path.exists():
@@ -136,7 +137,7 @@ def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, 
             for taxon, group, color in rows:
                 labeled = taxon
                 for ident, friendly in label_map.items():
-                    labeled = re.sub(rf"\\b{re.escape(ident)}\\b", friendly, labeled)
+                    labeled = _re.sub(rf"\\b{_re.escape(ident)}\\b", friendly, labeled)
                 handle.write(f"{labeled}\t{group}\t{color}\n")
 
 

@@ -53,6 +53,82 @@ def wrap_cmd(cfg: Dict, command: str) -> str:
     return command
 
 
+def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
+    candidates: List[Path] = []
+    vcf_db_folders = cfg.get("vcf_db_folders", [])
+    for folder in vcf_db_folders:
+        path = Path(folder.get("path")) if isinstance(folder, dict) else Path(str(folder))
+        candidates.append(path / "VCF_refs.csv")
+        candidates.append(path / "vcf_refs.csv")
+        candidates.append(path.parent / "VCF_refs.csv")
+        candidates.append(path.parent / "vcf_refs.csv")
+    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+    if vsnp3_path:
+        candidates.append(vsnp3_path / "VCF_REFS" / "VCF_refs.csv")
+        candidates.append(vsnp3_path / "VCF_REFS" / "vcf_refs.csv")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str]) -> Optional[Path]:
+    mapping_csv = _find_vcf_refs_csv(cfg)
+    if not mapping_csv:
+        return None
+    script_path = step2_dir / "_label_trees.py"
+    script = f"""\
+import csv
+import re
+from pathlib import Path
+
+mapping_csv = Path({str(mapping_csv)!r})
+step2_dir = Path({str(step2_dir)!r})
+
+def short_label(name: str) -> str:
+    name = name.strip()
+    if name.lower().startswith("lineage "):
+        parts = name.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            return f"L{{parts[1]}}"
+    if name.lower().startswith("m. "):
+        name = name[3:]
+    tokens = re.findall(r"[A-Za-z0-9]+", name)
+    if not tokens:
+        return name or "REF"
+    return "_".join(tokens)
+
+def load_mapping(path: Path):
+    out = {{}}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            label, ident = row[0].strip(), row[1].strip()
+            if not label or not ident or "number" in label.lower():
+                continue
+            short = short_label(label)
+            out[ident] = f"{{short}}_{{ident}}"
+    return out
+
+mapping = load_mapping(mapping_csv)
+if not mapping:
+    raise SystemExit(0)
+
+tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))
+for path in tree_files:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    for ident, label in mapping.items():
+        text = re.sub(rf"\\b{{re.escape(ident)}}(_zc\\.vcf(?:\\.gz)?)\\b", rf"{{label}}\\1", text)
+        text = re.sub(rf"\\b{{re.escape(ident)}}\\b", label, text)
+    labeled = path.with_name(path.stem + "_labeled" + path.suffix)
+    labeled.write_text(text, encoding="utf-8")
+"""
+    script_path.write_text(script, encoding="utf-8")
+    return script_path
+
+
 def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> List[str]:
     args = args or []
     vsnp3_path = cfg.get("vsnp3_path", "").strip()
@@ -940,6 +1016,9 @@ def step2_run(project: str, payload: Step2Request):
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
     cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
+    label_script = _build_tree_label_script(step2_dir, cfg)
+    if label_script:
+        cmd = f"{cmd} && python {label_script}"
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),

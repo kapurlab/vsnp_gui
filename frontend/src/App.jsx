@@ -115,6 +115,7 @@ export default function App() {
   // Item 2: Reference path management
   const [refPaths, setRefPaths] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
+  const [refPathInput, setRefPathInput] = useState("");
   // Item 3: Genome download
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
   const [genomeAccession, setGenomeAccession] = useState("");
@@ -881,6 +882,13 @@ export default function App() {
   async function step1Run() {
     if (!selectedProject || !settingsReady || !reference) return;
     const refValue = reference === "__auto__" ? null : reference;
+    setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
+    setStep2BuiltAt("");
+    setStep2VcfCount(0);
+    setStep2Outputs([]);
+    setStep2Groups([]);
+    setStep2OutputsError("");
+    setStep2RunId("");
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1607,6 +1615,26 @@ export default function App() {
                         <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
                       </div>
                     )) : <div className="muted">No custom reference paths configured.</div>}
+                    <div style={{display:"flex", gap:"0.3em", marginTop:"0.3em"}}>
+                      <input
+                        placeholder="/path/to/reference_root"
+                        value={refPathInput}
+                        onChange={(e) => setRefPathInput(e.target.value)}
+                        style={{flex:1}}
+                      />
+                      <button
+                        className="ghost action"
+                        style={{fontSize:"0.85em"}}
+                        onClick={() => {
+                          const trimmed = refPathInput.trim();
+                          if (!trimmed) return;
+                          addRefPath(trimmed);
+                          setRefPathInput("");
+                        }}
+                      >
+                        Add
+                      </button>
+                    </div>
                     {canPickPath ? (
                       <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
                         Add Location

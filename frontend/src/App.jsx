@@ -483,7 +483,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
     if (!step2AutoRefreshPending) return;
-    if (jobStatus !== "succeeded") return;
+    if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
     loadStep2Outputs();
     setStep2AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step2AutoRefreshPending]);

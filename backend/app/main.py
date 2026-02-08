@@ -172,6 +172,7 @@ from pathlib import Path
 
 mapping_csv = Path("__MAPPING_CSV__")
 step2_dir = Path("__STEP2_DIR__")
+label_style = "__LABEL_STYLE__"
 
 def short_label(name: str) -> str:
     name = name.strip()
@@ -202,7 +203,7 @@ def rich_label(name: str) -> str:
     return "_".join(tokens)
 
 def load_mapping(path: Path):
-    out = {{}}
+    out = {}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.reader(handle)
         for row in reader:
@@ -211,7 +212,7 @@ def load_mapping(path: Path):
             label, ident = row[0].strip(), row[1].strip()
             if not label or not ident or "number" in label.lower():
                 continue
-            if "{label_style}" == "rich":
+            if label_style == "rich":
                 friendly = rich_label(label)
             else:
                 friendly = short_label(label)
@@ -225,7 +226,7 @@ if not mapping:
 def load_color_map(step2_dir: Path):
     # Map accession -> color based on source type (sample vs reference)
     manifest = step2_dir / "vcf_source" / ".vcf_source_manifest.csv"
-    out = {{}}
+    out = {}
     if not manifest.exists():
         return out
     with manifest.open("r", encoding="utf-8") as handle:
@@ -273,7 +274,11 @@ for path in tree_files:
         encoding=\"utf-8\"
     )
 """
-    script = script.replace("__MAPPING_CSV__", str(mapping_csv)).replace("__STEP2_DIR__", str(step2_dir))
+    script = (
+        script.replace("__MAPPING_CSV__", str(mapping_csv))
+        .replace("__STEP2_DIR__", str(step2_dir))
+        .replace("__LABEL_STYLE__", label_style)
+    )
     script_path.write_text(script, encoding="utf-8")
     return script_path
 

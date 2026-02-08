@@ -72,7 +72,7 @@ def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
     return None
 
 
-def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str]) -> Optional[Path]:
+def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str], label_style: str) -> Optional[Path]:
     mapping_csv = _find_vcf_refs_csv(cfg)
     if not mapping_csv:
         return None
@@ -104,6 +104,15 @@ def short_label(name: str) -> str:
         return first.upper()
     return first[:1].upper() + first[1:]
 
+def rich_label(name: str) -> str:
+    name = name.strip()
+    if name.lower().startswith("m. "):
+        name = name[3:]
+    tokens = re.findall(r"[A-Za-z0-9]+", name)
+    if not tokens:
+        return name or "REF"
+    return "_".join(tokens)
+
 def load_mapping(path: Path):
     out = {{}}
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -114,8 +123,11 @@ def load_mapping(path: Path):
             label, ident = row[0].strip(), row[1].strip()
             if not label or not ident or "number" in label.lower():
                 continue
-            short = short_label(label)
-            out[ident] = f"{{short}}_{{ident}}"
+            if "{label_style}" == "rich":
+                friendly = rich_label(label)
+            else:
+                friendly = short_label(label)
+            out[ident] = f"{{friendly}}_{{ident}}"
     return out
 
 mapping = load_mapping(mapping_csv)
@@ -192,6 +204,7 @@ class Step2Request(BaseModel):
     n_threshold: Optional[int] = 50
     mq_threshold: Optional[int] = 56
     all_vcf: bool = True
+    label_style: Optional[str] = "short"
     find_new_filters: bool = False
     hash_groups: bool = False
     show_groups: bool = False
@@ -1022,7 +1035,8 @@ def step2_run(project: str, payload: Step2Request):
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
     cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
-    label_script = _build_tree_label_script(step2_dir, cfg)
+    label_style = payload.label_style or "short"
+    label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
         cmd = f"{cmd} && python {label_script}"
     job_id = job_manager.start_job(

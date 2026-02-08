@@ -81,6 +81,7 @@ export default function App() {
   const [s2HashGroups, setS2HashGroups] = useState(false);
   const [s2ShowGroups, setS2ShowGroups] = useState(false);
   const [s2HtmlTree, setS2HtmlTree] = useState(false);
+  const [s2LabelStyle, setS2LabelStyle] = useState("short");
   const [s2Dp, setS2Dp] = useState(false);
   const [s2DensityThreshold, setS2DensityThreshold] = useState("");
   const [s2DensityWindow, setS2DensityWindow] = useState("");
@@ -939,6 +940,7 @@ export default function App() {
         n_threshold: s2NThreshold,
         mq_threshold: s2MqThreshold,
         all_vcf: s2AllVcf,
+        label_style: s2LabelStyle,
         find_new_filters: s2FindNewFilters,
         hash_groups: s2HashGroups,
         show_groups: s2ShowGroups,
@@ -2446,6 +2448,14 @@ export default function App() {
                   <label className="checkbox">
                     <input type="checkbox" checked={s2HtmlTree} onChange={(e) => setS2HtmlTree(e.target.checked)} />
                     HTML tree (-html_tree)
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={s2LabelStyle === "rich"}
+                      onChange={(e) => setS2LabelStyle(e.target.checked ? "rich" : "short")}
+                    />
+                    Use rich labels for VCF refs (labeled trees)
                   </label>
                   <label className="checkbox">
                     <input type="checkbox" checked={s2Dp} onChange={(e) => setS2Dp(e.target.checked)} />

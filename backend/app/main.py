@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 from typing import List, Optional, Dict
 import zipfile
+import csv
 import socket
 import json
 import os
@@ -51,6 +52,91 @@ def wrap_cmd(cfg: Dict, command: str) -> str:
     if vsnp3_path:
         return f"PATH=\"{Path(vsnp3_path) / 'bin'}:$PATH\" {command}"
     return command
+
+
+def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]:
+    mapping_csv = _find_vcf_refs_csv(cfg)
+    if not mapping_csv:
+        return {}
+    def _short_label(name: str) -> str:
+        name = name.strip()
+        if name.lower().startswith("lineage "):
+            parts = name.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                return f"L{parts[1]}"
+        if name.lower().startswith("m. "):
+            name = name[3:]
+        m = re.match(r"^(L\\d+)\\b", name, re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        tokens = re.findall(r"[A-Za-z0-9]+", name)
+        if not tokens:
+            return name or "REF"
+        first = tokens[0]
+        if first.lower().startswith("l") and first[1:].isdigit():
+            return first.upper()
+        return first[:1].upper() + first[1:]
+    def _rich_label(name: str) -> str:
+        name = name.strip()
+        if name.lower().startswith("m. "):
+            name = name[3:]
+        tokens = re.findall(r"[A-Za-z0-9]+", name)
+        if not tokens:
+            return name or "REF"
+        return "_".join(tokens)
+    out: Dict[str, str] = {}
+    with mapping_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            label, ident = row[0].strip(), row[1].strip()
+            if not label or not ident or "number" in label.lower():
+                continue
+            friendly = _rich_label(label) if label_style == "rich" else _short_label(label)
+            out[ident] = friendly
+    return out
+
+
+def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
+    if not vcf_source_dir.exists():
+        return
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    source_map: Dict[str, str] = {}
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                name = (row.get("filename") or "").strip()
+                source_type = (row.get("source_type") or "").strip()
+                if name:
+                    source_map[name] = source_type
+    label_map = _load_vcf_label_map(cfg, label_style)
+    # Build group file(s)
+    rows = []
+    for vcf in sorted(vcf_source_dir.glob("*.vcf*")):
+        taxon = vcf.name
+        source_type = source_map.get(taxon, "reference")
+        group = "sample" if source_type == "step1" else "reference"
+        color = "#d1495b" if group == "sample" else "#2b6cb0"
+        rows.append((taxon, group, color))
+    if not rows:
+        return
+    group_path = step2_dir / "figtree_groups.tsv"
+    with group_path.open("w", encoding="utf-8") as handle:
+        handle.write("taxon\tgroup\tcolor\n")
+        for taxon, group, color in rows:
+            handle.write(f"{taxon}\t{group}\t{color}\n")
+    # Labeled version
+    if label_map:
+        labeled_path = step2_dir / "figtree_groups_labeled.tsv"
+        with labeled_path.open("w", encoding="utf-8") as handle:
+            handle.write("taxon\tgroup\tcolor\n")
+            for taxon, group, color in rows:
+                labeled = taxon
+                for ident, friendly in label_map.items():
+                    labeled = re.sub(rf"\\b{re.escape(ident)}\\b", friendly, labeled)
+                handle.write(f"{labeled}\t{group}\t{color}\n")
 
 
 def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
@@ -613,45 +699,56 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     renamed = 0
     mismatched = []
     seen_samples = {}
-    for vcf in vcfs:
-        vcf_ref = _detect_vcf_reference(vcf, alias_map)
-        if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
-            mismatched.append({"path": str(vcf), "reference": vcf_ref})
-            if not payload.allow_mismatch:
-                skipped += 1
-                continue
-        if not vcf_ref:
-            mismatched.append({"path": str(vcf), "reference": "unknown"})
-            if not payload.allow_mismatch:
-                skipped += 1
-                continue
-        if payload.dedupe:
-            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
-            if sample in seen_samples:
-                prev = seen_samples[sample]
-                if vcf.stat().st_mtime <= prev.stat().st_mtime:
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    manifest_exists = manifest_path.exists()
+    with manifest_path.open("a", encoding="utf-8") as manifest_handle:
+        if not manifest_exists:
+            manifest_handle.write("filename,source_type,source_path\n")
+        for vcf in vcfs:
+            vcf_ref = _detect_vcf_reference(vcf, alias_map)
+            if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
+                mismatched.append({"path": str(vcf), "reference": vcf_ref})
+                if not payload.allow_mismatch:
                     skipped += 1
                     continue
-            seen_samples[sample] = vcf
-        target = vcf_source_dir / vcf.name
-        if target.exists():
-            if on_conflict == "skip":
-                skipped += 1
-                continue
-            if on_conflict == "rename":
-                if payload.prefix_duplicates:
-                    prefix = _source_prefix(vcf, source_roots)
-                    target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
+            if not vcf_ref:
+                mismatched.append({"path": str(vcf), "reference": "unknown"})
+                if not payload.allow_mismatch:
+                    skipped += 1
+                    continue
+            if payload.dedupe:
+                sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
+                if sample in seen_samples:
+                    prev = seen_samples[sample]
+                    if vcf.stat().st_mtime <= prev.stat().st_mtime:
+                        skipped += 1
+                        continue
+                seen_samples[sample] = vcf
+            target = vcf_source_dir / vcf.name
+            if target.exists():
+                if on_conflict == "skip":
+                    skipped += 1
+                    continue
+                if on_conflict == "rename":
+                    if payload.prefix_duplicates:
+                        prefix = _source_prefix(vcf, source_roots)
+                        target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
+                    else:
+                        target = _unique_target(vcf_source_dir, vcf.name)
+                    renamed += 1
                 else:
-                    target = _unique_target(vcf_source_dir, vcf.name)
-                renamed += 1
+                    target.unlink()
+            if action == "link":
+                target.symlink_to(vcf)
             else:
-                target.unlink()
-        if action == "link":
-            target.symlink_to(vcf)
-        else:
-            shutil.copy2(vcf, target)
-        imported += 1
+                shutil.copy2(vcf, target)
+            imported += 1
+            try:
+                vcf_path = vcf.resolve()
+            except FileNotFoundError:
+                vcf_path = vcf
+            source_type = "step1" if step1_dir.exists() and str(vcf_path).startswith(str(step1_dir.resolve())) else "reference"
+            manifest_handle.write(f"{target.name},{source_type},{vcf_path}\n")
 
     mismatch_report = ""
     if mismatched:
@@ -956,6 +1053,9 @@ def step2_setup(project: str):
             pass
     count = 0
     edited_samples = []
+    manifest_path = step2_dir / ".vcf_source_manifest.csv"
+    with manifest_path.open("w", encoding="utf-8") as manifest:
+        manifest.write("filename,source_type,source_path\n")
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir():
             continue
@@ -971,6 +1071,7 @@ def step2_setup(project: str):
         if target.exists():
             continue
         target.symlink_to(chosen_vcf)
+        manifest.write(f"{target.name},step1,{chosen_vcf}\n")
         count += 1
         if patched_vcf:
             edited_samples.append(sample)
@@ -1007,6 +1108,7 @@ def step2_run(project: str, payload: Step2Request):
     remove_file = step2_dir / "remove_from_analysis.xlsx"
     remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
     _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
+    _write_figtree_groups(step2_dir, vcf_source_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:

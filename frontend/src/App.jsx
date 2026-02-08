@@ -2563,6 +2563,14 @@ export default function App() {
                 }
                 return (a.label || "").localeCompare(b.label || "");
               });
+              const sortedStep2Groups = step2Groups.slice().sort((a, b) => {
+                if (s2AllVcf) {
+                  const aIsAll = /-all$/i.test(a.name || "");
+                  const bIsAll = /-all$/i.test(b.name || "");
+                  if (aIsAll !== bIsAll) return aIsAll ? -1 : 1;
+                }
+                return (a.name || "").localeCompare(b.name || "");
+              });
               return (
                 <>
                   <div className="results-list">
@@ -2579,9 +2587,9 @@ export default function App() {
                   </div>
                 ))
               ) : null}
-              {step2Groups.length ? (
+              {sortedStep2Groups.length ? (
                 <div className="results-groups">
-                  {step2Groups.map((group) => (
+                  {sortedStep2Groups.map((group) => (
                     <details key={group.name} className="results-group">
                       <summary>{group.name}</summary>
                       {group.files.map((item) => (

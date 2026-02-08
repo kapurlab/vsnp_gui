@@ -45,7 +45,8 @@ fi
 cleanup() {
   for pid in "${BACK_PID:-}" "${FRONT_PID:-}"; do
     if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
-      kill "${pid}" >/dev/null 2>&1 || true
+      # Kill the whole process group to stop reload/child processes.
+      kill -- "-${pid}" >/dev/null 2>&1 || true
     fi
   done
 }

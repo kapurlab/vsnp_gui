@@ -2586,9 +2586,20 @@ export default function App() {
             {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
             {(() => {
-              const groupCount = step2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
-              const totalCount = step2Outputs.length + groupCount;
-              const sortedStep2Outputs = step2Outputs.slice().sort((a, b) => {
+              const shouldHideOutput = (item) => {
+                const path = item?.path || "";
+                return path.includes("_labeled_labeled");
+              };
+              const filteredStep2Outputs = step2Outputs.filter((item) => !shouldHideOutput(item));
+              const filteredStep2Groups = step2Groups
+                .map((group) => ({
+                  ...group,
+                  files: (group.files || []).filter((item) => !shouldHideOutput(item)),
+                }))
+                .filter((group) => group.files.length);
+              const groupCount = filteredStep2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
+              const totalCount = filteredStep2Outputs.length + groupCount;
+              const sortedStep2Outputs = filteredStep2Outputs.slice().sort((a, b) => {
                 if (s2AllVcf) {
                   const aIsAll = /-all$/i.test(a.label || "");
                   const bIsAll = /-all$/i.test(b.label || "");
@@ -2596,7 +2607,7 @@ export default function App() {
                 }
                 return (a.label || "").localeCompare(b.label || "");
               });
-              const sortedStep2Groups = step2Groups.slice().sort((a, b) => {
+              const sortedStep2Groups = filteredStep2Groups.slice().sort((a, b) => {
                 if (s2AllVcf) {
                   const aIsAll = /-all$/i.test(a.name || "");
                   const bIsAll = /-all$/i.test(b.name || "");

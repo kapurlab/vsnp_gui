@@ -249,8 +249,7 @@ def load_color_map(step2_dir: Path):
 color_map = load_color_map(step2_dir)
 
 def annotate_newick(text: str, color_map: dict) -> str:
-    # Add FigTree-style color annotations to leaf labels.
-    # Match leaf labels before branch length ":".
+    # Add FigTree-style color annotations before branch length.
     def repl(match):
         label = match.group(2)
         m = re.search(r"(SRR\\d+|ERR\\d+|DRR\\d+|SRX\\d+|ERX\\d+|DRX\\d+)", label)
@@ -260,15 +259,17 @@ def annotate_newick(text: str, color_map: dict) -> str:
         color = color_map.get(ident)
         if not color:
             return match.group(0)
-        return match.group(1) + label + "[&!color=" + color + ",!labelcolor=" + color + ",!namecolor=" + color + "]:"
+        return match.group(1) + label + "[&!color=" + color + "]:"
     return re.sub(r"([,(])([^:(),]+):", repl, text)
 
 tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))
 for path in tree_files:
+    if "_labeled" in path.stem:
+        continue
     text = path.read_text(encoding="utf-8", errors="ignore")
     for ident, label in mapping.items():
-        text = re.sub(rf"\\b{{re.escape(ident)}}(_zc\\.vcf(?:\\.gz)?)\\b", rf"{{label}}\\1", text)
-        text = re.sub(rf"\\b{{re.escape(ident)}}\\b", label, text)
+        text = re.sub(rf"\\b" + re.escape(ident) + r"(_zc\\.vcf(?:\\.gz)?)\\b", label + r"\\1", text)
+        text = re.sub(rf"\\b" + re.escape(ident) + r"\\b", label, text)
     labeled = path.with_name(path.stem + "_labeled" + path.suffix)
     labeled.write_text(text, encoding="utf-8")
     # Write a NEXUS file with color annotations for FigTree
@@ -2525,7 +2526,7 @@ def _open_path(target: Path, cfg: Optional[Dict] = None) -> None:
         cfg = cfg or load_config()
         suffix = target.suffix.lower()
         figtree_app = cfg.get("figtree_app_path") if isinstance(cfg, dict) else None
-        if figtree_app and suffix in {".nexus", ".tre", ".tree", ".nwk"}:
+        if figtree_app and suffix in {".nexus", ".nex", ".tre", ".tree", ".nwk"}:
             subprocess.run(["open", "-a", figtree_app, str(target)])
             return
         if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:

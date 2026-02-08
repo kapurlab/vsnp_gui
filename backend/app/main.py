@@ -290,6 +290,7 @@ class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
     igv_app_path: Optional[str] = None
+    figtree_app_path: Optional[str] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -2121,7 +2122,7 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target)
+    _open_path(target, cfg)
     return {"opened": str(target)}
 
 
@@ -2134,7 +2135,7 @@ def posthoc_open_path(payload: OpenRequest):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target)
+    _open_path(target, cfg)
     return {"opened": str(target)}
 
 
@@ -2505,9 +2506,14 @@ def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
     return sorted(candidates, key=lambda p: p.stat().st_mtime)[-1]
 
 
-def _open_path(target: Path) -> None:
+def _open_path(target: Path, cfg: Optional[Dict] = None) -> None:
     if sys.platform.startswith("darwin"):
+        cfg = cfg or load_config()
         suffix = target.suffix.lower()
+        figtree_app = cfg.get("figtree_app_path") if isinstance(cfg, dict) else None
+        if figtree_app and suffix in {".nexus", ".tre", ".tree", ".nwk"}:
+            subprocess.run(["open", "-a", figtree_app, str(target)])
+            return
         if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:
             subprocess.run(["open", "-e", str(target)])
         else:

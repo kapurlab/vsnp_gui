@@ -11,6 +11,7 @@ DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(HOME_DIR / "vsnp3"),
     "projects_root": str(HOME_DIR / "vsnp3" / "projects"),
     "igv_app_path": "",
+    "figtree_app_path": "",
     "bcftools_path": "",
     "step1_max_parallel": 3,
     "sra": {

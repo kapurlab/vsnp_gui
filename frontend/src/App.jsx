@@ -20,6 +20,7 @@ export default function App() {
     vsnp3_path: "",
     projects_root: "",
     igv_app_path: "",
+    figtree_app_path: "",
     bcftools_path: "",
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
@@ -347,6 +348,7 @@ export default function App() {
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
       igv_app_path: cfg.igv_app_path || "",
+      figtree_app_path: cfg.figtree_app_path || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
@@ -526,6 +528,7 @@ export default function App() {
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
         igv_app_path: settings.igv_app_path,
+        figtree_app_path: settings.figtree_app_path,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
@@ -1400,6 +1403,31 @@ export default function App() {
                       <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
                     ) : pathValidation.igv_app_path === false ? (
                       <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="settings-row">
+                  <label className="label">FigTree app</label>
+                  <input
+                    placeholder="/Applications/FigTree.app"
+                    value={settings.figtree_app_path}
+                    onChange={(e) => setSettings({ ...settings, figtree_app_path: e.target.value })}
+                  />
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath(
+                            "file",
+                            "Select FigTree app",
+                            settings.figtree_app_path,
+                            (value) => setSettings({ ...settings, figtree_app_path: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
                     ) : null}
                   </span>
                 </div>

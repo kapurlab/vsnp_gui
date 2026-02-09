@@ -106,6 +106,7 @@ export default function App() {
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
+  const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
   const [pathValidation, setPathValidation] = useState({});
@@ -2358,21 +2359,39 @@ export default function App() {
                   ) : (
                     <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF database folders configured.</div>
                   )}
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "directory",
-                          "Select VCF database folder",
-                          "",
-                          (path) => addVcfDbFolder(path)
-                        )
-                      }
-                    >
-                      Add Folder
-                    </button>
-                  ) : null}
+                  <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+                    <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
+                      <input
+                        type="text"
+                        value={manualVcfFolderPath}
+                        onChange={(e) => setManualVcfFolderPath(e.target.value)}
+                        placeholder="/path/to/VCF_REFS/folder"
+                        title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
+                        style={{flex:1, fontSize:"12px"}}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && manualVcfFolderPath.trim()) {
+                            addVcfDbFolder(manualVcfFolderPath.trim());
+                            setManualVcfFolderPath("");
+                          }
+                        }}
+                      />
+                      <button
+                        className="ghost action"
+                        onClick={() => {
+                          if (manualVcfFolderPath.trim()) {
+                            addVcfDbFolder(manualVcfFolderPath.trim());
+                            setManualVcfFolderPath("");
+                          }
+                        }}
+                        disabled={!manualVcfFolderPath.trim()}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="muted" style={{fontSize:"11px"}}>
+                      Tip: In Finder, right-click folder → Get Info → copy the path from "Where"
+                    </div>
+                  </div>
                 </div>
                 <label className="checkbox">
                   <input

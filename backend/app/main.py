@@ -338,6 +338,7 @@ class Step1Request(BaseModel):
     reference: Optional[str] = None
     debug: bool = False
     assemble_unmap: bool = False
+    nanopore: bool = False
 
 
 class Step2Request(BaseModel):
@@ -933,6 +934,7 @@ def step1_run(project: str, payload: Step1Request):
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
+    nanopore_flag = "--nanopore" if payload.nanopore else ""
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
@@ -981,12 +983,21 @@ def step1_run(project: str, payload: Step1Request):
             "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
             "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "  if [ -z \"$R1\" ] || [ -z \"$R2\" ]; then",
-            "    echo \"Missing R1/R2 in $d\" | tee -a \"$LOG\"",
+            "  if [ -z \"$R1\" ]; then",
+            "    if [ \"" + ("1" if payload.nanopore else "0") + "\" = \"1\" ]; then",
+            "      R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true)",
+            "    fi",
+            "  fi",
+            "  if [ -z \"$R1\" ]; then",
+            "    echo \"Missing R1 in $d\" | tee -a \"$LOG\"",
             "    cd ..",
             "    return 0",
             "  fi",
-            f"  vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} >> \"$LOG\" 2>&1",
+            f"  if [ -n \"$R2\" ]; then",
+            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            "  else",
+            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            "  fi",
             "  STATUS=$?",
             "  if [ \"$STATUS\" -eq 0 ]; then",
             "    END_TS=$(date +%s)",

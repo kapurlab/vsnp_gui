@@ -31,6 +31,7 @@ export default function App() {
   const [reference, setReference] = useState("");
   const [debugMode, setDebugMode] = useState(false);
   const [assembleUnmap, setAssembleUnmap] = useState(false);
+  const [nanoporeMode, setNanoporeMode] = useState(false);
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -896,7 +897,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap })
+      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
     });
     const data = await res.json();
     setJobId(data.job_id);
@@ -1870,6 +1871,14 @@ export default function App() {
                   onChange={(e) => setAssembleUnmap(e.target.checked)}
                 />
                 Assemble unmapped reads
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={nanoporeMode}
+                  onChange={(e) => setNanoporeMode(e.target.checked)}
+                />
+                Nanopore (ONT) reads
               </label>
               <div className="step1-actions">
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>

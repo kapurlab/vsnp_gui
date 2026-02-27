@@ -239,14 +239,21 @@ export default function App() {
   }
 
   async function addVcfDbFolder(path) {
-    const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "add", path })
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setVcfDbFolders(data || []);
+    try {
+      const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", path })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setVcfDbFolders(data || []);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Failed to add VCF folder: ${err.detail || res.statusText}`);
+      }
+    } catch (e) {
+      alert(`Cannot reach backend to add VCF folder. Is the backend running?\n\n${e.message}`);
     }
   }
 
@@ -2361,6 +2368,23 @@ export default function App() {
                   )}
                   <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
                     <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
+                      {canPickPath ? (
+                        <button
+                          className="ghost action"
+                          style={{fontSize:"12px"}}
+                          onClick={async () => {
+                            const picked = await window.vsnp.selectPath({
+                              kind: "folder",
+                              title: "Select VCF database folder"
+                            });
+                            if (picked) {
+                              await addVcfDbFolder(picked);
+                            }
+                          }}
+                        >
+                          Browse
+                        </button>
+                      ) : null}
                       <input
                         type="text"
                         value={manualVcfFolderPath}
@@ -2389,7 +2413,9 @@ export default function App() {
                       </button>
                     </div>
                     <div className="muted" style={{fontSize:"11px"}}>
-                      Tip: In Finder, right-click folder → Get Info → copy the path from "Where"
+                      {canPickPath
+                        ? "Use Browse to select a folder, or type a path and click Add"
+                        : "Tip: In Finder, right-click folder \u2192 Get Info \u2192 copy the path from \"Where\""}
                     </div>
                   </div>
                 </div>

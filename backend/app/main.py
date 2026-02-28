@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -2150,6 +2150,44 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=404, detail="File not found")
     _open_path(target, cfg)
     return {"opened": str(target)}
+
+
+@app.get("/api/projects/{project}/download-file")
+def download_file(project: str, path: str = Query(...)):
+    """Download any file from within a project directory."""
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    target = Path(path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = "application/octet-stream"
+    suffix = target.suffix.lower()
+    if suffix == ".html":
+        media_type = "text/html"
+    elif suffix == ".csv":
+        media_type = "text/csv"
+    elif suffix in (".xlsx", ".xls"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif suffix == ".pdf":
+        media_type = "application/pdf"
+    elif suffix in (".tre", ".nwk", ".nexus", ".nex", ".fasta", ".fa", ".vcf", ".txt", ".tsv", ".log"):
+        media_type = "text/plain"
+    return FileResponse(target, media_type=media_type, filename=target.name)
+
+
+@app.get("/api/download-file")
+def download_file_global(path: str = Query(...)):
+    """Download any file from within the projects root."""
+    cfg = load_config()
+    projects_root = Path(cfg["projects_root"]).resolve()
+    target = Path(path).resolve()
+    if not str(target).startswith(str(projects_root)):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, media_type="application/octet-stream", filename=target.name)
 
 
 @app.post("/api/posthoc/open")

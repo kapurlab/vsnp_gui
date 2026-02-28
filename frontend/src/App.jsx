@@ -683,6 +683,12 @@ export default function App() {
     });
   }
 
+  function downloadOutput(path) {
+    if (!selectedProject) return;
+    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}`;
+    window.open(url, "_blank");
+  }
+
   async function openPosthocOutput(path) {
     if (!path) return;
     await fetch(`${API_BASE}/api/posthoc/open`, {
@@ -2681,6 +2687,7 @@ export default function App() {
                     </div>
                     <div className="results-actions">
                       <button onClick={() => openOutput(item.path)}>Open</button>
+                      <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                     </div>
                   </div>
                 ))
@@ -2698,6 +2705,7 @@ export default function App() {
                           </div>
                           <div className="results-actions">
                             <button onClick={() => openOutput(item.path)}>Open</button>
+                            <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                           </div>
                         </div>
                       ))}

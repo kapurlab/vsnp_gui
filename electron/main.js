@@ -1,6 +1,11 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require("electron");
 const path = require("path");
 
+// Disable GPU acceleration on Linux (needed for X11 forwarding and headless).
+if (process.platform === "linux") {
+  app.disableHardwareAcceleration();
+}
+
 const devUrl = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL) || process.env.ELECTRON_DEV === "1";
 const appIconPng = path.join(__dirname, "..", "assets", "icons", "vSNP_Glossy_Helix_1024.jpg");

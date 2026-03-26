@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
 from typing import List, Optional, Dict
 import zipfile
+import csv
 import socket
 import json
 import os
@@ -53,6 +54,241 @@ def wrap_cmd(cfg: Dict, command: str) -> str:
     return command
 
 
+def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]:
+    mapping_csv = _find_vcf_refs_csv(cfg)
+    if not mapping_csv:
+        return {}
+    import re as _re
+    def _short_label(name: str) -> str:
+        name = name.strip()
+        if name.lower().startswith("lineage "):
+            parts = name.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                return f"L{parts[1]}"
+        if name.lower().startswith("m. "):
+            name = name[3:]
+        m = _re.match(r"^(L\\d+)\\b", name, _re.IGNORECASE)
+        if m:
+            return m.group(1).upper()
+        tokens = _re.findall(r"[A-Za-z0-9]+", name)
+        if not tokens:
+            return name or "REF"
+        first = tokens[0]
+        if first.lower().startswith("l") and first[1:].isdigit():
+            return first.upper()
+        return first[:1].upper() + first[1:]
+    def _rich_label(name: str) -> str:
+        name = name.strip()
+        if name.lower().startswith("m. "):
+            name = name[3:]
+        tokens = _re.findall(r"[A-Za-z0-9]+", name)
+        if not tokens:
+            return name or "REF"
+        return "_".join(tokens)
+    out: Dict[str, str] = {}
+    with mapping_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            label, ident = row[0].strip(), row[1].strip()
+            if not label or not ident or "number" in label.lower():
+                continue
+            friendly = _rich_label(label) if label_style == "rich" else _short_label(label)
+            out[ident] = friendly
+    return out
+
+
+def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
+    if not vcf_source_dir.exists():
+        return
+    import re as _re
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    source_map: Dict[str, str] = {}
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                name = (row.get("filename") or "").strip()
+                source_type = (row.get("source_type") or "").strip()
+                if name:
+                    source_map[name] = source_type
+    label_map = _load_vcf_label_map(cfg, label_style)
+    # Build group file(s)
+    rows = []
+    for vcf in sorted(vcf_source_dir.glob("*.vcf*")):
+        taxon = vcf.name
+        source_type = source_map.get(taxon, "reference")
+        group = "sample" if source_type == "step1" else "reference"
+        color = "#d1495b" if group == "sample" else "#2b6cb0"
+        rows.append((taxon, group, color))
+    if not rows:
+        return
+    group_path = step2_dir / "figtree_groups.tsv"
+    with group_path.open("w", encoding="utf-8") as handle:
+        handle.write("taxon\tgroup\tcolor\n")
+        for taxon, group, color in rows:
+            handle.write(f"{taxon}\t{group}\t{color}\n")
+    # Labeled version
+    if label_map:
+        labeled_path = step2_dir / "figtree_groups_labeled.tsv"
+        with labeled_path.open("w", encoding="utf-8") as handle:
+            handle.write("taxon\tgroup\tcolor\n")
+            for taxon, group, color in rows:
+                labeled = taxon
+                for ident, friendly in label_map.items():
+                    labeled = _re.sub(rf"\\b{_re.escape(ident)}\\b", friendly, labeled)
+                handle.write(f"{labeled}\t{group}\t{color}\n")
+
+
+def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
+    candidates: List[Path] = []
+    vcf_db_folders = cfg.get("vcf_db_folders", [])
+    for folder in vcf_db_folders:
+        path = Path(folder.get("path")) if isinstance(folder, dict) else Path(str(folder))
+        candidates.append(path / "VCF_refs.csv")
+        candidates.append(path / "vcf_refs.csv")
+        candidates.append(path.parent / "VCF_refs.csv")
+        candidates.append(path.parent / "vcf_refs.csv")
+    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+    if vsnp3_path:
+        candidates.append(vsnp3_path / "VCF_REFS" / "VCF_refs.csv")
+        candidates.append(vsnp3_path / "VCF_REFS" / "vcf_refs.csv")
+    projects_root = Path(cfg.get("projects_root", ""))
+    if projects_root:
+        parent = projects_root.parent
+        candidates.append(parent / "VCF_REFS" / "VCF_refs.csv")
+        candidates.append(parent / "VCF_REFS" / "vcf_refs.csv")
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str], label_style: str) -> Optional[Path]:
+    mapping_csv = _find_vcf_refs_csv(cfg)
+    if not mapping_csv:
+        return None
+    script_path = step2_dir / "_label_trees.py"
+    script = """\
+import csv
+import re
+from pathlib import Path
+
+mapping_csv = Path("__MAPPING_CSV__")
+step2_dir = Path("__STEP2_DIR__")
+label_style = "__LABEL_STYLE__"
+
+def short_label(name: str) -> str:
+    name = name.strip()
+    if name.lower().startswith("lineage "):
+        parts = name.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            return "L{}".format(parts[1])
+    if name.lower().startswith("m. "):
+        name = name[3:]
+    m = re.match(r"^(L\\d+)\\b", name, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    tokens = re.findall(r"[A-Za-z0-9]+", name)
+    if not tokens:
+        return name or "REF"
+    first = tokens[0]
+    if first.lower().startswith("l") and first[1:].isdigit():
+        return first.upper()
+    return first[:1].upper() + first[1:]
+
+def rich_label(name: str) -> str:
+    name = name.strip()
+    if name.lower().startswith("m. "):
+        name = name[3:]
+    tokens = re.findall(r"[A-Za-z0-9]+", name)
+    if not tokens:
+        return name or "REF"
+    return "_".join(tokens)
+
+def load_mapping(path: Path):
+    out = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            label, ident = row[0].strip(), row[1].strip()
+            if not label or not ident or "number" in label.lower():
+                continue
+            if label_style == "rich":
+                friendly = rich_label(label)
+            else:
+                friendly = short_label(label)
+            out[ident] = friendly + "_" + ident
+    return out
+
+mapping = load_mapping(mapping_csv)
+if not mapping:
+    raise SystemExit(0)
+
+def load_color_map(step2_dir: Path):
+    # Map accession -> color based on source type (sample vs reference)
+    manifest = step2_dir / "vcf_source" / ".vcf_source_manifest.csv"
+    out = {}
+    if not manifest.exists():
+        return out
+    with manifest.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            name = (row.get("filename") or "").strip()
+            source_type = (row.get("source_type") or "").strip()
+            m = re.search(r"(SRR\\d+|ERR\\d+|DRR\\d+|SRX\\d+|ERX\\d+|DRX\\d+)", name)
+            if not m:
+                continue
+            ident = m.group(1)
+            out[ident] = "#d1495b" if source_type == "step1" else "#2b6cb0"
+    return out
+
+color_map = load_color_map(step2_dir)
+
+def annotate_newick(text: str, color_map: dict) -> str:
+    # Add FigTree-style color annotations before branch length.
+    def repl(match):
+        label = match.group(2)
+        m = re.search(r"(SRR\\d+|ERR\\d+|DRR\\d+|SRX\\d+|ERX\\d+|DRX\\d+)", label)
+        if not m:
+            return match.group(0)
+        ident = m.group(1)
+        color = color_map.get(ident)
+        if not color:
+            return match.group(0)
+        return match.group(1) + label + "[&!color=" + color + "]:"
+    return re.sub(r"([,(])([^:(),]+):", repl, text)
+
+tree_files = list(step2_dir.rglob("*.tre")) + list(step2_dir.rglob("*.tree")) + list(step2_dir.rglob("*.nwk"))
+for path in tree_files:
+    if "_labeled" in path.stem:
+        continue
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    for ident, label in mapping.items():
+        text = re.sub(rf"\\b" + re.escape(ident) + r"(_zc\\.vcf(?:\\.gz)?)\\b", label + r"\\1", text)
+        text = re.sub(rf"\\b" + re.escape(ident) + r"\\b", label, text)
+    labeled = path.with_name(path.stem + "_labeled" + path.suffix)
+    labeled.write_text(text, encoding="utf-8")
+    # Write a NEXUS file with color annotations for FigTree
+    annotated = annotate_newick(text, color_map)
+    nexus_path = labeled.with_suffix(".nexus")
+    nexus_path.write_text(
+        \"#NEXUS\\nbegin trees;\\n  tree tree1 = \" + annotated.strip() + \"\\nend;\\n\",
+        encoding=\"utf-8\"
+    )
+"""
+    script = (
+        script.replace("__MAPPING_CSV__", str(mapping_csv))
+        .replace("__STEP2_DIR__", str(step2_dir))
+        .replace("__LABEL_STYLE__", label_style)
+    )
+    script_path.write_text(script, encoding="utf-8")
+    return script_path
+
+
 def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> List[str]:
     args = args or []
     vsnp3_path = cfg.get("vsnp3_path", "").strip()
@@ -66,6 +302,7 @@ class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
     igv_app_path: Optional[str] = None
+    figtree_app_path: Optional[str] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -101,6 +338,7 @@ class Step1Request(BaseModel):
     reference: Optional[str] = None
     debug: bool = False
     assemble_unmap: bool = False
+    nanopore: bool = False
 
 
 class Step2Request(BaseModel):
@@ -110,6 +348,7 @@ class Step2Request(BaseModel):
     n_threshold: Optional[int] = 50
     mq_threshold: Optional[int] = 56
     all_vcf: bool = True
+    label_style: Optional[str] = "short"
     find_new_filters: bool = False
     hash_groups: bool = False
     show_groups: bool = False
@@ -161,6 +400,7 @@ def get_config():
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
         "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
         "igv_app_path": Path(cfg.get("igv_app_path", "")).exists() if cfg.get("igv_app_path", "").strip() else None,
+        "figtree_app_path": Path(cfg.get("figtree_app_path", "")).exists() if cfg.get("figtree_app_path", "").strip() else None,
         "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
     }
     return cfg
@@ -175,6 +415,8 @@ def update_config(update: ConfigUpdate):
         cfg["projects_root"] = update.projects_root
     if update.igv_app_path is not None:
         cfg["igv_app_path"] = update.igv_app_path
+    if update.figtree_app_path is not None:
+        cfg["figtree_app_path"] = update.figtree_app_path
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
     if update.step1_max_parallel is not None:
@@ -518,45 +760,56 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     renamed = 0
     mismatched = []
     seen_samples = {}
-    for vcf in vcfs:
-        vcf_ref = _detect_vcf_reference(vcf, alias_map)
-        if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
-            mismatched.append({"path": str(vcf), "reference": vcf_ref})
-            if not payload.allow_mismatch:
-                skipped += 1
-                continue
-        if not vcf_ref:
-            mismatched.append({"path": str(vcf), "reference": "unknown"})
-            if not payload.allow_mismatch:
-                skipped += 1
-                continue
-        if payload.dedupe:
-            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
-            if sample in seen_samples:
-                prev = seen_samples[sample]
-                if vcf.stat().st_mtime <= prev.stat().st_mtime:
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    manifest_exists = manifest_path.exists()
+    with manifest_path.open("a", encoding="utf-8") as manifest_handle:
+        if not manifest_exists:
+            manifest_handle.write("filename,source_type,source_path\n")
+        for vcf in vcfs:
+            vcf_ref = _detect_vcf_reference(vcf, alias_map)
+            if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
+                mismatched.append({"path": str(vcf), "reference": vcf_ref})
+                if not payload.allow_mismatch:
                     skipped += 1
                     continue
-            seen_samples[sample] = vcf
-        target = vcf_source_dir / vcf.name
-        if target.exists():
-            if on_conflict == "skip":
-                skipped += 1
-                continue
-            if on_conflict == "rename":
-                if payload.prefix_duplicates:
-                    prefix = _source_prefix(vcf, source_roots)
-                    target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
+            if not vcf_ref:
+                mismatched.append({"path": str(vcf), "reference": "unknown"})
+                if not payload.allow_mismatch:
+                    skipped += 1
+                    continue
+            if payload.dedupe:
+                sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
+                if sample in seen_samples:
+                    prev = seen_samples[sample]
+                    if vcf.stat().st_mtime <= prev.stat().st_mtime:
+                        skipped += 1
+                        continue
+                seen_samples[sample] = vcf
+            target = vcf_source_dir / vcf.name
+            if target.exists():
+                if on_conflict == "skip":
+                    skipped += 1
+                    continue
+                if on_conflict == "rename":
+                    if payload.prefix_duplicates:
+                        prefix = _source_prefix(vcf, source_roots)
+                        target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
+                    else:
+                        target = _unique_target(vcf_source_dir, vcf.name)
+                    renamed += 1
                 else:
-                    target = _unique_target(vcf_source_dir, vcf.name)
-                renamed += 1
+                    target.unlink()
+            if action == "link":
+                target.symlink_to(vcf)
             else:
-                target.unlink()
-        if action == "link":
-            target.symlink_to(vcf)
-        else:
-            shutil.copy2(vcf, target)
-        imported += 1
+                shutil.copy2(vcf, target)
+            imported += 1
+            try:
+                vcf_path = vcf.resolve()
+            except FileNotFoundError:
+                vcf_path = vcf
+            source_type = "step1" if step1_dir.exists() and str(vcf_path).startswith(str(step1_dir.resolve())) else "reference"
+            manifest_handle.write(f"{target.name},{source_type},{vcf_path}\n")
 
     mismatch_report = ""
     if mismatched:
@@ -681,6 +934,7 @@ def step1_run(project: str, payload: Step1Request):
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
+    nanopore_flag = "--nanopore" if payload.nanopore else ""
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
@@ -698,6 +952,9 @@ def step1_run(project: str, payload: Step1Request):
             "set -uo pipefail",
             "FAIL=0",
             f"MAX_PARALLEL={max_parallel}",
+            "OVERALL_START=$(date +%s)",
+            "OVERALL_LOG=\"step1_run_summary.log\"",
+            "echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
             "run_sample() {",
             "  local d=\"$1\"",
             "  if [ ! -d \"$d\" ]; then",
@@ -707,6 +964,7 @@ def step1_run(project: str, payload: Step1Request):
             "  cd \"$d\"",
             "  LOG=run_step1.log",
             "  echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
+            "  START_TS=$(date +%s)",
             "  echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
             "  if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
             "    for dir in alignment_*; do",
@@ -725,15 +983,27 @@ def step1_run(project: str, payload: Step1Request):
             "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
             "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "  if [ -z \"$R1\" ] || [ -z \"$R2\" ]; then",
-            "    echo \"Missing R1/R2 in $d\" | tee -a \"$LOG\"",
+            "  if [ -z \"$R1\" ]; then",
+            "    if [ \"" + ("1" if payload.nanopore else "0") + "\" = \"1\" ]; then",
+            "      R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true)",
+            "    fi",
+            "  fi",
+            "  if [ -z \"$R1\" ]; then",
+            "    echo \"Missing R1 in $d\" | tee -a \"$LOG\"",
             "    cd ..",
             "    return 0",
             "  fi",
-            f"  vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} >> \"$LOG\" 2>&1",
+            f"  if [ -n \"$R2\" ]; then",
+            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            "  else",
+            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            "  fi",
             "  STATUS=$?",
             "  if [ \"$STATUS\" -eq 0 ]; then",
+            "    END_TS=$(date +%s)",
+            "    DURATION=$((END_TS-START_TS))",
             "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+            "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
             "  else",
             "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
             "    FAIL=1",
@@ -754,6 +1024,10 @@ def step1_run(project: str, payload: Step1Request):
             "for pid in \"${pids[@]}\"; do",
             "  wait \"$pid\" || FAIL=1",
             "done",
+            "OVERALL_END=$(date +%s)",
+            "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",
+            "echo \"End: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
+            "echo \"Duration: ${OVERALL_DURATION}s\" >> \"$OVERALL_LOG\"",
             "exit $FAIL",
         ]),
         encoding="utf-8"
@@ -850,6 +1124,9 @@ def step2_setup(project: str):
             pass
     count = 0
     edited_samples = []
+    manifest_path = step2_dir / ".vcf_source_manifest.csv"
+    with manifest_path.open("w", encoding="utf-8") as manifest:
+        manifest.write("filename,source_type,source_path\n")
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir():
             continue
@@ -865,6 +1142,7 @@ def step2_setup(project: str):
         if target.exists():
             continue
         target.symlink_to(chosen_vcf)
+        manifest.write(f"{target.name},step1,{chosen_vcf}\n")
         count += 1
         if patched_vcf:
             edited_samples.append(sample)
@@ -899,8 +1177,10 @@ def step2_run(project: str, payload: Step2Request):
         if child.is_dir() and child.name != "vcf_source":
             shutil.rmtree(child)
     remove_file = step2_dir / "remove_from_analysis.xlsx"
-    remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
+    excluded = _load_excluded_samples(cfg, remove_file)
+    vcf_run_dir = _filtered_vcf_source(step2_dir, vcf_source_dir, excluded)
     _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
+    _write_figtree_groups(step2_dir, vcf_run_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -928,7 +1208,11 @@ def step2_run(project: str, payload: Step2Request):
     if payload.density_window is not None:
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
-    cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
+    cmd = f"vsnp3_step2.py -wd {vcf_run_dir} {flags_str} -t {payload.reference}"
+    label_style = payload.label_style or "short"
+    label_script = _build_tree_label_script(step2_dir, cfg, label_style)
+    if label_script:
+        cmd = f"{cmd} && python {label_script}"
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
@@ -1865,8 +2149,46 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target)
+    _open_path(target, cfg)
     return {"opened": str(target)}
+
+
+@app.get("/api/projects/{project}/download-file")
+def download_file(project: str, path: str = Query(...)):
+    """Download any file from within a project directory."""
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    target = Path(path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type = "application/octet-stream"
+    suffix = target.suffix.lower()
+    if suffix == ".html":
+        media_type = "text/html"
+    elif suffix == ".csv":
+        media_type = "text/csv"
+    elif suffix in (".xlsx", ".xls"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif suffix == ".pdf":
+        media_type = "application/pdf"
+    elif suffix in (".tre", ".nwk", ".nexus", ".nex", ".fasta", ".fa", ".vcf", ".txt", ".tsv", ".log"):
+        media_type = "text/plain"
+    return FileResponse(target, media_type=media_type, filename=target.name)
+
+
+@app.get("/api/download-file")
+def download_file_global(path: str = Query(...)):
+    """Download any file from within the projects root."""
+    cfg = load_config()
+    projects_root = Path(cfg["projects_root"]).resolve()
+    target = Path(path).resolve()
+    if not str(target).startswith(str(projects_root)):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, media_type="application/octet-stream", filename=target.name)
 
 
 @app.post("/api/posthoc/open")
@@ -1878,7 +2200,7 @@ def posthoc_open_path(payload: OpenRequest):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target)
+    _open_path(target, cfg)
     return {"opened": str(target)}
 
 
@@ -2249,9 +2571,14 @@ def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
     return sorted(candidates, key=lambda p: p.stat().st_mtime)[-1]
 
 
-def _open_path(target: Path) -> None:
+def _open_path(target: Path, cfg: Optional[Dict] = None) -> None:
     if sys.platform.startswith("darwin"):
+        cfg = cfg or load_config()
         suffix = target.suffix.lower()
+        figtree_app = cfg.get("figtree_app_path") if isinstance(cfg, dict) else None
+        if figtree_app and suffix in {".nexus", ".nex", ".tre", ".tree", ".nwk"}:
+            subprocess.run(["open", "-a", figtree_app, str(target)])
+            return
         if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:
             subprocess.run(["open", "-e", str(target)])
         else:
@@ -2371,3 +2698,64 @@ def _sample_from_vcf(vcf: Path) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return vcf.stem
+
+
+def _load_excluded_samples(cfg: Dict, remove_file: Path) -> List[str]:
+    if not remove_file.exists():
+        return []
+    code = (
+        "import pandas as pd, sys\n"
+        "p=sys.argv[1]\n"
+        "df=pd.read_excel(p, header=None)\n"
+        "vals=[]\n"
+        "for v in df.iloc[:,0].tolist():\n"
+        "    if v is None:\n"
+        "        continue\n"
+        "    s=str(v).strip()\n"
+        "    if not s or s.lower()=='nan':\n"
+        "        continue\n"
+        "    vals.append(s)\n"
+        "print('\\n'.join(vals))\n"
+    )
+    cmd_list = conda_python_cmd(cfg, code, [str(remove_file)])
+    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    if result.returncode != 0:
+        logging.warning("Exclude list read failed: %s", result.stderr.strip())
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _exclude_match(sample: str, excluded: set) -> bool:
+    if sample in excluded:
+        return True
+    if "__" in sample:
+        tail = sample.split("__", 1)[1]
+        if tail in excluded:
+            return True
+    return False
+
+
+def _filtered_vcf_source(step2_dir: Path, vcf_source_dir: Path, excluded: List[str]) -> Path:
+    if not excluded:
+        return vcf_source_dir
+    filtered_dir = step2_dir / "vcf_source_filtered"
+    if filtered_dir.exists():
+        shutil.rmtree(filtered_dir)
+    filtered_dir.mkdir(parents=True, exist_ok=True)
+    excluded_set = set(excluded)
+    for vcf in vcf_source_dir.glob("*.vcf*"):
+        if vcf.suffix == ".tbi":
+            continue
+        sample = _sample_from_vcf(vcf)
+        if _exclude_match(sample, excluded_set):
+            continue
+        target = filtered_dir / vcf.name
+        if target.exists():
+            continue
+        target.symlink_to(vcf)
+        tbi_path = Path(f"{vcf}.tbi")
+        if tbi_path.exists():
+            tbi_target = filtered_dir / tbi_path.name
+            if not tbi_target.exists():
+                tbi_target.symlink_to(tbi_path)
+    return filtered_dir

@@ -20,6 +20,7 @@ export default function App() {
     vsnp3_path: "",
     projects_root: "",
     igv_app_path: "",
+    figtree_app_path: "",
     bcftools_path: "",
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
@@ -30,6 +31,7 @@ export default function App() {
   const [reference, setReference] = useState("");
   const [debugMode, setDebugMode] = useState(false);
   const [assembleUnmap, setAssembleUnmap] = useState(false);
+  const [nanoporeMode, setNanoporeMode] = useState(false);
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -81,6 +83,7 @@ export default function App() {
   const [s2HashGroups, setS2HashGroups] = useState(false);
   const [s2ShowGroups, setS2ShowGroups] = useState(false);
   const [s2HtmlTree, setS2HtmlTree] = useState(false);
+  const [s2LabelStyle, setS2LabelStyle] = useState("short");
   const [s2Dp, setS2Dp] = useState(false);
   const [s2DensityThreshold, setS2DensityThreshold] = useState("");
   const [s2DensityWindow, setS2DensityWindow] = useState("");
@@ -103,6 +106,7 @@ export default function App() {
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
+  const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
   const [pathValidation, setPathValidation] = useState({});
@@ -115,6 +119,7 @@ export default function App() {
   // Item 2: Reference path management
   const [refPaths, setRefPaths] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
+  const [refPathInput, setRefPathInput] = useState("");
   // Item 3: Genome download
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
   const [genomeAccession, setGenomeAccession] = useState("");
@@ -234,14 +239,21 @@ export default function App() {
   }
 
   async function addVcfDbFolder(path) {
-    const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "add", path })
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setVcfDbFolders(data || []);
+    try {
+      const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", path })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setVcfDbFolders(data || []);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Failed to add VCF folder: ${err.detail || res.statusText}`);
+      }
+    } catch (e) {
+      alert(`Cannot reach backend to add VCF folder. Is the backend running?\n\n${e.message}`);
     }
   }
 
@@ -345,6 +357,7 @@ export default function App() {
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
       igv_app_path: cfg.igv_app_path || "",
+      figtree_app_path: cfg.figtree_app_path || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
@@ -406,7 +419,12 @@ export default function App() {
         setJobStatus(status);
         // Update SRA status if this was an SRA job
         if (sraJobId && jobId === sraJobId) {
-          setSraStatus(status === "succeeded" ? "Download complete" : `Download ${status}`);
+          if (status === "succeeded") {
+            setSraStatus("Download complete");
+            loadAll();
+          } else {
+            setSraStatus(`Download ${status}`);
+          }
         }
         // Update genome download status if this was a genome download job
         if (genomeJobId && jobId === genomeJobId) {
@@ -474,7 +492,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
     if (!step2AutoRefreshPending) return;
-    if (jobStatus !== "succeeded") return;
+    if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
     loadStep2Outputs();
     setStep2AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step2AutoRefreshPending]);
@@ -519,6 +537,7 @@ export default function App() {
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
         igv_app_path: settings.igv_app_path,
+        figtree_app_path: settings.figtree_app_path,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
@@ -662,6 +681,12 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path })
     });
+  }
+
+  function downloadOutput(path) {
+    if (!selectedProject) return;
+    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}`;
+    window.open(url, "_blank");
   }
 
   async function openPosthocOutput(path) {
@@ -876,10 +901,17 @@ export default function App() {
   async function step1Run() {
     if (!selectedProject || !settingsReady || !reference) return;
     const refValue = reference === "__auto__" ? null : reference;
+    setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
+    setStep2BuiltAt("");
+    setStep2VcfCount(0);
+    setStep2Outputs([]);
+    setStep2Groups([]);
+    setStep2OutputsError("");
+    setStep2RunId("");
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap })
+      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
     });
     const data = await res.json();
     setJobId(data.job_id);
@@ -926,6 +958,7 @@ export default function App() {
         n_threshold: s2NThreshold,
         mq_threshold: s2MqThreshold,
         all_vcf: s2AllVcf,
+        label_style: s2LabelStyle,
         find_new_filters: s2FindNewFilters,
         hash_groups: s2HashGroups,
         show_groups: s2ShowGroups,
@@ -1389,6 +1422,36 @@ export default function App() {
                   </span>
                 </div>
                 <div className="settings-row">
+                  <label className="label">FigTree app</label>
+                  <input
+                    placeholder="/Applications/FigTree.app"
+                    value={settings.figtree_app_path}
+                    onChange={(e) => setSettings({ ...settings, figtree_app_path: e.target.value })}
+                  />
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    {canPickPath ? (
+                      <button
+                        className="ghost action"
+                        onClick={() =>
+                          pickPath(
+                            "file",
+                            "Select FigTree app",
+                            settings.figtree_app_path,
+                            (value) => setSettings({ ...settings, figtree_app_path: value })
+                          )
+                        }
+                      >
+                        Choose
+                      </button>
+                    ) : null}
+                    {pathValidation.figtree_app_path === true ? (
+                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
+                    ) : pathValidation.figtree_app_path === false ? (
+                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
+                    ) : null}
+                  </span>
+                </div>
+                <div className="settings-row">
                   <label className="label">bcftools</label>
                   <input
                     placeholder="/path/to/bcftools"
@@ -1602,6 +1665,26 @@ export default function App() {
                         <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
                       </div>
                     )) : <div className="muted">No custom reference paths configured.</div>}
+                    <div style={{display:"flex", gap:"0.3em", marginTop:"0.3em"}}>
+                      <input
+                        placeholder="/path/to/reference_root"
+                        value={refPathInput}
+                        onChange={(e) => setRefPathInput(e.target.value)}
+                        style={{flex:1}}
+                      />
+                      <button
+                        className="ghost action"
+                        style={{fontSize:"0.85em"}}
+                        onClick={() => {
+                          const trimmed = refPathInput.trim();
+                          if (!trimmed) return;
+                          addRefPath(trimmed);
+                          setRefPathInput("");
+                        }}
+                      >
+                        Add
+                      </button>
+                    </div>
                     {canPickPath ? (
                       <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
                         Add Location
@@ -1802,6 +1885,14 @@ export default function App() {
                   onChange={(e) => setAssembleUnmap(e.target.checked)}
                 />
                 Assemble unmapped reads
+              </label>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={nanoporeMode}
+                  onChange={(e) => setNanoporeMode(e.target.checked)}
+                />
+                Nanopore (ONT) reads
               </label>
               <div className="step1-actions">
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
@@ -2281,21 +2372,58 @@ export default function App() {
                   ) : (
                     <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF database folders configured.</div>
                   )}
-                  {canPickPath ? (
-                    <button
-                      className="ghost action"
-                      onClick={() =>
-                        pickPath(
-                          "directory",
-                          "Select VCF database folder",
-                          "",
-                          (path) => addVcfDbFolder(path)
-                        )
-                      }
-                    >
-                      Add Folder
-                    </button>
-                  ) : null}
+                  <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+                    <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
+                      {canPickPath ? (
+                        <button
+                          className="ghost action"
+                          style={{fontSize:"12px"}}
+                          onClick={async () => {
+                            const picked = await window.vsnp.selectPath({
+                              kind: "folder",
+                              title: "Select VCF database folder"
+                            });
+                            if (picked) {
+                              await addVcfDbFolder(picked);
+                            }
+                          }}
+                        >
+                          Browse
+                        </button>
+                      ) : null}
+                      <input
+                        type="text"
+                        value={manualVcfFolderPath}
+                        onChange={(e) => setManualVcfFolderPath(e.target.value)}
+                        placeholder="/path/to/VCF_REFS/folder"
+                        title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
+                        style={{flex:1, fontSize:"12px"}}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && manualVcfFolderPath.trim()) {
+                            addVcfDbFolder(manualVcfFolderPath.trim());
+                            setManualVcfFolderPath("");
+                          }
+                        }}
+                      />
+                      <button
+                        className="ghost action"
+                        onClick={() => {
+                          if (manualVcfFolderPath.trim()) {
+                            addVcfDbFolder(manualVcfFolderPath.trim());
+                            setManualVcfFolderPath("");
+                          }
+                        }}
+                        disabled={!manualVcfFolderPath.trim()}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    <div className="muted" style={{fontSize:"11px"}}>
+                      {canPickPath
+                        ? "Use Browse to select a folder, or type a path and click Add"
+                        : "Tip: In Finder, right-click folder \u2192 Get Info \u2192 copy the path from \"Where\""}
+                    </div>
+                  </div>
                 </div>
                 <label className="checkbox">
                   <input
@@ -2415,6 +2543,14 @@ export default function App() {
                     HTML tree (-html_tree)
                   </label>
                   <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={s2LabelStyle === "rich"}
+                      onChange={(e) => setS2LabelStyle(e.target.checked ? "rich" : "short")}
+                    />
+                    Use rich labels for VCF refs (labeled trees)
+                  </label>
+                  <label className="checkbox">
                     <input type="checkbox" checked={s2Dp} onChange={(e) => setS2Dp(e.target.checked)} />
                     Avg depth in tables (-dp)
                   </label>
@@ -2510,13 +2646,40 @@ export default function App() {
             {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
             {(() => {
-              const groupCount = step2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
-              const totalCount = step2Outputs.length + groupCount;
+              const shouldHideOutput = (item) => {
+                const path = item?.path || "";
+                return path.includes("_labeled_labeled");
+              };
+              const filteredStep2Outputs = step2Outputs.filter((item) => !shouldHideOutput(item));
+              const filteredStep2Groups = step2Groups
+                .map((group) => ({
+                  ...group,
+                  files: (group.files || []).filter((item) => !shouldHideOutput(item)),
+                }))
+                .filter((group) => group.files.length);
+              const groupCount = filteredStep2Groups.reduce((sum, g) => sum + (g.files?.length || 0), 0);
+              const totalCount = filteredStep2Outputs.length + groupCount;
+              const sortedStep2Outputs = filteredStep2Outputs.slice().sort((a, b) => {
+                if (s2AllVcf) {
+                  const aIsAll = /-all$/i.test(a.label || "");
+                  const bIsAll = /-all$/i.test(b.label || "");
+                  if (aIsAll !== bIsAll) return aIsAll ? -1 : 1;
+                }
+                return (a.label || "").localeCompare(b.label || "");
+              });
+              const sortedStep2Groups = filteredStep2Groups.slice().sort((a, b) => {
+                if (s2AllVcf) {
+                  const aIsAll = /-all$/i.test(a.name || "");
+                  const bIsAll = /-all$/i.test(b.name || "");
+                  if (aIsAll !== bIsAll) return aIsAll ? -1 : 1;
+                }
+                return (a.name || "").localeCompare(b.name || "");
+              });
               return (
                 <>
                   <div className="results-list">
-                  {step2Outputs.length ? (
-                    step2Outputs.map((item) => (
+                  {sortedStep2Outputs.length ? (
+                    sortedStep2Outputs.map((item) => (
                       <div key={item.path} className="results-item">
                         <div className="results-main">
                       <div className="results-name">{item.label}</div>
@@ -2524,13 +2687,14 @@ export default function App() {
                     </div>
                     <div className="results-actions">
                       <button onClick={() => openOutput(item.path)}>Open</button>
+                      <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                     </div>
                   </div>
                 ))
               ) : null}
-              {step2Groups.length ? (
+              {sortedStep2Groups.length ? (
                 <div className="results-groups">
-                  {step2Groups.map((group) => (
+                  {sortedStep2Groups.map((group) => (
                     <details key={group.name} className="results-group">
                       <summary>{group.name}</summary>
                       {group.files.map((item) => (
@@ -2541,6 +2705,7 @@ export default function App() {
                           </div>
                           <div className="results-actions">
                             <button onClick={() => openOutput(item.path)}>Open</button>
+                            <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                           </div>
                         </div>
                       ))}

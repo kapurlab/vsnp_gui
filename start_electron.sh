@@ -3,6 +3,25 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Allow overriding backend port and API URL to avoid conflicts.
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+API_URL="${VITE_API_URL:-http://localhost:${BACKEND_PORT}}"
+FRONTEND_PORT="${FRONTEND_PORT:-}"
+
+# Pick a free frontend port if not provided.
+if [ -z "$FRONTEND_PORT" ]; then
+  for p in {5173..5195}; do
+    if ! lsof -i :"$p" >/dev/null 2>&1; then
+      FRONTEND_PORT="$p"
+      break
+    fi
+  done
+fi
+if [ -z "$FRONTEND_PORT" ]; then
+  echo "No free frontend port found in range 5173-5195." >&2
+  exit 1
+fi
+
 # Auto-detect conda base
 CONDA_BASE=""
 if [ -n "${CONDA_EXE:-}" ]; then
@@ -21,6 +40,9 @@ echo "================================================"
 echo "  vSNP GUI — Detected Paths"
 echo "================================================"
 echo "  GUI root:        $ROOT_DIR"
+echo "  Backend port:    $BACKEND_PORT"
+echo "  API base URL:    $API_URL"
+echo "  Frontend port:   $FRONTEND_PORT"
 if [ -n "$CONDA_BASE" ]; then
   VSNP_ENV="$CONDA_BASE/envs/vsnp3"
   if [ -d "$VSNP_ENV" ]; then
@@ -45,7 +67,8 @@ fi
 cleanup() {
   for pid in "${BACK_PID:-}" "${FRONT_PID:-}"; do
     if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
-      kill "${pid}" >/dev/null 2>&1 || true
+      # Kill the whole process group to stop reload/child processes.
+      kill -- "-${pid}" >/dev/null 2>&1 || true
     fi
   done
 }
@@ -60,7 +83,7 @@ trap cleanup INT TERM EXIT
   fi
   source .venv/bin/activate
   pip install -r requirements.txt
-  uvicorn app.main:app --reload --port 8000
+  uvicorn app.main:app --reload --port "${BACKEND_PORT}"
 ) &
 BACK_PID=$!
 
@@ -70,7 +93,7 @@ BACK_PID=$!
   if [ ! -d node_modules ]; then
     npm install
   fi
-  npm run dev
+  VITE_API_URL="${API_URL}" npm run dev -- --port "${FRONTEND_PORT}" --strictPort
 ) &
 FRONT_PID=$!
 
@@ -78,20 +101,15 @@ FRONT_PID=$!
 echo "Waiting for Vite dev server..."
 VITE_PORT=""
 for i in {1..40}; do
-  for p in {5173..5195}; do
-    if curl -s "http://localhost:${p}" >/dev/null 2>&1; then
-      VITE_PORT="${p}"
-      break
-    fi
-  done
-  if [ -n "${VITE_PORT}" ]; then
+  if curl -s "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; then
+    VITE_PORT="${FRONTEND_PORT}"
     echo "Vite is ready on port ${VITE_PORT}."
     break
   fi
   sleep 0.5
 done
 if [ -z "${VITE_PORT}" ]; then
-  echo "Vite did not become ready on ports 5173-5195." >&2
+  echo "Vite did not become ready on port ${FRONTEND_PORT}." >&2
   exit 1
 fi
 
@@ -101,5 +119,5 @@ fi
   if [ ! -d node_modules ]; then
     npm install
   fi
-  VITE_DEV_SERVER_URL="http://localhost:${VITE_PORT}" npm run dev
+  VITE_DEV_SERVER_URL="http://localhost:${VITE_PORT}" VITE_API_URL="${API_URL}" npm run dev
 )

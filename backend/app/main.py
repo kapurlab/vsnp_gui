@@ -1177,9 +1177,10 @@ def step2_run(project: str, payload: Step2Request):
         if child.is_dir() and child.name != "vcf_source":
             shutil.rmtree(child)
     remove_file = step2_dir / "remove_from_analysis.xlsx"
-    remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
+    excluded = _load_excluded_samples(cfg, remove_file)
+    vcf_run_dir = _filtered_vcf_source(step2_dir, vcf_source_dir, excluded)
     _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
-    _write_figtree_groups(step2_dir, vcf_source_dir, cfg, payload.label_style or "short")
+    _write_figtree_groups(step2_dir, vcf_run_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -1207,7 +1208,7 @@ def step2_run(project: str, payload: Step2Request):
     if payload.density_window is not None:
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
-    cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
+    cmd = f"vsnp3_step2.py -wd {vcf_run_dir} {flags_str} -t {payload.reference}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
@@ -2697,3 +2698,64 @@ def _sample_from_vcf(vcf: Path) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return vcf.stem
+
+
+def _load_excluded_samples(cfg: Dict, remove_file: Path) -> List[str]:
+    if not remove_file.exists():
+        return []
+    code = (
+        "import pandas as pd, sys\n"
+        "p=sys.argv[1]\n"
+        "df=pd.read_excel(p, header=None)\n"
+        "vals=[]\n"
+        "for v in df.iloc[:,0].tolist():\n"
+        "    if v is None:\n"
+        "        continue\n"
+        "    s=str(v).strip()\n"
+        "    if not s or s.lower()=='nan':\n"
+        "        continue\n"
+        "    vals.append(s)\n"
+        "print('\\n'.join(vals))\n"
+    )
+    cmd_list = conda_python_cmd(cfg, code, [str(remove_file)])
+    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    if result.returncode != 0:
+        logging.warning("Exclude list read failed: %s", result.stderr.strip())
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _exclude_match(sample: str, excluded: set) -> bool:
+    if sample in excluded:
+        return True
+    if "__" in sample:
+        tail = sample.split("__", 1)[1]
+        if tail in excluded:
+            return True
+    return False
+
+
+def _filtered_vcf_source(step2_dir: Path, vcf_source_dir: Path, excluded: List[str]) -> Path:
+    if not excluded:
+        return vcf_source_dir
+    filtered_dir = step2_dir / "vcf_source_filtered"
+    if filtered_dir.exists():
+        shutil.rmtree(filtered_dir)
+    filtered_dir.mkdir(parents=True, exist_ok=True)
+    excluded_set = set(excluded)
+    for vcf in vcf_source_dir.glob("*.vcf*"):
+        if vcf.suffix == ".tbi":
+            continue
+        sample = _sample_from_vcf(vcf)
+        if _exclude_match(sample, excluded_set):
+            continue
+        target = filtered_dir / vcf.name
+        if target.exists():
+            continue
+        target.symlink_to(vcf)
+        tbi_path = Path(f"{vcf}.tbi")
+        if tbi_path.exists():
+            tbi_target = filtered_dir / tbi_path.name
+            if not tbi_target.exists():
+                tbi_target.symlink_to(tbi_path)
+    return filtered_dir

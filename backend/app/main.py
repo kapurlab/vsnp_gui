@@ -16,12 +16,14 @@ import shutil
 import gzip
 import sys
 import logging
+import shlex
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
 from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project, update_project_meta
 from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
 from app.sra import expand_accessions, build_download_script
+from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
 
 app = FastAPI(title="vSNP GUI API")
 logger = logging.getLogger("uvicorn.error")
@@ -356,6 +358,12 @@ class Step2Request(BaseModel):
     dp: bool = False
     density_threshold: Optional[int] = None
     density_window: Optional[int] = None
+
+
+class PosthocRunRequest(BaseModel):
+    group: str
+    tool: str
+    scope: Optional[str] = "all"
 
 
 class PosthocScanRequest(BaseModel):
@@ -1536,6 +1544,89 @@ def posthoc_resolve_samples(payload: PosthocResolveRequest):
     return {"found": found, "missing": missing}
 
 
+@app.get("/api/posthoc/tools")
+def posthoc_tools():
+    cfg = load_config()
+    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    tools = []
+    for tool in posthoc_list_tools():
+        status = posthoc_tool_status(tool, vsnp3_path)
+        tools.append({
+            "id": tool.tool_id,
+            "label": tool.label,
+            "description": tool.description,
+            "requires": tool.requires,
+            "outputs": tool.outputs,
+            "available": status["available"],
+            "missing": status["missing"],
+            "requirements": status["requirements"],
+        })
+    return tools
+
+
+@app.post("/api/projects/{project}/posthoc/run")
+def posthoc_run(project: str, payload: PosthocRunRequest):
+    cfg = load_config()
+    tool = posthoc_get_tool(payload.tool)
+    if not tool:
+        raise HTTPException(status_code=404, detail="Unknown posthoc tool")
+    status = posthoc_tool_status(tool, cfg.get("vsnp3_path", "").strip())
+    if not status["available"]:
+        raise HTTPException(status_code=400, detail=f"Missing dependencies: {', '.join(status['missing'])}")
+    project_dir = Path(cfg["projects_root"]) / project
+    step2_dir = project_dir / "step2"
+    group_dir = step2_dir / payload.group
+    if not group_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Group not found: {payload.group}")
+    posthoc_dir = group_dir / "posthoc"
+    posthoc_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = _posthoc_lock_path(step2_dir, payload.group, tool.tool_id)
+    _posthoc_clear_stale_lock(lock_path)
+    if lock_path.exists():
+        raise HTTPException(status_code=409, detail="Posthoc job already running for this group")
+    stats_path = posthoc_dir / "stats.json"
+    scope = (payload.scope or "all").lower()
+    if tool.tool_id == "snp_analysis":
+        cmd = _posthoc_snp_analysis_command(
+            group_dir,
+            payload.group,
+            posthoc_dir,
+            cfg.get("vsnp3_path", "").strip(),
+            scope,
+        )
+    else:
+        cmd = _posthoc_stub_command(cfg, stats_path, payload.group, tool.tool_id)
+    backend_root = Path(__file__).resolve().parent.parent
+    job_id = job_manager.start_job(
+        name=f"posthoc:{tool.tool_id}:{project}:{payload.group}",
+        command=cmd,
+        cwd=backend_root,
+    )
+    lock_path.write_text(job_id, encoding="utf-8")
+    return {"job_id": job_id, "group": payload.group, "tool": tool.tool_id, "outputs": tool.outputs}
+
+
+@app.get("/api/projects/{project}/posthoc/status")
+def posthoc_status(project: str, group: str, tool: str = "snp_analysis"):
+    cfg = load_config()
+    tool_obj = posthoc_get_tool(tool)
+    if not tool_obj:
+        raise HTTPException(status_code=404, detail="Unknown posthoc tool")
+    step2_dir = Path(cfg["projects_root"]) / project / "step2"
+    group_dir = step2_dir / group
+    if not group_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Group not found: {group}")
+    posthoc_dir = group_dir / "posthoc"
+    lock_path = _posthoc_lock_path(step2_dir, group, tool_obj.tool_id)
+    _posthoc_clear_stale_lock(lock_path)
+    running = lock_path.exists()
+    outputs = []
+    for rel in tool_obj.outputs:
+        path = group_dir / rel
+        outputs.append({"path": str(path), "exists": path.exists()})
+    return {"running": running, "outputs": outputs}
+
+
 @app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
@@ -2096,16 +2187,52 @@ def step2_outputs(project: str):
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
+
+    def _safe_name(value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+
+    def _find_group_fasta(group_dir: Path) -> Optional[Path]:
+        for pattern in ("*.fasta", "*.fa", "*.fna"):
+            matches = sorted(group_dir.glob(pattern))
+            if matches:
+                return matches[-1]
+        return None
+
+    def _count_fasta_sequences(fasta_path: Optional[Path]) -> int:
+        if not fasta_path or not fasta_path.exists():
+            return 0
+        count = 0
+        with fasta_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith(">"):
+                    count += 1
+        return count
+
     top = []
     html_files = sorted(step2_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
     if html_files:
         latest_html = html_files[-1]
-        top.append({"label": latest_html.name, "path": str(latest_html), "type": "html"})
+        top.append({
+            "label": latest_html.name,
+            "path": str(latest_html),
+            "type": "html",
+            "download_name": f"{_safe_name(project)}__{latest_html.name}",
+        })
     for f in step2_dir.glob("*.zip"):
-        top.append({"label": f.name, "path": str(f), "type": "zip"})
+        top.append({
+            "label": f.name,
+            "path": str(f),
+            "type": "zip",
+            "download_name": f"{_safe_name(project)}__{f.name}",
+        })
     mismatch_report = step2_dir / "mismatch_report.csv"
     if mismatch_report.exists():
-        top.append({"label": mismatch_report.name, "path": str(mismatch_report), "type": "csv"})
+        top.append({
+            "label": mismatch_report.name,
+            "path": str(mismatch_report),
+            "type": "csv",
+            "download_name": f"{_safe_name(project)}__{mismatch_report.name}",
+        })
     top.sort(key=lambda x: x["label"])
 
     groups = []
@@ -2114,13 +2241,36 @@ def step2_outputs(project: str):
             continue
         if d.name == "vcf_source":
             continue
+        fasta_path = _find_group_fasta(d)
+        fasta_count = _count_fasta_sequences(fasta_path)
         files = []
         for f in sorted(d.iterdir()):
             if f.is_file():
                 ext = f.suffix.lstrip(".")
-                files.append({"label": f.name, "path": str(f), "type": ext or "file"})
+                files.append({
+                    "label": f.name,
+                    "path": str(f),
+                    "type": ext or "file",
+                    "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__{f.name}",
+                })
+            elif f.is_dir() and f.name == "posthoc":
+                for pf in sorted(f.iterdir()):
+                    if pf.is_file():
+                        ext = pf.suffix.lstrip(".")
+                        files.append({
+                            "label": f"posthoc/{pf.name}",
+                            "path": str(pf),
+                            "type": ext or "file",
+                            "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__posthoc__{pf.name}",
+                        })
         if files:
-            groups.append({"name": d.name, "files": files})
+            groups.append({
+                "name": d.name,
+                "files": files,
+                "posthoc_possible": fasta_count >= 3,
+                "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
+                "posthoc_sequence_count": fasta_count,
+            })
     return {"top": top, "groups": groups}
 
 
@@ -2154,7 +2304,7 @@ def open_path(project: str, payload: OpenRequest):
 
 
 @app.get("/api/projects/{project}/download-file")
-def download_file(project: str, path: str = Query(...)):
+def download_file(project: str, path: str = Query(...), download_name: Optional[str] = Query(None)):
     """Download any file from within a project directory."""
     cfg = load_config()
     project_dir = Path(cfg["projects_root"]) / project
@@ -2175,7 +2325,12 @@ def download_file(project: str, path: str = Query(...)):
         media_type = "application/pdf"
     elif suffix in (".tre", ".nwk", ".nexus", ".nex", ".fasta", ".fa", ".vcf", ".txt", ".tsv", ".log"):
         media_type = "text/plain"
-    return FileResponse(target, media_type=media_type, filename=target.name)
+    filename = target.name
+    if download_name:
+        safe_name = Path(download_name).name
+        if safe_name:
+            filename = safe_name
+    return FileResponse(target, media_type=media_type, filename=filename)
 
 
 @app.get("/api/download-file")
@@ -2759,3 +2914,60 @@ def _filtered_vcf_source(step2_dir: Path, vcf_source_dir: Path, excluded: List[s
             if not tbi_target.exists():
                 tbi_target.symlink_to(tbi_path)
     return filtered_dir
+
+
+def _posthoc_lock_path(step2_dir: Path, group: str, tool: str) -> Path:
+    return step2_dir / group / "posthoc" / f".{tool}.lock"
+
+
+def _posthoc_clear_stale_lock(lock_path: Path) -> None:
+    if not lock_path.exists():
+        return
+    job_id = lock_path.read_text(encoding="utf-8").strip()
+    if not job_id:
+        lock_path.unlink()
+        return
+    job = job_manager.get_job(job_id)
+    if not job or job.get("status") in {"succeeded", "failed"}:
+        lock_path.unlink()
+
+
+def _posthoc_stub_command(cfg: Dict, stats_path: Path, group: str, tool: str) -> str:
+    code = (
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        "out=Path(sys.argv[1])\n"
+        "payload={\n"
+        "    'tool': sys.argv[2],\n"
+        "    'group': sys.argv[3],\n"
+        "    'status': 'stub',\n"
+        "    'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())\n"
+        "}\n"
+        "out.write_text(json.dumps(payload, indent=2), encoding='utf-8')\n"
+    )
+    cmd_list = conda_python_cmd(cfg, code, [str(stats_path), tool, group])
+    return " ".join(shlex.quote(part) for part in cmd_list)
+
+
+def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Path, vsnp3_path: str, scope: str) -> str:
+    snp_dists_path = "snp-dists"
+    if vsnp3_path:
+        candidate = Path(vsnp3_path) / "bin" / "snp-dists"
+        if candidate.exists():
+            snp_dists_path = str(candidate)
+    cmd_parts = [
+        sys.executable,
+        "-m",
+        "app.posthoc.snp_analysis",
+        "--group-dir",
+        str(group_dir),
+        "--group-name",
+        group_name,
+        "--out-dir",
+        str(out_dir),
+        "--snp-dists",
+        snp_dists_path,
+        "--scope",
+        scope,
+    ]
+    return " ".join(shlex.quote(part) for part in cmd_parts)

@@ -211,8 +211,11 @@ def reorder_by_cluster(df: pd.DataFrame) -> Tuple[pd.DataFrame, list]:
 def closest_neighbors(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=float)
-    mat = df.copy()
-    np.fill_diagonal(mat.values, np.nan)
+    # Work on a float copy so the diagonal can be masked with NaN.
+    mat = df.astype(float).copy()
+    arr = mat.to_numpy(copy=True)
+    np.fill_diagonal(arr, np.nan)
+    mat.iloc[:, :] = arr
     return mat.min(axis=1, skipna=True)
 
 

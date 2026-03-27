@@ -2780,41 +2780,46 @@ export default function App() {
                           <div className="group-actions">
                             {(() => {
                               const canRunPosthoc = snpToolAvailable && group.posthoc_possible;
-                              const posthocTitle = canRunPosthoc
-                                ? "Runs post-hoc SNP distance/KDP using the group FASTA."
-                                : (group.posthoc_reason || "SNP analysis is not available for this group.");
+                              const hasPosthocOutputs = posthocStatus[group.name]?.outputs?.some((o) => o.exists);
+                              if (!canRunPosthoc && !hasPosthocOutputs) {
+                                return null;
+                              }
+                              const posthocTitle = "Runs post-hoc SNP distance/KDP using the group FASTA.";
                               return (
                                 <>
-                                  {posthocStatus[group.name]?.outputs?.some((o) => o.exists) ? (
+                                  {hasPosthocOutputs ? (
                                     <span className="group-chip">posthoc ready</span>
                                   ) : null}
-                                  <select
-                                    className="small-select"
-                                    value={posthocScopeByGroup[group.name] || "all"}
-                                    title={canRunPosthoc ? "Choose isolates for SNP analysis (Step 1 only excludes reference VCFs)." : posthocTitle}
-                                    disabled={!canRunPosthoc}
-                                    onChange={(e) =>
-                                      setPosthocScopeByGroup((prev) => ({
-                                        ...prev,
-                                        [group.name]: e.target.value
-                                      }))
-                                    }
-                                  >
-                                    <option value="all">All VCFs</option>
-                                    <option value="step1_only">Step 1 only</option>
-                                  </select>
-                                  <button
-                                    className="small"
-                                    disabled={!canRunPosthoc || posthocStatus[group.name]?.running}
-                                    title={posthocStatus[group.name]?.running ? "SNP Analysis is running." : posthocTitle}
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      runPosthoc(group.name);
-                                    }}
-                                  >
-                                    {posthocStatus[group.name]?.running ? "SNP Analysis (running)" : "SNP Analysis"}
-                                  </button>
+                                  {canRunPosthoc ? (
+                                    <>
+                                      <select
+                                        className="small-select"
+                                        value={posthocScopeByGroup[group.name] || "all"}
+                                        title="Choose isolates for SNP analysis (Step 1 only excludes reference VCFs)."
+                                        onChange={(e) =>
+                                          setPosthocScopeByGroup((prev) => ({
+                                            ...prev,
+                                            [group.name]: e.target.value
+                                          }))
+                                        }
+                                      >
+                                        <option value="all">All VCFs</option>
+                                        <option value="step1_only">Step 1 only</option>
+                                      </select>
+                                      <button
+                                        className="small"
+                                        disabled={posthocStatus[group.name]?.running}
+                                        title={posthocStatus[group.name]?.running ? "SNP Analysis is running." : posthocTitle}
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          runPosthoc(group.name);
+                                        }}
+                                      >
+                                        {posthocStatus[group.name]?.running ? "SNP Analysis (running)" : "SNP Analysis"}
+                                      </button>
+                                    </>
+                                  ) : null}
                                 </>
                               );
                             })()}

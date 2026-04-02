@@ -39,16 +39,16 @@ def get_tool(tool_id: str) -> Optional[PosthocTool]:
     return TOOLS.get(tool_id)
 
 
-def _resolve_requirement(req: str, vsnp3_path: str) -> bool:
-    if vsnp3_path:
-        candidate = Path(vsnp3_path) / "bin" / req
+def _resolve_requirement(req: str, tool_bin: str) -> bool:
+    if tool_bin:
+        candidate = Path(tool_bin) / req
         if candidate.exists():
             return True
     return shutil.which(req) is not None
 
 
-def tool_status(tool: PosthocTool, vsnp3_path: str) -> Dict[str, object]:
-    req_status = {req: _resolve_requirement(req, vsnp3_path) for req in tool.requires}
+def tool_status(tool: PosthocTool, tool_bin: str = "") -> Dict[str, object]:
+    req_status = {req: _resolve_requirement(req, tool_bin) for req in tool.requires}
     missing = [req for req, ok in req_status.items() if not ok]
     return {
         "available": len(missing) == 0,

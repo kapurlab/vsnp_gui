@@ -43,16 +43,47 @@ projects_root.mkdir(parents=True, exist_ok=True)
 job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
 
 
+def _script_bin_dir(cfg: Dict) -> Optional[Path]:
+    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    if not vsnp3_path:
+        return None
+    candidate = Path(vsnp3_path) / "bin"
+    return candidate if candidate.is_dir() else None
+
+
+def _tool_bin_dir(cfg: Dict) -> Optional[Path]:
+    bcftools_path = cfg.get("bcftools_path", "").strip()
+    if bcftools_path:
+        candidate = Path(bcftools_path).expanduser().resolve().parent
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def build_env(cfg: Dict) -> Dict[str, str]:
-    vsnp_bin = Path(cfg["vsnp3_path"]) / "bin"
     current_path = os.environ.get("PATH", "")
-    return {"PATH": f"{vsnp_bin}:{current_path}"}
+    path_parts: List[str] = []
+    tool_bin = _tool_bin_dir(cfg)
+    script_bin = _script_bin_dir(cfg)
+    if tool_bin:
+        path_parts.append(str(tool_bin))
+    if script_bin:
+        path_parts.append(str(script_bin))
+    if current_path:
+        path_parts.append(current_path)
+    return {"PATH": ":".join(path_parts)}
 
 
 def wrap_cmd(cfg: Dict, command: str) -> str:
-    vsnp3_path = cfg.get("vsnp3_path", "").strip()
-    if vsnp3_path:
-        return f"PATH=\"{Path(vsnp3_path) / 'bin'}:$PATH\" {command}"
+    path_parts: List[str] = []
+    tool_bin = _tool_bin_dir(cfg)
+    script_bin = _script_bin_dir(cfg)
+    if tool_bin:
+        path_parts.append(str(tool_bin))
+    if script_bin:
+        path_parts.append(str(script_bin))
+    if path_parts:
+        return f"PATH=\"{':'.join(path_parts)}:$PATH\" {command}"
     return command
 
 
@@ -293,11 +324,7 @@ for path in tree_files:
 
 def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> List[str]:
     args = args or []
-    vsnp3_path = cfg.get("vsnp3_path", "").strip()
-    if vsnp3_path:
-        python_exe = Path(vsnp3_path) / "bin" / "python"
-        return [str(python_exe), "-c", code, *args]
-    return ["python", "-c", code, *args]
+    return [sys.executable, "-c", code, *args]
 
 
 class ConfigUpdate(BaseModel):
@@ -1547,10 +1574,10 @@ def posthoc_resolve_samples(payload: PosthocResolveRequest):
 @app.get("/api/posthoc/tools")
 def posthoc_tools():
     cfg = load_config()
-    vsnp3_path = cfg.get("vsnp3_path", "").strip()
+    tool_bin = str(_tool_bin_dir(cfg) or "")
     tools = []
     for tool in posthoc_list_tools():
-        status = posthoc_tool_status(tool, vsnp3_path)
+        status = posthoc_tool_status(tool, tool_bin)
         tools.append({
             "id": tool.tool_id,
             "label": tool.label,
@@ -1570,7 +1597,7 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
     tool = posthoc_get_tool(payload.tool)
     if not tool:
         raise HTTPException(status_code=404, detail="Unknown posthoc tool")
-    status = posthoc_tool_status(tool, cfg.get("vsnp3_path", "").strip())
+    status = posthoc_tool_status(tool, str(_tool_bin_dir(cfg) or ""))
     if not status["available"]:
         raise HTTPException(status_code=400, detail=f"Missing dependencies: {', '.join(status['missing'])}")
     project_dir = Path(cfg["projects_root"]) / project
@@ -1591,7 +1618,7 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
             group_dir,
             payload.group,
             posthoc_dir,
-            cfg.get("vsnp3_path", "").strip(),
+            str(_tool_bin_dir(cfg) or ""),
             scope,
         )
     else:
@@ -2949,10 +2976,10 @@ def _posthoc_stub_command(cfg: Dict, stats_path: Path, group: str, tool: str) ->
     return " ".join(shlex.quote(part) for part in cmd_list)
 
 
-def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Path, vsnp3_path: str, scope: str) -> str:
+def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Path, tool_bin: str, scope: str) -> str:
     snp_dists_path = "snp-dists"
-    if vsnp3_path:
-        candidate = Path(vsnp3_path) / "bin" / "snp-dists"
+    if tool_bin:
+        candidate = Path(tool_bin) / "snp-dists"
         if candidate.exists():
             snp_dists_path = str(candidate)
     cmd_parts = [

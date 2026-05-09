@@ -42,15 +42,26 @@ export default function TreePcStandalone() {
       treeRef.current = null;
       containerRef.current.innerHTML = "";
     }
+    const width = containerRef.current.clientWidth || 800;
+    const height = containerRef.current.clientHeight || 600;
     const tree = new PhylocanvasGL(containerRef.current, {
+      size: { width, height },
       source,
-      type: shape === "circular" ? TreeTypes.Circular : TreeTypes.Rectangular,
-      showLabels: true,
-      showLeafLabels: true,
-      showInternalLabels: showBootstrap,
-      showBranchLengths: true,
     });
     treeRef.current = tree;
+    // Apply non-essential props after construction so any one of them failing
+    // doesn't take down the whole init.
+    try {
+      tree.setProps({
+        type: shape === "circular" ? TreeTypes.Circular : TreeTypes.Rectangular,
+        showLabels: true,
+        showLeafLabels: true,
+        showInternalLabels: showBootstrap,
+        showBranchLengths: true,
+      });
+    } catch (e) {
+      setStatus(`setProps failed: ${e && e.message ? e.message : e}`);
+    }
     const nodes = (tree.getNodes && tree.getNodes()) || [];
     const leaves = nodes.filter((n) => n.isLeaf).length;
     setCounts({ leaves });

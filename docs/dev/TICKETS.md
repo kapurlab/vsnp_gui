@@ -67,6 +67,25 @@ What shipped:
 ### T-09 — Sample QC badges (pass/review/fail) — ⏳
 ### T-10 — Docker Compose deployment path — ⏳
 
+## Multi-user / multi-app architecture (post-T-10)
+
+These come up the moment a second user logs in or a second app is added (kraken, MHC). Out of scope for the initial single-user vSNP rewrite but worth tracking now so we don't paint ourselves into a corner.
+
+### T-11 — Shared reference options at `/srv/kapurlab/refs/` — ⏳
+Move `/home/vxk1/vSNP_reference_options/` to a server-wide read-only location every user can resolve. Update `vsnp3` env's `reference_options_paths.txt`. Add an admin-group writable subdir for new reference sets. Backend's reference listing already reads from a config-driven path list, so this is mostly file moves + permission setup.
+
+### T-12 — Multi-user projects layout — ⏳
+Decide between (a) per-user `~/projects/` (current), (b) shared `/srv/kapurlab/projects/<user>/`, or (c) hybrid where a project can opt into a shared scope. Affects `_resolve_sample_dir`, the Posthoc scan, the Step 2 import, and the project listing endpoint. Permission model: who can see / edit / delete whose projects.
+
+### T-13 — Cross-project VCF index — ⏳
+Index every `*_zc.vcf` across projects (and across users, scoped by T-12) into a queryable surface (`/api/vcfs?ref=…&project=…&user=…`). Lets users build custom Step 2 bundles by picking samples from arbitrary projects rather than running Step 2 within a single project.
+
+### T-14 — Step 1 cleanup / archival policy — ⏳
+After Step 1 finishes, intermediates (`*_filtered_hapall_annotated.vcf`, `RAxML_*` scratch, `*.reduced`, `unmapped_reads/`) accumulate. Add an "Archive" button per sample that compresses or deletes intermediates while keeping the BAM (for IGV review) and `_zc.vcf` (for Step 2). Optional default-on policy. Track disk-size deltas in run metadata (T-07).
+
+### T-15 — Multi-app deployment template — ⏳
+Once kraken / MHC arrive, factor the OOD wiring (uvicorn-on-FastAPI app + byte-range serve + lazy-loaded React routes) into a reusable template. Likely shape: `deploy/install_app.py <app_name>` which scaffolds the OOD app dir + a stub backend module. The portal-wide config (title, banner, pinned apps) already covers branding.
+
 ---
 
 ## Bonus fixes shipped on the `web` branch

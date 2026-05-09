@@ -1,0 +1,12 @@
+---
+# Dashboard branding
+dashboard_title: "Kapur Lab Pipelines"
+brand_bg_color: "#1f3b66"
+brand_link_active_bg_color: "#13294b"
+
+# Apps pinned to the dashboard. Use category/subcategory from the app's
+# manifest.yml. Add new entries when kraken / MHC / etc. apps land under
+# /var/www/ood/apps/sys/.
+pinned_apps:
+  - type: sys
+    category: Bioinformatics

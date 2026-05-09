@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@phylocanvas/phylocanvas.gl": "^1.62.0",
     "igv": "^3.8.0",
+    "phylotree": "^2.6.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

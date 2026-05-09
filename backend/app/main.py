@@ -1817,6 +1817,32 @@ def step2_outputs(project: str):
     return {"top": top, "groups": groups}
 
 
+@app.get("/api/projects/{project}/step2/trees")
+def step2_trees(project: str):
+    """List the latest .tre file per group under step2/."""
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        raise HTTPException(status_code=404, detail="Step2 directory not found")
+    trees = []
+    for d in sorted(step2_dir.iterdir()):
+        if not d.is_dir() or d.name == "vcf_source":
+            continue
+        tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
+        if not tre_files:
+            continue
+        latest = tre_files[-1]
+        trees.append({
+            "group": d.name,
+            "name": latest.name,
+            "path": str(latest),
+            "size": latest.stat().st_size,
+            "mtime": latest.stat().st_mtime,
+        })
+    return {"trees": trees}
+
+
 @app.post("/api/bootstrap")
 def bootstrap():
     cfg = load_config()

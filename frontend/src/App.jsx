@@ -2964,18 +2964,30 @@ export default function App() {
                   {sortedStep2Groups.map((group) => (
                     <details key={group.name} className="results-group">
                       <summary>{group.name}</summary>
-                      {group.files.map((item) => (
-                        <div key={item.path} className="results-item">
-                          <div className="results-main">
-                            <div className="results-name">{item.label}</div>
-                            <div className="results-path">{item.path}</div>
+                      {group.files.map((item) => {
+                        const isTre = (item.label || "").toLowerCase().endsWith(".tre");
+                        const treeBase = window.location.pathname.replace(/[^/]*$/, "");
+                        const ptUrl = isTre ? `${treeBase}?view=tree-pt&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(item.path)}` : "";
+                        const pcUrl = isTre ? `${treeBase}?view=tree-pc&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(item.path)}` : "";
+                        return (
+                          <div key={item.path} className="results-item">
+                            <div className="results-main">
+                              <div className="results-name">{item.label}</div>
+                              <div className="results-path">{item.path}</div>
+                            </div>
+                            <div className="results-actions">
+                              {isTre ? (
+                                <>
+                                  <button onClick={() => window.open(ptUrl, "_blank", "noopener")} title="Spike: phylotree.js">phylotree</button>
+                                  <button onClick={() => window.open(pcUrl, "_blank", "noopener")} title="Spike: phylocanvas.gl">phylocanvas</button>
+                                </>
+                              ) : null}
+                              <button onClick={() => openOutput(item.path)}>Open</button>
+                              <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
+                            </div>
                           </div>
-                          <div className="results-actions">
-                            <button onClick={() => openOutput(item.path)}>Open</button>
-                            <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </details>
                   ))}
                 </div>

@@ -39,13 +39,13 @@ These customize the OOD dashboard for the whole portal. New apps
 ```bash
 sudo install -m 0644 deploy/ood/portal/ondemand.d/dashboard.yml /etc/ood/config/ondemand.d/dashboard.yml
 sudo mkdir -p /etc/ood/config/announcements.d
-sudo install -m 0644 deploy/ood/portal/announcements.d/welcome.md /etc/ood/config/announcements.d/welcome.md
+sudo install -m 0644 deploy/ood/portal/announcements.d/welcome.yml /etc/ood/config/announcements.d/welcome.yml
 ```
 
 Files:
 - `portal/ondemand.d/dashboard.yml` — dashboard title (`Kapur Lab Pipelines`),
   brand color, pinned-apps config.
-- `portal/announcements.d/welcome.md` — markdown banner above the dashboard.
+- `portal/announcements.d/welcome.yml` — YAML banner (use .yml not .md — OOD 3.1.16 parses YAML frontmatter inconsistently from .md) above the dashboard.
 
 ## Backups
 

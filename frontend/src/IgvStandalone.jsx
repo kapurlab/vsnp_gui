@@ -9,17 +9,37 @@ function serveUrl(project, absPath) {
 
 export default function IgvStandalone() {
   const params = new URLSearchParams(window.location.search);
-  const project = params.get("project") || "";
-  const samples = (params.get("samples") || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // Two URL formats supported:
+  //   ?view=igv&tracks=proj:sample,proj:sample,...  (preferred, multi-project)
+  //   ?view=igv&project=X&samples=A,B,C             (back-compat, single project)
+  const initialTracks = (() => {
+    const tracksParam = params.get("tracks");
+    if (tracksParam) {
+      return tracksParam
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => {
+          const i = t.indexOf(":");
+          return i > 0
+            ? { project: t.slice(0, i), sample: t.slice(i + 1) }
+            : null;
+        })
+        .filter(Boolean);
+    }
+    const project = params.get("project") || "";
+    const samples = (params.get("samples") || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return samples.map((sample) => ({ project, sample }));
+  })();
 
-  const [status, setStatus] = useState(samples.length ? "Loading…" : "No samples specified.");
+  const [status, setStatus] = useState(initialTracks.length ? "Loading…" : "No samples specified.");
   const [meta, setMeta] = useState({ reference: "", trackCount: 0 });
   const browserRef = useRef(null);
   const containerRef = useRef(null);
-  const projectRef = useRef(project);
+  const projectRef = useRef(initialTracks[0] ? initialTracks[0].project : "");
   const refNameRef = useRef("");
   const loadedRef = useRef(new Set());
 
@@ -28,11 +48,8 @@ export default function IgvStandalone() {
       setStatus("IGV not ready yet — wait for initial load.");
       return;
     }
-    if (reqProject !== projectRef.current) {
-      setStatus(`Cannot mix projects (popout is showing ${projectRef.current}).`);
-      return;
-    }
-    if (loadedRef.current.has(sample)) {
+    const trackKey = `${reqProject}:${sample}`;
+    if (loadedRef.current.has(trackKey)) {
       setStatus(`${sample} already loaded.`);
       return;
     }
@@ -48,14 +65,15 @@ export default function IgvStandalone() {
         setStatus(`${sample}: reference ${candidate} ≠ ${refNameRef.current}`);
         return;
       }
+      const displayName = reqProject !== projectRef.current ? `${reqProject}/${sample}` : sample;
       await browserRef.current.loadTrack({
         type: "alignment",
         format: "bam",
-        name: sample,
+        name: displayName,
         url: serveUrl(reqProject, data.bam),
         indexURL: serveUrl(reqProject, `${data.bam}.bai`),
       });
-      loadedRef.current.add(sample);
+      loadedRef.current.add(trackKey);
       setMeta((prev) => ({ ...prev, trackCount: loadedRef.current.size }));
       setStatus("");
     } catch (err) {
@@ -77,42 +95,45 @@ export default function IgvStandalone() {
   }, []);
 
   useEffect(() => {
-    if (!project || samples.length === 0) return;
+    if (initialTracks.length === 0) return;
     let cancelled = false;
     (async () => {
       const tracks = [];
       let referenceFastaPath = "";
       let referenceFaiPath = "";
+      let refProject = "";
       let refName = "";
       const skipped = [];
-      for (const sample of samples) {
+      for (const t of initialTracks) {
+        const { project: tProject, sample } = t;
         try {
           const res = await fetch(
-            `${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/files?sample=${encodeURIComponent(sample)}`
+            `${API_BASE}/api/projects/${encodeURIComponent(tProject)}/step1/files?sample=${encodeURIComponent(sample)}`
           );
           if (!res.ok) {
-            skipped.push(`${sample} (HTTP ${res.status})`);
+            skipped.push(`${tProject}/${sample} (HTTP ${res.status})`);
             continue;
           }
           const data = await res.json();
           if (!data.bam || !data.reference_fasta) {
-            skipped.push(`${sample} (missing BAM/FASTA)`);
+            skipped.push(`${tProject}/${sample} (missing BAM/FASTA)`);
             continue;
           }
           if (!referenceFastaPath) {
             referenceFastaPath = data.reference_fasta;
             referenceFaiPath = `${data.reference_fasta}.fai`;
             refName = data.reference_fasta.split("/").pop();
+            refProject = tProject;
           } else {
             const candidate = data.reference_fasta.split("/").pop();
             if (candidate !== refName) {
-              skipped.push(`${sample} (reference ${candidate} ≠ ${refName})`);
+              skipped.push(`${tProject}/${sample} (reference ${candidate} ≠ ${refName})`);
               continue;
             }
           }
-          tracks.push({ sample, bamPath: data.bam, baiPath: `${data.bam}.bai` });
+          tracks.push({ project: tProject, sample, bamPath: data.bam, baiPath: `${data.bam}.bai` });
         } catch (e) {
-          skipped.push(`${sample} (${e && e.message ? e.message : e})`);
+          skipped.push(`${tProject}/${sample} (${e && e.message ? e.message : e})`);
         }
       }
       if (cancelled) return;
@@ -124,16 +145,19 @@ export default function IgvStandalone() {
       const config = {
         reference: {
           id: refName.replace(/\.(fa|fasta)$/i, "") || "ref",
-          fastaURL: serveUrl(project, referenceFastaPath),
-          indexURL: serveUrl(project, referenceFaiPath),
+          fastaURL: serveUrl(refProject, referenceFastaPath),
+          indexURL: serveUrl(refProject, referenceFaiPath),
         },
-        tracks: tracks.map((t) => ({
-          type: "alignment",
-          format: "bam",
-          name: t.sample,
-          url: serveUrl(project, t.bamPath),
-          indexURL: serveUrl(project, t.baiPath),
-        })),
+        tracks: tracks.map((t) => {
+          const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
+          return {
+            type: "alignment",
+            format: "bam",
+            name: displayName,
+            url: serveUrl(t.project, t.bamPath),
+            indexURL: serveUrl(t.project, t.baiPath),
+          };
+        }),
       };
       try {
         const browser = await igv.createBrowser(containerRef.current, config);
@@ -143,7 +167,9 @@ export default function IgvStandalone() {
         }
         browserRef.current = browser;
         refNameRef.current = refName;
-        for (const t of tracks) loadedRef.current.add(t.sample);
+        projectRef.current = refProject;
+        for (const t of tracks) loadedRef.current.add(`${t.project}:${t.sample}`);
+        setMeta({ reference: refName, trackCount: tracks.length });
         setStatus(skipped.length ? `Loaded ${tracks.length}; skipped: ${skipped.join("; ")}` : "");
       } catch (err) {
         setStatus(`IGV failed to load: ${err && err.message ? err.message : err}`);
@@ -162,9 +188,9 @@ export default function IgvStandalone() {
   useEffect(() => {
     const n = meta.trackCount;
     document.title = n
-      ? `IGV · ${project || "?"} · ${n} sample${n === 1 ? "" : "s"}`
-      : `IGV · ${project || "?"}`;
-  }, [project, meta.trackCount]);
+      ? `IGV · ${n} sample${n === 1 ? "" : "s"}`
+      : "IGV";
+  }, [meta.trackCount]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw" }}>

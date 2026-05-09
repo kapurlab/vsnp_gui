@@ -1148,29 +1148,28 @@ export default function App() {
       return;
     }
     const baiPath = data.bam.endsWith(".bam") ? `${data.bam}.bai` : "";
-    const newTrack = { sample, bamPath: data.bam, baiPath };
     setIgvPanel((prev) => {
       if (!prev.open) {
+        const firstTrack = { project, sample, bamPath: data.bam, baiPath, displayName: sample };
         return {
           open: true,
           project,
           referenceFastaPath: data.reference_fasta,
           referenceFaiPath: `${data.reference_fasta}.fai`,
-          tracks: [newTrack],
+          tracks: [firstTrack],
           status: "",
         };
-      }
-      if (prev.project !== project) {
-        return { ...prev, status: `Cannot mix projects (${prev.project} active).` };
       }
       const prevRefName = (prev.referenceFastaPath || "").split("/").pop();
       const newRefName = (data.reference_fasta || "").split("/").pop();
       if (prevRefName !== newRefName) {
         return { ...prev, status: `Cannot mix references (${prevRefName} vs ${newRefName}).` };
       }
-      if (prev.tracks.some((t) => t.sample === sample)) {
+      if (prev.tracks.some((t) => t.project === project && t.sample === sample)) {
         return { ...prev, status: `${sample} already loaded.` };
       }
+      const displayName = project !== prev.project ? `${project}/${sample}` : sample;
+      const newTrack = { project, sample, bamPath: data.bam, baiPath, displayName };
       return { ...prev, tracks: [...prev.tracks, newTrack], status: "" };
     });
   }
@@ -1188,10 +1187,10 @@ export default function App() {
   }
 
   function popOutIgv() {
-    if (!igvPanel.open || !igvPanel.project || igvPanel.tracks.length === 0) return;
-    const sampleNames = igvPanel.tracks.map((t) => t.sample).join(",");
+    if (!igvPanel.open || igvPanel.tracks.length === 0) return;
+    const trackParts = igvPanel.tracks.map((t) => `${t.project}:${t.sample}`);
     const base = window.location.pathname.replace(/[^/]*$/, "");
-    const url = `${base}?view=igv&project=${encodeURIComponent(igvPanel.project)}&samples=${encodeURIComponent(sampleNames)}`;
+    const url = `${base}?view=igv&tracks=${encodeURIComponent(trackParts.join(","))}`;
     const w = window.open(url, "vsnp_igv_popout");
     if (!w) {
       window.alert("Pop out blocked by browser. Allow popups for this site and try again.");
@@ -1236,9 +1235,9 @@ export default function App() {
         tracks: igvPanel.tracks.map((t) => ({
           type: "alignment",
           format: "bam",
-          name: t.sample,
-          url: igvServeUrl(igvPanel.project, t.bamPath),
-          indexURL: igvServeUrl(igvPanel.project, t.baiPath),
+          name: t.displayName || t.sample,
+          url: igvServeUrl(t.project || igvPanel.project, t.bamPath),
+          indexURL: igvServeUrl(t.project || igvPanel.project, t.baiPath),
         })),
       };
       const target = igvContainerRef.current;
@@ -1260,14 +1259,14 @@ export default function App() {
         .map((tv) => tv && tv.track && tv.track.name)
         .filter(Boolean)
     );
-    const toLoad = igvPanel.tracks.filter((t) => !loadedSet.has(t.sample));
+    const toLoad = igvPanel.tracks.filter((t) => !loadedSet.has(t.displayName || t.sample));
     for (const t of toLoad) {
       browser.loadTrack({
         type: "alignment",
         format: "bam",
-        name: t.sample,
-        url: igvServeUrl(igvPanel.project, t.bamPath),
-        indexURL: igvServeUrl(igvPanel.project, t.baiPath),
+        name: t.displayName || t.sample,
+        url: igvServeUrl(t.project || igvPanel.project, t.bamPath),
+        indexURL: igvServeUrl(t.project || igvPanel.project, t.baiPath),
       }).catch((err) => {
         setIgvPanel((prev) => ({ ...prev, status: `Track ${t.sample} failed: ${err && err.message ? err.message : err}` }));
       });
@@ -2508,7 +2507,10 @@ export default function App() {
               <span className="muted" style={{ fontSize: "0.85em" }}>
                 {igvPanel.referenceFastaPath ? igvPanel.referenceFastaPath.split("/").pop() : ""}
                 {igvPanel.tracks.length ? ` · ${igvPanel.tracks.length} track${igvPanel.tracks.length === 1 ? "" : "s"}` : ""}
-                {igvPanel.project ? ` · ${igvPanel.project}` : ""}
+                {(() => {
+                  const projects = Array.from(new Set(igvPanel.tracks.map((t) => t.project).filter(Boolean)));
+                  return projects.length ? ` · ${projects.join(", ")}` : "";
+                })()}
               </span>
               {igvPanel.status ? (
                 <span style={{ color: "#b34", fontSize: "0.85em" }}>{igvPanel.status}</span>

@@ -107,9 +107,14 @@ def list_projects(roots: RootsLike) -> List[Dict]:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
                 except json.JSONDecodeError:
-                    meta = {"name": p.name}
+                    meta = {}
             else:
-                meta = {"name": p.name}
+                meta = {}
+            # Always derive `name` from the directory. Older project.json files
+            # written by update_project_meta may have set display_name and
+            # reference without a name field; the directory is the source of
+            # truth for the project's identity.
+            meta["name"] = p.name
             meta.update(_project_counts(p))
             meta["scope"] = scope
             meta["_root"] = str(root)

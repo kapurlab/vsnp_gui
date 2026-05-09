@@ -69,6 +69,21 @@ chown -R "root:${GROUP}" "${DIR}"
 # Top dir + every subdir setgid 2770. Files inherit the group.
 find "${DIR}" -type d -exec chmod 2770 {} +
 
+# Project metadata (consumed by vsnp_gui's list_projects).
+META="${DIR}/project.json"
+if [ ! -f "${META}" ]; then
+  cat > "${META}" <<EOF
+{
+  "name": "${NAME}",
+  "scope": "shared",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "status": "created"
+}
+EOF
+  chown "root:${GROUP}" "${META}"
+  chmod 0660 "${META}"
+fi
+
 # Audit ledger: ensure exists, then make append-only.
 LEDGER="${DIR}/audit/edits.jsonl"
 [ -f "${LEDGER}" ] || { touch "${LEDGER}"; chown "root:${GROUP}" "${LEDGER}"; chmod 0660 "${LEDGER}"; }

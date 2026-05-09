@@ -176,8 +176,8 @@ def append_audit(host: str, entry: Dict, dry: bool) -> None:
     p.communicate(line.encode("utf-8"))
 
 
-def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool) -> Dict:
-    print(f"\n=== {source.name} → {target} ===")
+def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool, fastq_only: bool = False) -> Dict:
+    print(f"\n=== {source.name} → {target}{' [fastq-only]' if fastq_only else ''} ===")
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     t0 = time.monotonic()
 
@@ -188,11 +188,24 @@ def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool) -> 
     # 2. rsync. Trailing slash on source — copy *contents* into the
     # already-provisioned remote dir (preserving its setgid + group from
     # provisioning step). Excludes typical scratch.
+    if fastq_only:
+        # Copy only download/ (the fastqs) and project.json. Step 1/2 outputs
+        # will be regenerated on wgs3 against the canonical shared vsnp3 install,
+        # giving fresh provenance.
+        rsync_filter = [
+            "--include=/download/", "--include=/download/**",
+            "--include=/project.json",
+            "--exclude=*",
+        ]
+    else:
+        rsync_filter = []
+
     src = f"{source}/"
     dst = f"{host}:/srv/kapurlab/projects/{target}/"
     rsync_cmd = [
         "rsync", "-aH", "--info=stats", "--partial", "--append-verify",
         "--exclude=.DS_Store", "--exclude=.jobs", "--exclude=__pycache__",
+        *rsync_filter,
         src, dst,
     ]
     rc = run(rsync_cmd, dry=dry)
@@ -200,16 +213,20 @@ def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool) -> 
         return {"source": str(source), "target": target, "status": "rsync_failed", "started_at": started}
 
     # 3. Verify byte/file counts.
+    # Verification scope: count what we *should* have transferred.
+    scope = source / "download" if fastq_only else source
+
     if dry:
-        local_b = local_count_bytes(source)
-        local_f = local_count_files(source)
+        local_b = local_count_bytes(scope) if scope.exists() else 0
+        local_f = local_count_files(scope) if scope.exists() else 0
         print(f"  local : {local_f} files, {human_bytes(local_b)}")
         print(f"  remote: (skipped in dry-run)")
         return {"source": str(source), "target": target, "status": "dry_run",
+                "fastq_only": fastq_only,
                 "local_bytes": local_b, "local_files": local_f}
 
-    local_b = local_count_bytes(source)
-    local_f = local_count_files(source)
+    local_b = local_count_bytes(scope) if scope.exists() else 0
+    local_f = local_count_files(scope) if scope.exists() else 0
     remote_b = remote_count_bytes(host, target)
     remote_f = remote_count_files(host, target)
     elapsed = time.monotonic() - t0
@@ -223,6 +240,7 @@ def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool) -> 
         "source": str(source),
         "target": target,
         "status": status,
+        "fastq_only": fastq_only,
         "started_at": started,
         "elapsed_seconds": round(elapsed, 1),
         "local_bytes": local_b,
@@ -240,6 +258,11 @@ def main() -> int:
                    help=f"Initial member added to each proj-* group (default: {DEFAULT_REMOTE_USER})")
     p.add_argument("--execute", action="store_true",
                    help="Actually run. Without this, prints the plan and exits.")
+    p.add_argument("--fastq-only", action="store_true",
+                   help="Migrate only download/ (the fastqs) + project.json. "
+                        "Step 1/2 outputs are not copied; re-run them on wgs3 "
+                        "against the canonical /srv/kapurlab/tools/vsnp3 install "
+                        "for fresh provenance.")
     args = p.parse_args()
 
     rows = read_manifest(Path(args.manifest))
@@ -248,14 +271,30 @@ def main() -> int:
         print("Nothing marked KEEP. Done.")
         return 0
 
-    print(f"\nT-21 Phase 2 — {'EXECUTING' if args.execute else 'DRY RUN'}")
+    print(f"\nT-21 Phase 2 — {'EXECUTING' if args.execute else 'DRY RUN'}{' [fastq-only]' if args.fastq_only else ''}")
     print(f"  ssh host    : {args.host}")
     print(f"  initial admin: {args.admin}")
     print(f"  destination : {DEFAULT_TARGET_ROOT}/<target>/")
     print(f"  audit log   : /srv/kapurlab/audit/t21-migration.jsonl on {args.host}")
-    print(f"\nKEEP rows ({len(keepers)} projects, ~{human_bytes(total_bytes(keepers))} estimated):")
+
+    # Compute realistic transfer size (fastq-only sums download/* sizes only).
+    if args.fastq_only:
+        scoped_bytes = 0
+        for r, _t in keepers:
+            d = Path(r["path"]) / "download"
+            if d.exists():
+                scoped_bytes += local_count_bytes(d)
+        size_label = f"~{human_bytes(scoped_bytes)} fastq-only"
+    else:
+        size_label = f"~{human_bytes(total_bytes(keepers))} full"
+    print(f"\nKEEP rows ({len(keepers)} projects, {size_label}):")
     for r, target in keepers:
-        print(f"  {r['project']:<28s} → {target:<28s}  ({r.get('size','?')})")
+        if args.fastq_only:
+            d = Path(r["path"]) / "download"
+            sz = human_bytes(local_count_bytes(d)) if d.exists() else "?"
+        else:
+            sz = r.get("size", "?")
+        print(f"  {r['project']:<28s} → {target:<28s}  ({sz})")
 
     if not args.execute:
         print("\nDry run only. Pass --execute to actually migrate.")
@@ -264,7 +303,7 @@ def main() -> int:
     print("\n--- starting migration ---")
     audits: List[Dict] = []
     for r, target in keepers:
-        result = migrate_one(args.host, Path(r["path"]), target, args.admin, dry=False)
+        result = migrate_one(args.host, Path(r["path"]), target, args.admin, dry=False, fastq_only=args.fastq_only)
         append_audit(args.host, result, dry=False)
         audits.append(result)
 

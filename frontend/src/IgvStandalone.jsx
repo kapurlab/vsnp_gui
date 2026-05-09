@@ -35,6 +35,8 @@ export default function IgvStandalone() {
     return samples.map((sample) => ({ project, sample }));
   })();
 
+  const distinctProjects = Array.from(new Set(initialTracks.map((t) => t.project).filter(Boolean)));
+
   const [status, setStatus] = useState(initialTracks.length ? "Loading…" : "No samples specified.");
   const [meta, setMeta] = useState({ reference: "", trackCount: 0 });
   const browserRef = useRef(null);
@@ -208,7 +210,7 @@ export default function IgvStandalone() {
         <span style={{ color: "#666", fontSize: "0.9em" }}>
           {meta.reference}
           {meta.trackCount ? ` · ${meta.trackCount} track${meta.trackCount === 1 ? "" : "s"}` : ""}
-          {project ? ` · ${project}` : ""}
+          {distinctProjects.length ? ` · ${distinctProjects.join(", ")}` : ""}
         </span>
         {status ? <span style={{ color: "#b34", fontSize: "0.9em" }}>{status}</span> : null}
       </div>

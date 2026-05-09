@@ -8,7 +8,7 @@ function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
 }
 
-export default function TreePtStandalone() {
+export default function TreeStandalone() {
   const params = new URLSearchParams(window.location.search);
   const project = params.get("project") || "";
   const path = params.get("path") || "";
@@ -54,7 +54,7 @@ export default function TreePtStandalone() {
       },
       "edge-styler": (element, edge) => {
         if (rerootModeRef.current) element.style("cursor", "pointer");
-        element.on("click.spike-reroot", () => {
+        element.on("click.tree-reroot", () => {
           if (!rerootModeRef.current) return;
           try {
             tree.reroot(edge.target);
@@ -154,15 +154,16 @@ export default function TreePtStandalone() {
   }
 
   useEffect(() => {
-    document.title = `Tree (phylotree.js) · ${project || "?"}`;
-  }, [project]);
+    const fname = path ? path.split("/").pop() : "";
+    document.title = fname ? `Tree · ${fname}` : "Tree viewer";
+  }, [path]);
 
   const filename = path ? path.split("/").pop() : "";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw" }}>
       <div style={{ padding: "0.5rem 0.8rem", borderBottom: "1px solid #ddd", background: "#f7f7f7", display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
-        <strong>phylotree.js spike</strong>
+        <strong>Tree viewer</strong>
         <span style={{ color: "#666", fontSize: "0.9em" }}>
           {filename}{counts.leaves ? ` · ${counts.leaves} leaves` : ""}{project ? ` · ${project}` : ""}
         </span>

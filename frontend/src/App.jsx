@@ -2974,7 +2974,7 @@ export default function App() {
                       {group.files.map((item) => {
                         const isTre = (item.label || "").toLowerCase().endsWith(".tre");
                         const treeBase = window.location.pathname.replace(/[^/]*$/, "");
-                        const treeUrl = isTre ? `${treeBase}?view=tree-pt&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(item.path)}` : "";
+                        const treeUrl = isTre ? `${treeBase}?view=tree&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(item.path)}` : "";
                         return (
                           <div key={item.path} className="results-item">
                             <div className="results-main">
@@ -2983,7 +2983,7 @@ export default function App() {
                             </div>
                             <div className="results-actions">
                               {isTre ? (
-                                <button onClick={() => window.open(treeUrl, "_blank", "noopener")} title="View tree (phylotree.js)">View tree</button>
+                                <button onClick={() => window.open(treeUrl, "_blank", "noopener")} title="Open tree viewer in a new tab">View tree</button>
                               ) : null}
                               <button onClick={() => openOutput(item.path)}>Open</button>
                               <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>

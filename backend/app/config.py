@@ -31,9 +31,17 @@ _PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
 _DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
 _DEFAULT_BCFTOOLS = str(_DEFAULT_VSNP3_PATH / "bin" / "bcftools")
 
+# Shared projects root (T-12a). Surfaces in /api/config; backend's project
+# listing scans both this and per-user projects_root.
+_SHARED_PROJECTS_ROOT = Path("/srv/kapurlab/projects")
+_DEFAULT_SHARED_PROJECTS_ROOT = (
+    str(_SHARED_PROJECTS_ROOT) if _SHARED_PROJECTS_ROOT.is_dir() else ""
+)
+
 DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
     "projects_root": str(HOME_DIR / "projects"),
+    "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
     "bcftools_path": _DEFAULT_BCFTOOLS,
     "step1_max_parallel": 3,
     "sra": {
@@ -58,6 +66,11 @@ def load_config() -> Dict[str, Any]:
         cfg = json.load(f)
     cfg.pop("igv_app_path", None)
     cfg.pop("figtree_app_path", None)
+    # Backfill any keys added in newer schema versions (e.g. shared_projects_root
+    # added in T-12a). Existing users get sensible defaults without losing
+    # whatever they've customized.
+    for k, v in DEFAULTS.items():
+        cfg.setdefault(k, v)
     return cfg
 
 

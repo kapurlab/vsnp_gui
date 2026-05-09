@@ -19,7 +19,17 @@ import logging
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
-from app.projects import create_project, list_projects, ensure_project_dirs, archive_project, delete_project, update_project_meta
+from app.projects import (
+    create_project,
+    list_projects,
+    ensure_project_dirs,
+    archive_project,
+    delete_project,
+    update_project_meta,
+    resolve_project_dir,
+    SCOPE_PERSONAL,
+    SCOPE_SHARED,
+)
 from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
 from app.sra import expand_accessions, build_download_script
 
@@ -38,6 +48,44 @@ cfg = load_config()
 projects_root = Path(cfg["projects_root"])
 projects_root.mkdir(parents=True, exist_ok=True)
 job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
+
+
+def _project_roots(cfg_in: Dict) -> List:
+    """Build the list of (scope, root) pairs from config. Personal first
+    (so it wins on name collisions), then shared if present."""
+    personal = cfg_in.get("projects_root", "").strip()
+    shared = cfg_in.get("shared_projects_root", "").strip()
+    out = []
+    if personal:
+        out.append((SCOPE_PERSONAL, Path(personal)))
+    if shared:
+        out.append((SCOPE_SHARED, Path(shared)))
+    return out
+
+
+def _project_dir_for(cfg_in: Dict, name: str) -> Path:
+    """Resolve a project name to its on-disk directory across roots.
+    Falls back to the personal root if the project doesn't exist yet
+    (e.g. mid-create). Raises ValueError on invalid names."""
+    if "/" in name or name.startswith("."):
+        raise ValueError("Invalid project name")
+    found = resolve_project_dir(_project_roots(cfg_in), name)
+    if found is not None:
+        return found
+    return Path(cfg_in.get("projects_root", "")) / name
+
+
+def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
+    """Security check for /serve, /download-file, /posthoc/open: target
+    must resolve under any configured projects root."""
+    target = target.resolve()
+    for _scope, root in _project_roots(cfg_in):
+        try:
+            if str(target).startswith(str(root.resolve()) + "/") or target == root.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def build_env(cfg: Dict) -> Dict[str, str]:
@@ -300,6 +348,7 @@ def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> 
 class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
+    shared_projects_root: Optional[str] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -307,6 +356,7 @@ class ConfigUpdate(BaseModel):
 
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
+    scope: Optional[str] = None  # "personal" (default) or "shared"
 
 
 class SraRequest(BaseModel):
@@ -394,9 +444,11 @@ def get_config():
     cfg = load_config()
     root_dir = Path(__file__).resolve().parent.parent.parent
     cfg["gui_root"] = str(root_dir)
+    shared_root = cfg.get("shared_projects_root", "").strip()
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
         "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
+        "shared_projects_root": Path(shared_root).is_dir() if shared_root else None,
         "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
     }
     return cfg
@@ -409,6 +461,8 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
+    if update.shared_projects_root is not None:
+        cfg["shared_projects_root"] = update.shared_projects_root
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
     if update.step1_max_parallel is not None:
@@ -629,23 +683,29 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
 @app.get("/api/projects")
 def projects():
     cfg = load_config()
-    return list_projects(Path(cfg["projects_root"]))
+    return list_projects(_project_roots(cfg))
 
 
 @app.post("/api/projects")
 def project_create(payload: ProjectCreate):
     cfg = load_config()
-    project_dir = create_project(Path(cfg["projects_root"]), payload.name)
-    return {"path": str(project_dir), "name": payload.name}
+    scope = getattr(payload, "scope", None) or SCOPE_PERSONAL
+    try:
+        project_dir = create_project(_project_roots(cfg), payload.name, scope=scope)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"path": str(project_dir), "name": payload.name, "scope": scope}
 
 
 @app.post("/api/projects/{project}/archive")
 def project_archive(project: str):
     cfg = load_config()
     try:
-        target = archive_project(Path(cfg["projects_root"]), project)
+        target = archive_project(_project_roots(cfg), project)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return {"archived_to": str(target)}
 
 
@@ -653,7 +713,7 @@ def project_archive(project: str):
 def project_delete(project: str):
     cfg = load_config()
     try:
-        deleted = delete_project(Path(cfg["projects_root"]), project)
+        deleted = delete_project(_project_roots(cfg), project)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if deleted is None:
@@ -664,7 +724,7 @@ def project_delete(project: str):
 @app.post("/api/projects/{project}/link-local")
 def project_link_local(project: str, payload: LinkLocalRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
@@ -686,7 +746,7 @@ def project_link_local(project: str, payload: LinkLocalRequest):
 @app.post("/api/projects/{project}/import-vcfs")
 def project_import_vcfs(project: str, payload: ImportVcfRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
@@ -830,7 +890,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 @app.post("/api/projects/{project}/upload")
 async def project_upload(project: str, files: List[UploadFile] = File(...)):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
@@ -860,7 +920,7 @@ def sra_expand(project: str, payload: SraRequest):
 @app.post("/api/projects/{project}/sra/download")
 def sra_download(project: str, payload: SraRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
@@ -886,7 +946,7 @@ def sra_download(project: str, payload: SraRequest):
 @app.post("/api/projects/{project}/step1/setup")
 def step1_setup(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
@@ -919,7 +979,7 @@ def step1_setup(project: str):
 @app.post("/api/projects/{project}/step1/run")
 def step1_run(project: str, payload: Step1Request):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
@@ -1038,7 +1098,7 @@ def step1_run(project: str, payload: Step1Request):
 @app.get("/api/projects/{project}/step1/status")
 def step1_status(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1087,7 +1147,7 @@ def step1_status(project: str):
 @app.get("/api/projects/{project}/step1/log")
 def step1_log(project: str, sample: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     log_path = project_dir / "step1" / sample / "run_step1.log"
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log not found")
@@ -1102,7 +1162,7 @@ def step1_log(project: str, sample: str):
 @app.post("/api/projects/{project}/step2/setup")
 def step2_setup(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
@@ -1146,7 +1206,7 @@ def step2_setup(project: str):
 @app.post("/api/projects/{project}/step2/run")
 def step2_run(project: str, payload: Step2Request):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     refs = reference_lock(project)["references"]
@@ -1299,7 +1359,7 @@ def preflight(debug: bool = Query(False)):
 @app.get("/api/projects/{project}/qc_summary")
 def qc_summary(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1343,7 +1403,7 @@ def qc_summary(project: str):
 @app.get("/api/projects/{project}/qc_summary.csv")
 def qc_summary_csv(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1387,7 +1447,7 @@ def qc_summary_csv(project: str):
 @app.get("/api/projects/{project}/qc_summary.xlsx")
 def qc_summary_xlsx(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1533,7 +1593,7 @@ def posthoc_resolve_samples(payload: PosthocResolveRequest):
 @app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1596,7 +1656,7 @@ class OpenRequest(BaseModel):
 @app.get("/api/projects/{project}/step2/vcf_count")
 def step2_vcf_count(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     vcf_source_dir = project_dir / "step2" / "vcf_source"
     if not vcf_source_dir.exists():
         return {"count": 0}
@@ -1615,7 +1675,7 @@ def step2_vcf_count(project: str):
 @app.post("/api/projects/{project}/qc_exclude")
 def qc_exclude(project: str, payload: ExcludeRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     step2_dir.mkdir(parents=True, exist_ok=True)
     remove_path = step2_dir / "remove_from_analysis.xlsx"
@@ -1636,7 +1696,7 @@ def qc_exclude(project: str, payload: ExcludeRequest):
 @app.post("/api/projects/{project}/step2/clear")
 def step2_clear(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     vcf_source_dir = step2_dir / "vcf_source"
     if vcf_source_dir.exists():
@@ -1668,7 +1728,7 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
@@ -1703,7 +1763,7 @@ def step1_files(project: str, sample: str = Query(...)):
 @app.get("/api/projects/{project}/step1/samples/{sample}/stats/download")
 def step1_sample_stats_download(project: str, sample: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
@@ -1722,7 +1782,7 @@ def step1_sample_stats_download(project: str, sample: str):
 @app.get("/api/projects/{project}/step1/samples/{sample}/files")
 def step1_sample_files(project: str, sample: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
@@ -1758,7 +1818,7 @@ def step1_sample_files(project: str, sample: str):
 @app.get("/api/projects/{project}/step1/edits")
 def step1_edits(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
@@ -1785,7 +1845,7 @@ def step1_edits(project: str):
 @app.get("/api/projects/{project}/step2_outputs")
 def step2_outputs(project: str):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
@@ -1821,7 +1881,7 @@ def step2_outputs(project: str):
 def step2_trees(project: str):
     """List the latest .tre file per group under step2/."""
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
@@ -1862,7 +1922,7 @@ def bootstrap():
 @app.post("/api/projects/{project}/open")
 def open_path(project: str, payload: OpenRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     target = Path(payload.path).resolve()
     if not str(target).startswith(str(project_dir.resolve())):
         raise HTTPException(status_code=400, detail="Path not allowed")
@@ -1876,7 +1936,7 @@ def open_path(project: str, payload: OpenRequest):
 def download_file(project: str, path: str = Query(...)):
     """Download any file from within a project directory."""
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
     if not str(target).startswith(str(project_dir.resolve())):
         raise HTTPException(status_code=400, detail="Path not allowed")
@@ -1899,11 +1959,10 @@ def download_file(project: str, path: str = Query(...)):
 
 @app.get("/api/download-file")
 def download_file_global(path: str = Query(...)):
-    """Download any file from within the projects root."""
+    """Download any file from within any configured projects root."""
     cfg = load_config()
-    projects_root = Path(cfg["projects_root"]).resolve()
     target = Path(path).resolve()
-    if not str(target).startswith(str(projects_root)):
+    if not _path_under_any_project_root(cfg, target):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1983,7 +2042,7 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
     Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full download.
     """
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
     if not str(target).startswith(str(project_dir.resolve())):
         raise HTTPException(status_code=400, detail="Path not allowed")
@@ -1997,9 +2056,8 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
 @app.post("/api/posthoc/open")
 def posthoc_open_path(payload: OpenRequest):
     cfg = load_config()
-    projects_root = Path(cfg["projects_root"]).resolve()
     target = Path(payload.path).resolve()
-    if not str(target).startswith(str(projects_root)):
+    if not _path_under_any_project_root(cfg, target):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -2010,7 +2068,7 @@ def posthoc_open_path(payload: OpenRequest):
 @app.post("/api/projects/{project}/vcf_edit")
 def vcf_edit(project: str, payload: VcfEditRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, payload.sample) if step1_dir.is_dir() else None
     if not sample_dir:
@@ -2115,7 +2173,7 @@ def vcf_edit(project: str, payload: VcfEditRequest):
 @app.post("/api/projects/{project}/vcf_lookup")
 def vcf_lookup(project: str, payload: VcfLookupRequest):
     cfg = load_config()
-    project_dir = Path(cfg["projects_root"]) / project
+    project_dir = _project_dir_for(cfg, project)
     sample = (payload.sample or "").strip()
     if not sample:
         raise HTTPException(status_code=400, detail="Sample is required")

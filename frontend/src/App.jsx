@@ -1654,7 +1654,25 @@ export default function App() {
                   }}
                 >
                   <div className="list-details">
-                    <div className="list-title">{p.display_name || p.name}</div>
+                    <div className="list-title" style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span>{p.display_name || p.name}</span>
+                      {p.scope === "shared" ? (
+                        <span
+                          title="Shared project (visible to all members of the project group)"
+                          style={{
+                            fontSize: "0.7em",
+                            padding: "1px 6px",
+                            borderRadius: "10px",
+                            background: "#dbe9ff",
+                            color: "#13294b",
+                            fontWeight: 600,
+                            letterSpacing: "0.02em",
+                          }}
+                        >
+                          shared
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
                     </div>

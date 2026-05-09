@@ -17,6 +17,7 @@ export default function TreeStandalone() {
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [rerootMode, setRerootMode] = useState(false);
+  const [stripSuffix, setStripSuffix] = useState(true);
   const [counts, setCounts] = useState({ leaves: 0 });
 
   const treeRef = useRef(null);
@@ -45,11 +46,24 @@ export default function TreeStandalone() {
       brush: false,
       zoom: true,
       "node-styler": (element, node) => {
-        if (!node.children) {
-          const name = (node.data && node.data.name) || "";
-          if (searchTerm && name.toLowerCase().includes(searchTerm.toLowerCase())) {
-            element.select("text").style("fill", "#d62728").style("font-weight", "bold");
+        const data = (node && node.data) || {};
+        if (node && node.children) {
+          // Internal node: phylotree renders data.name when internal-names is on.
+          // Suppress any literal "root" label (synthetic wrapper or otherwise);
+          // genuine bootstrap values are stored as numeric strings.
+          if (data.name === "root") {
+            element.select("text").text("");
           }
+          return;
+        }
+        const name = data.name || "";
+        if (stripSuffix && name.toLowerCase().endsWith("_zc.vcf")) {
+          element.select("text").text(name.slice(0, -("_zc.vcf".length)));
+        } else if (stripSuffix && name.toLowerCase().endsWith("_zc.vcf.gz")) {
+          element.select("text").text(name.slice(0, -("_zc.vcf.gz".length)));
+        }
+        if (searchTerm && name.toLowerCase().includes(searchTerm.toLowerCase())) {
+          element.select("text").style("fill", "#d62728").style("font-weight", "bold");
         }
       },
       "edge-styler": (element, edge) => {
@@ -111,7 +125,7 @@ export default function TreeStandalone() {
   useEffect(() => {
     if (treeRef.current) render(treeRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showBootstrap, searchTerm, rerootMode]);
+  }, [showBootstrap, searchTerm, rerootMode, stripSuffix]);
 
   function midpointRoot() {
     if (!treeRef.current) return;
@@ -169,6 +183,7 @@ export default function TreeStandalone() {
         </span>
         <span style={{ flex: 1 }} />
         <input placeholder="Search tip…" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={{ width: 180 }} />
+        <label><input type="checkbox" checked={stripSuffix} onChange={(e) => setStripSuffix(e.target.checked)} /> Strip <code>_zc.vcf</code></label>
         <label><input type="checkbox" checked={showBootstrap} onChange={(e) => setShowBootstrap(e.target.checked)} /> Bootstrap</label>
         <label><input type="checkbox" checked={rerootMode} onChange={(e) => setRerootMode(e.target.checked)} /> Reroot mode (click branch)</label>
         <button onClick={midpointRoot}>Midpoint</button>

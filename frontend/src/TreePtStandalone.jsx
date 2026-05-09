@@ -89,6 +89,12 @@ export default function TreePtStandalone() {
         if (cancelled) return;
         originalNewickRef.current = newick;
         const tree = new phylotree(newick);
+        // Phylotree's parser wraps the parsed tree in a synthetic outer node
+        // named "root"; with internal-names on, that label is rendered as a
+        // phantom "root" alongside any legit "root" outgroup leaf. Blank it.
+        if (tree.nodes && tree.nodes.data && tree.nodes.data.name === "root") {
+          tree.nodes.data.name = "";
+        }
         treeRef.current = tree;
         const tips = tree.getTips ? tree.getTips() : [];
         setCounts({ leaves: tips.length || 0 });
@@ -126,6 +132,9 @@ export default function TreePtStandalone() {
     if (!originalNewickRef.current) return;
     try {
       const tree = new phylotree(originalNewickRef.current);
+      if (tree.nodes && tree.nodes.data && tree.nodes.data.name === "root") {
+        tree.nodes.data.name = "";
+      }
       treeRef.current = tree;
       render(tree);
     } catch (err) {

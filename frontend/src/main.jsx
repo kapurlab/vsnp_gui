@@ -8,7 +8,6 @@ const params = new URLSearchParams(window.location.search);
 const view = params.get("view");
 
 const TreePtStandalone = lazy(() => import("./TreePtStandalone.jsx"));
-const TreePcStandalone = lazy(() => import("./TreePcStandalone.jsx"));
 
 const Fallback = () => (
   <div style={{ padding: "1rem", fontFamily: "system-ui" }}>Loading viewer…</div>
@@ -39,14 +38,6 @@ if (view === "igv") {
     <ErrorBoundary label="phylotree.js">
       <Suspense fallback={<Fallback />}>
         <TreePtStandalone />
-      </Suspense>
-    </ErrorBoundary>
-  );
-} else if (view === "tree-pc") {
-  root.render(
-    <ErrorBoundary label="phylocanvas.gl">
-      <Suspense fallback={<Fallback />}>
-        <TreePcStandalone />
       </Suspense>
     </ErrorBoundary>
   );

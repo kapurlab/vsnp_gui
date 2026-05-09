@@ -60,3 +60,51 @@ sudo groupdel proj-<name>
 ```
 
 If we find ourselves doing this often, write the helper.
+
+## kapurlab-add-user.sh
+
+Provisions a new lab user: Linux account, password, group memberships (`kapurlab-members` always, `kapurlab-admins` if `--admin`, any `proj-*` via `--project`), and the SSH self-loopback key required by OOD's `linux_host` adapter.
+
+```bash
+sudo install -m 0750 -o root -g kapurlab-admins \
+  deploy/admin/kapurlab-add-user.sh \
+  /usr/local/sbin/kapurlab-add-user.sh
+```
+
+### Usage
+
+```bash
+# Lab member with access to two projects
+sudo kapurlab-add-user.sh dev --project mtbc_v1 --project mhc_v1
+
+# Admin
+sudo kapurlab-add-user.sh tod --admin
+
+# Provide an explicit password instead of generating one
+sudo kapurlab-add-user.sh ro --password "use-strong-passwords"
+```
+
+### What it does
+
+| Step | Effect |
+|---|---|
+| 1 | Creates Linux user with `useradd -m -s /bin/bash` (no-op if exists) |
+| 2 | Sets a password — explicit (`--password`) or auto-generated (printed once) |
+| 3 | Adds user to `kapurlab-members`; to `kapurlab-admins` with `--admin`; to each `proj-<name>` with `--project <name>` |
+| 4 | Generates `~/.ssh/id_ed25519` and adds the pubkey to the user's own `authorized_keys` (OOD's `linux_host` adapter needs passwordless `ssh user@localhost` to spawn batch_connect sessions) |
+| 5 | Smoke-tests `ssh <user>@localhost` — flags a warning if it fails |
+
+### Conventions
+
+- Username: lowercase alphanumeric + `_` `-`, starts with a letter, 2–31 chars.
+- Passwords: PAM-authable (OOD basic-auth uses PAM). Rotate later with `sudo passwd <user>`.
+- The script doesn't add the user to the `sudo` group — admin status here means "kapurlab-admins" (write `/srv/kapurlab/refs`, `/tools`, `/audit`), not OS-level sudo. If you want sudo too, do it explicitly.
+- New group memberships **don't apply to existing OOD sessions**. The user must end any active sessions and re-launch.
+
+### Removing a user
+
+```bash
+sudo userdel -r <user>           # removes account + home dir
+# Group memberships clean up automatically with userdel.
+# proj-<name> groups stay (they own their projects independently).
+```

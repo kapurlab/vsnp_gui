@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import PhylocanvasGL, { Shapes } from "@phylocanvas/phylocanvas.gl";
+import PhylocanvasGL, { TreeTypes } from "@phylocanvas/phylocanvas.gl";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -44,7 +44,7 @@ export default function TreePcStandalone() {
     }
     const tree = new PhylocanvasGL(containerRef.current, {
       source,
-      type: shape === "circular" ? Shapes.Circular : Shapes.Rectangular,
+      type: shape === "circular" ? TreeTypes.Circular : TreeTypes.Rectangular,
       showLabels: true,
       showLeafLabels: true,
       showInternalLabels: showBootstrap,

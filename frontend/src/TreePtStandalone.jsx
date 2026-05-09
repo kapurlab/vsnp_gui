@@ -53,9 +53,9 @@ export default function TreePtStandalone() {
         }
       },
       "edge-styler": (element, edge) => {
-        if (!rerootModeRef.current) return;
-        element.style("cursor", "pointer");
+        if (rerootModeRef.current) element.style("cursor", "pointer");
         element.on("click.spike-reroot", () => {
+          if (!rerootModeRef.current) return;
           try {
             tree.reroot(edge.target);
             render(tree);
@@ -105,14 +105,14 @@ export default function TreePtStandalone() {
   useEffect(() => {
     if (treeRef.current) render(treeRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showBootstrap, searchTerm]);
+  }, [showBootstrap, searchTerm, rerootMode]);
 
   function midpointRoot() {
     if (!treeRef.current) return;
     try {
       const mid = computeMidpoint(treeRef.current);
-      if (mid && mid.target) {
-        treeRef.current.reroot(mid.target);
+      if (mid && mid.location) {
+        treeRef.current.reroot(mid.location, mid.breakpoint || 0);
         render(treeRef.current);
       } else {
         setStatus("Midpoint not computable on this tree.");

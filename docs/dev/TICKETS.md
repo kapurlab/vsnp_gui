@@ -25,7 +25,7 @@ Landed 2026-05-08.
 - npm: `igv@^3.8.0`
 
 🪝 Follow-ups:
-- [ ] Retire desktop IGV: `step1_igv_session`, `_open_igv`, `_send_igv_commands`, `posthoc/igv_session`, IGV settings field
+- [x] Retire desktop IGV: `step1_igv_session`, `posthoc/igv_session`, `_open_igv` and helpers, `igv_app_path` config field, frontend handlers and settings UI (commit follows)
 - [ ] After T-03 lands, remove Xvfb / x11vnc / websockify from OOD `script.sh.erb`
 - [ ] Posthoc-tab IGV smoke test (needs a 2nd project; sufficient by symlinking `test/step1`)
 

@@ -20,7 +20,6 @@ export default function App() {
   const [settings, setSettings] = useState({
     vsnp3_path: "",
     projects_root: "",
-    igv_app_path: "",
     figtree_app_path: "",
     bcftools_path: "",
     step1_max_parallel: 3,
@@ -363,7 +362,6 @@ export default function App() {
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
-      igv_app_path: cfg.igv_app_path || "",
       figtree_app_path: cfg.figtree_app_path || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
@@ -543,7 +541,6 @@ export default function App() {
       body: JSON.stringify({
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
-        igv_app_path: settings.igv_app_path,
         figtree_app_path: settings.figtree_app_path,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
@@ -1099,23 +1096,6 @@ export default function App() {
     return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
   }
 
-  async function openStep1Igv(sample) {
-    if (!selectedProject) return;
-    const data = await getStep1Files(sample);
-    if (!data || !data.sample_dir) return;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/igv_session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: data.sample_dir })
-    });
-    if (res.ok) {
-      const payload = await res.json();
-      if (!payload.igv_commands_sent) {
-        window.alert("IGV command server did not accept commands. Make sure IGV is running and port 60151 is enabled (View > Preferences > Advanced > Enable port).");
-      }
-    }
-  }
-
   function igvServeUrl(project, absPath) {
     return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
   }
@@ -1451,21 +1431,6 @@ export default function App() {
     }
   }
 
-  async function openPosthocIgv(sampleDir) {
-    if (!sampleDir) return;
-    const res = await fetch(`${API_BASE}/api/posthoc/igv_session`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: sampleDir })
-    });
-    if (res.ok) {
-      const payload = await res.json();
-      if (!payload.igv_commands_sent) {
-        window.alert("IGV command server did not accept commands. Make sure IGV is running and port 60151 is enabled (View > Preferences > Advanced > Enable port).");
-      }
-    }
-  }
-
   return (
     <div className="app">
       <header className="app-header">
@@ -1608,36 +1573,6 @@ export default function App() {
               </div>
               <div className="input-column">
                 <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Optional</label>
-                <div className="settings-row">
-                  <label className="label">IGV app</label>
-                  <input
-                    placeholder="/Applications/IGV.app"
-                    value={settings.igv_app_path}
-                    onChange={(e) => setSettings({ ...settings, igv_app_path: e.target.value })}
-                  />
-                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
-                    {canPickPath ? (
-                      <button
-                        className="ghost action"
-                        onClick={() =>
-                          pickPath(
-                            "file",
-                            "Select IGV app",
-                            settings.igv_app_path,
-                            (value) => setSettings({ ...settings, igv_app_path: value })
-                          )
-                        }
-                      >
-                        Choose
-                      </button>
-                    ) : null}
-                    {pathValidation.igv_app_path === true ? (
-                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
-                    ) : pathValidation.igv_app_path === false ? (
-                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
-                    ) : null}
-                  </span>
-                </div>
                 <div className="settings-row">
                   <label className="label">FigTree app</label>
                   <input

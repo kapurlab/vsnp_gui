@@ -354,6 +354,7 @@ class Step2Request(BaseModel):
     dp: bool = False
     density_threshold: Optional[int] = None
     density_window: Optional[int] = None
+    bootstrap: int = 0
 
 
 class PosthocScanRequest(BaseModel):
@@ -1207,11 +1208,14 @@ def step2_run(project: str, payload: Step2Request):
     label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
         cmd = f"{cmd} && python {label_script}"
+    step2_env = build_env(cfg)
+    if payload.bootstrap and payload.bootstrap > 0:
+        step2_env["VSNP3_BOOTSTRAP"] = str(int(payload.bootstrap))
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
         cwd=step2_dir,
-        env=build_env(cfg)
+        env=step2_env
     )
     return {"job_id": job_id}
 

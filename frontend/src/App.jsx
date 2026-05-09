@@ -93,6 +93,7 @@ export default function App() {
   const [s2Dp, setS2Dp] = useState(false);
   const [s2DensityThreshold, setS2DensityThreshold] = useState("");
   const [s2DensityWindow, setS2DensityWindow] = useState("");
+  const [s2Bootstrap, setS2Bootstrap] = useState("");
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
@@ -969,7 +970,8 @@ export default function App() {
         html_tree: s2HtmlTree,
         dp: s2Dp,
         density_threshold: s2DensityThreshold !== "" ? parseInt(s2DensityThreshold, 10) : null,
-        density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null
+        density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null,
+        bootstrap: s2Bootstrap !== "" ? parseInt(s2Bootstrap, 10) || 0 : 0
       })
     });
     if (!res.ok) {
@@ -2847,6 +2849,11 @@ export default function App() {
                     <span>Density window (bp)</span>
                     <input type="number" value={s2DensityWindow} placeholder="20" onChange={(e) => setS2DensityWindow(e.target.value)} style={{width:"5em"}} />
                     <span className="muted" style={{fontSize:"0.8em"}}>default: 20</span>
+                  </label>
+                  <label className="option-field">
+                    <span>Bootstrap (replicates)</span>
+                    <input type="number" min="0" value={s2Bootstrap} placeholder="0" onChange={(e) => setS2Bootstrap(e.target.value)} style={{width:"5em"}} />
+                    <span className="muted" style={{fontSize:"0.8em"}}>0 = off · 100 typical · RAxML -f a</span>
                   </label>
                 </div>
               </div>

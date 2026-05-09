@@ -5,15 +5,26 @@
 echo "=== vSNP GUI Session Starting ==="
 echo "uvicorn:${port}"
 
-VSNP3_ENV=/home/${USER}/miniforge3/envs/vsnp3
-PYTHON=/home/${USER}/miniforge3/bin/python
+# Shared lab tools (T-11). Falls back to per-user install if the shared one
+# isn't present yet (e.g. on a single-user dev box).
+SHARED_VSNP3=/srv/kapurlab/tools/vsnp3
+PERSONAL_VSNP3=/home/${USER}/miniforge3/envs/vsnp3
+PERSONAL_BASE_PYTHON=/home/${USER}/miniforge3/bin/python
+if [ -d "${SHARED_VSNP3}" ]; then
+  VSNP3_ENV="${SHARED_VSNP3}"
+  PYTHON="${SHARED_VSNP3}/bin/python"
+else
+  VSNP3_ENV="${PERSONAL_VSNP3}"
+  PYTHON="${PERSONAL_BASE_PYTHON}"
+fi
+
 VSNP_DIR=/home/${USER}/vsnp_gui
 
 # Make the vsnp3 env CLI tools (vsnp3_step1.py, raxml, samtools, …) available.
 export PATH="${VSNP3_ENV}/bin:${PATH}"
 
 cd "${VSNP_DIR}/backend"
-echo "Starting uvicorn on port ${port}..."
+echo "Starting uvicorn on port ${port} with vsnp3 env ${VSNP3_ENV}..."
 exec $PYTHON -m uvicorn app.main:app \
     --host 0.0.0.0 \
     --port "${port}" \

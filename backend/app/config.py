@@ -22,10 +22,19 @@ CONFIG_PATH = DATA_DIR / "config.json"
 _LEGACY_CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
 
 HOME_DIR = Path.home()
+
+# Shared lab tools live under /srv/kapurlab/tools/ (see docs/dev/MULTIUSER.md).
+# Falls back to a per-user $HOME path if the shared install doesn't exist
+# (e.g. on a single-user dev box, or pre-T-11 systems).
+_SHARED_VSNP3 = Path("/srv/kapurlab/tools/vsnp3")
+_PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
+_DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
+_DEFAULT_BCFTOOLS = str(_DEFAULT_VSNP3_PATH / "bin" / "bcftools")
+
 DEFAULTS: Dict[str, Any] = {
-    "vsnp3_path": str(HOME_DIR / "miniforge3" / "envs" / "vsnp3"),
+    "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
     "projects_root": str(HOME_DIR / "projects"),
-    "bcftools_path": "",
+    "bcftools_path": _DEFAULT_BCFTOOLS,
     "step1_max_parallel": 3,
     "sra": {
         "use_sratoolkit_first": True,

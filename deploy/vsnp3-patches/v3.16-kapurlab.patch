@@ -1,0 +1,48 @@
+--- a/bin/vsnp3_fasta_to_snps_table.py	2026-05-08 20:12:28.620752479 -0400
++++ b/bin/vsnp3_fasta_to_snps_table.py	2026-05-09 12:29:22.931155663 -0400
+@@ -71,10 +71,16 @@
+         raxml_version = subprocess.check_output(f'{raxml} -v', shell=True, text=True)
+         self.raxml_version = raxml_version.split('\n')[2]
+ 
+-        os.system(f'{raxml} -s {fasta_alignments} -n raxml -m GTRCATI -o root -w {write_path} -p 456123 -T 4 > /dev/null 2>&1') #> /dev/null 2>&1
++        n_boot = int(os.environ.get('VSNP3_BOOTSTRAP', '0') or '0')
++        if n_boot > 0:
++            os.system(f'{raxml} -f a -s {fasta_alignments} -n raxml -m GTRCATI -o root -w {write_path} -p 456123 -x 7777 -N {n_boot} -T 4 > /dev/null 2>&1')
++            bestree_src = f'{write_path}/RAxML_bipartitions.raxml'
++        else:
++            os.system(f'{raxml} -s {fasta_alignments} -n raxml -m GTRCATI -o root -w {write_path} -p 456123 -T 4 > /dev/null 2>&1')
++            bestree_src = f'{write_path}/RAxML_bestTree.raxml'
+         try:
+             newick = f'{write_path}/{tree_name}_{self.st}.tre'
+-            os.rename(f'{write_path}/RAxML_bestTree.raxml', newick)
++            os.rename(bestree_src, newick)
+             raxml_to_remove = glob.glob(f'{write_path}/RAxML*')
+             for each in raxml_to_remove:
+                 os.remove(each)
+@@ -201,7 +207,7 @@
+             column = tree_order[column_header]
+             # for each element in the column
+             for element in column:
+-                if element != column[0] and element != '-': #column[0] is top row/root/reference, element is everything below it.
++                if element != column.iloc[0] and element != '-': #column.iloc[0] is top row/root/reference, element is everything below it.
+                     count = count + 1
+             snp_per_column.append(count)
+         row1 = pd.Series(snp_per_column, tree_order.columns, name="snp_per_column")
+@@ -215,7 +221,7 @@
+             # for each element in the column
+             # skip the first element
+             for element in column[1:]:
+-                if element == column[0] or element == '-': # when - keep count, essentially skip -
++                if element == column.iloc[0] or element == '-': # when - keep count, essentially skip -
+                     count = count + 1
+                 else:
+                     break
+@@ -246,7 +252,7 @@
+             column = tree_order2[column_header]
+             index_list_of_ref_differences=[]
+             for ind, list_item in enumerate(column[1:].to_list()):
+-                if list_item != column[0] and list_item != '-':
++                if list_item != column.iloc[0] and list_item != '-':
+                     index_list_of_ref_differences.append(ind)
+             c = itertools.count()
+             val = max((list(g) for _, g in itertools.groupby(index_list_of_ref_differences, lambda x: x-next(c))), key=len)

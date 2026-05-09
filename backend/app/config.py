@@ -34,6 +34,7 @@ def load_config() -> Dict[str, Any]:
         cfg["vsnp3_path"] = DEFAULTS["vsnp3_path"]
     if str(projects_root).startswith("/Users/vivekkapur") and not projects_root.exists():
         cfg["projects_root"] = DEFAULTS["projects_root"]
+    cfg.pop("igv_app_path", None)
     return cfg
 
 

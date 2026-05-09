@@ -38,6 +38,14 @@ _DEFAULT_SHARED_PROJECTS_ROOT = (
     str(_SHARED_PROJECTS_ROOT) if _SHARED_PROJECTS_ROOT.is_dir() else ""
 )
 
+# Shared VCF database root. Subdirectories under this path are auto-discovered
+# as VCF DB folders for every user (in addition to whatever they add manually
+# via vcf_db_folders). Lab admins curate by managing the filesystem.
+_SHARED_VCF_DB_ROOT = Path("/srv/kapurlab/refs/vsnp3/vcf_db_folders")
+_DEFAULT_SHARED_VCF_DB_ROOT = (
+    str(_SHARED_VCF_DB_ROOT) if _SHARED_VCF_DB_ROOT.is_dir() else ""
+)
+
 DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
     "projects_root": str(HOME_DIR / "projects"),
@@ -49,7 +57,11 @@ DEFAULTS: Dict[str, Any] = {
         "allow_insecure_https": False,
         "max_parallel": 2
     },
-    "vcf_db_folders": []
+    "vcf_db_folders": [],
+    "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
+    # Per-user opt-out for shared DBs: paths the user has chosen to skip in
+    # their analyses. Shared entries are visible but unchecked when in here.
+    "disabled_vcf_db_paths": []
 }
 
 

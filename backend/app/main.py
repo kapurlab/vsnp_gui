@@ -188,11 +188,85 @@ def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, 
                 handle.write(f"{labeled}\t{group}\t{color}\n")
 
 
+def _count_vcfs(folder: Path) -> int:
+    """Count *.vcf and *.vcf.gz files at the top level of a DB folder."""
+    try:
+        return sum(
+            1 for p in folder.iterdir()
+            if p.is_file() and (p.name.endswith(".vcf") or p.name.endswith(".vcf.gz"))
+        )
+    except OSError:
+        return 0
+
+
+def _resolved_vcf_db_folders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Discover VCF DBs as a 2-level tree under vcf_db_folders_root:
+        <root>/<reference>/<db_name>/*.vcf
+
+    Each entry carries:
+        path           absolute folder path
+        reference      parent dir name (matches vsnp3 reference key)
+        name           leaf folder name (display name)
+        sample_count   live count of *.vcf / *.vcf.gz at top level
+        enabled        bool (user toggle; shared entries always True in V1)
+        scope          "shared" | "user"
+
+    Shared entries (auto-discovered) are emitted first; user entries (explicit
+    config list) follow. Paths are deduplicated. User entries must declare
+    their reference in the config item dict; legacy plain-string entries are
+    surfaced with reference="" and the GUI can prompt the user to set one."""
+    result: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _emit(path: Path, reference: str, scope: str, enabled: bool):
+        p = str(path.resolve())
+        if p in seen:
+            return
+        result.append({
+            "path": p,
+            "reference": reference,
+            "name": path.name,
+            "sample_count": _count_vcfs(path),
+            "enabled": enabled,
+            "scope": scope,
+        })
+        seen.add(p)
+
+    disabled_shared = set(cfg.get("disabled_vcf_db_paths", []) or [])
+    root = cfg.get("vcf_db_folders_root", "")
+    if root:
+        root_path = Path(root)
+        if root_path.is_dir():
+            for ref_dir in sorted(root_path.iterdir()):
+                if not ref_dir.is_dir():
+                    continue
+                for db_dir in sorted(ref_dir.iterdir()):
+                    if not db_dir.is_dir():
+                        continue
+                    resolved = str(db_dir.resolve())
+                    _emit(db_dir, reference=ref_dir.name, scope="shared",
+                          enabled=resolved not in disabled_shared)
+
+    for entry in cfg.get("vcf_db_folders", []) or []:
+        if isinstance(entry, dict):
+            raw = entry.get("path")
+            enabled = entry.get("enabled", True)
+            reference = entry.get("reference", "") or ""
+        else:
+            raw = str(entry)
+            enabled = True
+            reference = ""
+        if not raw:
+            continue
+        p = Path(raw).expanduser()
+        _emit(p, reference=reference, scope="user", enabled=bool(enabled))
+    return result
+
+
 def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
     candidates: List[Path] = []
-    vcf_db_folders = cfg.get("vcf_db_folders", [])
-    for folder in vcf_db_folders:
-        path = Path(folder.get("path")) if isinstance(folder, dict) else Path(str(folder))
+    for folder in _resolved_vcf_db_folders(cfg):
+        path = Path(folder["path"])
         candidates.append(path / "VCF_refs.csv")
         candidates.append(path / "vcf_refs.csv")
         candidates.append(path.parent / "VCF_refs.csv")
@@ -477,37 +551,71 @@ class VcfDbFolderAction(BaseModel):
     action: str  # "add", "remove", "toggle"
     path: Optional[str] = None
     index: Optional[int] = None
+    reference: Optional[str] = None  # required for "add" — which reference this DB targets
 
 
 @app.get("/api/vcf-db-folders")
 def get_vcf_db_folders():
     cfg = load_config()
-    return cfg.get("vcf_db_folders", [])
+    return _resolved_vcf_db_folders(cfg)
 
 
 @app.post("/api/vcf-db-folders")
 def update_vcf_db_folders(payload: VcfDbFolderAction):
+    """Mutates the user's explicit vcf_db_folders list. Shared (auto-discovered)
+    entries are read-only — managed via the filesystem at vcf_db_folders_root."""
     cfg = load_config()
     folders = cfg.get("vcf_db_folders", [])
+    target_path = (
+        str(Path(payload.path).expanduser().resolve())
+        if payload.path
+        else None
+    )
     if payload.action == "add":
-        if not payload.path:
+        if not target_path:
             raise HTTPException(status_code=400, detail="path is required for add")
-        p = str(Path(payload.path).expanduser().resolve())
-        if not any(f.get("path") == p for f in folders):
-            folders.append({"path": p, "enabled": True})
+        ref = (payload.reference or "").strip()
+        if not ref:
+            raise HTTPException(status_code=400, detail="reference is required for add")
+        if not any(
+            (f.get("path") if isinstance(f, dict) else str(f)) == target_path
+            for f in folders
+        ):
+            folders.append({"path": target_path, "enabled": True, "reference": ref})
     elif payload.action == "remove":
-        if payload.index is not None and 0 <= payload.index < len(folders):
+        if target_path:
+            folders = [
+                f for f in folders
+                if (f.get("path") if isinstance(f, dict) else str(f)) != target_path
+            ]
+        elif payload.index is not None and 0 <= payload.index < len(folders):
             folders.pop(payload.index)
-        elif payload.path:
-            folders = [f for f in folders if f.get("path") != payload.path]
     elif payload.action == "toggle":
-        if payload.index is not None and 0 <= payload.index < len(folders):
-            folders[payload.index]["enabled"] = not folders[payload.index].get("enabled", True)
+        # First check if path matches a user-explicit entry — flip its enabled.
+        # Otherwise treat as a shared path: add/remove from disabled_vcf_db_paths.
+        idx = None
+        if target_path:
+            for i, f in enumerate(folders):
+                fp = f.get("path") if isinstance(f, dict) else str(f)
+                if fp == target_path:
+                    idx = i
+                    break
+        elif payload.index is not None and 0 <= payload.index < len(folders):
+            idx = payload.index
+        if idx is not None and isinstance(folders[idx], dict):
+            folders[idx]["enabled"] = not folders[idx].get("enabled", True)
+        elif target_path:
+            disabled = list(cfg.get("disabled_vcf_db_paths", []) or [])
+            if target_path in disabled:
+                disabled = [p for p in disabled if p != target_path]
+            else:
+                disabled.append(target_path)
+            cfg["disabled_vcf_db_paths"] = disabled
     else:
         raise HTTPException(status_code=400, detail="action must be add, remove, or toggle")
     cfg["vcf_db_folders"] = folders
     save_config(cfg)
-    return folders
+    return _resolved_vcf_db_folders(cfg)
 
 
 class RefPathRequest(BaseModel):

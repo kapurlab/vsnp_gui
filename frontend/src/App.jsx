@@ -113,6 +113,7 @@ export default function App() {
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
+  const [vcfDbDropdownOpen, setVcfDbDropdownOpen] = useState(false);
   const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
@@ -245,12 +246,16 @@ export default function App() {
     }
   }
 
-  async function addVcfDbFolder(path) {
+  async function addVcfDbFolder(path, reference) {
+    if (!reference) {
+      alert("Select a reference before adding a custom VCF folder — VCFs are reference-dependent.");
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "add", path })
+        body: JSON.stringify({ action: "add", path, reference })
       });
       if (res.ok) {
         const data = await res.json();
@@ -264,11 +269,11 @@ export default function App() {
     }
   }
 
-  async function removeVcfDbFolder(index) {
+  async function removeVcfDbFolder(path) {
     const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "remove", index })
+      body: JSON.stringify({ action: "remove", path })
     });
     if (res.ok) {
       const data = await res.json();
@@ -276,11 +281,11 @@ export default function App() {
     }
   }
 
-  async function toggleVcfDbFolder(index) {
+  async function toggleVcfDbFolder(path) {
     const res = await fetch(`${API_BASE}/api/vcf-db-folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "toggle", index })
+      body: JSON.stringify({ action: "toggle", path })
     });
     if (res.ok) {
       const data = await res.json();
@@ -2645,48 +2650,101 @@ export default function App() {
                   ))}
                 </select>
                 <div style={{marginTop:"8px"}}>
-                  {vcfDbFolders.length ? (
-                    <div style={{display:"flex", flexDirection:"column", gap:"4px", marginBottom:"8px"}}>
-                      {vcfDbFolders.map((folder, i) => (
-                        <div key={i} style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"8px", fontSize:"12px"}}>
-                          <input
-                            type="checkbox"
-                            checked={folder.enabled !== false}
-                            onChange={() => toggleVcfDbFolder(i)}
-                            style={{width:"auto"}}
-                          />
-                          <span
-                            title={folder.path}
-                            style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", opacity: folder.enabled !== false ? 1 : 0.5}}
-                          >
-                            {folder.path.split("/").pop() || folder.path}
+                  {(() => {
+                    const visible = importReference
+                      ? vcfDbFolders.filter((f) => (f.reference || "") === importReference)
+                      : [];
+                    if (!importReference) {
+                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Select a reference above to see matching VCF databases.</div>;
+                    }
+                    if (!visible.length) {
+                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF databases configured for {importReference} yet.</div>;
+                    }
+                    const enabledList = visible.filter((f) => f.enabled !== false);
+                    const summary = (() => {
+                      if (!enabledList.length) return "None selected";
+                      if (enabledList.length === visible.length) return `All ${visible.length} databases selected`;
+                      const names = enabledList.map((f) => f.name || (f.path || "").split("/").pop());
+                      const joined = names.join(", ");
+                      const truncated = joined.length > 60 ? `${joined.slice(0, 57)}…` : joined;
+                      return `${enabledList.length} of ${visible.length} selected: ${truncated}`;
+                    })();
+                    return (
+                      <div style={{position:"relative", marginBottom:"8px"}}>
+                        <button
+                          type="button"
+                          onClick={() => setVcfDbDropdownOpen(!vcfDbDropdownOpen)}
+                          className="ghost"
+                          style={{width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px", padding:"6px 10px", fontSize:"12px", textAlign:"left"}}
+                          aria-expanded={vcfDbDropdownOpen}
+                        >
+                          <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                            {summary}
                           </span>
-                          <button
-                            className="chip-remove"
-                            onClick={() => removeVcfDbFolder(i)}
-                            title="Remove folder"
-                          >
-                            x
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF database folders configured.</div>
-                  )}
+                          <span style={{fontSize:"10px"}}>{vcfDbDropdownOpen ? "▲" : "▼"}</span>
+                        </button>
+                        {vcfDbDropdownOpen ? (
+                          <div style={{display:"flex", flexDirection:"column", gap:"4px", marginTop:"6px", padding:"6px", border:"1px solid var(--border)", borderRadius:"8px", background:"var(--panel)"}}>
+                            {visible.map((folder, i) => {
+                              const isShared = folder.scope === "shared";
+                              const lname = (folder.name || "").toLowerCase();
+                              const isSynthetic = lname.includes("synthetic") || lname.includes("from_assembly");
+                              return (
+                                <div key={folder.path || i} style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"6px", fontSize:"12px"}}>
+                                  <input
+                                    type="checkbox"
+                                    checked={folder.enabled !== false}
+                                    onChange={() => toggleVcfDbFolder(folder.path)}
+                                    title={isShared ? "Shared lab DB — toggle to include/exclude for your runs" : "Toggle"}
+                                    style={{width:"auto"}}
+                                  />
+                                  <span
+                                    title={folder.path}
+                                    style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", opacity: folder.enabled !== false ? 1 : 0.5}}
+                                  >
+                                    {folder.name || folder.path.split("/").pop() || folder.path}
+                                    {typeof folder.sample_count === "number" ? <span className="muted" style={{marginLeft:"6px"}}>(n={folder.sample_count})</span> : null}
+                                    {isSynthetic ? <span className="muted" style={{marginLeft:"6px", fontStyle:"italic"}}>[from-assembly]</span> : null}
+                                  </span>
+                                  {isShared ? (
+                                    <span
+                                      title="Shared lab DB — managed via the filesystem; toggle is per-user"
+                                      style={{fontSize:"10px", padding:"1px 6px", borderRadius:"6px", background:"var(--accent)", color:"#f7faf9", textTransform:"uppercase", letterSpacing:"0.04em"}}
+                                    >
+                                      shared
+                                    </span>
+                                  ) : (
+                                    <button
+                                      className="chip-remove"
+                                      onClick={() => removeVcfDbFolder(folder.path)}
+                                      title="Remove folder"
+                                    >
+                                      x
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })()}
                   <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
                     <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
                       {canPickPath ? (
                         <button
                           className="ghost action"
                           style={{fontSize:"12px"}}
+                          disabled={!importReference}
+                          title={importReference ? "Browse for a VCF folder" : "Select a reference first"}
                           onClick={async () => {
                             const picked = await window.vsnp.selectPath({
                               kind: "folder",
                               title: "Select VCF database folder"
                             });
                             if (picked) {
-                              await addVcfDbFolder(picked);
+                              await addVcfDbFolder(picked, importReference);
                             }
                           }}
                         >
@@ -2697,12 +2755,13 @@ export default function App() {
                         type="text"
                         value={manualVcfFolderPath}
                         onChange={(e) => setManualVcfFolderPath(e.target.value)}
-                        placeholder="/path/to/VCF_REFS/folder"
+                        disabled={!importReference}
+                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Select a reference first"}
                         title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
                         style={{flex:1, fontSize:"12px"}}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter" && manualVcfFolderPath.trim()) {
-                            addVcfDbFolder(manualVcfFolderPath.trim());
+                          if (e.key === "Enter" && manualVcfFolderPath.trim() && importReference) {
+                            addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
                             setManualVcfFolderPath("");
                           }
                         }}
@@ -2710,12 +2769,12 @@ export default function App() {
                       <button
                         className="ghost action"
                         onClick={() => {
-                          if (manualVcfFolderPath.trim()) {
-                            addVcfDbFolder(manualVcfFolderPath.trim());
+                          if (manualVcfFolderPath.trim() && importReference) {
+                            addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
                             setManualVcfFolderPath("");
                           }
                         }}
-                        disabled={!manualVcfFolderPath.trim()}
+                        disabled={!manualVcfFolderPath.trim() || !importReference}
                       >
                         Add
                       </button>

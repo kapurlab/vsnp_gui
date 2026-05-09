@@ -18,13 +18,21 @@ else
   PYTHON="${PERSONAL_BASE_PYTHON}"
 fi
 
-VSNP_DIR=/home/${USER}/vsnp_gui
+SHARED_VSNP_GUI=/srv/kapurlab/tools/vsnp_gui
+PERSONAL_VSNP_GUI=/home/${USER}/vsnp_gui
+if [ -d "${SHARED_VSNP_GUI}/backend" ]; then
+  VSNP_DIR="${SHARED_VSNP_GUI}"
+else
+  VSNP_DIR="${PERSONAL_VSNP_GUI}"
+fi
 
 # Make the vsnp3 env CLI tools (vsnp3_step1.py, raxml, samtools, …) available.
 export PATH="${VSNP3_ENV}/bin:${PATH}"
 
 cd "${VSNP_DIR}/backend"
-echo "Starting uvicorn on port ${port} with vsnp3 env ${VSNP3_ENV}..."
+echo "Starting uvicorn on port ${port}"
+echo "  vsnp3 env: ${VSNP3_ENV}"
+echo "  vsnp_gui:  ${VSNP_DIR}"
 exec $PYTHON -m uvicorn app.main:app \
     --host 0.0.0.0 \
     --port "${port}" \

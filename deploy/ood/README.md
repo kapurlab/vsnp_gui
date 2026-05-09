@@ -47,6 +47,21 @@ Files:
   brand color, pinned-apps config.
 - `portal/announcements.d/welcome.yml` — YAML banner (use .yml not .md — OOD 3.1.16 parses YAML frontmatter inconsistently from .md) above the dashboard.
 
+## Cluster config (Singularity bind paths)
+
+```bash
+sudo install -m 0644 deploy/ood/clusters.d/wgs3.yml /etc/ood/config/clusters.d/wgs3.yml
+```
+
+Why: every OOD batch_connect job on wgs3 runs inside `singularity exec --pid /opt/ood/ondemand/ood_default.sif`. The `singularity_bindpath` in this file decides which host paths are visible *inside* the container. If a path isn't listed, the running uvicorn / vsnp3 cannot see it even though it exists on the host.
+
+T-11 added `/srv` to the bindpath so the container can reach `/srv/kapurlab/tools/vsnp3/` and `/srv/kapurlab/refs/`. Future shared mounts under `/srv/kapurlab/projects/` (T-12a) come along for free.
+
+After editing, **users must relaunch their OOD session**; the change applies to new sessions only.
+
+Files:
+- `clusters.d/wgs3.yml` — cluster definition for the linux_host adapter (single-node OOD).
+
 ## Backups
 
 When updating live OOD files, back up the previous version *outside*

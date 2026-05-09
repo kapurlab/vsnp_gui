@@ -1,0 +1,20 @@
+---
+v2:
+  metadata:
+    title: "WGS3 (Local)"
+  login:
+    host: "localhost"
+  job:
+    adapter: "linux_host"
+    submit_host: "localhost"
+    ssh_hosts:
+      - localhost
+      - a8-an-vxk1-u5
+      - kapurlab-wgs3.tailf38ff4.ts.net
+    site_timeout: 7200
+    debug: true
+    singularity_bin: /usr/bin/singularity
+    singularity_bindpath: /etc,/home,/tmp,/opt,/usr,/var,/srv
+    singularity_image: /opt/ood/ondemand/ood_default.sif
+    strict_host_checking: false
+    tmux_bin: /usr/bin/tmux

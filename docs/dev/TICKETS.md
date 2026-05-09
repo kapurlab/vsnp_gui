@@ -31,7 +31,31 @@ Landed 2026-05-08.
 
 ## P1
 
-### T-03 — Browser tree viewer (Phylocanvas.gl) — ⏳
+### T-03 — Browser tree viewer — ✅ (with follow-ups)
+
+In-browser tree viewer using **phylotree.js**. Picked over phylocanvas.gl after an A/B spike (preserved in branch `t03-spike`).
+
+Layout: **new tab** (not a drawer). Rectangular trees + long tip labels (`hCoV-19-deer-USA-IA-XXXX-EPI_zc.vcf` ~50 chars) benefit more from full viewport than from a constrained drawer; screening workflow doesn't need to keep the project view in context.
+
+What shipped:
+- `frontend/src/TreeStandalone.jsx` — full-viewport viewer at `?view=tree&project=…&path=…`. Controls: tip search highlight, Bootstrap labels toggle, Reroot mode (click branch), Midpoint root, Reset, Download `.tre` (handoff to iTOL/FigTree).
+- `frontend/src/main.jsx` — lazy-loaded behind `React.lazy` + `Suspense` + `ErrorBoundary` (introduced during the spike to keep the main App alive if a viewer chunk crashes; pattern kept).
+- `App.jsx` — `*.tre` rows in Step 2 outputs show a **View tree** button that opens the standalone in a new tab.
+- Backend `GET /api/projects/{p}/step2/trees` — lists latest `.tre` per group.
+- npm: `phylotree`.
+
+**Bootstrap support shipped at the same time**:
+- vsnp3 upstream's RAxML call is hard-coded as best-tree-only. Patched the conda env to read a `VSNP3_BOOTSTRAP` env var; if > 0, RAxML runs `-f a -x 7777 -N <n>` and the pipeline picks up `RAxML_bipartitions.raxml`.
+- New "Bootstrap (replicates)" field in Step 2 Options. Default 0 (off). Backend threads it through as the env var.
+- Filed upstream: [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23). Same conda-update caveat as the column[0] patch.
+- Smoke (test project, 7 SARS-CoV-2 deer samples): 50 replicates → 2.17 s; `.tre` carries support values on all 5 internal branches.
+
+🪝 Follow-ups (not blocking T-03 sign-off):
+- [ ] **Phantom "root"**: when Bootstrap is on, a second "root" label still appears alongside the legit outgroup leaf. First fix (blanking phylotree's synthetic outer name) addressed only one source. The remaining one is likely the parent of the `(stuff,root)` topology being labeled by phylotree even after blanking. Investigate next pass.
+- [ ] Optional UX: toggle to strip the `_zc.vcf` suffix from displayed tip labels. Cosmetic.
+- [ ] Retire FigTree backend launcher (`figtree_app_path` config field, `_open_path` xdg-open path on `.tre`).
+- [ ] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` (closes T-02 acceptance criterion 6).
+
 ### T-04 — Remove hardcoded user paths (`$HOME`-relative) — ⏳
 ### T-05 — Real-time Step 1 log streaming (SSE) — ⏳
 ### T-06 — Project export ZIP download — ⏳
@@ -56,6 +80,8 @@ These were uncovered while working T-01 / T-02 and weren't separate tickets, but
 - **Reference alias map: last-writer-wins** — `_reference_alias_map` overwrote a stem→name mapping when multiple reference sets contained the same fasta stem (e.g. a stray `NC_045512.fasta` inside `tb_reference/` overrode the canonical `NC_045512_wuhan-hu-1`). Now prefers the mapping where the reference-set name contains the fasta stem.
 
 - **vsnp3 upstream `column[0]` → pandas 2 KeyError** — patched the conda-installed `vsnp3_fasta_to_snps_table.py` (3 sites) to use `.iloc[0]`. Filed [USDA-VS/vSNP3#22](https://github.com/USDA-VS/vSNP3/issues/22). The patch lives only in the conda env; will be overwritten on `conda update vsnp3`.
+
+- **vsnp3 has no bootstrap support** — patched the same file to read `VSNP3_BOOTSTRAP` env var and run RAxML rapid bootstrap (`-f a`) when set. Backup at `vsnp3_fasta_to_snps_table.py.bak.bootstrap`. Filed [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23) for an upstream `--bootstrap N` flag. Same conda-update caveat as the column[0] patch.
 
 - **IGV "Error loading Google oAuth properties" nag** — set `ENABLE_GOOGLE_MENU=false` and cleared `PROVISIONING_URL` in `~/.igv/prefs.properties`. Pre-T-02 mitigation; mostly moot once desktop IGV is retired.
 

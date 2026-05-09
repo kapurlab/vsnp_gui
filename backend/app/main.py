@@ -354,6 +354,7 @@ class Step2Request(BaseModel):
     dp: bool = False
     density_threshold: Optional[int] = None
     density_window: Optional[int] = None
+    bootstrap: int = 0
 
 
 class PosthocScanRequest(BaseModel):
@@ -1207,11 +1208,14 @@ def step2_run(project: str, payload: Step2Request):
     label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
         cmd = f"{cmd} && python {label_script}"
+    step2_env = build_env(cfg)
+    if payload.bootstrap and payload.bootstrap > 0:
+        step2_env["VSNP3_BOOTSTRAP"] = str(int(payload.bootstrap))
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
         cwd=step2_dir,
-        env=build_env(cfg)
+        env=step2_env
     )
     return {"job_id": job_id}
 
@@ -1815,6 +1819,32 @@ def step2_outputs(project: str):
         if files:
             groups.append({"name": d.name, "files": files})
     return {"top": top, "groups": groups}
+
+
+@app.get("/api/projects/{project}/step2/trees")
+def step2_trees(project: str):
+    """List the latest .tre file per group under step2/."""
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        raise HTTPException(status_code=404, detail="Step2 directory not found")
+    trees = []
+    for d in sorted(step2_dir.iterdir()):
+        if not d.is_dir() or d.name == "vcf_source":
+            continue
+        tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
+        if not tre_files:
+            continue
+        latest = tre_files[-1]
+        trees.append({
+            "group": d.name,
+            "name": latest.name,
+            "path": str(latest),
+            "size": latest.stat().st_size,
+            "mtime": latest.stat().st_mtime,
+        })
+    return {"trees": trees}
 
 
 @app.post("/api/bootstrap")

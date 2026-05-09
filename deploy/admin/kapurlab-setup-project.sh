@@ -65,6 +65,12 @@ done
 
 # 3. directory tree
 mkdir -p "${DIR}"/{download,step1,step2/vcf_source,audit}
+
+# An append-only (chattr +a) audit ledger from a previous run will block any
+# chown/chmod against it. Drop +a now, do bulk ops, re-apply at the end.
+LEDGER="${DIR}/audit/edits.jsonl"
+[ -f "${LEDGER}" ] && chattr -a "${LEDGER}" 2>/dev/null || true
+
 chown -R "root:${GROUP}" "${DIR}"
 # Top dir + every subdir setgid 2770. Files inherit the group.
 find "${DIR}" -type d -exec chmod 2770 {} +
@@ -85,7 +91,6 @@ EOF
 fi
 
 # Audit ledger: ensure exists, then make append-only.
-LEDGER="${DIR}/audit/edits.jsonl"
 [ -f "${LEDGER}" ] || { touch "${LEDGER}"; chown "root:${GROUP}" "${LEDGER}"; chmod 0660 "${LEDGER}"; }
 # +a may fail on non-ext/xfs, on bind mounts, or in containers. Tolerate.
 if ! lsattr "${LEDGER}" 2>/dev/null | grep -q ' \+a'; then

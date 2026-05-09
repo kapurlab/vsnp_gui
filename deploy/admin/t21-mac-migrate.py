@@ -202,8 +202,19 @@ def migrate_one(host: str, source: Path, target: str, admin: str, dry: bool, fas
 
     src = f"{source}/"
     dst = f"{host}:/srv/kapurlab/projects/{target}/"
+    # macOS ships openrsync (advertises "rsync 2.6.9 compatible") — it doesn't
+    # know --info=stats or --append-verify, so stick to a minimal flag set
+    # that works on both modern rsync and the BSD/openrsync drop-in.
+    # We do our own byte+file count verification afterwards.
+    # vxk1 is in the destination's group but doesn't own the directory tree
+    # (root does, mode 2770 from setup-project). Drop the `-a` bits that
+    # require ownership: perms / owner / group / dir-times. We keep file
+    # mtimes (-t), recursion (-r), symlinks (-l), devices (-D), hardlinks (-H).
+    # The destination dir's own perms + group come from setup-project and are
+    # the right ones for the multi-user model anyway.
     rsync_cmd = [
-        "rsync", "-aH", "--info=stats", "--partial", "--append-verify",
+        "rsync", "-rltDHv", "--partial", "--omit-dir-times",
+        "--no-perms", "--no-owner", "--no-group",
         "--exclude=.DS_Store", "--exclude=.jobs", "--exclude=__pycache__",
         *rsync_filter,
         src, dst,

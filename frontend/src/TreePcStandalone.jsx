@@ -15,7 +15,6 @@ export default function TreePcStandalone() {
   const [status, setStatus] = useState(project && path ? "Loading…" : "Missing project or path.");
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [rerootMode, setRerootMode] = useState(false);
   const [counts, setCounts] = useState({ leaves: 0 });
   const [shape, setShape] = useState("rectangular");
 
@@ -23,48 +22,41 @@ export default function TreePcStandalone() {
   const containerRef = useRef(null);
   const originalNewickRef = useRef("");
 
+  function computeStyles(tree, term) {
+    if (!tree || !term) return {};
+    const lc = term.toLowerCase();
+    const out = {};
+    const nodes = (tree.getNodes && tree.getNodes()) || [];
+    for (const n of nodes) {
+      if (n.isLeaf && n.label && n.label.toLowerCase().includes(lc)) {
+        out[n.id] = { fillColour: "#d62728", labelColour: "#d62728" };
+      }
+    }
+    return out;
+  }
+
   function buildTree(source) {
+    if (!containerRef.current) return;
     if (treeRef.current) {
       try { treeRef.current.destroy(); } catch (e) { /* ignore */ }
       treeRef.current = null;
+      containerRef.current.innerHTML = "";
     }
-    const tree = new PhylocanvasGL(
-      containerRef.current,
-      {
-        source,
-        showBranchLengths: true,
-        showLabels: true,
-        showLeafLabels: true,
-        showInternalLabels: showBootstrap,
-        showBootstrapValues: showBootstrap,
-        type: shape === "circular" ? Shapes.Circular : Shapes.Rectangular,
-        size: { width: containerRef.current.clientWidth || 800, height: containerRef.current.clientHeight || 600 },
-        styles: searchTerm
-          ? Object.fromEntries(
-              (function () {
-                const tr = new PhylocanvasGL(document.createElement("div"), { source });
-                const ids = (tr.getNodes() || []).filter((n) => n.isLeaf && n.label && n.label.toLowerCase().includes(searchTerm.toLowerCase())).map((n) => n.id);
-                try { tr.destroy(); } catch (e) {}
-                return ids.map((id) => [id, { fillColour: "#d62728", labelColour: "#d62728" }]);
-              })()
-            )
-          : {},
-      },
-    );
-    tree.deck.setProps({
-      onClick: (info) => {
-        if (!rerootMode || !info || !info.object || !info.object.id) return;
-        try {
-          tree.setRoot(info.object.id);
-        } catch (e) {
-          setStatus(`Reroot failed: ${e && e.message ? e.message : e}`);
-        }
-      },
+    const tree = new PhylocanvasGL(containerRef.current, {
+      source,
+      type: shape === "circular" ? Shapes.Circular : Shapes.Rectangular,
+      showLabels: true,
+      showLeafLabels: true,
+      showInternalLabels: showBootstrap,
+      showBranchLengths: true,
     });
     treeRef.current = tree;
-    const nodes = tree.getNodes ? tree.getNodes() : [];
+    const nodes = (tree.getNodes && tree.getNodes()) || [];
     const leaves = nodes.filter((n) => n.isLeaf).length;
     setCounts({ leaves });
+    if (searchTerm) {
+      try { tree.setProps({ styles: computeStyles(tree, searchTerm) }); } catch (e) { /* ignore */ }
+    }
   }
 
   useEffect(() => {
@@ -93,16 +85,14 @@ export default function TreePcStandalone() {
   useEffect(() => {
     if (originalNewickRef.current) buildTree(originalNewickRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showBootstrap, searchTerm, shape]);
+  }, [showBootstrap, shape]);
 
-  function midpointRoot() {
-    if (!treeRef.current) return;
-    try {
-      treeRef.current.setProps({ rootMode: "midpoint" });
-    } catch (err) {
-      setStatus(`Midpoint failed: ${err && err.message ? err.message : err}`);
+  useEffect(() => {
+    if (treeRef.current) {
+      try { treeRef.current.setProps({ styles: computeStyles(treeRef.current, searchTerm) }); } catch (e) { /* ignore */ }
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm]);
 
   function resetRoot() {
     if (originalNewickRef.current) buildTree(originalNewickRef.current);
@@ -139,8 +129,6 @@ export default function TreePcStandalone() {
           <option value="circular">Circular</option>
         </select>
         <label><input type="checkbox" checked={showBootstrap} onChange={(e) => setShowBootstrap(e.target.checked)} /> Bootstrap</label>
-        <label><input type="checkbox" checked={rerootMode} onChange={(e) => setRerootMode(e.target.checked)} /> Reroot mode (click node)</label>
-        <button onClick={midpointRoot}>Midpoint</button>
         <button onClick={resetRoot}>Reset</button>
         <button onClick={downloadTre}>Download .tre</button>
         {status ? <span style={{ color: "#b34", fontSize: "0.9em" }}>{status}</span> : null}

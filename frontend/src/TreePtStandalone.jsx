@@ -26,31 +26,29 @@ export default function TreePtStandalone() {
 
   useEffect(() => { rerootModeRef.current = rerootMode; }, [rerootMode]);
 
-  function clearContainer() {
-    if (containerRef.current) containerRef.current.innerHTML = "";
-  }
-
   function render(tree) {
-    clearContainer();
-    const width = containerRef.current.clientWidth || 800;
-    const height = containerRef.current.clientHeight || 600;
-    tree.render({
+    if (!containerRef.current) return;
+    containerRef.current.innerHTML = "";
+    const width = Math.max(400, containerRef.current.clientWidth || 800);
+    const height = Math.max(400, containerRef.current.clientHeight || 600);
+    const display = tree.render({
       container: containerRef.current,
       "left-right-spacing": "fit-to-size",
       "top-bottom-spacing": "fit-to-size",
       width,
       height,
-      "show-scale": true,
+      "show-scale": "top",
       "draw-size-bubbles": false,
       "internal-names": showBootstrap,
       selectable: false,
+      collapsible: false,
       brush: false,
       zoom: true,
       "node-styler": (element, node) => {
         if (!node.children) {
           const name = (node.data && node.data.name) || "";
           if (searchTerm && name.toLowerCase().includes(searchTerm.toLowerCase())) {
-            element.style("fill", "#d62728").style("font-weight", "bold");
+            element.select("text").style("fill", "#d62728").style("font-weight", "bold");
           }
         }
       },
@@ -67,10 +65,13 @@ export default function TreePtStandalone() {
         });
       },
     });
-    const svg = containerRef.current.querySelector("svg");
-    if (svg) {
-      svg.style.width = "100%";
-      svg.style.height = "100%";
+    const svgNode = display.show ? display.show() : null;
+    if (svgNode) {
+      svgNode.style.width = "100%";
+      svgNode.style.height = "100%";
+      containerRef.current.appendChild(svgNode);
+    } else {
+      setStatus("phylotree returned no SVG node");
     }
   }
 
@@ -89,8 +90,8 @@ export default function TreePtStandalone() {
         originalNewickRef.current = newick;
         const tree = new phylotree(newick);
         treeRef.current = tree;
-        const leaves = tree.getTips ? tree.getTips().length : (tree.nodes && tree.nodes.descendants ? tree.nodes.descendants().filter((n) => !n.children).length : 0);
-        setCounts({ leaves });
+        const tips = tree.getTips ? tree.getTips() : [];
+        setCounts({ leaves: tips.length || 0 });
         render(tree);
         setStatus("");
       } catch (err) {

@@ -53,6 +53,7 @@ export default function App() {
   const igvBrowserRef = useRef(null);
   const igvContainerRef = useRef(null);
   const igvPopoutRef = useRef(null);
+  const uploadInputRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -782,24 +783,58 @@ export default function App() {
       setUploadStatus("Select a project and complete Settings before uploading.");
       return;
     }
-    if (!fileList?.length) {
+    const files = Array.from(fileList || []);
+    if (!files.length) {
       setUploadStatus("No files selected.");
       return;
     }
-    setUploadStatus("Uploading...");
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const totalMB = (totalBytes / 1024 / 1024).toFixed(1);
     const formData = new FormData();
-    Array.from(fileList).forEach((file) => formData.append("files", file));
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/upload`, {
-      method: "POST",
-      body: formData
+    files.forEach((file) => formData.append("files", file));
+    const startTime = Date.now();
+    const plural = files.length > 1 ? "s" : "";
+    setUploadStatus(`Uploading ${files.length} file${plural} (0 / ${totalMB} MB)...`);
+    await new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.addEventListener("progress", (e) => {
+        if (!e.lengthComputable) return;
+        const elapsed = (Date.now() - startTime) / 1000;
+        const loadedMB = (e.loaded / 1024 / 1024).toFixed(1);
+        const pct = ((e.loaded / e.total) * 100).toFixed(1);
+        const mbps = elapsed > 0 ? (e.loaded / 1024 / 1024 / elapsed).toFixed(1) : "—";
+        setUploadStatus(`Uploading ${files.length} file${plural}: ${loadedMB} / ${totalMB} MB (${pct}%, ${elapsed.toFixed(0)}s, ${mbps} MB/s)`);
+      });
+      xhr.addEventListener("load", () => {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            setUploadStatus(`Uploaded ${data.uploaded} file${data.uploaded > 1 ? "s" : ""} in ${elapsed}s (${totalMB} MB)`);
+          } catch {
+            setUploadStatus(`Upload completed in ${elapsed}s`);
+          }
+        } else {
+          let detail = `Upload failed (HTTP ${xhr.status})`;
+          try {
+            const msg = JSON.parse(xhr.responseText);
+            if (msg.detail) detail = msg.detail;
+          } catch {}
+          setUploadStatus(detail);
+        }
+        resolve();
+      });
+      xhr.addEventListener("error", () => {
+        setUploadStatus("Upload failed (network error)");
+        resolve();
+      });
+      xhr.addEventListener("abort", () => {
+        setUploadStatus("Upload aborted");
+        resolve();
+      });
+      xhr.open("POST", `${API_BASE}/api/projects/${selectedProject}/upload`);
+      xhr.send(formData);
     });
-    if (!res.ok) {
-      const msg = await res.json();
-      setUploadStatus(msg.detail || "Upload failed");
-      return;
-    }
-    const data = await res.json();
-    setUploadStatus(`Uploaded ${data.uploaded} files`);
     await loadAll();
   }
 
@@ -1743,11 +1778,24 @@ export default function App() {
                     }}
                   >
                     <input
+                      ref={uploadInputRef}
                       type="file"
                       multiple
-                      onChange={(e) => uploadFiles(e.target.files)}
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const files = Array.from(e.target.files);
+                        e.target.value = "";
+                        uploadFiles(files);
+                      }}
                     />
-                    <span>Drop FASTQ.GZ files here or click to select</span>
+                    <button
+                      type="button"
+                      disabled={!selectedProject || !settingsReady}
+                      onClick={() => uploadInputRef.current?.click()}
+                    >
+                      Choose Files
+                    </button>
+                    <span>Or drop FASTQ.GZ files here</span>
                   </div>
                   {!selectedProject || !settingsReady ? (
                     <div className="note warning">Select a project and complete Settings to enable uploads.</div>

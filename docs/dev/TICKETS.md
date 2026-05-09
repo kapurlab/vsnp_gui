@@ -31,34 +31,29 @@ Landed 2026-05-08.
 
 ## P1
 
-### T-03 — Browser tree viewer — 🚧 (on `t03-spike` branch)
+### T-03 — Browser tree viewer — ✅ (with follow-ups)
 
-A/B spike comparing **phylotree.js** vs **phylocanvas.gl** is on the `t03-spike` branch.
+In-browser tree viewer using **phylotree.js**. Picked over phylocanvas.gl after an A/B spike (preserved in branch `t03-spike`).
 
-Outcome: **phylotree.js wins** for vSNP's screening workflow.
-- Trees < 2k leaves; Phylocanvas's WebGL scale advantage doesn't apply.
-- SVG output is publication-grade and native in phylotree.
-- Reroot, tip search, bootstrap labels, midpoint root all first-class.
-- Phylocanvas.gl 1.62 also has a "Attempted to assign to readonly property" failure under modern Vite/Safari that we couldn't unblock; not worth fighting.
+Layout: **new tab** (not a drawer). Rectangular trees + long tip labels (`hCoV-19-deer-USA-IA-XXXX-EPI_zc.vcf` ~50 chars) benefit more from full viewport than from a constrained drawer; screening workflow doesn't need to keep the project view in context.
 
-Spike code lives at:
-- `frontend/src/TreePtStandalone.jsx` (winner — promote into a drawer next)
-- `frontend/src/TreePcStandalone.jsx` (loser — delete on promotion)
-- Backend `GET /api/projects/{p}/step2/trees` — keep
-- npm: `phylotree` (keep), `@phylocanvas/phylocanvas.gl` (delete on promotion)
+What shipped:
+- `frontend/src/TreeStandalone.jsx` — full-viewport viewer at `?view=tree&project=…&path=…`. Controls: tip search highlight, Bootstrap labels toggle, Reroot mode (click branch), Midpoint root, Reset, Download `.tre` (handoff to iTOL/FigTree).
+- `frontend/src/main.jsx` — lazy-loaded behind `React.lazy` + `Suspense` + `ErrorBoundary` (introduced during the spike to keep the main App alive if a viewer chunk crashes; pattern kept).
+- `App.jsx` — `*.tre` rows in Step 2 outputs show a **View tree** button that opens the standalone in a new tab.
+- Backend `GET /api/projects/{p}/step2/trees` — lists latest `.tre` per group.
+- npm: `phylotree`.
 
-**Bootstrap shipped on the spike**:
-- vsnp3 upstream doesn't generate bootstrap values — RAxML invocation in `bin/vsnp3_fasta_to_snps_table.py` is hard-coded as best-tree only. Patched the conda env to read a `VSNP3_BOOTSTRAP` env var; if > 0, RAxML runs `-f a -x 7777 -N <n>` and the pipeline picks up `RAxML_bipartitions.raxml`.
-- New "Bootstrap (replicates)" field in Step 2 Options. Default 0 (off). Backend sets the env var when > 0.
-- Filed upstream: [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23).
-- End-to-end smoke on `test` project: 50 replicates run in ~2s on 7 SARS-CoV-2 deer samples; `.tre` carries support values.
+**Bootstrap support shipped at the same time**:
+- vsnp3 upstream's RAxML call is hard-coded as best-tree-only. Patched the conda env to read a `VSNP3_BOOTSTRAP` env var; if > 0, RAxML runs `-f a -x 7777 -N <n>` and the pipeline picks up `RAxML_bipartitions.raxml`.
+- New "Bootstrap (replicates)" field in Step 2 Options. Default 0 (off). Backend threads it through as the env var.
+- Filed upstream: [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23). Same conda-update caveat as the column[0] patch.
+- Smoke (test project, 7 SARS-CoV-2 deer samples): 50 replicates → 2.17 s; `.tre` carries support values on all 5 internal branches.
 
-**Pending before merge to `web`**:
-- [ ] Promote `TreePtStandalone` into a resizable + fullscreen drawer in `App.jsx` (mirror IGV drawer's UX). Currently spike-only via `?view=tree-pt` tab.
-- [ ] Wire a "View" button next to `*.tre` rows in Step 2 outputs that opens the drawer (replaces the spike `phylotree`/`phylocanvas` buttons).
-- [ ] Delete `TreePcStandalone.jsx` and `npm uninstall @phylocanvas/phylocanvas.gl`.
-- [ ] Cherry-pick or merge `t03-spike` → `web`.
-- [ ] Retire FigTree backend launcher (`figtree_app_path` config field, `_open_path` xdg-open on .tre).
+🪝 Follow-ups (not blocking T-03 sign-off):
+- [ ] **Phantom "root"**: when Bootstrap is on, a second "root" label still appears alongside the legit outgroup leaf. First fix (blanking phylotree's synthetic outer name) addressed only one source. The remaining one is likely the parent of the `(stuff,root)` topology being labeled by phylotree even after blanking. Investigate next pass.
+- [ ] Optional UX: toggle to strip the `_zc.vcf` suffix from displayed tip labels. Cosmetic.
+- [ ] Retire FigTree backend launcher (`figtree_app_path` config field, `_open_path` xdg-open path on `.tre`).
 - [ ] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` (closes T-02 acceptance criterion 6).
 
 ### T-04 — Remove hardcoded user paths (`$HOME`-relative) — ⏳

@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import igv from "igv";
 import { APP_VERSION } from "./version";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || ".";
 
 function parseAccessions(text) {
   return text
@@ -48,6 +49,12 @@ export default function App() {
   const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step1FilesCache, setStep1FilesCache] = useState({});
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
+  const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "" });
+  const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
+  const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
+  const igvBrowserRef = useRef(null);
+  const igvContainerRef = useRef(null);
+  const igvPopoutRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -1039,6 +1046,59 @@ export default function App() {
     }
   }
 
+  function downloadStep1Stats(project, sample) {
+    if (!project || !sample) return;
+    const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/stats/download`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  async function openStep1FolderModal(project, sample) {
+    if (!project || !sample) return;
+    setFolderModal({ open: true, project, sample, files: [], sampleDir: "", loading: true, error: "" });
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/files`);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setFolderModal((prev) => ({ ...prev, loading: false, error: detail.detail || `Failed to load files (${res.status})` }));
+        return;
+      }
+      const data = await res.json();
+      setFolderModal({ open: true, project, sample, files: data.files || [], sampleDir: data.sample_dir || "", loading: false, error: "" });
+    } catch (err) {
+      setFolderModal((prev) => ({ ...prev, loading: false, error: String(err) }));
+    }
+  }
+
+  function closeFolderModal() {
+    setFolderModal({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "" });
+  }
+
+  function downloadFolderFile(project, path) {
+    if (!project || !path) return;
+    const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(path)}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function formatBytes(bytes) {
+    if (bytes == null) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let v = bytes / 1024;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+  }
+
   async function openStep1Igv(sample) {
     if (!selectedProject) return;
     const data = await getStep1Files(sample);
@@ -1055,6 +1115,164 @@ export default function App() {
       }
     }
   }
+
+  function igvServeUrl(project, absPath) {
+    return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
+  }
+
+  async function openSampleInIgv(project, sample) {
+    if (!project || !sample) {
+      window.alert("IGV: missing project or sample.");
+      return;
+    }
+    if (igvPopoutOpen) {
+      const w = igvPopoutRef.current;
+      if (w && !w.closed) {
+        try {
+          w.postMessage({ type: "vsnpAddSample", project, sample }, window.location.origin);
+          w.focus();
+        } catch (e) { /* fall through to drawer */ }
+        return;
+      }
+      igvPopoutRef.current = null;
+      setIgvPopoutOpen(false);
+    }
+    const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/files?sample=${encodeURIComponent(sample)}`);
+    if (!res.ok) {
+      window.alert(`IGV: cannot resolve sample files (HTTP ${res.status}).`);
+      return;
+    }
+    const data = await res.json();
+    if (!data.bam || !data.reference_fasta) {
+      window.alert("IGV: BAM or reference FASTA not found for this sample.");
+      return;
+    }
+    const baiPath = data.bam.endsWith(".bam") ? `${data.bam}.bai` : "";
+    const newTrack = { sample, bamPath: data.bam, baiPath };
+    setIgvPanel((prev) => {
+      if (!prev.open) {
+        return {
+          open: true,
+          project,
+          referenceFastaPath: data.reference_fasta,
+          referenceFaiPath: `${data.reference_fasta}.fai`,
+          tracks: [newTrack],
+          status: "",
+        };
+      }
+      if (prev.project !== project) {
+        return { ...prev, status: `Cannot mix projects (${prev.project} active).` };
+      }
+      const prevRefName = (prev.referenceFastaPath || "").split("/").pop();
+      const newRefName = (data.reference_fasta || "").split("/").pop();
+      if (prevRefName !== newRefName) {
+        return { ...prev, status: `Cannot mix references (${prevRefName} vs ${newRefName}).` };
+      }
+      if (prev.tracks.some((t) => t.sample === sample)) {
+        return { ...prev, status: `${sample} already loaded.` };
+      }
+      return { ...prev, tracks: [...prev.tracks, newTrack], status: "" };
+    });
+  }
+
+  function closeIgvPanel() {
+    if (igvBrowserRef.current) {
+      try { igv.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
+      igvBrowserRef.current = null;
+    }
+    setIgvPanel({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
+  }
+
+  function toggleIgvFullscreen() {
+    setIgvPanel((prev) => ({ ...prev, fullscreen: !prev.fullscreen }));
+  }
+
+  function popOutIgv() {
+    if (!igvPanel.open || !igvPanel.project || igvPanel.tracks.length === 0) return;
+    const sampleNames = igvPanel.tracks.map((t) => t.sample).join(",");
+    const base = window.location.pathname.replace(/[^/]*$/, "");
+    const url = `${base}?view=igv&project=${encodeURIComponent(igvPanel.project)}&samples=${encodeURIComponent(sampleNames)}`;
+    const w = window.open(url, "vsnp_igv_popout");
+    if (!w) {
+      window.alert("Pop out blocked by browser. Allow popups for this site and try again.");
+      return;
+    }
+    igvPopoutRef.current = w;
+    setIgvPopoutOpen(true);
+    if (igvBrowserRef.current) {
+      try { igv.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
+      igvBrowserRef.current = null;
+    }
+    setIgvPanel({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
+  }
+
+  function startIgvResize(e) {
+    e.preventDefault();
+    const onMove = (ev) => {
+      const distFromBottom = window.innerHeight - ev.clientY;
+      const newHeight = Math.min(95, Math.max(15, (distFromBottom / window.innerHeight) * 100));
+      setIgvPanel((prev) => ({ ...prev, height: newHeight }));
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.userSelect = "";
+    };
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  useEffect(() => {
+    if (!igvPanel.open || igvPanel.tracks.length === 0) return;
+    let cancelled = false;
+    if (!igvBrowserRef.current) {
+      const config = {
+        reference: {
+          id: igvPanel.referenceFastaPath.split("/").pop().replace(/\.(fa|fasta)$/i, "") || "ref",
+          fastaURL: igvServeUrl(igvPanel.project, igvPanel.referenceFastaPath),
+          indexURL: igvServeUrl(igvPanel.project, igvPanel.referenceFaiPath),
+        },
+        tracks: igvPanel.tracks.map((t) => ({
+          type: "alignment",
+          format: "bam",
+          name: t.sample,
+          url: igvServeUrl(igvPanel.project, t.bamPath),
+          indexURL: igvServeUrl(igvPanel.project, t.baiPath),
+        })),
+      };
+      const target = igvContainerRef.current;
+      if (!target) return;
+      igv.createBrowser(target, config).then((browser) => {
+        if (cancelled) {
+          try { igv.removeBrowser(browser); } catch (e) { /* ignore */ }
+          return;
+        }
+        igvBrowserRef.current = browser;
+      }).catch((err) => {
+        setIgvPanel((prev) => ({ ...prev, status: `IGV failed to load: ${err && err.message ? err.message : err}` }));
+      });
+      return () => { cancelled = true; };
+    }
+    const browser = igvBrowserRef.current;
+    const loadedSet = new Set(
+      (browser.trackViews || [])
+        .map((tv) => tv && tv.track && tv.track.name)
+        .filter(Boolean)
+    );
+    const toLoad = igvPanel.tracks.filter((t) => !loadedSet.has(t.sample));
+    for (const t of toLoad) {
+      browser.loadTrack({
+        type: "alignment",
+        format: "bam",
+        name: t.sample,
+        url: igvServeUrl(igvPanel.project, t.bamPath),
+        indexURL: igvServeUrl(igvPanel.project, t.baiPath),
+      }).catch((err) => {
+        setIgvPanel((prev) => ({ ...prev, status: `Track ${t.sample} failed: ${err && err.message ? err.message : err}` }));
+      });
+    }
+  }, [igvPanel.open, igvPanel.tracks, igvPanel.referenceFastaPath, igvPanel.project]);
 
   function openEditVcf(sample, project = "") {
     if (!sample) return;
@@ -2046,13 +2264,13 @@ export default function App() {
                                   </summary>
                                   <div className="inline-files">
                                     <button
-                                      onClick={() => openStep1File(sampleKey(row), "sample_dir")}
+                                      onClick={() => openStep1FolderModal(selectedProject, sampleKey(row))}
                                       disabled={!sampleKey(row)}
                                     >
                                       Open Folder
                                     </button>
                                     <button
-                                      onClick={() => openStep1Igv(sampleKey(row))}
+                                      onClick={() => openSampleInIgv(selectedProject, sampleKey(row))}
                                       disabled={!sampleKey(row)}
                                     >
                                       IGV
@@ -2066,8 +2284,8 @@ export default function App() {
                                     {editInfo?.edit_log ? (
                                       <button onClick={() => openOutput(editInfo.edit_log)}>Edit Log</button>
                                     ) : null}
-                                    {row._file ? (
-                                      <button onClick={() => openOutput(row._file)}>Stats</button>
+                                    {sampleKey(row) ? (
+                                      <button onClick={() => downloadStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
                                   </div>
                                 </details>
@@ -2199,10 +2417,16 @@ export default function App() {
                                   Files
                                 </summary>
                                 <div className="inline-files">
-                                  <button onClick={() => openPosthocOutput(sampleDir)} disabled={!sampleDir}>
+                                  <button
+                                    onClick={() => openStep1FolderModal(row._project || "", row._sample || row.sample || "")}
+                                    disabled={!(row._project && (row._sample || row.sample))}
+                                  >
                                     Open Folder
                                   </button>
-                                  <button onClick={() => openPosthocIgv(sampleDir)} disabled={!sampleDir}>
+                                  <button
+                                    onClick={() => openSampleInIgv(row._project || "", row._sample || row.sample || "")}
+                                    disabled={!(row._project && (row._sample || row.sample))}
+                                  >
                                     IGV
                                   </button>
                                   <button
@@ -2215,7 +2439,7 @@ export default function App() {
                                   {editLog ? (
                                     <button onClick={() => openPosthocOutput(editLog)}>Edit Log</button>
                                   ) : null}
-                                  {row._file ? <button onClick={() => openPosthocOutput(row._file)}>Stats</button> : null}
+                                  {row._project && (row._sample || row.sample) ? <button onClick={() => downloadStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
                                 </div>
                               </details>
                             </td>
@@ -2239,6 +2463,112 @@ export default function App() {
             )}
           </section>
         </div>
+        ) : null}
+
+        {igvPanel.open ? (
+          <div
+            style={{
+              position: "fixed",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              top: igvPanel.fullscreen ? 0 : "auto",
+              height: igvPanel.fullscreen ? "100vh" : `${igvPanel.height}vh`,
+              background: "#fff",
+              borderTop: igvPanel.fullscreen ? "none" : "1px solid #ccc",
+              boxShadow: igvPanel.fullscreen ? "none" : "0 -4px 12px rgba(0,0,0,0.12)",
+              zIndex: 9000,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {!igvPanel.fullscreen ? (
+              <div
+                onMouseDown={startIgvResize}
+                title="Drag to resize"
+                style={{
+                  height: "6px",
+                  cursor: "ns-resize",
+                  background: "#e6e6e6",
+                  borderBottom: "1px solid #d0d0d0",
+                }}
+              />
+            ) : null}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "1rem",
+                padding: "0.4rem 0.8rem",
+                borderBottom: "1px solid #eee",
+                background: "#f7f7f7",
+              }}
+            >
+              <strong>IGV</strong>
+              <span className="muted" style={{ fontSize: "0.85em" }}>
+                {igvPanel.referenceFastaPath ? igvPanel.referenceFastaPath.split("/").pop() : ""}
+                {igvPanel.tracks.length ? ` · ${igvPanel.tracks.length} track${igvPanel.tracks.length === 1 ? "" : "s"}` : ""}
+                {igvPanel.project ? ` · ${igvPanel.project}` : ""}
+              </span>
+              {igvPanel.status ? (
+                <span style={{ color: "#b34", fontSize: "0.85em" }}>{igvPanel.status}</span>
+              ) : null}
+              <span style={{ flex: 1 }} />
+              <button onClick={popOutIgv} title="Open this panel in a new tab">Pop out</button>
+              <button onClick={toggleIgvFullscreen} title="Toggle fullscreen">
+                {igvPanel.fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              </button>
+              <button onClick={closeIgvPanel}>Close</button>
+            </div>
+            <div ref={igvContainerRef} style={{ flex: 1, overflow: "auto" }} />
+          </div>
+        ) : null}
+
+        {folderModal.open ? (
+          <div className="modal-backdrop" onClick={closeFolderModal}>
+            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+              <h3>Sample folder</h3>
+              <div className="note">
+                <div><strong>{folderModal.sample}</strong>{folderModal.project ? <span> (Project: {folderModal.project})</span> : null}</div>
+                {folderModal.sampleDir ? <div className="muted" style={{ wordBreak: "break-all" }}>{folderModal.sampleDir}</div> : null}
+              </div>
+              {folderModal.loading ? (
+                <div className="note">Loading…</div>
+              ) : folderModal.error ? (
+                <div className="error">{folderModal.error}</div>
+              ) : folderModal.files.length === 0 ? (
+                <div className="note">No files in this folder.</div>
+              ) : (
+                <div className="folder-modal-files" style={{ maxHeight: "60vh", overflow: "auto" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>File</th>
+                        <th>Type</th>
+                        <th style={{ textAlign: "right" }}>Size</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {folderModal.files.map((f) => (
+                        <tr key={f.relpath}>
+                          <td style={{ wordBreak: "break-all" }}>{f.relpath}</td>
+                          <td>{f.type}</td>
+                          <td style={{ textAlign: "right" }}>{formatBytes(f.size)}</td>
+                          <td>
+                            <button onClick={() => downloadFolderFile(folderModal.project, f.path)}>Download</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="modal-actions">
+                <button onClick={closeFolderModal}>Close</button>
+              </div>
+            </div>
+          </div>
         ) : null}
 
         {editVcfOpen ? (

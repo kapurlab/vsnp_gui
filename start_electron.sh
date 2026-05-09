@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Load nvm
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Allow overriding backend port and API URL to avoid conflicts.

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -1127,25 +1127,25 @@ def step2_setup(project: str):
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
-    for sample_dir in sorted(step1_dir.glob("*")):
-        if not sample_dir.is_dir():
-            continue
-        sample = sample_dir.name
-        vcf_candidates = sorted(sample_dir.glob("**/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
-        if not vcf_candidates:
-            continue
-        source_vcf = vcf_candidates[-1]
-        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
-        chosen_vcf = patched_vcf or source_vcf
-        target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
-        target = step2_dir / target_name
-        if target.exists():
-            continue
-        target.symlink_to(chosen_vcf)
-        manifest.write(f"{target.name},step1,{chosen_vcf}\n")
-        count += 1
-        if patched_vcf:
-            edited_samples.append(sample)
+        for sample_dir in sorted(step1_dir.glob("*")):
+            if not sample_dir.is_dir():
+                continue
+            sample = sample_dir.name
+            vcf_candidates = sorted(sample_dir.glob("**/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
+            if not vcf_candidates:
+                continue
+            source_vcf = vcf_candidates[-1]
+            patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+            chosen_vcf = patched_vcf or source_vcf
+            target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
+            target = step2_dir / target_name
+            if target.exists():
+                continue
+            target.symlink_to(chosen_vcf)
+            manifest.write(f"{target.name},step1,{chosen_vcf}\n")
+            count += 1
+            if patched_vcf:
+                edited_samples.append(sample)
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
     total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
     return {"linked": count, "total": total, "edited": len(set(edited_samples))}
@@ -1177,10 +1177,9 @@ def step2_run(project: str, payload: Step2Request):
         if child.is_dir() and child.name != "vcf_source":
             shutil.rmtree(child)
     remove_file = step2_dir / "remove_from_analysis.xlsx"
-    excluded = _load_excluded_samples(cfg, remove_file)
-    vcf_run_dir = _filtered_vcf_source(step2_dir, vcf_source_dir, excluded)
+    remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
     _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
-    _write_figtree_groups(step2_dir, vcf_run_dir, cfg, payload.label_style or "short")
+    _write_figtree_groups(step2_dir, vcf_source_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -1208,7 +1207,7 @@ def step2_run(project: str, payload: Step2Request):
     if payload.density_window is not None:
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
-    cmd = f"vsnp3_step2.py -wd {vcf_run_dir} {flags_str} -t {payload.reference}"
+    cmd = f"vsnp3_step2.py -wd {vcf_source_dir} {flags_str} -t {payload.reference}{remove_arg}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
@@ -1706,6 +1705,61 @@ def step1_files(project: str, sample: str = Query(...)):
     }
 
 
+@app.get("/api/projects/{project}/step1/samples/{sample}/stats/download")
+def step1_sample_stats_download(project: str, sample: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
+        raise HTTPException(status_code=404, detail="Sample not found")
+    stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
+    if not stats_files:
+        raise HTTPException(status_code=404, detail="Stats file not found")
+    target = stats_files[-1]
+    return FileResponse(
+        target,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"{sample}_stats.xlsx",
+    )
+
+
+@app.get("/api/projects/{project}/step1/samples/{sample}/files")
+def step1_sample_files(project: str, sample: str):
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
+        raise HTTPException(status_code=404, detail="Sample not found")
+    base = sample_dir.resolve()
+    entries = []
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name.startswith(".~lock"):
+            continue
+        try:
+            rel = path.relative_to(base).as_posix()
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        entries.append({
+            "name": path.name,
+            "relpath": rel,
+            "path": str(path),
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "type": path.suffix.lstrip(".").lower() or "file",
+        })
+    return {
+        "project": project,
+        "sample": sample,
+        "sample_dir": str(base),
+        "files": entries,
+    }
+
+
 @app.get("/api/projects/{project}/step1/edits")
 def step1_edits(project: str):
     cfg = load_config()
@@ -1796,9 +1850,9 @@ def step1_igv_session(project: str, payload: OpenRequest):
     include_genome = not igv_status or _IGV_STATE["genome"] != desired_genome
     if not igv_status:
         _open_igv(session_path, igv_app_path, None)
-        _wait_for_igv(timeout=15.0)
+        _wait_for_igv(timeout=45.0)
     elif igv_status == "process":
-        _wait_for_igv(timeout=15.0)
+        _wait_for_igv(timeout=45.0)
     send_goto = include_genome
     # Only load annotation on genome switch to avoid duplicate tracks.
     extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
@@ -1887,9 +1941,9 @@ def posthoc_igv_session(payload: OpenRequest):
     include_genome = not igv_status or _IGV_STATE["genome"] != desired_genome
     if not igv_status:
         _open_igv(session_path, igv_app_path, None)
-        _wait_for_igv(timeout=15.0)
+        _wait_for_igv(timeout=45.0)
     elif igv_status == "process":
-        _wait_for_igv(timeout=15.0)
+        _wait_for_igv(timeout=45.0)
     send_goto = include_genome
     extra_tracks = [gbk_path] if (gbk_path and include_genome) else []
     sent, err, sent_commands, responses = _send_igv_commands(
@@ -1912,6 +1966,28 @@ def posthoc_igv_session(payload: OpenRequest):
         "igv_error": err,
         "igv_commands": sent_commands
     }
+
+
+def _ensure_igv_port_enabled() -> None:
+    """Pre-create IGV prefs file with command-server port enabled so IGV
+    doesn't need manual Preferences > Advanced > Enable port setup."""
+    prefs_dir = Path.home() / ".igv"
+    prefs_dir.mkdir(parents=True, exist_ok=True)
+    prefs_file = prefs_dir / "prefs.properties"
+    required = {"PORT_ENABLED": "true", "PORT_NUMBER": "60151"}
+    existing: dict = {}
+    if prefs_file.exists():
+        for line in prefs_file.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                existing[k.strip()] = v.strip()
+    if all(existing.get(k) == v for k, v in required.items()):
+        return  # already set
+    existing.update(required)
+    prefs_file.write_text(
+        "".join(f"{k}={v}\n" for k, v in existing.items())
+    )
+    logger.info("IGV prefs updated: command server port 60151 enabled")
 
 
 def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[Path] = None) -> None:
@@ -1938,12 +2014,21 @@ def _open_igv(session_path: Path, igv_app_path: str = "", batch_path: Optional[P
             subprocess.run(["open", "-a", str(igv_apps[0]), str(session_path)])
             return
     if sys.platform.startswith("linux"):
-        igv_sh = shutil.which("igv.sh")
-        if igv_sh:
+        # Find IGV binary: conda installs "igv", older installs use "igv.sh"
+        igv_bin = None
+        if igv_app_path and Path(igv_app_path).is_file() and os.access(igv_app_path, os.X_OK):
+            igv_bin = igv_app_path
+        if not igv_bin:
+            igv_bin = shutil.which("igv") or shutil.which("igv.sh")
+        if igv_bin:
+            _ensure_igv_port_enabled()
+            env = os.environ.copy()
             if batch_path:
-                subprocess.run([igv_sh, "-b", str(batch_path)])
+                subprocess.Popen([igv_bin, "-b", str(batch_path)], env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                subprocess.run([igv_sh, str(session_path)])
+                subprocess.Popen([igv_bin, str(session_path)], env=env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
     _open_path(session_path)
 
@@ -2189,6 +2274,90 @@ def download_file_global(path: str = Query(...)):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(target, media_type="application/octet-stream", filename=target.name)
+
+
+_IGV_SERVE_MEDIA_TYPES = {
+    ".bam": "application/octet-stream",
+    ".bai": "application/octet-stream",
+    ".cram": "application/octet-stream",
+    ".crai": "application/octet-stream",
+    ".vcf": "text/plain",
+    ".gz": "application/gzip",
+    ".tbi": "application/octet-stream",
+    ".fasta": "text/plain",
+    ".fa": "text/plain",
+    ".fai": "text/plain",
+    ".gff": "text/plain",
+    ".gff3": "text/plain",
+    ".bed": "text/plain",
+    ".gbk": "text/plain",
+}
+
+
+def _range_response(target: Path, request: Request, media_type: str):
+    file_size = target.stat().st_size
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    if not range_header:
+        def _full():
+            with open(target, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        }
+        return StreamingResponse(_full(), media_type=media_type, headers=headers)
+    if not range_header.startswith("bytes="):
+        raise HTTPException(status_code=400, detail="Invalid Range header")
+    try:
+        spec = range_header[len("bytes="):].split(",", 1)[0].strip()
+        start_s, end_s = spec.split("-", 1)
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else file_size - 1
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Range header")
+    if start < 0 or end >= file_size or start > end:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+    length = end - start + 1
+
+    def _slice():
+        with open(target, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(length),
+    }
+    return StreamingResponse(_slice(), status_code=206, media_type=media_type, headers=headers)
+
+
+@app.get("/api/projects/{project}/serve")
+def serve_project_file(project: str, request: Request, path: str = Query(...)):
+    """Serve a file from within the project directory with HTTP byte-range support.
+
+    Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full download.
+    """
+    cfg = load_config()
+    project_dir = Path(cfg["projects_root"]) / project
+    target = Path(path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    suffix = target.suffix.lower()
+    media_type = _IGV_SERVE_MEDIA_TYPES.get(suffix, "application/octet-stream")
+    return _range_response(target, request, media_type)
 
 
 @app.post("/api/posthoc/open")
@@ -2652,7 +2821,14 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
             continue
         for ext in (".fa", ".fasta", ".fna", ".fas"):
             for fasta in base.rglob(f"*{ext}"):
-                aliases[fasta.stem] = name
+                stem = fasta.stem
+                existing = aliases.get(stem)
+                if existing is None:
+                    aliases[stem] = name
+                    continue
+                stem_lc = stem.lower()
+                if stem_lc in name.lower() and stem_lc not in existing.lower():
+                    aliases[stem] = name
             if name in aliases.values():
                 break
     return aliases
@@ -2700,62 +2876,99 @@ def _sample_from_vcf(vcf: Path) -> str:
     return vcf.stem
 
 
-def _load_excluded_samples(cfg: Dict, remove_file: Path) -> List[str]:
-    if not remove_file.exists():
-        return []
-    code = (
-        "import pandas as pd, sys\n"
-        "p=sys.argv[1]\n"
-        "df=pd.read_excel(p, header=None)\n"
-        "vals=[]\n"
-        "for v in df.iloc[:,0].tolist():\n"
-        "    if v is None:\n"
-        "        continue\n"
-        "    s=str(v).strip()\n"
-        "    if not s or s.lower()=='nan':\n"
-        "        continue\n"
-        "    vals.append(s)\n"
-        "print('\\n'.join(vals))\n"
-    )
-    cmd_list = conda_python_cmd(cfg, code, [str(remove_file)])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        logging.warning("Exclude list read failed: %s", result.stderr.strip())
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+# ---------------------------------------------------------------------------
+# Serve frontend static files (added for OOD deployment)
+# ---------------------------------------------------------------------------
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse as _FileResponse
+
+_frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+if _frontend_dist.exists():
+    @app.get("/", include_in_schema=False)
+    async def _serve_root():
+        return _FileResponse(_frontend_dist / "index.html")
+
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="static_assets")
+
+    # Serve other static files at root level (favicon, etc.)
+    for _f in _frontend_dist.iterdir():
+        if _f.is_file() and _f.name != "index.html":
+            _fname = _f.name
+            @app.get(f"/{_fname}", include_in_schema=False)
+            async def _serve_static(fname=_fname):
+                return _FileResponse(_frontend_dist / fname)
 
 
-def _exclude_match(sample: str, excluded: set) -> bool:
-    if sample in excluded:
-        return True
-    if "__" in sample:
-        tail = sample.split("__", 1)[1]
-        if tail in excluded:
-            return True
-    return False
+# ---------------------------------------------------------------------------
+# noVNC WebSocket proxy (routes VNC through uvicorn, bypasses OOD rnode auth)
+# ---------------------------------------------------------------------------
+import asyncio as _asyncio
+from websockets.asyncio.client import connect as _ws_connect
+from fastapi import WebSocket as _WebSocket, WebSocketDisconnect as _WebSocketDisconnect
+
+_NOVNC_WS_PORT = int(os.environ.get("NOVNC_WS_PORT", "6080"))
 
 
-def _filtered_vcf_source(step2_dir: Path, vcf_source_dir: Path, excluded: List[str]) -> Path:
-    if not excluded:
-        return vcf_source_dir
-    filtered_dir = step2_dir / "vcf_source_filtered"
-    if filtered_dir.exists():
-        shutil.rmtree(filtered_dir)
-    filtered_dir.mkdir(parents=True, exist_ok=True)
-    excluded_set = set(excluded)
-    for vcf in vcf_source_dir.glob("*.vcf*"):
-        if vcf.suffix == ".tbi":
-            continue
-        sample = _sample_from_vcf(vcf)
-        if _exclude_match(sample, excluded_set):
-            continue
-        target = filtered_dir / vcf.name
-        if target.exists():
-            continue
-        target.symlink_to(vcf)
-        tbi_path = Path(f"{vcf}.tbi")
-        if tbi_path.exists():
-            tbi_target = filtered_dir / tbi_path.name
-            if not tbi_target.exists():
-                tbi_target.symlink_to(tbi_path)
-    return filtered_dir
+@app.websocket("/novnc-ws")
+async def _novnc_ws_proxy(ws: _WebSocket):
+    """Proxy noVNC WebSocket to the local websockify server."""
+    proto_header = ws.headers.get("sec-websocket-protocol", "")
+    subprotocols = [p.strip() for p in proto_header.split(",")] if proto_header else []
+
+    await ws.accept(subprotocol=subprotocols[0] if subprotocols else None)
+
+    vnc_ws_uri = f"ws://localhost:{_NOVNC_WS_PORT}"
+    try:
+        connect_kwargs = {"subprotocols": subprotocols} if subprotocols else {}
+        async with _ws_connect(vnc_ws_uri, **connect_kwargs) as upstream:
+
+            async def _downstream():
+                """upstream → browser"""
+                try:
+                    async for msg in upstream:
+                        if isinstance(msg, bytes):
+                            await ws.send_bytes(msg)
+                        else:
+                            await ws.send_text(msg)
+                except Exception:
+                    pass
+
+            async def _upstream():
+                """browser → upstream"""
+                try:
+                    while True:
+                        data = await ws.receive()
+                        if data.get("bytes"):
+                            await upstream.send(data["bytes"])
+                        elif data.get("text"):
+                            await upstream.send(data["text"])
+                        elif data.get("type") == "websocket.disconnect":
+                            break
+                except Exception:
+                    pass
+
+            tasks = [
+                _asyncio.create_task(_downstream()),
+                _asyncio.create_task(_upstream()),
+            ]
+            done, pending = await _asyncio.wait(tasks, return_when=_asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except _asyncio.CancelledError:
+                    pass
+    except Exception as exc:
+        logger.warning("noVNC proxy error: %s", exc)
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+# Mount noVNC static files at /novnc/
+_novnc_static_dir = Path("/usr/share/novnc")
+if _novnc_static_dir.exists():
+    app.mount("/novnc", StaticFiles(directory=str(_novnc_static_dir), html=True), name="novnc_static")

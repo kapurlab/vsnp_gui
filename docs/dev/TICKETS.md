@@ -1,111 +1,173 @@
 # Ticket Tracking — `web` branch
 
-Source of truth for ticket scope: [`vsnp_gui_architecture_roadmap.docx`](vsnp_gui_architecture_roadmap.docx).
-This file tracks **status** as we work the backlog. Update as tickets land.
+Source of truth for ticket scope: [`vsnp_gui_architecture_roadmap.docx`](vsnp_gui_architecture_roadmap.docx) (original P0–P2 set) and ad-hoc decisions captured below for the multi-user/multi-app additions.
 
-Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up after a done ticket
+Multi-user / multi-app architecture (storage, groups, refs, MHC approval, …): see [`MULTIUSER.md`](MULTIUSER.md). That document is the design source of truth — this file is execution status only.
 
-## P0
+Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 
-### T-01 — Fix Stats & Open Folder (download-based) — ✅
-Landed 2026-05-08.
-- Stats button → per-sample XLSX download via `Content-Disposition: attachment`
-- Open Folder → modal listing files in the sample dir, with a Download button per file
-- Endpoints: `GET /api/projects/{p}/step1/samples/{s}/stats/download`, `GET /api/projects/{p}/step1/samples/{s}/files`
-- Frontend: `downloadStep1Stats`, `openStep1FolderModal`, `formatBytes`, modal in `App.jsx`
+---
 
-### T-02 — Replace desktop IGV with igv.js — ✅ (with follow-ups)
-Landed 2026-05-08.
-- igv.js panel renders inline (bottom drawer, resizable + fullscreen)
-- BAM + BAI loaded against the project reference FASTA
-- Multi-track stacking on second click (comparison mode)
-- Pop-out tab via `?view=igv&project=…&samples=…` (`IgvStandalone.jsx`)
-- Subsequent IGV clicks routed to the live popout via `postMessage` (additive)
-- Backend: `GET /api/projects/{p}/serve` with HTTP byte-range support (206 + `Content-Range`)
-- npm: `igv@^3.8.0`
+## Done so far (chronological)
 
-🪝 Follow-ups:
-- [x] Retire desktop IGV: `step1_igv_session`, `posthoc/igv_session`, `_open_igv` and helpers, `igv_app_path` config field, frontend handlers and settings UI.
-- [x] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` and the FastAPI noVNC WebSocket proxy. Closes T-02 acceptance criterion 6.
-- [ ] Posthoc-tab IGV smoke test (needs a 2nd project; sufficient by symlinking `test/step1`).
+- **T-01 Stats & Open Folder via downloads** — ✅
+- **T-02 igv.js replaces desktop IGV** — ✅
+- **T-02 follow-up: retire desktop IGV backend** — ✅
+- **T-02 follow-up: drop OOD virtual desktop (Xvfb/x11vnc/websockify) + noVNC backend proxy** — ✅
+- **T-03 Browser tree viewer (phylotree.js)** — ✅
+- **T-03 follow-up: phantom "root" suppression + strip _zc.vcf toggle** — ✅
+- **T-03 follow-up: retire FigTree backend launcher** — ✅
+- **Portal cosmetic pass: "Kapur Lab Pipelines" title + welcome banner + pinned apps** — ✅
+- **Step 2 bootstrap support (`VSNP3_BOOTSTRAP` env var + RAxML `-f a`)** — ✅
+- **deploy/ood/ tracked in repo (app + portal config)** — ✅
 
-## P1
+Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
 
-### T-03 — Browser tree viewer — ✅ (with follow-ups)
+---
 
-In-browser tree viewer using **phylotree.js**. Picked over phylocanvas.gl after an A/B spike (preserved in branch `t03-spike`).
+## Milestone A — wgs3 multi-user-ready (foundation)
 
-Layout: **new tab** (not a drawer). Rectangular trees + long tip labels (`hCoV-19-deer-USA-IA-XXXX-EPI_zc.vcf` ~50 chars) benefit more from full viewport than from a constrained drawer; screening workflow doesn't need to keep the project view in context.
+The unblocker tier. Until A is done, only `vxk1` can use the system. Everything in B/C depends on this.
 
-What shipped:
-- `frontend/src/TreeStandalone.jsx` — full-viewport viewer at `?view=tree&project=…&path=…`. Controls: tip search highlight, Bootstrap labels toggle, Reroot mode (click branch), Midpoint root, Reset, Download `.tre` (handoff to iTOL/FigTree).
-- `frontend/src/main.jsx` — lazy-loaded behind `React.lazy` + `Suspense` + `ErrorBoundary` (introduced during the spike to keep the main App alive if a viewer chunk crashes; pattern kept).
-- `App.jsx` — `*.tre` rows in Step 2 outputs show a **View tree** button that opens the standalone in a new tab.
-- Backend `GET /api/projects/{p}/step2/trees` — lists latest `.tre` per group.
-- npm: `phylotree`.
+### T-19 Storage layout — ⏳ (runbook drafted)
 
-**Bootstrap support shipped at the same time**:
-- vsnp3 upstream's RAxML call is hard-coded as best-tree-only. Patched the conda env to read a `VSNP3_BOOTSTRAP` env var; if > 0, RAxML runs `-f a -x 7777 -N <n>` and the pipeline picks up `RAxML_bipartitions.raxml`.
-- New "Bootstrap (replicates)" field in Step 2 Options. Default 0 (off). Backend threads it through as the env var.
-- Filed upstream: [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23). Same conda-update caveat as the column[0] patch.
-- Smoke (test project, 7 SARS-CoV-2 deer samples): 50 replicates → 2.17 s; `.tre` carries support values on all 5 internal branches.
+Mount the four idle disks (~21 TB) and migrate `/home`. End state:
+- `/home` on nvme2n1 (3.7 TB NVMe, XFS w/ usrquota+prjquota)
+- `/srv/kapurlab` on sda (10.9 TB HDD, XFS w/ prjquota)
+- `/srv/kapurlab/backup` on sdb (5.5 TB HDD, XFS w/ prjquota)
+- swap on nvme1n1 (953 GB, replaces /swapfile)
 
-🪝 Follow-ups:
-- [x] **Phantom "root"**: suppressed in the `node-styler` — any internal node whose `data.name === "root"` has its label blanked at draw time, regardless of source.
-- [x] **Strip `_zc.vcf`** toggle for tip labels (defaults on, off via header checkbox).
-- [x] Retire FigTree backend launcher: dropped `figtree_app_path` from `ConfigUpdate`, `get_config`, `update_config`, `config.py` defaults; removed the FigTree branch in `_open_path`; dropped the FigTree settings field from the Settings UI.
-- [x] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` and drop the FastAPI `/novnc-ws` WebSocket proxy + `/novnc/` static mount. OOD templates now tracked in [`deploy/ood/`](../../deploy/ood/) so the deployment is reviewable. Closes T-02 acceptance criterion 6.
+Runbook: [`runbooks/T-19-storage-layout.md`](runbooks/T-19-storage-layout.md). ~60–90 min downtime window. Schedule when nobody else is using OOD.
 
-### T-04 — Remove hardcoded user paths (`$HOME`-relative) — ⏳
-### T-05 — Real-time Step 1 log streaming (SSE) — ⏳
-### T-06 — Project export ZIP download — ⏳
-### T-07 — Run provenance (`run_metadata.json`) — ⏳
+**Prerequisite for T-04 / T-11 / T-12a / T-21.**
 
-## P2
+### T-04 Remove hardcoded user paths — ⏳ (was P1, promoted to P0)
 
-### T-08 — Install script (automated OOD deployment) — ⏳
-### T-09 — Sample QC badges (pass/review/fail) — ⏳
-### T-10 — Docker Compose deployment path — ⏳
+`/home/vxk1/` literals scattered through `backend/app/main.py`, `backend/app/config.py`, the OOD `script.sh.erb` template, the bootstrap script, and a handful of helper functions. Each becomes config-driven (read `$HOME` or a config key). Trivial individually; tedious in aggregate. Must land before any user other than vxk1 logs in.
 
-## Multi-user / multi-app architecture (post-T-10)
+### T-11 Shared refs at `/srv/kapurlab/refs/` — ⏳
 
-These come up the moment a second user logs in or a second app is added (kraken, MHC). Out of scope for the initial single-user vSNP rewrite but worth tracking now so we don't paint ourselves into a corner.
+- Move `/home/vxk1/vSNP_reference_options/` → `/srv/kapurlab/refs/vsnp3/reference_options/`.
+- Install vsnp3 once into `/srv/kapurlab/tools/vsnp3/`. PATH points at `<install>/bin/`.
+- `vsnp3_path_adder.py -d /srv/kapurlab/refs/vsnp3/reference_options` writes to the install's shared `reference_options_paths.txt`.
+- Set group ownership: `:kapurlab-members 0755`. `kapurlab-admins` rwx via ACL or sudo.
+- vsnp_gui's `vcf_db_folders` config field accepts `/srv/kapurlab/refs/vsnp3/vcf_db_folders/*`.
 
-### T-11 — Shared reference options at `/srv/kapurlab/refs/` — ⏳
-Move `/home/vxk1/vSNP_reference_options/` to a server-wide read-only location every user can resolve. Update `vsnp3` env's `reference_options_paths.txt`. Add an admin-group writable subdir for new reference sets. Backend's reference listing already reads from a config-driven path list, so this is mostly file moves + permission setup.
+### T-12a Multi-user projects (symlink-based) — ⏳
 
-### T-12 — Multi-user projects layout — ⏳
-Decide between (a) per-user `~/projects/` (current), (b) shared `/srv/kapurlab/projects/<user>/`, or (c) hybrid where a project can opt into a shared scope. Affects `_resolve_sample_dir`, the Posthoc scan, the Step 2 import, and the project listing endpoint. Permission model: who can see / edit / delete whose projects.
+- Create groups: `kapurlab-members`, `kapurlab-admins`.
+- Add admin script `/usr/local/sbin/kapurlab-setup-project.sh <project> <user>...` that creates `proj-<name>` group, makes `/srv/kapurlab/projects/<name>/` setgid, adds users, sets XFS prjquota.
+- vsnp_gui aware of `/srv/kapurlab/projects/` (config-driven via T-04).
+- Cross-project sample sharing via symlinks (deferred flat-store is **T-12b**).
 
-### T-13 — Cross-project VCF index — ⏳
-Index every `*_zc.vcf` across projects (and across users, scoped by T-12) into a queryable surface (`/api/vcfs?ref=…&project=…&user=…`). Lets users build custom Step 2 bundles by picking samples from arbitrary projects rather than running Step 2 within a single project.
+### T-21 Migrate Vivek's Mac Electron projects — ⏳
 
-### T-14 — Step 1 cleanup / archival policy — ⏳
-After Step 1 finishes, intermediates (`*_filtered_hapall_annotated.vcf`, `RAxML_*` scratch, `*.reduced`, `unmapped_reads/`) accumulate. Add an "Archive" button per sample that compresses or deletes intermediates while keeping the BAM (for IGV review) and `_zc.vcf` (for Step 2). Optional default-on policy. Track disk-size deltas in run metadata (T-07).
+One-shot script that walks `/Users/vivekkapur/vsnp3/projects/` (Mac), identifies real projects vs throwaways, rsyncs raw fastq/bam/vcf into the new `/srv/kapurlab/projects/<name>/` shape, and emits a manifest of what moved where.
 
-### T-15 — Multi-app deployment template — ⏳
-Once kraken / MHC arrive, factor the OOD wiring (uvicorn-on-FastAPI app + byte-range serve + lazy-loaded React routes) into a reusable template. Likely shape: `deploy/install_app.py <app_name>` which scaffolds the OOD app dir + a stub backend module. The portal-wide config (title, banner, pinned apps) already covers branding.
+Pre-req: T-12a done so the destination structure exists.
+
+### T-07 Run provenance (`run_metadata.json`) — ⏳ (was P1, promoted to P0)
+
+Must land before any production run. Captures per Step 1 / Step 2 invocation:
+- `vsnp3 --version`
+- contents of `reference_options_paths.txt`
+- all CLI flags
+- env vars: PATH, VSNP3_BOOTSTRAP, etc.
+- input file paths + sizes (skip SHA on big BAMs for speed)
+- `git rev-parse HEAD` of vsnp_gui
+- user, hostname, timestamps
+
+Written to `<project>/<step>/run_metadata.json` and mirrored to `/srv/kapurlab/audit/runs.jsonl` (append-only).
+
+**End of Milestone A: Tod logs in, runs vSNP on a real project, output is reproducible.**
+
+---
+
+## Milestone B — Lab-friendly experience (polish + onboarding)
+
+### T-16 KapurLab landing page — ⏳ (3 phases)
+
+Visual rebuild of the OOD dashboard per the layout mockup (`kapurlab_landing_mockup_v2.html` layout A2 — three-pane: Data | Pipelines + Active work | System).
+
+- **Phase 1**: announcement frontmatter fix (the leaking `type: info`), brand bg/title polish, locale overrides, footer cleanup. Pure cosmetics + bug. ~2 h.
+- **Phase 2**: custom `welcome.html.erb` partial rendering A2 layout with mocked data (read from `wgs_pipelines.yml`). Validates the OOD Rails view-override path before backend wiring. ~½ day.
+- **Phase 3**: live data — group filtering on `/srv/kapurlab/projects/`, real `df`/`/proc/loadavg`, jobs from vsnp_gui's `JobManager` (no Slurm on this box), composite status pill. ~1 day.
+
+Replaces the standalone "Open vSNP GUI" button as the home. Carries the foundation for adding kraken/MHC entries.
+
+### T-09 Sample QC badges — ⏳
+
+Pass / review / fail badges in the Step 1 sample table based on configurable thresholds (coverage, mapping rate, contamination flag from sourmash).
+
+### T-05 Real-time Step 1 log streaming (SSE) — ⏳
+
+Currently Step 1 logs are batched at completion. Stream live via SSE to the GUI so a multi-hour run feels alive.
+
+**End of Milestone B: Lingling / Dev / Dee can be onboarded with project-scoped access and the experience feels intentional, not bolted-on.**
+
+---
+
+## Milestone C — Second app + cross-project flows (scale-out)
+
+### T-15 + T-08 (merged) Multi-app deployment template + install script — ⏳
+
+`deploy/install_app.py <app_name>` scaffolds a new OOD app dir under `deploy/ood/<app>/` from a template, with the same uvicorn-on-FastAPI + byte-range serve + lazy-loaded React routes pattern. Folds in T-08 (the per-app install command we run by hand today).
+
+### T-18 Kraken DB layout — ⏳
+
+`/srv/kapurlab/refs/kraken/<db>/` for shared databases. Compatibility check that the installed kraken2 mmaps from there. First post-vSNP app uses this template.
+
+### T-13 Cross-project VCF index — ⏳
+
+Index every `*_zc.vcf` across projects + users (scoped by T-12a) into a queryable surface (`/api/vcfs?ref=…&project=…&user=…`). Lets users build custom Step 2 bundles by picking samples from arbitrary projects.
+
+### T-17 MHC approval chain — ⏳
+
+`pending/` → `<panel>_current/` flow with admin CLI (`kapurlab-mhc review <id>`) and append-only ledger at `/srv/kapurlab/audit/mhc-approvals.jsonl`. See [`MULTIUSER.md`](MULTIUSER.md) for the full design.
+
+### T-20 Staged ingestion flow — ⏳
+
+GUI "Add to project" tab listing `/home/<user>/uploads/*` with a move button (rename(2) when same FS, copy+verify+unlink otherwise). Plus documentation for the sequencer rsync cron.
+
+### T-14 Step 1 cleanup / archival — ⏳
+
+After Step 1, "Archive" button per sample compresses or deletes intermediates (`*_filtered_hapall_annotated.vcf`, `RAxML_*` scratch, `*.reduced`, `unmapped_reads/`) while keeping BAM + `_zc.vcf`. Optional default-on policy. Disk-size deltas tracked in run metadata (T-07).
+
+### T-06 Project export ZIP — ⏳
+
+Bundle a project for off-system handoff. Configurable: with/without raw fastq, with/without intermediates. Writes to `/srv/kapurlab/projects/<name>/exports/` so the user can download or rsync elsewhere.
+
+---
+
+## Milestone D — Later
+
+### T-12b Flat sample-store — ⏳
+
+`/srv/kapurlab/samples/<sample-id>/` as canonical home for fastq/BAM/VCF/edit-log; projects become views. Trigger: when symlinks bite us (provenance gets confusing, deletion gets risky, cross-project queries are clumsy). See [`MULTIUSER.md`](MULTIUSER.md) for the trigger criteria.
+
+### T-10 Docker Compose deployment — ⏳
+
+For non-OOD environments (local dev, demos, eventual public-facing). Unblocks publishing the GUI. Low priority while OOD on wgs3 is the canonical deployment.
 
 ---
 
 ## Bonus fixes shipped on the `web` branch
 
-These were uncovered while working T-01 / T-02 and weren't separate tickets, but are worth noting so we don't re-debug them:
+These were uncovered while working tickets and weren't separate items, but worth noting so we don't re-debug them:
 
-- **`API_BASE` localhost fallback** — `frontend/src/App.jsx` was defaulting to `http://localhost:8000` if `VITE_API_URL` wasn't set. From any browser whose machine had a local uvicorn (typical: dev Mac), every fetch silently went there instead of through the OOD rnode proxy. Changed to `"."` (relative). Symptom: GUI showed Mac-side projects when loading from the OOD URL.
-
-- **`step2_setup` manifest write outside `with` block** — `manifest_path.open()` `with` block closed the file after the header line; the loop then wrote to a closed handle. Fixed by indenting the loop into the `with`.
-
-- **Reference alias map: last-writer-wins** — `_reference_alias_map` overwrote a stem→name mapping when multiple reference sets contained the same fasta stem (e.g. a stray `NC_045512.fasta` inside `tb_reference/` overrode the canonical `NC_045512_wuhan-hu-1`). Now prefers the mapping where the reference-set name contains the fasta stem.
-
-- **vsnp3 upstream `column[0]` → pandas 2 KeyError** — patched the conda-installed `vsnp3_fasta_to_snps_table.py` (3 sites) to use `.iloc[0]`. Filed [USDA-VS/vSNP3#22](https://github.com/USDA-VS/vSNP3/issues/22). The patch lives only in the conda env; will be overwritten on `conda update vsnp3`.
-
-- **vsnp3 has no bootstrap support** — patched the same file to read `VSNP3_BOOTSTRAP` env var and run RAxML rapid bootstrap (`-f a`) when set. Backup at `vsnp3_fasta_to_snps_table.py.bak.bootstrap`. Filed [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23) for an upstream `--bootstrap N` flag. Same conda-update caveat as the column[0] patch.
-
-- **IGV "Error loading Google oAuth properties" nag** — set `ENABLE_GOOGLE_MENU=false` and cleared `PROVISIONING_URL` in `~/.igv/prefs.properties`. Pre-T-02 mitigation; mostly moot once desktop IGV is retired.
+- **`API_BASE` localhost fallback** — `frontend/src/App.jsx` defaulted to `http://localhost:8000` if `VITE_API_URL` wasn't set; from a browser whose machine had a local uvicorn (typical: dev Mac), every fetch silently hit there instead of through the OOD rnode proxy. Changed to `"."` (relative).
+- **`step2_setup` manifest write outside `with` block** — write went to a closed handle. Fixed.
+- **Reference alias map: last-writer-wins** — stray `NC_045512.fasta` inside `tb_reference/` was clobbering `NC_045512_wuhan-hu-1`. Now prefers the mapping where the reference name contains the fasta stem.
+- **`step1_vcfs` count** — was globbing `**/*.vcf` (counts both `_zc.vcf` and intermediates → 2× actual). Now `_zc.vcf` only.
+- **vsnp3 upstream `column[0]` → pandas-2 KeyError** — patched conda env. Filed [USDA-VS/vSNP3#22](https://github.com/USDA-VS/vSNP3/issues/22).
+- **vsnp3 has no bootstrap support** — patched conda env to honor `VSNP3_BOOTSTRAP`. Filed [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23).
+- **IGV "Google oAuth properties" nag** — set `ENABLE_GOOGLE_MENU=false` in `~/.igv/prefs.properties`. Mostly moot once desktop IGV was retired.
+- **Phantom "root" tree label** — phylotree's newick parser wraps the parsed tree in a synthetic outer node named `"root"`; with internal-names on (bootstrap toggle), that label was rendered as a phantom "root" alongside the legit outgroup leaf. Suppressed in node-styler.
 
 ---
 
 ## Branching / source of truth
 
-`web` is the OOD/FastAPI rewrite branch off `main`. The pre-Apr-10 Electron history on `main` is preserved but is **not** the path forward for OOD deployment. Daily work happens on wgs3 against this branch. The Mac copy (`/Users/vivekkapur/vsnp_gui/`) is a viewer; do not run a local uvicorn there or it will shadow the OOD backend in the browser (see the API_BASE note above).
+`web` is the OOD/FastAPI rewrite branch off `main`. The pre-Apr-10 Electron history on `main` is preserved but is **not** the path forward for OOD deployment. Daily work happens on wgs3 against this branch. The Mac copy (`/Users/vivekkapur/vsnp_gui/`) is a viewer; do not run a local uvicorn there or it will shadow the OOD backend in the browser (see the `API_BASE` note above).
+
+`t03-spike` retained as the A/B record for phylotree.js vs phylocanvas.gl.

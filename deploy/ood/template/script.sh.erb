@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# vSNP GUI OOD batch_connect script
+# $port (uvicorn) is exported by before.sh.
+
+echo "=== vSNP GUI Session Starting ==="
+echo "uvicorn:${port}"
+
+VSNP3_ENV=/home/${USER}/miniforge3/envs/vsnp3
+PYTHON=/home/${USER}/miniforge3/bin/python
+VSNP_DIR=/home/${USER}/vsnp_gui
+
+# Make the vsnp3 env CLI tools (vsnp3_step1.py, raxml, samtools, …) available.
+export PATH="${VSNP3_ENV}/bin:${PATH}"
+
+cd "${VSNP_DIR}/backend"
+echo "Starting uvicorn on port ${port}..."
+exec $PYTHON -m uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port "${port}" \
+    --log-level info

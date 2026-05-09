@@ -300,7 +300,6 @@ def conda_python_cmd(cfg: Dict, code: str, args: Optional[List[str]] = None) -> 
 class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
-    figtree_app_path: Optional[str] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -398,7 +397,6 @@ def get_config():
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
         "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
-        "figtree_app_path": Path(cfg.get("figtree_app_path", "")).exists() if cfg.get("figtree_app_path", "").strip() else None,
         "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
     }
     return cfg
@@ -411,8 +409,6 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
-    if update.figtree_app_path is not None:
-        cfg["figtree_app_path"] = update.figtree_app_path
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
     if update.step1_max_parallel is not None:
@@ -2379,13 +2375,8 @@ def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
 
 
 def _open_path(target: Path, cfg: Optional[Dict] = None) -> None:
+    suffix = target.suffix.lower()
     if sys.platform.startswith("darwin"):
-        cfg = cfg or load_config()
-        suffix = target.suffix.lower()
-        figtree_app = cfg.get("figtree_app_path") if isinstance(cfg, dict) else None
-        if figtree_app and suffix in {".nexus", ".nex", ".tre", ".tree", ".nwk"}:
-            subprocess.run(["open", "-a", figtree_app, str(target)])
-            return
         if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:
             subprocess.run(["open", "-e", str(target)])
         else:
@@ -2538,75 +2529,3 @@ if _frontend_dist.exists():
                 return _FileResponse(_frontend_dist / fname)
 
 
-# ---------------------------------------------------------------------------
-# noVNC WebSocket proxy (routes VNC through uvicorn, bypasses OOD rnode auth)
-# ---------------------------------------------------------------------------
-import asyncio as _asyncio
-from websockets.asyncio.client import connect as _ws_connect
-from fastapi import WebSocket as _WebSocket, WebSocketDisconnect as _WebSocketDisconnect
-
-_NOVNC_WS_PORT = int(os.environ.get("NOVNC_WS_PORT", "6080"))
-
-
-@app.websocket("/novnc-ws")
-async def _novnc_ws_proxy(ws: _WebSocket):
-    """Proxy noVNC WebSocket to the local websockify server."""
-    proto_header = ws.headers.get("sec-websocket-protocol", "")
-    subprotocols = [p.strip() for p in proto_header.split(",")] if proto_header else []
-
-    await ws.accept(subprotocol=subprotocols[0] if subprotocols else None)
-
-    vnc_ws_uri = f"ws://localhost:{_NOVNC_WS_PORT}"
-    try:
-        connect_kwargs = {"subprotocols": subprotocols} if subprotocols else {}
-        async with _ws_connect(vnc_ws_uri, **connect_kwargs) as upstream:
-
-            async def _downstream():
-                """upstream → browser"""
-                try:
-                    async for msg in upstream:
-                        if isinstance(msg, bytes):
-                            await ws.send_bytes(msg)
-                        else:
-                            await ws.send_text(msg)
-                except Exception:
-                    pass
-
-            async def _upstream():
-                """browser → upstream"""
-                try:
-                    while True:
-                        data = await ws.receive()
-                        if data.get("bytes"):
-                            await upstream.send(data["bytes"])
-                        elif data.get("text"):
-                            await upstream.send(data["text"])
-                        elif data.get("type") == "websocket.disconnect":
-                            break
-                except Exception:
-                    pass
-
-            tasks = [
-                _asyncio.create_task(_downstream()),
-                _asyncio.create_task(_upstream()),
-            ]
-            done, pending = await _asyncio.wait(tasks, return_when=_asyncio.FIRST_COMPLETED)
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except _asyncio.CancelledError:
-                    pass
-    except Exception as exc:
-        logger.warning("noVNC proxy error: %s", exc)
-    finally:
-        try:
-            await ws.close()
-        except Exception:
-            pass
-
-
-# Mount noVNC static files at /novnc/
-_novnc_static_dir = Path("/usr/share/novnc")
-if _novnc_static_dir.exists():
-    app.mount("/novnc", StaticFiles(directory=str(_novnc_static_dir), html=True), name="novnc_static")

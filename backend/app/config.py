@@ -10,7 +10,6 @@ HOME_DIR = Path.home()
 DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(HOME_DIR / "vsnp3"),
     "projects_root": str(HOME_DIR / "vsnp3" / "projects"),
-    "figtree_app_path": "",
     "bcftools_path": "",
     "step1_max_parallel": 3,
     "sra": {
@@ -35,6 +34,7 @@ def load_config() -> Dict[str, Any]:
     if str(projects_root).startswith("/Users/vivekkapur") and not projects_root.exists():
         cfg["projects_root"] = DEFAULTS["projects_root"]
     cfg.pop("igv_app_path", None)
+    cfg.pop("figtree_app_path", None)
     return cfg
 
 

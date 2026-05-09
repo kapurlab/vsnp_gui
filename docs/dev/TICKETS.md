@@ -25,9 +25,9 @@ Landed 2026-05-08.
 - npm: `igv@^3.8.0`
 
 🪝 Follow-ups:
-- [x] Retire desktop IGV: `step1_igv_session`, `posthoc/igv_session`, `_open_igv` and helpers, `igv_app_path` config field, frontend handlers and settings UI (commit follows)
-- [ ] After T-03 lands, remove Xvfb / x11vnc / websockify from OOD `script.sh.erb`
-- [ ] Posthoc-tab IGV smoke test (needs a 2nd project; sufficient by symlinking `test/step1`)
+- [x] Retire desktop IGV: `step1_igv_session`, `posthoc/igv_session`, `_open_igv` and helpers, `igv_app_path` config field, frontend handlers and settings UI.
+- [x] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` and the FastAPI noVNC WebSocket proxy. Closes T-02 acceptance criterion 6.
+- [ ] Posthoc-tab IGV smoke test (needs a 2nd project; sufficient by symlinking `test/step1`).
 
 ## P1
 
@@ -50,11 +50,11 @@ What shipped:
 - Filed upstream: [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23). Same conda-update caveat as the column[0] patch.
 - Smoke (test project, 7 SARS-CoV-2 deer samples): 50 replicates → 2.17 s; `.tre` carries support values on all 5 internal branches.
 
-🪝 Follow-ups (not blocking T-03 sign-off):
-- [ ] **Phantom "root"**: when Bootstrap is on, a second "root" label still appears alongside the legit outgroup leaf. First fix (blanking phylotree's synthetic outer name) addressed only one source. The remaining one is likely the parent of the `(stuff,root)` topology being labeled by phylotree even after blanking. Investigate next pass.
-- [ ] Optional UX: toggle to strip the `_zc.vcf` suffix from displayed tip labels. Cosmetic.
-- [ ] Retire FigTree backend launcher (`figtree_app_path` config field, `_open_path` xdg-open path on `.tre`).
-- [ ] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` (closes T-02 acceptance criterion 6).
+🪝 Follow-ups:
+- [x] **Phantom "root"**: suppressed in the `node-styler` — any internal node whose `data.name === "root"` has its label blanked at draw time, regardless of source.
+- [x] **Strip `_zc.vcf`** toggle for tip labels (defaults on, off via header checkbox).
+- [x] Retire FigTree backend launcher: dropped `figtree_app_path` from `ConfigUpdate`, `get_config`, `update_config`, `config.py` defaults; removed the FigTree branch in `_open_path`; dropped the FigTree settings field from the Settings UI.
+- [x] Remove Xvfb / x11vnc / websockify from OOD `script.sh.erb` and drop the FastAPI `/novnc-ws` WebSocket proxy + `/novnc/` static mount. OOD templates now tracked in [`deploy/ood/`](../../deploy/ood/) so the deployment is reviewable. Closes T-02 acceptance criterion 6.
 
 ### T-04 — Remove hardcoded user paths (`$HOME`-relative) — ⏳
 ### T-05 — Real-time Step 1 log streaming (SSE) — ⏳

@@ -70,19 +70,21 @@ Runbook: [`runbooks/T-19-storage-layout.md`](runbooks/T-19-storage-layout.md). ~
 - vsnp_gui aware of `/srv/kapurlab/projects/` (config-driven via T-04).
 - Cross-project sample sharing via symlinks (deferred flat-store is **T-12b**).
 
-### T-21 Migrate Vivek's Mac Electron projects — 🚧
+### T-21 Migrate Vivek's Mac Electron projects — 🪝 deferred (superseded by ad-hoc upload)
 
-Manifest script (`deploy/admin/t21-mac-manifest.py`) and migration script (`deploy/admin/t21-mac-migrate.py --fastq-only`) shipped 2026-05-09 phase 1+2. Mid-flight migration was killed mid-run after two real bugs surfaced; needs the fixes below before re-run.
+**Decision (2026-05-09)**: not pursuing the bulk migration. The original projects remain on the Mac; the GUI's per-project upload UX (now reliable: drag-and-drop or Choose Files with XHR progress) covers the actual need — bring projects over to wgs3 selectively, when there's a reason to. Re-running Step 1+2 from fastq is fast (~10 min for the 16-sample MTBC test). The bulk migration optimized for a use case (one-shot move of *all* Mac projects to wgs3) that isn't actually needed.
 
-**Bugs uncovered during the live run (must fix before re-attempt):**
+**Status of artifacts**:
+- Manifest script (`deploy/admin/t21-mac-manifest.py`) and migration script (`deploy/admin/t21-mac-migrate.py --fastq-only`) shipped, but committed without the openrsync-compat fixes that lived only in `/tmp/t21-mac-migrate.py` on the Mac. Those fixes are also lost-by-default unless someone resurrects this work.
+- One mid-flight live attempt was killed; partial state (`download/` contents + project shells under `/srv/kapurlab/projects/`) was cleaned up; only `sanity_test` remains there.
 
-1. **Symlink dereferencing.** Script uses `rsync -rltDvh …`; the `-l` preserves symlinks as symlinks, but several Mac source dirs are symlink-only (e.g. `M5_test/download/` is 100% symlinks into `Nagalingam_03242026`; `Nagalingam_02272026/` mixes real fastq with Dropbox-aliased samples). Result: dest dirs filled with broken symlinks pointing at Mac paths that don't exist on Linux. Fix: add `-L` (or `--copy-links`) to the rsync flag set.
+**Bugs uncovered during the live run** (kept here so future-you isn't surprised if T-21 is ever resurrected):
 
-2. **`project.json` overwriting.** `--fastq-only` doesn't filter `project.json`, so rsync stomps the clean version `kapurlab-setup-project.sh` writes with the Mac-side `display_name` (e.g. "Linglnig_mtbc0_v1.1"). The GUI then shows confusing legacy display names. Fix: either exclude `project.json` from rsync, or re-write it after rsync from setup-project's template.
+1. **Symlink dereferencing.** Script uses `rsync -rltDvh …`; the `-l` preserves symlinks as symlinks, but several Mac source dirs are symlink-only (e.g. `M5_test/download/` is 100% symlinks into `Nagalingam_03242026`; `Nagalingam_02272026/` mixes real fastq with Dropbox-aliased samples). Result: dest dirs filled with broken symlinks pointing at Mac paths that don't exist on Linux. Fix: add `-L` (or `--copy-links`).
 
-**Open semantic question** — for projects that on the Mac are pure aliases of another project (M5_test → Nagalingam_03242026), do we (a) migrate as real data via `-L`, (b) drop them from the manifest entirely, or (c) re-create the alias relationship on Linux via symlinks under `/srv/kapurlab/projects/`? Decision deferred.
+2. **`project.json` overwriting.** `--fastq-only` doesn't filter `project.json`, so rsync stomps the clean version `kapurlab-setup-project.sh` writes with the Mac-side `display_name` (e.g. "Linglnig_mtbc0_v1.1"). The GUI then shows confusing legacy display names. Fix: exclude `project.json` from rsync, or re-write it after rsync from setup-project's template.
 
-Pre-req: T-12a done so the destination structure exists. ✅
+**Open semantic question** — for projects that on the Mac are pure aliases of another project (M5_test → Nagalingam_03242026), would we (a) migrate as real data via `-L`, (b) drop from the manifest, or (c) recreate the alias on Linux via symlinks under `/srv/kapurlab/projects/`? Permanent question now that the migration is deferred — re-decide if T-21 is ever reopened.
 
 ### T-07 Run provenance (`run_metadata.json`) — ⏳ (was P1, promoted to P0)
 

@@ -281,21 +281,31 @@ def check_step2(report: Report, project_dir: Path) -> None:
         except Exception as e:
             report.warn("step2: drift check failed", str(e))
 
-    if rec.vcf_db_selections:
+    # When no DBs are available for this reference (e.g. SARS-CoV-2 has no
+    # curated DBs in the lab inventory), both selections and inventory are
+    # legitimately empty. Collapse to a single PASS rather than spam two WARNs
+    # on every project that uses such a reference.
+    ref_name = rec.reference.name if rec.reference else "<unknown>"
+    if not rec.vcf_db_inventory_at_dispatch:
         report.ok(
-            f"step2: vcf_db_selections captured",
-            f"n={len(rec.vcf_db_selections)}",
+            "step2: no VCF DBs available for reference",
+            f"ref={ref_name} (expected for refs without curated DBs)",
         )
     else:
-        report.warn("step2: vcf_db_selections empty", "(no DBs selected at dispatch)")
-
-    if rec.vcf_db_inventory_at_dispatch:
+        if rec.vcf_db_selections:
+            report.ok(
+                "step2: vcf_db_selections captured",
+                f"n={len(rec.vcf_db_selections)}",
+            )
+        else:
+            report.warn(
+                "step2: vcf_db_selections empty",
+                f"(DBs available for {ref_name} but none selected)",
+            )
         report.ok(
-            f"step2: vcf_db_inventory_at_dispatch captured",
+            "step2: vcf_db_inventory_at_dispatch captured",
             f"n={len(rec.vcf_db_inventory_at_dispatch)} (forensic snapshot of what was available)",
         )
-    else:
-        report.warn("step2: vcf_db_inventory_at_dispatch empty")
 
     if rec.outputs:
         tre_count = sum(1 for o in rec.outputs if o.path.endswith(".tre"))

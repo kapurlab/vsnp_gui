@@ -30,6 +30,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 - **GUI upload UX: explicit Choose Files button + XHR progress** — ✅ (replaces flaky bare `<input type="file">`, real per-byte progress with elapsed time and MB/s, fixes FileList live-collection bug)
 - **vsnp3 SyntaxWarning fixes (step1.py, step2.py)** — ✅ (patched in `deploy/vsnp3-patches/v3.16-kapurlab.patch`; `apply.sh` now handles partial-state via `patch -N`)
 - **vsnp3 markupsafe DeprecationWarning suppression** — ✅ (`PYTHONWARNINGS` exported via `wrap_cmd`, scoped to `markupsafe` module so other DeprecationWarnings still surface)
+- **T-05 Real-time Step 1 log streaming via SSE** — ✅ (`/api/jobs/<id>/events` now multiplexes batch log + per-sample `run_step1.log` files for step1 jobs, prefixing lines with `[batch]`/`[<sample>]`; discovers late-arriving samples mid-stream; smoke test in `backend/app/test_step1_sse_smoke.py` covers the multiplex behavior)
 
 Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
 
@@ -119,9 +120,15 @@ Replaces the standalone "Open vSNP GUI" button as the home. Carries the foundati
 
 Pass / review / fail badges in the Step 1 sample table based on configurable thresholds (coverage, mapping rate, contamination flag from sourmash).
 
-### T-05 Real-time Step 1 log streaming (SSE) — ⏳
+### T-05 Real-time Step 1 log streaming (SSE) — ✅
 
-Currently Step 1 logs are batched at completion. Stream live via SSE to the GUI so a multi-hour run feels alive.
+`/api/jobs/<id>/events` multiplexes the batch log and every per-sample `run_step1.log` for step1 jobs. Each line carries an `[batch] ` or `[<sample>] ` prefix so the unified stream stays parseable. Late-arriving samples (the ones queued behind `step1_max_parallel`) get discovered each poll cycle. Final flush before the `[job:status]` terminator catches anything written between the last poll and process exit.
+
+Behavior unchanged for step2 / SRA / genome-download jobs (no prefix, single-log tail) — backward-compatible with existing log consumers.
+
+Smoke test: `backend/app/test_step1_sse_smoke.py` (8/8 assertions against the deployed env).
+
+Future polish (separate ticket if it ever surfaces): frontend could parse the prefix and render per-sample collapsible panels with live tail per sample, instead of the current unified stream. The unified stream is the V1 win; per-panel UI is the V2 ask.
 
 **End of Milestone B: Lingling / Dev / Dee can be onboarded with project-scoped access and the experience feels intentional, not bolted-on.**
 

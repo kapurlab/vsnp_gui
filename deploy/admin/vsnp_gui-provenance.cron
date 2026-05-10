@@ -1,0 +1,24 @@
+# /etc/cron.d/vsnp_gui-provenance — T-07 provenance-index janitor.
+#
+# Source of truth: deploy/admin/vsnp_gui-provenance.cron in the vsnp_gui repo.
+# Install with:
+#   sudo install -o root -g root -m 0644 \
+#     /srv/kapurlab/tools/vsnp_gui/deploy/admin/vsnp_gui-provenance.cron \
+#     /etc/cron.d/vsnp_gui-provenance
+#
+# The wrapper script handles PYTHONPATH and walks every project root that
+# exists on the host (/srv/kapurlab/projects + /home/*/projects). Output is
+# discarded — diagnose by re-running the action directly as vxk1.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+# Hourly: mark stuck `running` records as `unknown_terminated` after 48h.
+0 * * * * vxk1 /srv/kapurlab/tools/vsnp_gui/deploy/admin/provenance-cron.sh gc >/dev/null 2>&1
+
+# Nightly 02:00: backfill any records the writer's inline finalize_callback missed.
+0 2 * * * vxk1 /srv/kapurlab/tools/vsnp_gui/deploy/admin/provenance-cron.sh crawl >/dev/null 2>&1
+
+# Nightly 02:05: dump indexer to JSONL for archive grep-ability and offsite backup.
+5 2 * * * vxk1 /srv/kapurlab/tools/vsnp_gui/deploy/admin/provenance-cron.sh export >/dev/null 2>&1

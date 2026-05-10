@@ -407,10 +407,12 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     via copy_env_snapshot_into_run() and updating the path fields to
     per-run paths in the per-run record.
 
-    Cached for uvicorn lifetime, keyed by the conda prefix.
+    Cached for uvicorn lifetime, keyed by the conda prefix (or vsnp3
+    install path if no conda env is active).
     """
-    conda_prefix = os.environ.get("CONDA_PREFIX", "")
-    cache_key = conda_prefix or "no_conda"
+    vsnp3_path = Path(cfg.get("vsnp3_path", "/srv/kapurlab/tools/vsnp3"))
+    conda_prefix = os.environ.get("CONDA_PREFIX", "") or str(vsnp3_path)
+    cache_key = conda_prefix
 
     cached = _env_snapshot_cache.get(cache_key)
     if cached is not None:
@@ -423,37 +425,56 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
 
         audit_root = Path(cfg.get("audit_root", "/srv/kapurlab/audit"))
         snapshots_dir = audit_root / "env_snapshots"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            snapshots_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("env_snapshots dir not writable (%s); skipping shared store", e)
+            snapshots_dir = None
 
-        # Conda env yaml
+        # Conda env: try `conda env export` first; if that fails (no conda
+        # binary on this deploy), fall back to reading conda-meta/*.json
+        # from the install dir, which is conda's own authoritative record
+        # of what's installed. The fallback yaml is a synthesized list of
+        # `<package>=<version>=<build>` lines, which is what `conda env
+        # export --no-builds` would produce in the dependencies section.
         conda_yaml_normalized = _capture_conda_env_yaml()
+        if not conda_yaml_normalized:
+            conda_yaml_normalized = _capture_conda_meta_fallback(vsnp3_path)
         conda_yaml_sha = (
             hashlib.sha256(conda_yaml_normalized.encode()).hexdigest()
             if conda_yaml_normalized else None
         )
         conda_yaml_shared_path = None
-        if conda_yaml_sha:
+        if conda_yaml_sha and snapshots_dir is not None:
             target = snapshots_dir / f"{conda_yaml_sha}.yaml"
             _write_to_shared_store(target, conda_yaml_normalized)
             conda_yaml_shared_path = str(target)
 
-        # Pip freeze
+        # Pip freeze (only if pip is available — vsnp3 conda envs sometimes
+        # ship without pip).
         pip_freeze_normalized = _capture_pip_freeze()
         pip_freeze_sha = (
             hashlib.sha256(pip_freeze_normalized.encode()).hexdigest()
             if pip_freeze_normalized else None
         )
         pip_freeze_shared_path = None
-        if pip_freeze_sha:
+        if pip_freeze_sha and snapshots_dir is not None:
             target = snapshots_dir / f"{pip_freeze_sha}.txt"
             _write_to_shared_store(target, pip_freeze_normalized)
             pip_freeze_shared_path = str(target)
 
-        # System packages
+        # System packages: try `dpkg-query` first (works for apt-installed
+        # tools); if that returns nothing for a tool, probe the vsnp3 env's
+        # bin/ for the binary and run --version. Many lab-tool installs are
+        # conda-only; dpkg-query will be empty for them.
         system_packages = _capture_system_packages()
+        bin_versions = _capture_install_bin_versions(vsnp3_path)
+        for tool, version in bin_versions.items():
+            if not system_packages.get(tool):
+                system_packages[tool] = version
 
         env = {
-            "conda_env_name": os.environ.get("CONDA_DEFAULT_ENV") or None,
+            "conda_env_name": os.environ.get("CONDA_DEFAULT_ENV") or vsnp3_path.name or None,
             "conda_env_yaml_sha256": conda_yaml_sha,
             "conda_env_yaml_path": None,  # filled in per-run by caller
             "_conda_env_yaml_shared_path": conda_yaml_shared_path,  # internal; stripped before serialize
@@ -466,6 +487,85 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
         }
         _env_snapshot_cache[cache_key] = env
         return dict(env)
+
+
+def _capture_conda_meta_fallback(install_path: Path) -> str:
+    """Read `<install>/conda-meta/*.json` filenames and synthesize a yaml-like
+    manifest. Each file is named `<package>-<version>-<build>.json` by conda
+    (this naming is part of conda's on-disk contract). Sorted, hashed → a
+    stable fingerprint of the env's contents that doesn't require the conda
+    binary. Returns "" if conda-meta doesn't exist (e.g. not a conda env)."""
+    conda_meta = install_path / "conda-meta"
+    if not conda_meta.is_dir():
+        return ""
+    try:
+        entries = sorted(p.stem for p in conda_meta.glob("*.json"))
+    except OSError:
+        return ""
+    if not entries:
+        return ""
+    # YAML-like for grep-ability; not a valid `conda env import` source
+    # because conda doesn't preserve the channel info in conda-meta filenames.
+    # That's fine for fingerprinting.
+    body = "\n".join(f"  - {entry}" for entry in entries)
+    return f"name: {install_path.name}\n# synthesized from conda-meta/*.json (no conda binary)\ndependencies:\n{body}\n"
+
+
+_TOOL_VERSION_PROBES: tuple[tuple[str, list[str], int], ...] = (
+    # (tool, args, regex-target — search both stdout and stderr)
+    ("samtools", ["--version"], 1),
+    ("bcftools", ["--version"], 1),
+    ("bwa", [], 1),  # bwa with no args prints version on stderr
+    ("mafft", ["--version"], 1),
+    ("raxmlHPC", ["-v"], 1),
+    ("raxml", ["-v"], 1),
+    ("iqtree", ["--version"], 1),
+    ("iqtree2", ["--version"], 1),
+)
+
+
+def _capture_install_bin_versions(install_path: Path) -> dict[str, str | None]:
+    """For each tracked tool, probe `<install>/bin/<tool>` and parse a version.
+
+    Returns a dict keyed by the canonical tool name (samtools, bcftools, bwa,
+    mafft, raxml, iqtree). raxml/iqtree have multiple binary names across
+    builds (raxmlHPC vs raxml; iqtree2 vs iqtree); whichever is present
+    populates the canonical key.
+    """
+    canonical = {
+        "samtools": "samtools",
+        "bcftools": "bcftools",
+        "bwa": "bwa",
+        "mafft": "mafft",
+        "raxmlHPC": "raxml",
+        "raxml": "raxml",
+        "iqtree": "iqtree",
+        "iqtree2": "iqtree",
+    }
+    out: dict[str, str | None] = {tool: None for tool in TRACKED_SYSTEM_PACKAGES}
+    bin_dir = install_path / "bin"
+    if not bin_dir.is_dir():
+        return out
+    for binary, args, _ in _TOOL_VERSION_PROBES:
+        path = bin_dir / binary
+        if not path.is_file():
+            continue
+        canonical_name = canonical.get(binary)
+        if not canonical_name or out.get(canonical_name):
+            continue  # already filled by an earlier probe
+        try:
+            result = subprocess.run(
+                [str(path), *args],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        text = (result.stdout or "") + " " + (result.stderr or "")
+        # Match like "samtools 1.23.1", "Version: 1.17", "version 2.2.2.7"
+        m = re.search(r"\b\d+\.\d+(?:\.\d+)*(?:[A-Za-z0-9._-]+)?\b", text)
+        if m:
+            out[canonical_name] = m.group(0)
+    return out
 
 
 def _capture_conda_env_yaml() -> str:
@@ -1199,9 +1299,19 @@ def _read_sentinel_int(path: Path) -> int | None:
 
 
 def _scan_step1_sample_outputs(sample_dir: Path) -> list[dict[str, Any]]:
-    """Find expected step1 outputs (the *_zc.vcf and BAM)."""
+    """Find expected step1 outputs (the *_zc.vcf and BAM).
+
+    vsnp3 step1 writes outputs into `<sample>/alignment_<ref>/` subdirs, not
+    at the sample top level — so the glob has to be recursive. Also includes
+    `*_filtered_hapall_annotated.vcf` (the QC-flag-detection target) since
+    its presence is a finer-grained completion signal than just *_zc.vcf.
+    """
     outputs: list[dict[str, Any]] = []
-    for pattern in ("*_zc.vcf", "*.bam"):
+    for pattern in (
+        "**/*_zc.vcf",
+        "**/*_filtered_hapall_annotated.vcf",
+        "**/*_nodup.bam",
+    ):
         for p in sorted(sample_dir.glob(pattern)):
             stat = p.stat()
             outputs.append({

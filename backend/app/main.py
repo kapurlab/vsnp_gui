@@ -1250,6 +1250,10 @@ def step1_run(project: str, payload: Step1Request):
             "  if [ ! -d \"$d\" ]; then",
             "    return 0",
             "  fi",
+            "  # Skip writer/janitor scaffolding (T-07 _provenance, .git, etc.).",
+            "  case \"$d\" in",
+            "    _*/|.*/|_*|.*) return 0 ;;",
+            "  esac",
             "  echo \"== Running step1 in $d ==\"",
             "  cd \"$d\"",
             "  LOG=run_step1.log",
@@ -1381,6 +1385,10 @@ def step1_status(project: str):
     statuses = []
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir():
+            continue
+        # Skip writer/janitor scaffolding (e.g. _provenance/) so they don't
+        # surface as "Unknown" samples in the GUI.
+        if sample_dir.name.startswith(("_", ".")):
             continue
         sample = sample_dir.name
         log_path = sample_dir / "run_step1.log"

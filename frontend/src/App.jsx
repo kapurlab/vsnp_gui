@@ -997,8 +997,14 @@ export default function App() {
 
   async function importVcfs() {
     if (!selectedProject || !settingsReady) return;
-    // Auto-populate from enabled vcfDbFolders
-    const enabledPaths = vcfDbFolders.filter((f) => f.enabled).map((f) => f.path);
+    // Auto-populate from enabled vcfDbFolders matching the selected reference.
+    // The picker UI already filters to importReference for display, but the
+    // underlying state holds every shared+user DB. Without the reference
+    // filter here, e.g. selecting NC_045512_wuhan-hu-1 still pulls in the
+    // mtbc0_v1.1 DBs because they're "enabled by default."
+    const enabledPaths = vcfDbFolders
+      .filter((f) => f.enabled && (f.reference || "") === importReference)
+      .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
     const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
     const sourcesText = allPaths.join("\n");

@@ -480,6 +480,13 @@ export default function App() {
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
+    // Clear the import-sources textarea on project change. Otherwise paths
+    // from a previous project's import (a different reference, possibly
+    // different shared DBs) survive the switch and get re-injected into
+    // the next build via parseAccessions(importSourcesText).
+    setImportSourcesText("");
+    setImportStatus("");
+    setImportMismatchReport("");
   }, [selectedProject]);
 
   useEffect(() => {
@@ -1007,8 +1014,12 @@ export default function App() {
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
     const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
-    const sourcesText = allPaths.join("\n");
-    setImportSourcesText(sourcesText);
+    // Don't write allPaths back into the textarea. The textarea is
+    // reserved for *user-typed* extra paths only; auto-discovered DB
+    // selections bleed in here would create a feedback loop where a
+    // previous reference's DB paths survive a reference/project switch
+    // and get re-included in the next build (manifesting as a
+    // mysterious "Mismatched 57" the user didn't ask for).
     const sources = allPaths;
     if (!sources.length && !importIncludeStep1) {
       setImportStatus("Provide at least one source path or include Step 1.");

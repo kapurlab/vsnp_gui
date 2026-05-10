@@ -13,11 +13,11 @@ pipelines:
     icon: v
     title: vSNP3
     description: >-
-      Reference-guided SNP analysis and phylogenetics. Supports MTBC,
-      <em>Brucella</em>, and other bacterial pathogens for outbreak tracking
-      and isolate clustering.
+      Validated reference-guided SNP analysis and phylogenetics pipeline.
+      Supports bacterial and viral pathogens WGS analysis for outbreak
+      tracking and isolate clustering.
     status: available
-    runtime: "~30 min · 8 cores"
+    runtime: "GUI-based interactive fully contained sessions"
     launch_url: /pun/sys/dashboard/batch_connect/sys/vsnp_gui/session_contexts/new
 
   - id: desktop
@@ -26,13 +26,12 @@ pipelines:
     description: >-
       Graphical desktop with the lab bioinformatics toolchain pre-installed.
       For ad-hoc analysis and visualization.
-    status: available
-    runtime: "interactive · 4 cores"
-    launch_url: /pun/sys/dashboard/batch_connect/sys/bc_desktop/session_contexts/new
+    status: coming
+    runtime: "in development"
 
   - id: kraken
     icon: k
-    title: Kraken Classifier
+    title: Kraken
     description: >-
       Read-level taxonomic classification against custom databases. For
       contamination screening and metagenomic profiling.
@@ -43,8 +42,7 @@ pipelines:
     icon: m
     title: MHC Typer
     description: >-
-      HLA and BoLA typing from WGS reads. Optimized for bovine and human
-      reference panels.
+      BoLA typing from WGS reads. Optimized for bovine reference panels.
     status: coming
     runtime: "in development"
 

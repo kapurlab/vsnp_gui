@@ -54,6 +54,9 @@ export default function App() {
   const igvContainerRef = useRef(null);
   const igvPopoutRef = useRef(null);
   const uploadInputRef = useRef(null);
+  const excludeSaveTimerRef = useRef(null);
+  const qcRowsRef = useRef([]);
+  const excludedRef = useRef({});
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -143,6 +146,12 @@ export default function App() {
   const [refEditorPath, setRefEditorPath] = useState("");
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
+
+  // Mirror qcRows / excluded into refs so the debounced auto-save reads
+  // current state at fire time, not the stale closure capture from when the
+  // timer was scheduled.
+  useEffect(() => { qcRowsRef.current = qcRows; }, [qcRows]);
+  useEffect(() => { excludedRef.current = excluded; }, [excluded]);
 
   const settingsReady = Boolean(
     settings.vsnp3_path && settings.projects_root
@@ -614,6 +623,26 @@ export default function App() {
     }
     const data = await res.json();
     setQcRows(data);
+    // Hydrate the exclusion checkboxes from the persisted xlsx so re-opening
+    // a project shows what's actually saved on disk (no more silent drift
+    // between the GUI's checkbox state and what Step 2 will honor).
+    try {
+      const exRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`);
+      if (exRes.ok) {
+        const exData = await exRes.json();
+        const samples = new Set(exData.samples || []);
+        const map = {};
+        data.forEach((row) => {
+          const sample = sampleKey(row);
+          if (sample && samples.has(sample)) {
+            map[excludeKey(row)] = true;
+          }
+        });
+        setExcluded(map);
+      }
+    } catch (_) {
+      // Non-fatal — the table just shows everything unchecked.
+    }
     if (!reference) {
       const refCandidate = data
         .map((r) => normalizeReferenceName(r.Reference))
@@ -744,27 +773,65 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
-  async function saveExclusions() {
-    if (!selectedProject) return;
+  // Build the set of sample names currently flagged for exclusion. Reads from
+  // refs so a debounced auto-save doesn't see stale closure state.
+  function _collectExcludedSamples() {
     const samples = new Set();
-    qcRows.forEach((row) => {
+    (qcRowsRef.current || []).forEach((row) => {
       const key = excludeKey(row);
-      if (excluded[key]) {
+      if (excludedRef.current[key]) {
         const sample = sampleKey(row);
         if (sample) samples.add(sample);
       }
     });
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ samples: Array.from(samples) })
-    });
-    if (!res.ok) {
-      const msg = await res.json();
-      window.alert(msg.detail || "Failed to save exclusions");
-      return;
+    return samples;
+  }
+
+  async function _persistExclusions(opts = {}) {
+    if (!selectedProject) return { ok: false };
+    const samples = _collectExcludedSamples();
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ samples: Array.from(samples) })
+      });
+      if (!res.ok) {
+        if (opts.alertOnError) {
+          const msg = await res.json().catch(() => ({}));
+          window.alert(msg.detail || "Failed to save exclusions");
+        }
+        return { ok: false };
+      }
+      return { ok: true, count: samples.size };
+    } catch (e) {
+      if (opts.alertOnError) window.alert(`Save failed: ${e.message}`);
+      return { ok: false };
     }
-    window.alert("Exclusions saved");
+  }
+
+  // Toggle handler: applies the change locally, then debounces a save so a
+  // user click-storming through the QC table only POSTs once after they stop.
+  function toggleExcluded(row, checked) {
+    setExcluded((prev) => ({ ...prev, [excludeKey(row)]: checked }));
+    if (excludeSaveTimerRef.current) {
+      clearTimeout(excludeSaveTimerRef.current);
+    }
+    excludeSaveTimerRef.current = setTimeout(() => {
+      excludeSaveTimerRef.current = null;
+      _persistExclusions();
+    }, 400);
+  }
+
+  // Manual save button — flushes any pending debounce immediately and surfaces
+  // errors via alert. Kept as a belt-and-suspenders affordance.
+  async function saveExclusions() {
+    if (excludeSaveTimerRef.current) {
+      clearTimeout(excludeSaveTimerRef.current);
+      excludeSaveTimerRef.current = null;
+    }
+    const result = await _persistExclusions({ alertOnError: true });
+    if (result.ok) window.alert(`Exclusions saved (${result.count})`);
   }
 
   async function linkLocal(pathOverride = "") {
@@ -2149,7 +2216,14 @@ export default function App() {
                     </button>
                     <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
                     <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
-                    <button onClick={saveExclusions} disabled={!selectedProject}>Save Exclusions</button>
+                    <button
+                      onClick={saveExclusions}
+                      disabled={!selectedProject}
+                      className="ghost"
+                      title="Exclusions auto-save when you toggle a checkbox; this button forces an immediate save and confirms with an alert."
+                    >
+                      Force-save Exclusions
+                    </button>
                   </>
                 ) : (
                   <>
@@ -2211,9 +2285,8 @@ export default function App() {
                                 <input
                                   type="checkbox"
                                   checked={Boolean(excluded[excludeKey(row)])}
-                                  onChange={(e) =>
-                                    setExcluded({ ...excluded, [excludeKey(row)]: e.target.checked })
-                                  }
+                                  onChange={(e) => toggleExcluded(row, e.target.checked)}
+                                  title="Toggling auto-saves to remove_from_analysis.xlsx; the next Step 2 run honors it via -remove_by_name"
                                 />
                               </td>
                               <td>

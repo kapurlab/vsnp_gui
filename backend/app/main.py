@@ -1797,6 +1797,17 @@ def qc_exclude(project: str, payload: ExcludeRequest):
     step2_dir = project_dir / "step2"
     step2_dir.mkdir(parents=True, exist_ok=True)
     remove_path = step2_dir / "remove_from_analysis.xlsx"
+    # If the GUI clears every checkbox, delete the file rather than writing
+    # an empty xlsx — `step2_run` checks for file existence to decide whether
+    # to pass `-remove_by_name` to vsnp3, and an empty list is logically the
+    # same as "no exclusions".
+    if not payload.samples:
+        if remove_path.exists():
+            try:
+                remove_path.unlink()
+            except OSError:
+                pass
+        return {"remove_file": str(remove_path), "count": 0}
     code = (
         "import pandas as pd, sys; "
         "out=sys.argv[1]; "
@@ -1809,6 +1820,30 @@ def qc_exclude(project: str, payload: ExcludeRequest):
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"Exclude list failed: {result.stderr.strip()}")
     return {"remove_file": str(remove_path), "count": len(payload.samples)}
+
+
+@app.get("/api/projects/{project}/qc_exclude")
+def qc_exclude_get(project: str):
+    """Return the persisted exclusion set so the GUI can hydrate the QC table
+    on project load. Reads `step2/remove_from_analysis.xlsx` directly via
+    pandas (uvicorn runs in the vsnp3 env). Returns empty list if the file
+    is absent — that is the canonical "no exclusions" state."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    remove_path = project_dir / "step2" / "remove_from_analysis.xlsx"
+    if not remove_path.exists():
+        return {"samples": []}
+    try:
+        import pandas as pd  # vsnp3 env always has pandas
+        df = pd.read_excel(remove_path, header=None)
+        samples = [
+            str(s).strip()
+            for s in df.iloc[:, 0].tolist()
+            if str(s).strip() and str(s).strip().lower() != "nan"
+        ]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read exclusions: {exc}")
+    return {"samples": samples}
 
 
 @app.post("/api/projects/{project}/step2/clear")

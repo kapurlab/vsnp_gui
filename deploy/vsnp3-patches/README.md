@@ -9,6 +9,9 @@ Local patches we apply on top of the bioconda vsnp3 v3.16 install. These belong 
 - `v3.16-kapurlab.patch` — unified diff against pristine v3.16:
   - **column[0] → column.iloc[0]** (3 sites in `bin/vsnp3_fasta_to_snps_table.py`). Fixes `KeyError: 0` on pandas 2.x. Tracked at USDA-VS/vSNP3#22.
   - **`VSNP3_BOOTSTRAP` env var support**. When set (>0), RAxML runs as `-f a -x 7777 -N $VSNP3_BOOTSTRAP` and the pipeline picks `RAxML_bipartitions.raxml` (best tree with bootstrap proportions on internal branches) instead of `RAxML_bestTree.raxml`. Tracked at USDA-VS/vSNP3#23.
+  - **SyntaxWarning fixes** (one site each in `bin/vsnp3_step1.py` and `bin/vsnp3_step2.py`): convert the affected regex literals to raw strings and drop the bogus `\/` escape. Cosmetic — Python still ran the patterns — but every parallel worker emitted a noisy warning at module load. Will become a hard error in a future Python release; raw-string is the correct fix.
+
+`apply.sh` checks for the raw-string fix as its idempotency sentinel and uses `patch -N` so installs already carrying the older hunks pick up only the new ones.
 
 ## Apply
 

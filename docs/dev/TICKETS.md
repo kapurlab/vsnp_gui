@@ -20,6 +20,16 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 - **Portal cosmetic pass: "Kapur Lab Pipelines" title + welcome banner + pinned apps** — ✅
 - **Step 2 bootstrap support (`VSNP3_BOOTSTRAP` env var + RAxML `-f a`)** — ✅
 - **deploy/ood/ tracked in repo (app + portal config)** — ✅
+- **T-19 Storage layout** — ✅ (`/home` on nvme2n1, `/srv/kapurlab` on sda, `/srv/kapurlab/backup` on sdb, swap on nvme1n1)
+- **T-04 Remove hardcoded user paths** — ✅ (per-user `~/.config/vsnp_gui/config.json`)
+- **T-11 Shared refs at `/srv/kapurlab/refs/`** — ✅ (vsnp3 install at `/srv/kapurlab/tools/vsnp3`, refs at `/srv/kapurlab/refs/vsnp3/reference_options/`, multi-user vsnp_gui clone at `/srv/kapurlab/tools/vsnp_gui`)
+- **T-12a Multi-user projects (symlink-based)** — ✅ (groups, `kapurlab-setup-project.sh`, `kapurlab-add-user.sh`, `shared_projects_root`, "shared" badge)
+- **mtbc0_v1.1 reference install** — ✅ (copied from Mac into `/srv/kapurlab/refs/vsnp3/reference_options/`)
+- **VCF DB v2: auto-discovered, reference-scoped, per-user opt-out, dropdown UI** — ✅ (2-level layout `<root>/<reference>/<db_name>/`, `vcf_db_folders_root` config, `disabled_vcf_db_paths` for per-user opt-out, frontend dropdown trigger with name + sample count + scope badge + `[from-assembly]` marker)
+- **MTBC VCF DBs installed at `/srv/kapurlab/refs/vsnp3/vcf_db_folders/mtbc0_v1.1/`** — ✅ (`representative` n=57, `minimum_tree` n=17, `synthetic` n=16, `canetti` n=1)
+- **GUI upload UX: explicit Choose Files button + XHR progress** — ✅ (replaces flaky bare `<input type="file">`, real per-byte progress with elapsed time and MB/s, fixes FileList live-collection bug)
+- **vsnp3 SyntaxWarning fixes (step1.py, step2.py)** — ✅ (patched in `deploy/vsnp3-patches/v3.16-kapurlab.patch`; `apply.sh` now handles partial-state via `patch -N`)
+- **vsnp3 markupsafe DeprecationWarning suppression** — ✅ (`PYTHONWARNINGS` exported via `wrap_cmd`, scoped to `markupsafe` module so other DeprecationWarnings still surface)
 
 Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
 
@@ -29,7 +39,7 @@ Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` m
 
 The unblocker tier. Until A is done, only `vxk1` can use the system. Everything in B/C depends on this.
 
-### T-19 Storage layout — ⏳ (runbook drafted)
+### T-19 Storage layout — ✅
 
 Mount the four idle disks (~21 TB) and migrate `/home`. End state:
 - `/home` on nvme2n1 (3.7 TB NVMe, XFS w/ usrquota+prjquota)
@@ -41,11 +51,11 @@ Runbook: [`runbooks/T-19-storage-layout.md`](runbooks/T-19-storage-layout.md). ~
 
 **Prerequisite for T-04 / T-11 / T-12a / T-21.**
 
-### T-04 Remove hardcoded user paths — ⏳ (was P1, promoted to P0)
+### T-04 Remove hardcoded user paths — ✅
 
 `/home/vxk1/` literals scattered through `backend/app/main.py`, `backend/app/config.py`, the OOD `script.sh.erb` template, the bootstrap script, and a handful of helper functions. Each becomes config-driven (read `$HOME` or a config key). Trivial individually; tedious in aggregate. Must land before any user other than vxk1 logs in.
 
-### T-11 Shared refs at `/srv/kapurlab/refs/` — ⏳
+### T-11 Shared refs at `/srv/kapurlab/refs/` — ✅
 
 - Move `/home/vxk1/vSNP_reference_options/` → `/srv/kapurlab/refs/vsnp3/reference_options/`.
 - Install vsnp3 once into `/srv/kapurlab/tools/vsnp3/`. PATH points at `<install>/bin/`.
@@ -53,18 +63,26 @@ Runbook: [`runbooks/T-19-storage-layout.md`](runbooks/T-19-storage-layout.md). ~
 - Set group ownership: `:kapurlab-members 0755`. `kapurlab-admins` rwx via ACL or sudo.
 - vsnp_gui's `vcf_db_folders` config field accepts `/srv/kapurlab/refs/vsnp3/vcf_db_folders/*`.
 
-### T-12a Multi-user projects (symlink-based) — ⏳
+### T-12a Multi-user projects (symlink-based) — ✅
 
 - Create groups: `kapurlab-members`, `kapurlab-admins`.
 - Add admin script `/usr/local/sbin/kapurlab-setup-project.sh <project> <user>...` that creates `proj-<name>` group, makes `/srv/kapurlab/projects/<name>/` setgid, adds users, sets XFS prjquota.
 - vsnp_gui aware of `/srv/kapurlab/projects/` (config-driven via T-04).
 - Cross-project sample sharing via symlinks (deferred flat-store is **T-12b**).
 
-### T-21 Migrate Vivek's Mac Electron projects — ⏳
+### T-21 Migrate Vivek's Mac Electron projects — 🚧
 
-One-shot script that walks `/Users/vivekkapur/vsnp3/projects/` (Mac), identifies real projects vs throwaways, rsyncs raw fastq/bam/vcf into the new `/srv/kapurlab/projects/<name>/` shape, and emits a manifest of what moved where.
+Manifest script (`deploy/admin/t21-mac-manifest.py`) and migration script (`deploy/admin/t21-mac-migrate.py --fastq-only`) shipped 2026-05-09 phase 1+2. Mid-flight migration was killed mid-run after two real bugs surfaced; needs the fixes below before re-run.
 
-Pre-req: T-12a done so the destination structure exists.
+**Bugs uncovered during the live run (must fix before re-attempt):**
+
+1. **Symlink dereferencing.** Script uses `rsync -rltDvh …`; the `-l` preserves symlinks as symlinks, but several Mac source dirs are symlink-only (e.g. `M5_test/download/` is 100% symlinks into `Nagalingam_03242026`; `Nagalingam_02272026/` mixes real fastq with Dropbox-aliased samples). Result: dest dirs filled with broken symlinks pointing at Mac paths that don't exist on Linux. Fix: add `-L` (or `--copy-links`) to the rsync flag set.
+
+2. **`project.json` overwriting.** `--fastq-only` doesn't filter `project.json`, so rsync stomps the clean version `kapurlab-setup-project.sh` writes with the Mac-side `display_name` (e.g. "Linglnig_mtbc0_v1.1"). The GUI then shows confusing legacy display names. Fix: either exclude `project.json` from rsync, or re-write it after rsync from setup-project's template.
+
+**Open semantic question** — for projects that on the Mac are pure aliases of another project (M5_test → Nagalingam_03242026), do we (a) migrate as real data via `-L`, (b) drop them from the manifest entirely, or (c) re-create the alias relationship on Linux via symlinks under `/srv/kapurlab/projects/`? Decision deferred.
+
+Pre-req: T-12a done so the destination structure exists. ✅
 
 ### T-07 Run provenance (`run_metadata.json`) — ⏳ (was P1, promoted to P0)
 
@@ -163,6 +181,18 @@ These were uncovered while working tickets and weren't separate items, but worth
 - **vsnp3 has no bootstrap support** — patched conda env to honor `VSNP3_BOOTSTRAP`. Filed [USDA-VS/vSNP3#23](https://github.com/USDA-VS/vSNP3/issues/23).
 - **IGV "Google oAuth properties" nag** — set `ENABLE_GOOGLE_MENU=false` in `~/.igv/prefs.properties`. Mostly moot once desktop IGV was retired.
 - **Phantom "root" tree label** — phylotree's newick parser wraps the parsed tree in a synthetic outer node named `"root"`; with internal-names on (bootstrap toggle), that label was rendered as a phantom "root" alongside the legit outgroup leaf. Suppressed in node-styler.
+
+---
+
+## Follow-ups noted
+
+🪝 small/medium items that came up during recent work but don't justify their own milestone slot yet:
+
+- **T-22 GUI server-pull ingestion for large fastq.** Browser uploads (either GUI drop-zone or OOD Files) hold up the tab and die if the user closes it; over Tailscale a 5 GB pair is fine, but anything larger or unattended needs a server-side pull. Sketch: per-user `/home/<user>/uploads/` drop-dir + a "Scan inbox" tab in the project view that lists/move-into-project, plus optional rsync-from-Mac cron. Overlaps with **T-20 staged ingestion**; merge them when picked up.
+- **T-23 VCF DB v3: per-DB `db.json` metadata.** V2 ships with folder-name + live sample count. V3 adds a tiny `db.json` for friendly display name (e.g. "MTBC representative isolates (Coll et al. 2014)"), short description, citation, kind tag (empirical/synthetic/minimum_tree). Discovery falls back to folder name when missing. Add when we have more than one reference's worth of DBs and bare folder names start being ambiguous.
+- **T-24 VCF DB v3 (cont.): per-user opt-out of synthetic DBs by default.** Currently shared DBs default to enabled (including `synthetic`); if usage shows synthetic noise hurts more than it helps for routine runs, flip the default-checked logic for `kind: "synthetic"` so they're available but unchecked.
+- **T-25 Upstream vsnp3 PRs.** Two more patches we now carry locally: the SyntaxWarning raw-string fixes in `bin/vsnp3_step1.py` and `bin/vsnp3_step2.py`. File alongside the existing `column[0]` (USDA-VS/vSNP3#22) and bootstrap (#23) issues. Trivial — 4 character changes total.
+- **T-26 OOD Files upload size.** `/etc/ood/config/nginx_stage.yml` left at default (10 GB max upload). Confirmed working at 345 MB; haven't stress-tested above 2 GB. Bump or document if anyone hits it.
 
 ---
 

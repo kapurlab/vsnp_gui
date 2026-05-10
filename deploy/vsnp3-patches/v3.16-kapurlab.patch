@@ -46,3 +46,25 @@
                      index_list_of_ref_differences.append(ind)
              c = itertools.count()
              val = max((list(g) for _, g in itertools.groupby(index_list_of_ref_differences, lambda x: x-next(c))), key=len)
+--- a/bin/vsnp3_step1.py	2026-05-09 12:29:22.933155658 -0400
++++ b/bin/vsnp3_step1.py	2026-05-09 20:24:08.051460166 -0400
+@@ -95,7 +95,7 @@
+             fasta_name=[]
+             for each in FASTAs:
+                 basenames.append(os.path.basename(each))
+-                fasta_name.append(re.sub('\..*', '', os.path.basename(each)))
++                fasta_name.append(re.sub(r'\..*', '', os.path.basename(each)))
+             self.excel_stats.excel_dict["FASTA/s"] = ", ".join(basenames)
+             #concatenate FASTA list
+             concatenated_TEMP = f'{"_".join(fasta_name)}.temp'
+--- a/bin/vsnp3_step2.py	2026-05-09 12:29:22.933155658 -0400
++++ b/bin/vsnp3_step2.py	2026-05-09 20:24:08.052460165 -0400
+@@ -137,7 +137,7 @@
+                     line = re.sub('""', '"', line)
+                     line = re.sub('"$', '', line)
+                     line = re.sub('GQ:PL\t"', 'GQ:PL\t', line)
+-                    line = re.sub('[0-9]+\tGT\t.\/.$', '999\tGT:AD:DP:GQ:PL\t1/1:0,80:80:99:2352,239,0', line)
++                    line = re.sub(r'[0-9]+\tGT\t./.$', '999\tGT:AD:DP:GQ:PL\t1/1:0,80:80:99:2352,239,0', line)
+                     line = re.sub('^"', '', line)
+                     if line.startswith('##') and line.endswith('"'):
+                         line = re.sub('"$', '', line)

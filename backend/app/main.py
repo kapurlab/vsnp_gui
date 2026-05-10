@@ -95,10 +95,20 @@ def build_env(cfg: Dict) -> Dict[str, str]:
 
 
 def wrap_cmd(cfg: Dict, command: str) -> str:
+    # PYTHONWARNINGS suppresses two classes of cosmetic noise from each vsnp3
+    # worker:
+    #   - SyntaxWarning: belt-and-suspenders for any regex literals we haven't
+    #     patched yet (the known sites in step1/step2 are fixed in
+    #     deploy/vsnp3-patches/v3.16-kapurlab.patch).
+    #   - DeprecationWarning from markupsafe's __version__ access. vsnp3 still
+    #     uses the deprecated attribute; harmless but spams logs once per
+    #     subprocess. Scoped to the markupsafe module so other deprecation
+    #     warnings still surface.
+    env_prefix = 'PYTHONWARNINGS="ignore::SyntaxWarning,ignore::DeprecationWarning:markupsafe"'
     vsnp3_path = cfg.get("vsnp3_path", "").strip()
     if vsnp3_path:
-        return f"PATH=\"{Path(vsnp3_path) / 'bin'}:$PATH\" {command}"
-    return command
+        return f"{env_prefix} PATH=\"{Path(vsnp3_path) / 'bin'}:$PATH\" {command}"
+    return f"{env_prefix} {command}"
 
 
 def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]:

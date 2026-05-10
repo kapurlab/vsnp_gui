@@ -296,3 +296,114 @@ What they need to produce:
 - `git rev-parse HEAD` from inside `/srv/kapurlab/tools/vsnp_gui` returns the deploy SHA; deploy is a regular git clone.
 - `os.environ` at uvicorn process startup is a stable enough source for env capture (we set `OOD_*` vars in `script.sh.erb` and they persist).
 - The applied-patches set is small and known: 4 hunks total in `deploy/vsnp3-patches/v3.16-kapurlab.patch`. SHA-256 the whole patch file once at import; the per-hunk decomposition is metadata baked into the schema.
+
+---
+
+## 9. Resolved follow-ups (Opus's round 2 + my answers)
+
+### 9a. step1 per-sample dispatch + finalize: P1 with sentinel files (not log parsing)
+
+Adopted. Writer's flow:
+
+- **Dispatch**: writer pre-creates `<sample>/run_metadata.json` (status=running) and an empty `<sample>/.provenance/` dir, all 16 carrying the same `dispatch_state` sub-block (per-sample bits — input fastq paths/hashes — vary; everything else identical).
+- **Bash batch (writer modifies the script-template generation in `step1_run`)**: each `run_sample()` writes three sentinel files alongside the existing `run_step1.log`:
+  ```bash
+  mkdir -p .provenance
+  date -u +%s.%N > .provenance/started_at
+  vsnp3_step1.py …
+  STATUS=$?
+  echo $STATUS > .provenance/exit_code
+  date -u +%s.%N > .provenance/finished_at
+  ```
+  Three sentinels, deterministic format the writer owns. Decoupled from `run_step1.log` emission entirely (the log stays for human consumption; sentinels are machine-only).
+- **Post-batch finalize** (fired by JobManager's `finalize_callback` after the batch exits): writer walks per-sample dirs, reads sentinels, rewrites each per-sample `run_metadata.json` as terminal. Missing `finished_at` sentinel → `status: "unknown_terminated"`. Missing `exit_code` → same. Plus the batch roll-up `<project>/step1/run_metadata.json` is finalized.
+
+Format note for the sentinels: epoch-seconds with sub-second precision (`%s.%N`) is `bash`'s portable form; writer parses as `float` and converts to UTC ISO-8601 for the schema.
+
+### 9b. JobManager finalize-callback failure isolation
+
+Adopted exactly as Opus drafted. The callback is wrapped in try/except inside `JobManager._run`; failure logs to `/srv/kapurlab/audit/metadata_failures.jsonl` (append-only sibling of `runs.sqlite` and `t21-migration.jsonl`) and **does not** mask the subprocess exit code in `get_job()` and **does not** raise into JobManager's loop. Per the locked policy: hard fail at dispatch (no metadata, no run); soft fail at finalize (run completes, metadata gap is logged, janitor catches stuck records via the 48h timeout).
+
+JobManager change Opus produces:
+```python
+# in _run, after process.wait():
+if self._finalize_callback is not None:
+    try:
+        self._finalize_callback(job_id, exit_code, started_at, finished_at)
+    except Exception:
+        logger.exception("finalize_callback failed for %s", job_id)
+        self._record_metadata_failure(job_id, exc_info=sys.exc_info())
+```
+
+`_record_metadata_failure` writes one JSONL line per failure to `/srv/kapurlab/audit/metadata_failures.jsonl`. Schema: `{ts, job_id, exception_type, exception_message, traceback}`. The audit dir is created by `kapurlab-setup-project.sh` already; the `metadata_failures.jsonl` is just another sibling in `/srv/kapurlab/audit/` (no chattr +a in V1; the file is a forensic trail, not a tamper-evident ledger).
+
+### 9c. Helper caching semantics — uvicorn-lifetime cache, dispatch-time only
+
+Adopted Opus's option (a). Cache `current_env_snapshot()`, `current_vsnp_gui_state()`, `current_vsnp3_state()` for the lifetime of the uvicorn process; service restart is the documented refresh mechanism. Function naming convention: name them `capture_env_snapshot()` etc. (verb form) to signal "this is a one-shot capture act, not a query." First call per uvicorn lifetime pays the cost; subsequent calls return the cached result.
+
+The `dispatch_state` sub-block is frozen by definition — once a run's dispatch_state is written, no code path should re-invoke these capture helpers for the same `run_id`. Enforce by passing `dispatch_state` through to `finalize_*` rather than re-deriving from helpers.
+
+(Why my original `(install_path, install_path_mtime)` keying was wrong: the vsnp3 install_path mtime doesn't track conda env mutations. `mamba install` updates packages under `CONDA_PREFIX` without touching the vsnp3 install dir's mtime in a meaningful way. Service-restart-as-refresh is the honest version.)
+
+### 9d. Step2 dispatched while step1 is still running
+
+Adopted asymmetric policy:
+
+- **Shared project** (`<project>` is under `cfg["shared_projects_root"]`): if any sample's `step1/<sample>/run_metadata.json` has `status: "running"`, refuse to dispatch step2. Return HTTP 409 with detail like `"Cannot dispatch step2: 3 step1 sample(s) still running [Mg220, Mg222, Mg263]. Wait for them to finish or cancel."` Same shared-vs-personal asymmetry as the hard-fail-dispatch / soft-fail-finalize split.
+- **Personal project** (`<project>` is under `cfg["projects_root"]`): warn-and-proceed. Set `consumed_step1_run_ids_complete: false` in the pipeline_run record, populate `consistency.warnings` with `"3 step1 samples were still running at step2 dispatch: [Mg220, Mg222, Mg263]; their run_ids reflect dispatch state, not necessarily what was consumed by step2"`. Personal projects are user-owned; users can shoot their own foot.
+
+Same "predates T-07" handling: samples without any `run_metadata.json` get `consumed_step1_run_ids_complete: false` and a separate warning, regardless of project scope.
+
+### 9e. Step2 dispatch write ordering
+
+Adopted: pipeline_run record first, then step2 `run_metadata.json` referencing that pipeline_run_id. Both use atomic write (`tempfile + os.replace`). Failure mode if step2 metadata write fails after pipeline_run succeeds: orphan pipeline_run (no `step2_runs` entry pointing at any extant step2 metadata) — identifiable by the indexer's existing `crawl_project()` and recoverable by janitor. The reverse ordering produces an unrecoverable dangling reference.
+
+### 9f. `read_edit_record_refs` semantics — return all, edits accumulate
+
+**Important correction to the schema brief.** The actual edit log is per-sample, not project-wide:
+
+- Per-sample patchlog: `<step1>/<sample>/vcf_edits/<sample>_patchlog.jsonl` (no chattr +a; written by the `vcf_edit` endpoint).
+- The project-wide `<project>/audit/edits.jsonl` that `kapurlab-setup-project.sh` provisions with chattr +a is **not currently written to by anything in the backend**. (Pre-T-07 leftover; meant for a future "write-once edit ledger" feature that wasn't built.)
+- Edits **accumulate**: each edit is layered on the prior patched VCF (`base_vcf = patched_vcf if patched_vcf.exists() else source_vcf`, `main.py:2278`). The patched file is the cumulative state.
+
+Therefore `read_edit_record_refs(sample_dir, sample, run_started_at)` should:
+
+- Read `sample_dir / "vcf_edits" / f"{sample}_patchlog.jsonl"` (not the project-wide audit log).
+- Return **all** records whose timestamp ≤ `run_started_at`, not just the latest. Auditors need the full edit history, not a snapshot. Cost is bounded (a few KB per sample).
+- Each `EditRecordRef`: `audit_log = <abs path to patchlog>`, `line_number = 1-indexed line in the file`, `record_sha256 = SHA-256 of the JSON line bytes` (so the link survives line renumbering or log compaction).
+- If the per-sample patchlog doesn't exist (sample never edited), return `[]`. The `edited_samples_at_run_time` block then omits that sample.
+
+**Follow-up for after T-07**: the project-wide `audit/edits.jsonl` should actually be written to (tee from `vcf_edit`) so the chattr +a is doing real work. Out of scope here; file as a small ticket post-Phase-3.
+
+### 9g. Shared env_snapshot store concurrency
+
+Adopted Opus's pattern:
+
+```python
+target = env_snapshots_dir / f"{sha256}.yaml"
+if target.exists():
+    return target  # content-addressed; identical content already on disk
+tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".{sha256}.", dir=env_snapshots_dir)
+try:
+    os.write(tmp_fd, content)
+    os.close(tmp_fd)
+    try:
+        os.link(tmp_path, target)  # atomic; fails with EEXIST if another writer beat us
+    except FileExistsError:
+        pass  # losing the race is fine; content is identical
+finally:
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(tmp_path)
+```
+
+Stat-first short-circuits the common case (no temp file needed); `os.link` with `EEXIST` handling covers the race. Identical content → identical hash → identical file, so a lost race is benign.
+
+### 9h. Division of labor — confirmed
+
+Opus produces:
+
+1. `backend/app/provenance_writer.py` — the writer module with the function surface in §5.
+2. Reader patch in `backend/app/vsnp_provenance/__init__.py` to make `diff_dispatch_vs_final()` work against the sub-block layout (or a sibling `diff_dispatch_vs_final_subblock(metadata_path)` helper that reads from the single file).
+3. JobManager finalize-callback patch in `backend/app/jobs.py` per §9b.
+
+I (this session, when Opus delivers) wire the three calls into `main.py`'s `step1_run` and `step2_run` against the JobManager change, surface the OOD session ID + per-user-vs-shared resolution, and run the end-to-end smoke test against `nagalingam_test`.

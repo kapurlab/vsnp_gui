@@ -1088,6 +1088,66 @@ async def project_upload(project: str, files: List[UploadFile] = File(...)):
     return {"uploaded": saved}
 
 
+@app.get("/api/projects/{project}/inputs")
+def project_inputs(project: str):
+    """List files currently in <project>/download/.
+
+    Returns name + size + mtime per entry, plus an aggregate. Used by the
+    GUI's "Files in this project" panel under the upload dropzone."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    download_dir = project_dir / "download"
+    files: List[Dict] = []
+    total_bytes = 0
+    if download_dir.is_dir():
+        for p in sorted(download_dir.iterdir()):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            try:
+                stat = p.stat()
+            except OSError:
+                continue
+            files.append({
+                "name": p.name,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+            })
+            total_bytes += stat.st_size
+    return {"files": files, "total_bytes": total_bytes, "count": len(files)}
+
+
+@app.delete("/api/projects/{project}/inputs/{filename}")
+def project_input_delete(project: str, filename: str):
+    """Delete a single file from <project>/download/.
+
+    Filename is treated as a basename only — any directory traversal attempt
+    (`..`, slashes, leading dots) is rejected. Idempotent: deleting a missing
+    file returns 404."""
+    if not filename or "/" in filename or "\\" in filename or filename.startswith(".") or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    target = (project_dir / "download" / filename).resolve()
+    download_dir = (project_dir / "download").resolve()
+    # Defense in depth: even if the basename guard above slipped, the resolved
+    # target must live inside the project's download dir.
+    try:
+        target.relative_to(download_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        target.unlink()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+    return {"deleted": filename}
+
+
 @app.post("/api/projects/{project}/sra/expand")
 def sra_expand(project: str, payload: SraRequest):
     _ = project

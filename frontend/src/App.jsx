@@ -35,6 +35,9 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [inputs, setInputs] = useState({ files: [], total_bytes: 0, count: 0 });
+  const [inputsLoading, setInputsLoading] = useState(false);
+  const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
   const [qcLoading, setQcLoading] = useState(false);
   const [qcError, setQcError] = useState("");
@@ -55,6 +58,7 @@ export default function App() {
   const igvPopoutRef = useRef(null);
   const uploadInputRef = useRef(null);
   const excludeSaveTimerRef = useRef(null);
+  const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
@@ -472,6 +476,7 @@ export default function App() {
     loadQC();
     loadStep1Status();
     loadStep2Outputs();
+    loadInputs(selectedProject);
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
@@ -850,6 +855,63 @@ export default function App() {
     await loadAll();
   }
 
+  async function loadInputs(project) {
+    if (!project) {
+      setInputs({ files: [], total_bytes: 0, count: 0 });
+      return;
+    }
+    setInputsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/inputs`);
+      if (res.ok) {
+        const data = await res.json();
+        setInputs(data);
+      } else {
+        setInputs({ files: [], total_bytes: 0, count: 0 });
+      }
+    } catch (_) {
+      setInputs({ files: [], total_bytes: 0, count: 0 });
+    } finally {
+      setInputsLoading(false);
+    }
+  }
+
+  async function deleteInput(filename) {
+    if (!selectedProject) return;
+    if (!window.confirm(`Delete ${filename}? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${selectedProject}/inputs/${encodeURIComponent(filename)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        window.alert(`Delete failed: ${err.detail || res.statusText}`);
+        return;
+      }
+    } catch (e) {
+      window.alert(`Delete failed: ${e.message}`);
+      return;
+    }
+    await loadInputs(selectedProject);
+  }
+
+  function cancelUpload() {
+    const xhr = uploadXhrRef.current;
+    if (xhr) {
+      xhr.abort();
+      uploadXhrRef.current = null;
+    }
+  }
+
+  function _formatBytes(bytes) {
+    if (!bytes) return "0 B";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
   async function uploadFiles(fileList) {
     if (!selectedProject || !settingsReady) {
       setUploadStatus("Select a project and complete Settings before uploading.");
@@ -869,6 +931,7 @@ export default function App() {
     setUploadStatus(`Uploading ${files.length} file${plural} (0 / ${totalMB} MB)...`);
     await new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
+      uploadXhrRef.current = xhr;
       xhr.upload.addEventListener("progress", (e) => {
         if (!e.lengthComputable) return;
         const elapsed = (Date.now() - startTime) / 1000;
@@ -901,12 +964,18 @@ export default function App() {
         resolve();
       });
       xhr.addEventListener("abort", () => {
-        setUploadStatus("Upload aborted");
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+        setUploadStatus(`Upload cancelled after ${elapsed}s`);
         resolve();
       });
       xhr.open("POST", `${API_BASE}/api/projects/${selectedProject}/upload`);
       xhr.send(formData);
     });
+    uploadXhrRef.current = null;
+    // Refresh the inputs panel so any successfully landed files appear
+    // immediately. Cancelled uploads may have left a partial file behind;
+    // it surfaces in the list and can be deleted via the [×] button.
+    await loadInputs(selectedProject);
     await loadAll();
   }
 
@@ -1814,9 +1883,9 @@ export default function App() {
             <div className="input-columns">
               <div className="input-column">
                 <h3>Bring Your Own FASTQ</h3>
-                <button
-                  onClick={async () => {
-                    if (window?.vsnp?.selectPath) {
+                {window?.vsnp?.selectPath ? (
+                  <button
+                    onClick={async () => {
                       const picked = await window.vsnp.selectPath({
                         kind: "folder",
                         title: "Select FASTQ folder",
@@ -1826,18 +1895,75 @@ export default function App() {
                         setLocalPath(picked);
                         await linkLocal(picked);
                       }
-                    } else {
-                      const picked = window.prompt("Enter FASTQ folder path:");
-                      if (picked) {
-                        setLocalPath(picked);
-                        await linkLocal(picked);
-                      }
-                    }
-                  }}
-                  disabled={!selectedProject || !settingsReady}
-                >
-                  Choose Folder
-                </button>
+                    }}
+                    disabled={!selectedProject || !settingsReady}
+                  >
+                    Choose Folder
+                  </button>
+                ) : (
+                  <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+                    <select
+                      value={folderPickerMode === "custom" ? "__custom__" : ""}
+                      disabled={!selectedProject || !settingsReady}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        if (value === "__custom__") {
+                          setFolderPickerMode("custom");
+                          return;
+                        }
+                        if (value === "") return;
+                        setLocalPath(value);
+                        await linkLocal(value);
+                      }}
+                      style={{fontSize:"13px"}}
+                    >
+                      <option value="">Pick a folder on wgs3…</option>
+                      {projects
+                        .filter((p) => p.name !== selectedProject && p._root)
+                        .map((p) => {
+                          const path = `${p._root}/${p.name}/download`;
+                          return (
+                            <option key={path} value={path}>
+                              {p.name}/download {p.scope === "shared" ? "(shared)" : ""}
+                            </option>
+                          );
+                        })}
+                      <option value="__custom__">Custom path…</option>
+                    </select>
+                    {folderPickerMode === "custom" ? (
+                      <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
+                        <input
+                          type="text"
+                          value={localPath}
+                          onChange={(e) => setLocalPath(e.target.value)}
+                          placeholder="/srv/kapurlab/projects/<name>/download"
+                          style={{flex:1, fontSize:"12px"}}
+                          onKeyDown={async (e) => {
+                            if (e.key === "Enter" && localPath.trim()) {
+                              await linkLocal(localPath.trim());
+                            }
+                          }}
+                        />
+                        <button
+                          className="ghost"
+                          onClick={async () => {
+                            if (localPath.trim()) await linkLocal(localPath.trim());
+                          }}
+                          disabled={!localPath.trim() || !selectedProject || !settingsReady}
+                        >
+                          Link
+                        </button>
+                        <button
+                          className="ghost"
+                          onClick={() => { setFolderPickerMode("dropdown"); setLocalPath(""); }}
+                          title="Back to dropdown"
+                        >
+                          ↶
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
                 {localPath ? <div className="note">Selected: {localPath}</div> : null}
                 <div className="block">
                   <h3>Upload / Drag & Drop</h3>
@@ -1872,8 +1998,83 @@ export default function App() {
                   {!selectedProject || !settingsReady ? (
                     <div className="note warning">Select a project and complete Settings to enable uploads.</div>
                   ) : null}
-                  {uploadStatus ? <div className="note">{uploadStatus}</div> : null}
+                  {uploadStatus ? (
+                    <div className="note" style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                      <span style={{flex:1}}>{uploadStatus}</span>
+                      {uploadStatus.startsWith("Uploading") ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={cancelUpload}
+                          title="Abort the in-progress upload (partial file will appear in the list below)"
+                          style={{fontSize:"11px", padding:"2px 8px"}}
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
+                {/* T-07-adjacent: file list in <project>/download/ so users can see what
+                    they've uploaded (without going through OOD Files) and clean up
+                    partial files left behind by a cancelled upload. */}
+                {selectedProject ? (
+                  <div className="block">
+                    <h3 style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                      <span style={{flex:1}}>
+                        Files in download/
+                        {inputs.count > 0 ? (
+                          <span className="muted" style={{marginLeft:"6px", fontWeight:"normal", fontSize:"12px"}}>
+                            ({inputs.count} file{inputs.count > 1 ? "s" : ""}, {_formatBytes(inputs.total_bytes)})
+                          </span>
+                        ) : null}
+                      </span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => loadInputs(selectedProject)}
+                        disabled={inputsLoading}
+                        title="Refresh the file list"
+                        style={{fontSize:"11px", padding:"2px 8px"}}
+                      >
+                        {inputsLoading ? "…" : "Refresh"}
+                      </button>
+                    </h3>
+                    {!inputsLoading && inputs.files.length === 0 ? (
+                      <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
+                    ) : null}
+                    {inputs.files.length > 0 ? (
+                      <div style={{display:"flex", flexDirection:"column", gap:"3px", maxHeight:"260px", overflowY:"auto"}}>
+                        {inputs.files.map((f) => (
+                          <div
+                            key={f.name}
+                            style={{
+                              display:"flex", alignItems:"center", gap:"8px",
+                              padding:"4px 8px",
+                              background:"var(--panel-2)",
+                              border:"1px solid var(--border)",
+                              borderRadius:"6px",
+                              fontSize:"12px",
+                            }}
+                          >
+                            <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={f.name}>
+                              {f.name}
+                            </span>
+                            <span className="muted" style={{minWidth:"70px", textAlign:"right"}}>{_formatBytes(f.size)}</span>
+                            <button
+                              type="button"
+                              className="chip-remove"
+                              onClick={() => deleteInput(f.name)}
+                              title={`Delete ${f.name}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <div className="input-column">
                 <h3>SRA Download</h3>

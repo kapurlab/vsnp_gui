@@ -152,17 +152,52 @@ My partial counter: yes, but capturing on *every* run dumps `~5 KB × 16 samples
 
 ---
 
-## Decisions needed from you
+## Decisions locked in (2026-05-10)
 
-Before I start Phase 1, want your call on:
+| # | Decision | Notes |
+|---|---|---|
+| 1 | **`dispatch_state` sub-block in `run_metadata.json`** (single file) | Frozen at dispatch, preserved verbatim through finalize via `tempfile + os.replace`. Reader provides `diff_dispatch_vs_final()` that compares the sub-block against the rest of the record. |
+| 2 | **Defer `staged_path` to V2.** V1 uses a 256 MB hash threshold; configurable via a backend setting (`provenance.hash_max_bytes`, default `268435456`). Files above the threshold get `identity_method: "size_mtime_path"`; files at or below get `"sha256"`. Limitation documented in the rendered metadata via the `trust_scope.sample_chain_of_custody` field. |
+| 3 | **Belt-and-braces env capture.** Compute the normalized content hash; write the env yaml + pip freeze to the shared store at `/srv/kapurlab/audit/env_snapshots/<sha256>.{yaml,txt}` if not already present; AND copy a verbatim snapshot into the per-run `_provenance/` dir. Per-run metadata references both. Storage is negligible (<5 KB per run); resilience to shared-store loss/GC/corruption is real. |
+| 4 | **Schema version `1`.** Nothing has been written to disk under any schema yet, so V1 is available and cleaner. Reader's `SUPPORTED_SCHEMA_VERSIONS = {1}` (will need to be flipped from `{2}` in the saved scaffold). |
+| 5 | **Wire the full reader API in V1** — `load`, `load_dispatch` (now returns the sub-block from a `RunMetadataV1`), `load_pipeline_run`, `iter_run_metadata`, `diff_dispatch_vs_final`, `reconstruct_pipeline_run_from_step2`. Marginal cost is small; the indexer needs `iter_run_metadata` and reimplementing record loading there would be wasteful; `reconstruct_*` is needed within the first quarter of operational use for any retro-labeling of historical runs. |
 
-1. **`dispatch_metadata.json` separate file vs. `dispatch_state` sub-block** (my pushback #1) — single file is my recommendation; their separate-file is also defensible.
-2. **`staged_path` for big inputs** — defer per pushback #2, or insist on it for V1?
-3. **Env snapshot dedup** — content-addressed shared store as I propose, or per-run copy as the red-team proposed?
-4. **Schema version label** — V1 (my preference) or V2 (their proposal)?
-5. **Reader scope** — wire only `model_validate` for now (my preference), or wire the full reader API?
+Once Phase 1 lands, `backend/app/provenance.py` gets bumped `2 → 1` and the dispatch model collapses (`DispatchMetadataV2` becomes a property accessor on `RunMetadataV1` returning the `dispatch_state` sub-block).
 
-Once those are settled I'll do Phase 1 in a focused session and report back with a working capture against `nagalingam_test`.
+---
+
+## Concurrency / latency model (raised in the red-team's follow-up, missing from my draft)
+
+The original brief assumed metadata writes happen synchronously at dispatch. For step1's multi-sample batch (16 samples × env capture × reference manifest computation × input identity), naive sequential dispatch-side writes could add 30+ seconds of latency *before any vsnp3 subprocess runs*. Worth being explicit.
+
+**Where the work actually lives:**
+
+| Work | When | Cost | Cacheable? |
+|---|---|---|---|
+| Reference folder manifest hash | Once per (reference, run batch) | ~50–200 ms (small fasta + gbk + xlsx) | Yes — cache by reference path + mtime |
+| Env snapshot hash + capture | Once per uvicorn process lifetime (until install changes) | First call ~1–5 s (conda env export + pip freeze + dpkg); subsequent <50 ms | Yes — process-memory cache, invalidate on install path mtime change |
+| Input identity (sha256 ≤256 MB; size+mtime above) | Per input file | ~200 ms / 100 MB on this hardware | No |
+| `vcf_db_inventory_at_dispatch` snapshot | Once per step2 dispatch | <50 ms (filesystem walk) | Per-process cache OK but not necessary |
+| `run_metadata.json` write | Per run (per sample for step1) | <10 ms | n/a |
+
+**Plan:**
+
+- **step1 batch dispatch**: writes the *batch-level* `run_metadata.json` (under `<project>/step1/`) with `status: "running"` and the dispatch_state sub-block. Per-sample metadata writes happen *inside each worker*, after the worker acquires its parallelism slot from `step1_max_parallel: 8` and immediately before forking the vsnp3 subprocess. Per-worker metadata work runs in parallel with up to 7 other workers; user-visible latency is "first worker's metadata write before first subprocess starts", not "16 workers' metadata writes before any subprocess starts." On this hardware that's ~300 ms after caches warm.
+- **step2 dispatch**: single `run_metadata.json` plus the implicit `pipeline_run` record creation (walk step1 dirs, collect run_ids). All sequential, but only once per step2 invocation. Total dispatch-side latency budget: ~500 ms.
+- **finalize writes**: per-sample (step1) on subprocess exit; once (step2) on subprocess exit. Atomic via `tempfile + os.replace`. Async-fire-and-forget if write latency on the hot exit path is ever a problem (it shouldn't be — kilobyte JSON write).
+
+This makes the dispatch-side latency O(per-sample-work) bounded by `step1_max_parallel`, not O(total-samples).
+
+### Risk to flag: conda env export
+
+`conda env export -n vsnp3-3.16` is the unknown:
+- Sometimes slow on large envs (the vsnp3 env has ~150 packages — mid-range; rough expectation 1–5 s first call).
+- Output is non-deterministic in two ways we need to normalize past: (a) `prefix:` line includes the absolute install path, (b) dependency ordering varies between calls.
+- The `--no-builds` flag drops build hashes (which is what we want for reproducibility-by-spec), but the resulting yaml is still input-order-sensitive.
+
+**Normalization**: parse the yaml, drop `prefix:`, sort `dependencies:` (split into conda + pip sub-groups, sort each lexicographically, preserve grouping), dump canonical form, hash that. Cache by `(env install path, install path mtime)` in the uvicorn process. Capture cost amortizes to near-zero after the first run.
+
+**If env capture turns out to be slow or stubbornly non-deterministic past the normalization above**, that's where Phase 1 schedule pressure shows up. Fallback: capture only `pip freeze` + `dpkg -l <tools>` + the `vsnp3 --version`, skip the conda env yaml capture for V1, document the gap. Less reproducible but unblocks shipping.
 
 ---
 

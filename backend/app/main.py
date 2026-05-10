@@ -19,6 +19,7 @@ import logging
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
+from app import provenance_writer
 from app.projects import (
     create_project,
     list_projects,
@@ -92,6 +93,65 @@ def build_env(cfg: Dict) -> Dict[str, str]:
     vsnp_bin = Path(cfg["vsnp3_path"]) / "bin"
     current_path = os.environ.get("PATH", "")
     return {"PATH": f"{vsnp_bin}:{current_path}"}
+
+
+# T-07 provenance helpers ---------------------------------------------------
+
+
+def _ood_session_id() -> Optional[str]:
+    """Best-effort OOD session UUID extraction.
+
+    OOD's batch_connect spawns uvicorn with cwd somewhere under
+    `~/ondemand/data/sys/dashboard/batch_connect/sys/vsnp_gui/output/<UUID>/`.
+    If the env doesn't expose the UUID directly (it usually doesn't), we
+    derive from the cwd path. Returns None if neither source succeeds —
+    actor.ood_session_id will be null in the metadata, which is acceptable.
+    """
+    sid = os.environ.get("OOD_SESSION_ID") or os.environ.get("OOD_BC_SESSION_ID")
+    if sid:
+        return sid
+    try:
+        for parent in [Path.cwd()] + list(Path.cwd().parents):
+            if parent.parent.name == "output":
+                # Looks like .../output/<UUID>/...; UUID is the dir whose parent
+                # is named "output".
+                return parent.name
+    except OSError:
+        pass
+    return None
+
+
+def _current_user() -> str:
+    """User identity to record in provenance actor block."""
+    return os.environ.get("USER") or str(os.getuid()) if hasattr(os, "getuid") else "unknown"
+
+
+def _is_shared_project(cfg: Dict, project_dir: Path) -> bool:
+    """True iff project_dir lies under cfg['shared_projects_root']."""
+    shared_root = cfg.get("shared_projects_root", "")
+    if not shared_root:
+        return False
+    try:
+        project_dir.resolve().relative_to(Path(shared_root).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _step1_sample_names(step1_dir: Path) -> List[str]:
+    """Discover step1 sample names: subdirs with at least one *_R1*.fastq.gz
+    (or fallback patterns matching the bash script's R1 detection).
+
+    Filters out hidden / underscore-prefixed dirs (the writer's _provenance/
+    sibling) so they don't get treated as samples.
+    """
+    samples = []
+    for p in sorted(step1_dir.iterdir()):
+        if not p.is_dir() or p.name.startswith(("_", ".")):
+            continue
+        if any(p.glob("*_R1*.fastq.gz")) or any(p.glob("*_1*.fastq.gz")) or any(p.glob("*.fastq.gz")):
+            samples.append(p.name)
+    return samples
 
 
 def wrap_cmd(cfg: Dict, command: str) -> str:
@@ -1163,12 +1223,16 @@ def step1_run(project: str, payload: Step1Request):
             "    cd ..",
             "    return 0",
             "  fi",
+            "  mkdir -p .provenance",
+            "  date -u +%s.%N > .provenance/started_at",
             f"  if [ -n \"$R2\" ]; then",
             f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
             "  else",
             f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
             "  fi",
             "  STATUS=$?",
+            "  echo $STATUS > .provenance/exit_code",
+            "  date -u +%s.%N > .provenance/finished_at",
             "  if [ \"$STATUS\" -eq 0 ]; then",
             "    END_TS=$(date +%s)",
             "    DURATION=$((END_TS-START_TS))",
@@ -1203,11 +1267,39 @@ def step1_run(project: str, payload: Step1Request):
         encoding="utf-8"
     )
     script_path.chmod(0o755)
+
+    # T-07: provenance dispatch. Pre-create per-sample run_metadata.json with
+    # frozen dispatch_state sub-block; bash batch will write sentinel files
+    # alongside vsnp3_step1.py invocations; finalize_callback rewrites per-
+    # sample metadata as terminal once the batch exits. Skip provenance if
+    # no reference is set (legacy/unconfigured runs) — the bash still runs.
+    prov_finalize_cb = None
+    if payload.reference:
+        samples = _step1_sample_names(step1_dir)
+        if samples:
+            try:
+                prov_batch_run_id, _sample_run_ids = provenance_writer.dispatch_step1_batch(
+                    cfg, project_dir, samples, payload.reference,
+                    user=_current_user(),
+                    ood_session_id=_ood_session_id(),
+                )
+            except provenance_writer.DispatchFailed as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Provenance dispatch failed (step1): {e}",
+                )
+
+            def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
+                provenance_writer.finalize_step1_batch(
+                    project_dir, prov_batch_run_id, exit_code, started_at, finished_at,
+                )
+
     job_id = job_manager.start_job(
         name="step1",
         command=wrap_cmd(cfg, f"bash {script_path}"),
         cwd=step1_dir,
-        env=build_env(cfg)
+        env=build_env(cfg),
+        finalize_callback=prov_finalize_cb,
     )
     (step1_dir / ".step1_job_id").write_text(job_id, encoding="utf-8")
     return {"job_id": job_id}
@@ -1385,11 +1477,40 @@ def step2_run(project: str, payload: Step2Request):
     step2_env = build_env(cfg)
     if payload.bootstrap and payload.bootstrap > 0:
         step2_env["VSNP3_BOOTSTRAP"] = str(int(payload.bootstrap))
+
+    # T-07: provenance dispatch. Writes pipeline_run record (linking step1
+    # samples) and step2 run_metadata.json with frozen dispatch_state.
+    # On shared projects, refuses to dispatch if any step1 sample is still
+    # running (HTTP 409). On personal projects, warn-and-proceed via
+    # consumed_step1_run_ids_complete: false in the pipeline_run record.
+    try:
+        prov_step2_run_id, _prov_pipeline_run_id = provenance_writer.dispatch_step2(
+            cfg, project_dir, payload.reference,
+            cli_command=cmd, cli_flags=step2_flags,
+            user=_current_user(),
+            ood_session_id=_ood_session_id(),
+            is_shared=_is_shared_project(cfg, project_dir),
+            resolved_vcf_db_folders=_resolved_vcf_db_folders(cfg),
+        )
+    except provenance_writer.Step2DispatchBlocked as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except provenance_writer.DispatchFailed as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Provenance dispatch failed (step2): {e}",
+        )
+
+    def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
+        provenance_writer.finalize_step2(
+            project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
+        )
+
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
         cwd=step2_dir,
-        env=step2_env
+        env=step2_env,
+        finalize_callback=prov_finalize_cb,
     )
     return {"job_id": job_id}
 

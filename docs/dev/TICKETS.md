@@ -31,6 +31,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 - **vsnp3 SyntaxWarning fixes (step1.py, step2.py)** — ✅ (patched in `deploy/vsnp3-patches/v3.16-kapurlab.patch`; `apply.sh` now handles partial-state via `patch -N`)
 - **vsnp3 markupsafe DeprecationWarning suppression** — ✅ (`PYTHONWARNINGS` exported via `wrap_cmd`, scoped to `markupsafe` module so other DeprecationWarnings still surface)
 - **T-05 Real-time Step 1 log streaming via SSE** — ✅ (`/api/jobs/<id>/events` now multiplexes batch log + per-sample `run_step1.log` files for step1 jobs, prefixing lines with `[batch]`/`[<sample>]`; discovers late-arriving samples mid-stream; smoke test in `backend/app/test_step1_sse_smoke.py` covers the multiplex behavior)
+- **T-09 Sample QC badges** — ✅ (three-tier pass/review/fail chip in Step 1 + post-hoc tables, computed backend-side from `*_stats.xlsx` against thresholds in `config.DEFAULTS["qc_thresholds"]`; merge order is module defaults < user config < project.json override; reasons surfaced on hover)
 - **T-07 Run provenance** — ✅ (per-step `run_metadata.json` with dispatch→finalize drift detection, vsnp_gui git + vsnp3 patch + env snapshot + reference manifest + inputs + outputs all hashed; writer at `backend/app/provenance_writer.py`, reader/indexer at `backend/app/vsnp_provenance/`; JobManager `finalize_callback` indexes inline with soft-fail to `metadata_failures.jsonl`; SQLite indexer at `/srv/kapurlab/audit/runs.sqlite` with hourly gc + nightly crawl/export cron at `/etc/cron.d/vsnp_gui-provenance`; `deploy/admin/{verify_provenance.py,kapurlab-rename-project.sh,provenance-cron.sh,vsnp_gui-provenance.cron}`; verified end-to-end on `/home/vxk1/projects/quick2` — 89 PASS, 0 WARN)
 
 Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
@@ -126,9 +127,20 @@ Visual rebuild of the OOD dashboard per the layout mockup (`kapurlab_landing_moc
 
 Replaces the standalone "Open vSNP GUI" button as the home. Carries the foundation for adding kraken/MHC entries.
 
-### T-09 Sample QC badges — ⏳
+### T-09 Sample QC badges — ✅
 
-Pass / review / fail badges in the Step 1 sample table based on configurable thresholds (coverage, mapping rate, contamination flag from sourmash).
+Three-tier verdict (pass / review / fail) on every Step 1 sample row and post-hoc QC row, computed backend-side from the same `*_stats.xlsx` columns the table already shows. Verdict + reasons + parsed signals ride along on each row as `_qc_verdict`; the frontend renders a colored chip in a new "QC" column with reasons exposed on hover.
+
+**Defaults** (lab-tuned, in `config.DEFAULTS["qc_thresholds"]`):
+- Coverage (Average Depth): ≥30× pass / ≥10× review / <10× fail
+- Mapping rate (`100 − Unmapped Percent`): ≥90% pass / ≥70% review / <70% fail
+- Contamination flag (sourmash output — vsnp3 doesn't emit this today, handled defensively for when it does): any positive value forces verdict to at least `review`
+
+**Threshold layering**: module DEFAULTS < per-user `~/.config/vsnp_gui/config.json` < per-project `project.json["qc_thresholds"]`. The merge is a shallow per-key dict update, so a project that only overrides `coverage.pass_min` still inherits everything else from the user config. There's no UI for editing thresholds yet — admins edit `config.json` / `project.json` by hand. Add a settings panel if/when the hand-edit gets old.
+
+**Verified end-to-end**: real *_stats.xlsx data on `/home/vxk1/projects/quick2` (7/7 pass — clean SARS-CoV-2 deer panel) and `/home/vxk1/projects/nagalingam_test` (11 pass + 2 review for borderline mapping + 2 fail for low depth/mapping — verdicts match what the eye sees in the metrics).
+
+Smoke test: `backend/app/test_qc_verdict.py` covers all three tiers, missing/unparseable fields, escalation order, contamination, and the override merge.
 
 ### T-05 Real-time Step 1 log streaming (SSE) — ✅
 

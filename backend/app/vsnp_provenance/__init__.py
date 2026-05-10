@@ -1,6 +1,6 @@
 """
-vsnp_provenance.py
-==================
+vsnp_provenance
+===============
 
 Reader library for vsnp_gui run provenance metadata (T-07).
 
@@ -8,11 +8,10 @@ Loads `run_metadata.json`, `dispatch_metadata.json`, and pipeline-run records;
 handles schema version dispatch; provides typed access and basic diff/query
 helpers.
 
-NOTE: Scaffold. Returned by the red-team review on 2026-05-10. Saved here as
-the eventual reader surface; NOT YET WIRED into the writer side or any
-endpoint. The writer (separate work) will validate against these models
-before persisting, so the schema stays single-source-of-truth in this file.
-Requires pydantic v2; verify before importing in production code.
+Pairs with `vsnp_provenance.index` (SQLite indexer + janitor) and
+`backend/app/provenance_writer.py` (the writer the JobManager calls). All
+three modules use the same pydantic v2 models defined here as the
+single-source-of-truth schema.
 
 Design notes
 ------------

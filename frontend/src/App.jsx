@@ -632,6 +632,35 @@ export default function App() {
     return typeof value === "number" ? `${value.toFixed(1)}%` : "-";
   }
 
+  // Strip the trailing " < N% fail threshold" / " < N× pass threshold" suffix
+  // so the inline reason under a chip stays terse — the criteria widget above
+  // the table already explains the thresholds; here the reader just needs to
+  // see which signal tripped (e.g. "mapping rate 58.5%").
+  function summarizeQcReason(reason) {
+    return reason.replace(/\s*<\s*[\d.]+\s*[%×xX]\s*(pass|review|fail)\s+threshold\s*$/i, "").trim();
+  }
+
+  function QcChip({ row }) {
+    const level = qcLevel(row);
+    const reasons = qcReasons(row);
+    return (
+      <div className="qc-cell">
+        <span
+          className={`qc-badge qc-badge-${level}`}
+          title={reasons.length ? reasons.join("\n") : "All thresholds met"}
+        >
+          {level}
+        </span>
+        {reasons.length > 0 ? (
+          <span className="qc-reason" title={reasons.join("\n")}>
+            {summarizeQcReason(reasons[0])}
+            {reasons.length > 1 ? <span className="qc-reason-more"> +{reasons.length - 1}</span> : null}
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+
   // Renders the live QC thresholds (from /api/config) inside a <details>
   // disclosure so users can see exactly what determines pass/review/fail
   // without digging into config.json. Per-project overrides via project.json
@@ -2555,7 +2584,6 @@ export default function App() {
                           const key = sampleKey(row);
                           const editInfo = step1Edits[key];
                           const level = qcLevel(row);
-                          const reasons = qcReasons(row);
                           return (
                             <tr key={row._file} className={`qc-row qc-${level}`}>
                               <td>
@@ -2566,14 +2594,7 @@ export default function App() {
                                   title="Toggling auto-saves to remove_from_analysis.xlsx; the next Step 2 run honors it via -remove_by_name"
                                 />
                               </td>
-                              <td>
-                                <span
-                                  className={`qc-badge qc-badge-${level}`}
-                                  title={reasons.length ? reasons.join("\n") : "All thresholds met"}
-                                >
-                                  {level}
-                                </span>
-                              </td>
+                              <td><QcChip row={row} /></td>
                               <td>
                                 <div className="cell-inline">
                                   <span>{row._sample || row.sample || "-"}</span>
@@ -2731,18 +2752,10 @@ export default function App() {
                           const isEdited = Boolean(row._edited);
                           const editLog = row._edit_log || "";
                           const level = qcLevel(row);
-                          const reasons = qcReasons(row);
                           return (
                           <tr key={row._file} className={`qc-row qc-${level}`}>
                             <td>{row._project || "-"}</td>
-                            <td>
-                              <span
-                                className={`qc-badge qc-badge-${level}`}
-                                title={reasons.length ? reasons.join("\n") : "All thresholds met"}
-                              >
-                                {level}
-                              </span>
-                            </td>
+                            <td><QcChip row={row} /></td>
                             <td>
                               <div className="cell-inline">
                                 <span>{sampleName}</span>

@@ -618,6 +618,56 @@ export default function App() {
     return qcLevel(row) !== "pass";
   }
 
+  function qcMappingRate(row) {
+    // Backend already computed this in _qc_verdict.signals.mapping_rate (=
+    // 100 - parsePercent(Unmapped Percent)). Falling back to a local parse
+    // keeps the column populated for legacy rows that pre-date T-09 wiring.
+    const sig = row?._qc_verdict?.signals?.mapping_rate;
+    if (typeof sig === "number") return sig;
+    const unmapped = parsePercent(row?.["Unmapped Percent"]);
+    return unmapped == null ? null : 100 - unmapped;
+  }
+
+  function fmtPercent1(value) {
+    return typeof value === "number" ? `${value.toFixed(1)}%` : "-";
+  }
+
+  // Renders the live QC thresholds (from /api/config) inside a <details>
+  // disclosure so users can see exactly what determines pass/review/fail
+  // without digging into config.json. Per-project overrides via project.json
+  // are not reflected here yet — surfacing the resolved-per-project view
+  // would need a /api/projects/<p>/qc_thresholds endpoint we haven't built.
+  function QcCriteriaWidget() {
+    const t = config?.qc_thresholds;
+    if (!t) return null;
+    const cov = t.coverage || {};
+    const mr = t.mapping_rate || {};
+    return (
+      <details className="qc-criteria">
+        <summary>QC criteria</summary>
+        <ul>
+          <li>
+            <strong>Coverage</strong> (Avg Depth):
+            {" "}≥{cov.pass_min}× pass · ≥{cov.review_min}× review · &lt;{cov.review_min}× fail
+          </li>
+          <li>
+            <strong>Mapping rate</strong> (1 − Unmapped %):
+            {" "}≥{mr.pass_min}% pass · ≥{mr.review_min}% review · &lt;{mr.review_min}% fail
+          </li>
+          <li>
+            <strong>Contamination</strong> flag (sourmash, when available):
+            {" "}{t.contamination_review ? "any positive value forces review" : "ignored"}
+          </li>
+        </ul>
+        <div className="muted">
+          Defaults live in <code>~/.config/vsnp_gui/config.json</code> under{" "}
+          <code>qc_thresholds</code>; per-project overrides go in the project's{" "}
+          <code>project.json</code>.
+        </div>
+      </details>
+    );
+  }
+
   function normalizeReferenceName(ref) {
     if (!ref) return "";
     return String(ref)
@@ -2478,6 +2528,7 @@ export default function App() {
                   Show only flagged samples
                 </label>
                 {qcError ? <div className="note error">{qcError}</div> : null}
+                <QcCriteriaWidget />
                 <div className="qc-table scrollable">
                   <table>
                     <thead>
@@ -2488,6 +2539,7 @@ export default function App() {
                         <th>Files</th>
                         <th>Reference</th>
                         <th>Avg Depth</th>
+                        <th>Mapping %</th>
                         <th>Zero Cov %</th>
                         <th>Dup %</th>
                         <th>R1 Q20</th>
@@ -2572,6 +2624,7 @@ export default function App() {
                               </td>
                               <td>{row.Reference || "-"}</td>
                               <td>{row["Average Depth"] || "-"}</td>
+                              <td>{fmtPercent1(qcMappingRate(row))}</td>
                               <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
                               <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
                               <td>{formatPercent(row["R1 Passing Q20"])}</td>
@@ -2650,6 +2703,8 @@ export default function App() {
                   <div className="note">Filtering to reference: {reference}</div>
                 ) : null}
                 {posthocFilteredRows.length ? (
+                  <>
+                  <QcCriteriaWidget />
                   <div className="qc-table scrollable">
                     <table>
                       <thead>
@@ -2660,6 +2715,7 @@ export default function App() {
                           <th>Files</th>
                           <th>Reference</th>
                           <th>Avg Depth</th>
+                          <th>Mapping %</th>
                           <th>Zero Cov %</th>
                           <th>Dup %</th>
                           <th>R1 Q20</th>
@@ -2736,6 +2792,7 @@ export default function App() {
                             </td>
                             <td>{row.Reference || "-"}</td>
                             <td>{row["Average Depth"] || "-"}</td>
+                            <td>{fmtPercent1(qcMappingRate(row))}</td>
                             <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
                             <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
                             <td>{formatPercent(row["R1 Passing Q20"])}</td>
@@ -2747,6 +2804,7 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
+                  </>
                 ) : (
                   <div className="note">No post-hoc results loaded yet.</div>
                 )}

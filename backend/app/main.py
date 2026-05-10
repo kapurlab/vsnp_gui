@@ -1985,11 +1985,25 @@ def step2_outputs(project: str):
             continue
         if d.name == "vcf_source":
             continue
+        # If a *_labeled.tre exists for a base group tree, hide the unlabeled
+        # sibling — labeled has the lineage prefix prepended to each leaf
+        # (e.g. L4_ERR2704709_zc.vcf), which is what makes the tree useful
+        # for placing run samples in context. Unlabeled file is still on
+        # disk for anyone going via the filesystem.
+        labeled_bases = {
+            f.name.removesuffix("_labeled.tre")
+            for f in d.iterdir()
+            if f.is_file() and f.name.endswith("_labeled.tre")
+        }
         files = []
         for f in sorted(d.iterdir()):
-            if f.is_file():
-                ext = f.suffix.lstrip(".")
-                files.append({"label": f.name, "path": str(f), "type": ext or "file"})
+            if not f.is_file():
+                continue
+            if f.name.endswith(".tre") and not f.name.endswith("_labeled.tre"):
+                if f.name.removesuffix(".tre") in labeled_bases:
+                    continue
+            ext = f.suffix.lstrip(".")
+            files.append({"label": f.name, "path": str(f), "type": ext or "file"})
         if files:
             groups.append({"name": d.name, "files": files})
     return {"top": top, "groups": groups}

@@ -24,24 +24,185 @@
 -%>
 <%
   require 'yaml'
+  require 'etc'
+  require 'shellwords'
+
+  # ---------- Pipeline / footer / onboarding stay declarative (YAML) ----------
   pipelines_yml = '/etc/ood/config/wgs_pipelines.yml'
   cfg = File.exist?(pipelines_yml) ? (YAML.load_file(pipelines_yml) || {}) : {}
   pipelines    = cfg['pipelines'] || []
-  jobs_list    = cfg['jobs'] || []
-  data_shared  = cfg.dig('data', 'shared') || []
-  data_personal = (cfg.dig('data', 'personal') || []).map do |row|
-    row = row.dup
-    row['path']     = row['path'].to_s.gsub('$USER', request.env['REMOTE_USER'].to_s) if row['path']
-    row
-  end
-  sysm         = cfg['system'] || {}
   footer_cfg   = cfg['footer'] || {}
   onboarding   = cfg['onboarding'] || {}
-
   available_count = pipelines.count { |p| p['status'] == 'available' }
   coming_count    = pipelines.count { |p| p['status'] == 'coming' }
-  running_count   = jobs_list.count { |j| j['status'] == 'running' }
-  queued_count    = jobs_list.count { |j| j['status'] == 'queued' }
+
+  # ---------- Identity + group memberships ----------
+  remote_user  = request.env['REMOTE_USER'].to_s
+  user_groups  = Process.groups.map { |gid| Etc.getgrgid(gid).name rescue nil }.compact
+  is_admin     = user_groups.include?('kapurlab-admins')
+  is_lab_member = user_groups.include?('kapurlab-members') || is_admin
+  proj_groups  = user_groups.select { |g| g.start_with?('proj-') }.map { |g| g.sub(/^proj-/, '') }
+  account_role = is_admin ? 'Admin' : (is_lab_member ? 'Lab member' : 'Guest')
+
+  # ---------- System metrics ----------
+  fmt_bytes = ->(b) {
+    b = b.to_i
+    case
+    when b >= 10 ** 12 then format('%.1f TB', b / 1e12)
+    when b >= 10 ** 9  then format('%d GB',   b / 1e9)
+    when b >= 10 ** 6  then format('%d MB',   b / 1e6)
+    else                    format('%d B',    b)
+    end
+  }
+  fmt_kb = ->(kb) {
+    case
+    when kb >= 1_048_576 then format('%.1f TB', kb / 1_048_576.0)
+    when kb >= 1_024     then format('%d GB',   kb / 1_024)
+    else                       format('%d MB',  kb)
+    end
+  }
+
+  load1 = (File.read('/proc/loadavg').split.first.to_f rescue 0.0)
+  ncpu  = (Etc.nprocessors rescue 1)
+  cpu_pct = ncpu > 0 ? [(load1 / ncpu * 100).round, 100].min : 0
+  cpu_metric = {
+    'value' => "#{cpu_pct}%",
+    'percent' => cpu_pct,
+    'sub' => "load #{format('%.2f', load1)} · #{ncpu} cores",
+    'warn' => cpu_pct >= 80,
+  }
+
+  mem = begin
+    File.read('/proc/meminfo').lines.each_with_object({}) do |l, h|
+      k, v = l.split(':', 2)
+      h[k.strip] = v.to_i if v
+    end
+  rescue
+    {}
+  end
+  mem_total_kb = mem['MemTotal'].to_i
+  mem_avail_kb = mem['MemAvailable'].to_i
+  mem_used_kb  = [mem_total_kb - mem_avail_kb, 0].max
+  mem_pct      = mem_total_kb > 0 ? (mem_used_kb.to_f / mem_total_kb * 100).round : 0
+  mem_metric = mem_total_kb > 0 ? {
+    'value' => fmt_kb.call(mem_used_kb),
+    'percent' => mem_pct,
+    'sub' => "of #{fmt_kb.call(mem_total_kb)}",
+    'warn' => mem_pct >= 85,
+  } : nil
+
+  storage_path = File.directory?('/srv/kapurlab') ? '/srv/kapurlab' : '/'
+  storage_metric = nil
+  begin
+    df_lines = `df -B1 #{Shellwords.escape(storage_path)} 2>/dev/null`.lines
+    if df_lines.length >= 2
+      parts = df_lines.last.split
+      s_total, s_used = parts[1].to_i, parts[2].to_i
+      s_pct = s_total > 0 ? (s_used.to_f / s_total * 100).round : 0
+      storage_metric = {
+        'value' => fmt_bytes.call(s_used),
+        'percent' => s_pct,
+        'sub' => "of #{fmt_bytes.call(s_total)} · #{storage_path}",
+        'warn' => s_pct >= 85,
+      }
+    end
+  rescue
+    storage_metric = nil
+  end
+
+  # ---------- Active work — user's BatchConnect sessions ----------
+  active_sessions = (BatchConnect::Session.all rescue []).reject { |s| s.completed? }
+  fmt_age = ->(secs) {
+    secs = secs.to_i
+    case
+    when secs < 60      then "#{secs}s"
+    when secs < 3600    then "#{secs / 60}m"
+    when secs < 86_400  then "#{secs / 3600}h"
+    else                     "#{secs / 86_400}d"
+    end
+  }
+  jobs_list = active_sessions.map do |s|
+    created = (Time.at(s.created_at.to_i) rescue Time.now)
+    age_str = fmt_age.call(Time.now - created)
+    state = begin
+      if s.respond_to?(:status) && s.status
+        s.status.to_s
+      elsif s.respond_to?(:starting?) && s.starting? then 'starting'
+      elsif s.respond_to?(:running?)  && s.running?  then 'running'
+      elsif s.respond_to?(:queued?)   && s.queued?   then 'queued'
+      else 'pending'
+      end
+    rescue
+      'pending'
+    end
+    app_name = (s.respond_to?(:app_name) && s.app_name) ? s.app_name : (s.respond_to?(:token) ? s.token.to_s : 'session')
+    {
+      'name'    => "#{app_name}",
+      'meta'    => "started #{age_str} ago",
+      'status'  => state,
+      'runtime' => age_str,
+    }
+  end
+  running_count = jobs_list.count { |j| %w[running starting].include?(j['status']) }
+  queued_count  = jobs_list.count { |j| j['status'] == 'queued' }
+  queue_metric = {
+    'value' => "#{running_count} running",
+    'sub' => "#{queued_count} waiting",
+  }
+
+  # ---------- Data list — group-aware project/ref filesystem walk ----------
+  list_subdirs = ->(root, exclude_underscore: true) {
+    return [] unless File.directory?(root)
+    Dir.entries(root).reject do |e|
+      e.start_with?('.') || (exclude_underscore && e.start_with?('_'))
+    end.select { |e| File.directory?(File.join(root, e)) }.sort
+  }
+
+  data_shared = []
+  refs_dir = '/srv/kapurlab/refs/vsnp3/reference_options'
+  if File.directory?(refs_dir)
+    ref_count = list_subdirs.call(refs_dir).length
+    data_shared << { 'label' => 'Reference', 'path' => refs_dir, 'info' => "#{ref_count} references" }
+  end
+  shared_proj_root = '/srv/kapurlab/projects'
+  list_subdirs.call(shared_proj_root).each do |name|
+    visible = is_admin || proj_groups.include?(name) || proj_groups.include?(name.downcase)
+    next unless visible
+    full = File.join(shared_proj_root, name)
+    step1 = File.join(full, 'step1')
+    sample_count = list_subdirs.call(step1).length
+    info = sample_count > 0 ? "#{sample_count} sample dir#{sample_count == 1 ? '' : 's'}" : 'project'
+    data_shared << { 'label' => "Project · #{name}", 'path' => full, 'info' => info }
+  end
+
+  data_personal = []
+  home_dir = remote_user.empty? ? '' : "/home/#{remote_user}"
+  if !home_dir.empty? && File.directory?(home_dir)
+    data_personal << { 'label' => 'Home', 'path' => home_dir, 'info' => 'per-user data' }
+    home_proj_root = "#{home_dir}/projects"
+    if File.directory?(home_proj_root)
+      pcount = list_subdirs.call(home_proj_root).length
+      data_personal << {
+        'label' => 'Projects',
+        'path' => home_proj_root,
+        'info' => "#{pcount} project#{pcount == 1 ? '' : 's'}",
+      }
+    end
+    uploads_dir = "#{home_dir}/uploads"
+    if File.directory?(uploads_dir)
+      ucount = (Dir.entries(uploads_dir).reject { |e| e.start_with?('.') } rescue []).length
+      data_personal << {
+        'label' => 'Uploads (incoming)',
+        'path' => uploads_dir,
+        'info' => "#{ucount} file#{ucount == 1 ? '' : 's'}",
+      }
+    end
+  end
+
+  # ---------- Overall status pill ----------
+  any_warn = cpu_metric['warn'] || (mem_metric && mem_metric['warn']) || (storage_metric && storage_metric['warn'])
+  status_text  = any_warn ? 'Resource pressure' : 'All systems normal'
+  status_class = any_warn ? 'kl-status-pill kl-status-pill-warn' : 'kl-status-pill'
 %>
 <%- content_for :head do -%>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -128,6 +289,18 @@
     font-weight: 500;
   }
   .kl-status-pill .kl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--kl-status-ok); }
+  .kl-status-pill-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--kl-status-beta-bg);
+    color: var(--kl-status-beta);
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .kl-status-pill-warn .kl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--kl-status-beta); }
 
   .kl-main { padding: 28px 32px; max-width: 1440px; margin: 0 auto; }
   .kl-home h2 {
@@ -331,7 +504,8 @@
   .kl-job-row:first-child { padding-top: 0; }
   .kl-job-row .kl-name { font-weight: 500; font-size: 13.5px; }
   .kl-job-row .kl-jobmeta { font-size: 12px; color: var(--kl-text-muted); margin-top: 2px; }
-  .kl-job-row .kl-runtime {
+  .kl-job-row .kl-runtime,
+  .kl-runtime-mono {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 12px;
     color: var(--kl-text-muted);
@@ -407,7 +581,7 @@
     </div>
     <div class="kl-meta">
       <span class="kl-host">host: <%= Socket.gethostname %></span>
-      <span class="kl-status-pill"><span class="kl-dot"></span>All systems normal</span>
+      <span class="<%= status_class %>"><span class="kl-dot"></span><%= status_text %></span>
     </div>
   </div>
 
@@ -489,7 +663,7 @@
           </div>
           <div class="kl-jobs-panel">
             <% if jobs_list.empty? %>
-              <div class="kl-job-empty">No active jobs.</div>
+              <div class="kl-job-empty">No active sessions. Launch a pipeline above to start one.</div>
             <% else %>
               <% jobs_list.each do |j| %>
                 <div class="kl-job-row">
@@ -497,10 +671,10 @@
                     <div class="kl-name"><%= j['name'] %></div>
                     <div class="kl-jobmeta"><%= j['meta'] %></div>
                   </div>
-                  <span class="kl-badge <%= j['status'] == 'running' ? 'kl-ok' : 'kl-coming' %>">
+                  <span class="kl-badge <%= %w[running starting].include?(j['status']) ? 'kl-ok' : 'kl-coming' %>">
                     <%= (j['status'] || '').capitalize %>
                   </span>
-                  <span class="kl-runtime"><%= j['runtime'] %></span>
+                  <span class="kl-runtime kl-runtime-mono"><%= j['runtime'] %></span>
                 </div>
               <% end %>
             <% end %>
@@ -513,10 +687,10 @@
           <h3>System</h3>
           <div class="kl-system-grid">
             <% [
-              ['CPU',     sysm['cpu']],
-              ['Memory',  sysm['memory']],
-              ['Storage', sysm['storage']],
-              ['Queue',   sysm['queue']],
+              ['CPU',     cpu_metric],
+              ['Memory',  mem_metric],
+              ['Storage', storage_metric],
+              ['Sessions', queue_metric],
             ].each do |label, m| %>
               <% next unless m %>
               <div class="kl-metric">
@@ -533,9 +707,8 @@
 
         <div class="kl-panel">
           <h3>Your account</h3>
-          <div class="kl-account-name"><strong><%= request.env['REMOTE_USER'] %></strong></div>
-          <div class="kl-account-role">Lab member</div>
-          <span class="kl-priority-tag">High priority queue</span>
+          <div class="kl-account-name"><strong><%= remote_user %></strong></div>
+          <div class="kl-account-role"><%= account_role %><% if proj_groups.any? %> · <%= pluralize(proj_groups.length, 'project') %><% end %></div>
         </div>
 
         <% if onboarding['text'] %>

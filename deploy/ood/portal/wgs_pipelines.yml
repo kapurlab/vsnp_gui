@@ -1,12 +1,13 @@
-# T-16 Phase 2 — KapurLab landing page mock data.
+# T-16 — KapurLab landing page declarative config.
 #
 # Read by deploy/ood/portal/apps/dashboard/views/dashboard/index.html.erb
-# (the override partial). Phase 2 sources every section from this file so
-# the partial stays declarative; Phase 3 swaps the static `jobs:` and
-# `system:` blocks for live JobManager / df / /proc/loadavg readers and
-# walks /srv/kapurlab/projects + /home/<user>/projects for `data:`.
+# (the override partial). Install at /etc/ood/config/wgs_pipelines.yml.
 #
-# Install at /etc/ood/config/wgs_pipelines.yml on wgs3.
+# Phase 3 (live) replaced the mocked `jobs:`, `system:`, and `data:` blocks
+# this file used to carry. Active sessions, system metrics (cpu/mem/storage),
+# and the data lists are now read directly inside the partial from
+# BatchConnect::Session / /proc / df / filesystem walks. What remains here
+# is genuinely declarative: pipeline cards, footer copy, onboarding links.
 
 pipelines:
   - id: vsnp3
@@ -45,53 +46,6 @@ pipelines:
       BoLA typing from WGS reads. Optimized for bovine reference panels.
     status: coming
     runtime: "in development"
-
-# Phase 2 mock — Phase 3 replaces with live JobManager output.
-jobs:
-  - name: "vSNP3 · btb_india_batch_07"
-    meta: "4 isolates · M. bovis · started 23m ago · vivek"
-    status: running
-    runtime: "23m"
-  - name: "vSNP3 · brucella_screen_q3"
-    meta: "8 isolates · B. melitensis · started 8m ago · raksha"
-    status: running
-    runtime: "8m"
-
-# Phase 2 mock — Phase 3 walks /srv/kapurlab/projects and /home/<user>/.
-data:
-  shared:
-    - label: Reference
-      path: /srv/kapurlab/refs/vsnp3/reference_options
-      info: "12 references · 2.4 GB"
-    - label: "Project · Sanity Test"
-      path: /srv/kapurlab/projects/sanity_test
-      info: "MTBC SARS-CoV-2 deer · smoke test"
-  personal:
-    - label: Home
-      path: /home/$USER
-      info: "per-user projects + uploads"
-    - label: "Uploads (incoming)"
-      path: /home/$USER/uploads
-      info: "drop dir for staged ingest"
-
-# Phase 2 mock — Phase 3 reads /proc/loadavg, df, JobManager.
-system:
-  cpu:
-    value: "18%"
-    percent: 18
-    sub: "22 of 128 cores in use"
-  memory:
-    value: "42 GB"
-    percent: 33
-    sub: "of 128 GB"
-  storage:
-    value: "1.2 TB"
-    percent: 30
-    sub: "of 4 TB · /srv/kapurlab"
-    warn: true
-  queue:
-    value: "2 running"
-    sub: "0 waiting"
 
 footer:
   left: "Kapur Lab · Penn State · WGS3 node"

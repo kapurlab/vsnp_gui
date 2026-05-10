@@ -31,6 +31,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 - **vsnp3 SyntaxWarning fixes (step1.py, step2.py)** — ✅ (patched in `deploy/vsnp3-patches/v3.16-kapurlab.patch`; `apply.sh` now handles partial-state via `patch -N`)
 - **vsnp3 markupsafe DeprecationWarning suppression** — ✅ (`PYTHONWARNINGS` exported via `wrap_cmd`, scoped to `markupsafe` module so other DeprecationWarnings still surface)
 - **T-05 Real-time Step 1 log streaming via SSE** — ✅ (`/api/jobs/<id>/events` now multiplexes batch log + per-sample `run_step1.log` files for step1 jobs, prefixing lines with `[batch]`/`[<sample>]`; discovers late-arriving samples mid-stream; smoke test in `backend/app/test_step1_sse_smoke.py` covers the multiplex behavior)
+- **T-07 Run provenance** — ✅ (per-step `run_metadata.json` with dispatch→finalize drift detection, vsnp_gui git + vsnp3 patch + env snapshot + reference manifest + inputs + outputs all hashed; writer at `backend/app/provenance_writer.py`, reader/indexer at `backend/app/vsnp_provenance/`; JobManager `finalize_callback` indexes inline with soft-fail to `metadata_failures.jsonl`; SQLite indexer at `/srv/kapurlab/audit/runs.sqlite` with hourly gc + nightly crawl/export cron at `/etc/cron.d/vsnp_gui-provenance`; `deploy/admin/{verify_provenance.py,kapurlab-rename-project.sh,provenance-cron.sh,vsnp_gui-provenance.cron}`; verified end-to-end on `/home/vxk1/projects/quick2` — 89 PASS, 0 WARN)
 
 Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
 
@@ -87,20 +88,29 @@ Runbook: [`runbooks/T-19-storage-layout.md`](runbooks/T-19-storage-layout.md). ~
 
 **Open semantic question** — for projects that on the Mac are pure aliases of another project (M5_test → Nagalingam_03242026), would we (a) migrate as real data via `-L`, (b) drop from the manifest, or (c) recreate the alias on Linux via symlinks under `/srv/kapurlab/projects/`? Permanent question now that the migration is deferred — re-decide if T-21 is ever reopened.
 
-### T-07 Run provenance (`run_metadata.json`) — ⏳ (was P1, promoted to P0)
+### T-07 Run provenance (`run_metadata.json`) — ✅ (was P1, promoted to P0)
 
-Must land before any production run. Captures per Step 1 / Step 2 invocation:
-- `vsnp3 --version`
-- contents of `reference_options_paths.txt`
-- all CLI flags
-- env vars: PATH, VSNP3_BOOTSTRAP, etc.
-- input file paths + sizes (skip SHA on big BAMs for speed)
-- `git rev-parse HEAD` of vsnp_gui
-- user, hostname, timestamps
+Captures, per Step 1 / Step 2 invocation, everything needed to reproduce a run:
+- vsnp_gui git sha + branch + dirty flag
+- vsnp3 version + applied-patches list (sha-checked against `deploy/vsnp3-patches/`)
+- environment fingerprint: `conda_env.yaml` from `conda-meta/*.json` synthesis, pip freeze where present, `<install>/bin/` version probes for samtools/bcftools/bwa/raxml/mafft/iqtree, hashed and deduped under `/srv/kapurlab/audit/env_snapshots/`
+- reference folder manifest (every file under the reference dir, sha256-hashed; one rolled-up `folder_manifest_sha256` per record)
+- inputs (sha256-identified, including auto-discovered VCFs) and outputs
+- step2: `pipeline_run_id` linking to a `_provenance/pipeline_runs/<uuid>.json` graph that names the step1 records consumed; `vcf_db_selections` + `vcf_db_inventory_at_dispatch` snapshot
+- `dispatch_state` sub-block frozen at job-start, compared against the finalize block at write time so any silent drift surfaces in the verifier
 
-Written to `<project>/<step>/run_metadata.json` and mirrored to `/srv/kapurlab/audit/runs.jsonl` (append-only).
+**Architecture**:
+- Reader/schema: `backend/app/vsnp_provenance/{__init__.py,index.py}` (Pydantic models + SQLite indexer + janitor + CLI; 30+ smoke assertions in `test_provenance_indexer.py`).
+- Writer: `backend/app/provenance_writer.py` (35+ smoke assertions in `test_provenance_writer.py`).
+- JobManager wiring: `backend/app/jobs.py` `finalize_callback` indexes inline; on failure writes a fingerprinted entry to `/srv/kapurlab/audit/metadata_failures.jsonl` instead of corrupting the run record (17/17 assertions in `test_jobs_callback.py`).
+- Ops: `runs.sqlite` indexer, `/etc/cron.d/vsnp_gui-provenance` (hourly gc, nightly 02:00 crawl, nightly 02:05 JSONL export), all driven by `deploy/admin/provenance-cron.sh`.
+- Admin tools: `deploy/admin/verify_provenance.py` (color punch-list — collapses the empty-VCF-DB case to PASS for refs without curated DBs), `deploy/admin/kapurlab-rename-project.sh` (atomic mv + indexer rename to keep paths consistent).
 
-**End of Milestone A: Tod logs in, runs vSNP on a real project, output is reproducible.**
+**Verified end-to-end** on `/home/vxk1/projects/quick2` (SARS-CoV-2 NC_045512, 7 samples, step1+step2 round-trip): 89 PASS, 0 WARN, 0 FAIL.
+
+**Design corpus** (kept as historical record): `docs/dev/T-07-{red-team-brief,red-team-feedback,implementation-plan,jobs-patch,writer-context-for-opus}.md`.
+
+**End of Milestone A: Tod logs in, runs vSNP on a real project, output is reproducible.** ✅ — true as of 2026-05-10.
 
 ---
 

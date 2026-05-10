@@ -1408,22 +1408,66 @@ def job_events(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     log_path = Path(job["log_path"])
+    # T-05: for step1 batch jobs, also tail every per-sample run_step1.log so
+    # the GUI shows live bwa/samtools/etc output during the long part of the
+    # run, not just the bash-batch coordination noise. Other job types (step2,
+    # SRA, genome download) keep the original single-log behavior.
+    is_step1 = job.get("name") == "step1"
+    step1_dir = Path(job["cwd"]) if is_step1 and job.get("cwd") else None
+    batch_prefix = "[batch] " if is_step1 else ""
 
     def event_stream():
-        last_size = 0
-        while True:
+        offsets: Dict[Path, int] = {}
+        sample_offsets: Dict[Path, int] = {}
+
+        def discover_step1_samples() -> None:
+            if not (is_step1 and step1_dir and step1_dir.is_dir()):
+                return
+            try:
+                children = sorted(step1_dir.iterdir())
+            except OSError:
+                return
+            for child in children:
+                if not child.is_dir():
+                    continue
+                slog = child / "run_step1.log"
+                if slog.exists() and slog not in sample_offsets:
+                    sample_offsets[slog] = 0
+
+        def emit_new(path: Path, offset_dict: Dict[Path, int], prefix: str):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return
+            last = offset_dict.get(path, 0)
+            if size <= last:
+                return
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(last)
+                    chunk = f.read(size - last)
+            except OSError:
+                return
+            offset_dict[path] = size
+            for line in chunk.splitlines():
+                yield f"data: {prefix}{line}\n\n"
+
+        def drain_all():
             if log_path.exists():
-                size = log_path.stat().st_size
-                if size > last_size:
-                    with open(log_path, "r", encoding="utf-8") as f:
-                        f.seek(last_size)
-                        chunk = f.read()
-                        for line in chunk.splitlines():
-                            yield f"data: {line}\n\n"
-                    last_size = size
-            job = job_manager.get_job(job_id)
-            if job and job["status"] in {"succeeded", "failed"}:
-                yield f"data: [job:{job['status']}]\n\n"
+                yield from emit_new(log_path, offsets, batch_prefix)
+            if is_step1:
+                discover_step1_samples()
+                for slog in sorted(sample_offsets.keys()):
+                    sample = slog.parent.name
+                    yield from emit_new(slog, sample_offsets, f"[{sample}] ")
+
+        while True:
+            yield from drain_all()
+            j = job_manager.get_job(job_id)
+            if j and j["status"] in {"succeeded", "failed"}:
+                # Catch anything written between the last poll and process exit.
+                yield from drain_all()
+                yield f"data: [job:{j['status']}]\n\n"
                 break
             time.sleep(0.5)
 

@@ -352,7 +352,18 @@ def main() -> int:
         print("\n[env snapshot dedup]")
         snapshots_dir = audit_root / "env_snapshots"
         if snapshots_dir.is_dir():
-            yaml_count_before = sum(1 for _ in snapshots_dir.glob("*.yaml"))
+            # Snapshot files must be group-readable (0640) so other lab admins
+            # in the kapurlab-admins group can audit env state, not just the
+            # original writer.
+            yamls = list(snapshots_dir.glob("*.yaml"))
+            for y in yamls:
+                mode = y.stat().st_mode & 0o777
+                if mode != 0o640:
+                    raise AssertionError(
+                        f"{y.name} mode={oct(mode)}, expected 0o640"
+                    )
+            print(f"  OK  env snapshot files mode 0o640 (n={len(yamls)})")
+            yaml_count_before = len(yamls)
             # Re-dispatch by running another fake step2
             project_dir2 = projects_root / "smoke_test_2"
             project_dir2.mkdir()

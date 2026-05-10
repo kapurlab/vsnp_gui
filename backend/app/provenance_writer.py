@@ -684,6 +684,10 @@ def _write_to_shared_store(target: Path, content: str) -> None:
     try:
         with os.fdopen(tmp_fd, "w") as f:
             f.write(content)
+        # tempfile.mkstemp() creates files mode 0600. The shared-store dir is
+        # setgid kapurlab-admins so other lab admins can list it; widen the
+        # snapshot itself to 0640 so they can also read it.
+        os.chmod(tmp_path, 0o640)
         try:
             os.link(tmp_path, str(target))
         except FileExistsError:

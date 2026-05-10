@@ -255,6 +255,35 @@ def main() -> int:
         resolved = idx.resolve_current_path("/srv/kapurlab/projects/alpha")
         assert_eq(resolved, "/srv/kapurlab/projects/alpha_v2", "rename resolution")
 
+        # rename cycle rejection: self-loop
+        try:
+            idx.record_rename("/srv/kapurlab/projects/x", "/srv/kapurlab/projects/x",
+                              renamed_by="vxk1")
+        except ValueError:
+            print("  OK  rename rejects self-loop")
+        else:
+            raise AssertionError("rename self-loop should have raised ValueError")
+
+        # rename cycle rejection: direct 2-cycle (round-trip)
+        try:
+            idx.record_rename("/srv/kapurlab/projects/alpha_v2", "/srv/kapurlab/projects/alpha",
+                              renamed_by="vxk1")
+        except ValueError:
+            print("  OK  rename rejects 2-cycle round-trip")
+        else:
+            raise AssertionError("rename 2-cycle should have raised ValueError")
+
+        # rename cycle rejection: longer chain that closes a loop
+        idx.record_rename("/srv/kapurlab/projects/alpha_v2", "/srv/kapurlab/projects/alpha_v3",
+                          renamed_by="vxk1")
+        try:
+            idx.record_rename("/srv/kapurlab/projects/alpha_v3", "/srv/kapurlab/projects/alpha",
+                              renamed_by="vxk1")
+        except ValueError:
+            print("  OK  rename rejects 3-cycle through chain")
+        else:
+            raise AssertionError("rename 3-cycle should have raised ValueError")
+
         # export
         out_path = tmp / "runs.jsonl"
         n = idx.export_jsonl(out_path)

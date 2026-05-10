@@ -634,8 +634,35 @@ class Indexer:
     # ------ project renames ------
 
     def record_rename(self, old_path: str, new_path: str, renamed_by: str) -> None:
+        if old_path == new_path:
+            raise ValueError(f"rename old and new paths are identical: {old_path}")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # Reject inserts that would create a cycle in the rename chain.
+            # Walk forward from new_path along existing rows; if we land on
+            # old_path (closing the loop) or revisit any node, refuse the
+            # insert. resolve_current_path() detects existing cycles at read
+            # time, but that's too late — once a cycle is in the table any
+            # consumer call will raise.
+            current = new_path
+            seen = {current}
+            while True:
+                row = conn.execute(
+                    "SELECT new_path FROM project_renames "
+                    "WHERE old_path = ? ORDER BY renamed_at ASC LIMIT 1",
+                    (current,),
+                ).fetchone()
+                if not row:
+                    break
+                nxt = row["new_path"]
+                if nxt == old_path or nxt in seen:
+                    conn.execute("ROLLBACK")
+                    raise ValueError(
+                        f"rename {old_path!r} -> {new_path!r} would create a "
+                        f"cycle in the project_renames chain"
+                    )
+                seen.add(nxt)
+                current = nxt
             conn.execute(
                 """
                 INSERT INTO project_renames (old_path, new_path, renamed_at, renamed_by)

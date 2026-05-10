@@ -1,0 +1,560 @@
+<%#
+  T-16 Phase 2 — KapurLab landing page (A2 three-pane: Data | Pipelines + Active work | System).
+
+  Source of truth: deploy/ood/portal/apps/dashboard/views/dashboard/index.html.erb
+
+  Install on wgs3 with:
+    sudo install -D -m 0644 \
+      /srv/kapurlab/tools/vsnp_gui/deploy/ood/portal/apps/dashboard/views/dashboard/index.html.erb \
+      /etc/ood/config/apps/dashboard/views/dashboard/index.html.erb
+    sudo install -m 0644 \
+      /srv/kapurlab/tools/vsnp_gui/deploy/ood/portal/wgs_pipelines.yml \
+      /etc/ood/config/wgs_pipelines.yml
+
+  Rails reloads partials live; refresh the browser to pick up changes.
+
+  Phase 2: every section reads from /etc/ood/config/wgs_pipelines.yml so the
+  partial stays declarative. Phase 3 replaces the static `jobs:` and
+  `system:` blocks with live JobManager / df / /proc/loadavg readers.
+
+  This file replaces the OOD-default home page (which was the OnDemand logo
+  + "single access point for all your HPC resources" copy + pinned-apps
+  grid). The shared/welcome partial and the dashboard_layout rows are
+  intentionally not invoked.
+-%>
+<%
+  require 'yaml'
+  pipelines_yml = '/etc/ood/config/wgs_pipelines.yml'
+  cfg = File.exist?(pipelines_yml) ? (YAML.load_file(pipelines_yml) || {}) : {}
+  pipelines    = cfg['pipelines'] || []
+  jobs_list    = cfg['jobs'] || []
+  data_shared  = cfg.dig('data', 'shared') || []
+  data_personal = (cfg.dig('data', 'personal') || []).map do |row|
+    row = row.dup
+    row['path']     = row['path'].to_s.gsub('$USER', request.env['REMOTE_USER'].to_s) if row['path']
+    row
+  end
+  sysm         = cfg['system'] || {}
+  footer_cfg   = cfg['footer'] || {}
+  onboarding   = cfg['onboarding'] || {}
+
+  available_count = pipelines.count { |p| p['status'] == 'available' }
+  coming_count    = pipelines.count { |p| p['status'] == 'coming' }
+  running_count   = jobs_list.count { |j| j['status'] == 'running' }
+  queued_count    = jobs_list.count { |j| j['status'] == 'queued' }
+%>
+<%- content_for :head do -%>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<%- end -%>
+
+<style>
+  /* T-16 Phase 2 — KapurLab landing styles. Class names prefixed `kl-`
+     so they don't collide with OOD's bootstrap rules. */
+  .kl-home {
+    --kl-bg: #f6f3ec;
+    --kl-bg-deep: #efeadf;
+    --kl-surface: #ffffff;
+    --kl-surface-warm: #fbf9f3;
+    --kl-text: #1a2536;
+    --kl-text-muted: #6a7585;
+    --kl-text-faint: #9aa3b0;
+    --kl-border: #e8e2d2;
+    --kl-border-strong: #d4ccb8;
+    --kl-accent: #b85a3e;
+    --kl-accent-hover: #a04e34;
+    --kl-status-ok: #3d6b4a;
+    --kl-status-ok-bg: #e0ebe3;
+    --kl-status-beta: #95682a;
+    --kl-status-beta-bg: #f3e6cb;
+    --kl-status-coming: #6e6759;
+    --kl-status-coming-bg: #ebe6d7;
+    --kl-shadow-md: 0 4px 12px rgba(26, 37, 54, 0.06), 0 2px 4px rgba(26, 37, 54, 0.04);
+    background: var(--kl-bg);
+    color: var(--kl-text);
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    /* Bleed beyond OOD's container so the landing fills the viewport. */
+    margin: -20px calc(50% - 50vw) 0;
+    padding-bottom: 32px;
+  }
+  .kl-home * { box-sizing: border-box; }
+
+  .kl-brand-strip {
+    background: var(--kl-surface-warm);
+    border-bottom: 1px solid var(--kl-border);
+    padding: 22px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .kl-brand-strip .kl-lab { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .kl-brand-strip .kl-wordmark {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 22px;
+    letter-spacing: -0.01em;
+    color: var(--kl-text);
+  }
+  .kl-brand-strip .kl-tagline {
+    font-size: 13px;
+    color: var(--kl-text-muted);
+    border-left: 1px solid var(--kl-border-strong);
+    padding-left: 14px;
+  }
+  .kl-brand-strip .kl-meta { display: flex; align-items: center; gap: 16px; font-size: 13px; flex-wrap: wrap; }
+  .kl-brand-strip .kl-host {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--kl-text-muted);
+    background: var(--kl-bg-deep);
+    padding: 4px 10px;
+    border-radius: 3px;
+  }
+  .kl-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--kl-status-ok-bg);
+    color: var(--kl-status-ok);
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .kl-status-pill .kl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--kl-status-ok); }
+
+  .kl-main { padding: 28px 32px; max-width: 1440px; margin: 0 auto; }
+  .kl-home h2 {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 20px;
+    letter-spacing: -0.005em;
+    color: var(--kl-text);
+    margin: 0 0 14px;
+  }
+  .kl-home h3 {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 15px;
+    color: var(--kl-text);
+    margin: 0 0 12px;
+  }
+  .kl-section { margin-bottom: 28px; }
+  .kl-section:last-child { margin-bottom: 0; }
+  .kl-section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .kl-section-header h2 { margin: 0; }
+  .kl-section-header .kl-meta { font-size: 12px; color: var(--kl-text-muted); }
+
+  .kl-tri { display: grid; grid-template-columns: 270px 1fr 270px; gap: 24px; }
+  .kl-tri .kl-rail, .kl-tri .kl-center { min-width: 0; }
+
+  .kl-pipeline-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .kl-pipeline-card {
+    background: var(--kl-surface);
+    border: 1px solid var(--kl-border);
+    border-radius: 8px;
+    padding: 18px;
+    transition: all 0.15s;
+    display: flex;
+    flex-direction: column;
+    min-height: 175px;
+    position: relative;
+    text-decoration: none;
+    color: inherit;
+  }
+  .kl-pipeline-card.kl-available { cursor: pointer; }
+  .kl-pipeline-card.kl-available:hover {
+    border-color: var(--kl-border-strong);
+    box-shadow: var(--kl-shadow-md);
+    transform: translateY(-1px);
+    text-decoration: none;
+  }
+  .kl-pipeline-card.kl-unavailable { opacity: 0.75; }
+  .kl-pipeline-card .kl-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .kl-pipeline-card .kl-icon {
+    width: 34px; height: 34px;
+    border-radius: 6px;
+    background: var(--kl-bg-deep);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--kl-text);
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 15px;
+  }
+  .kl-pipeline-card h4 {
+    font-family: 'Fraunces', serif;
+    font-weight: 500;
+    font-size: 16px;
+    margin: 0 0 6px;
+    color: var(--kl-text);
+  }
+  .kl-pipeline-card .kl-desc { font-size: 12.5px; color: var(--kl-text-muted); line-height: 1.5; flex: 1; }
+  .kl-pipeline-card .kl-cardfoot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--kl-border);
+  }
+  .kl-pipeline-card .kl-runtime {
+    font-size: 11px;
+    color: var(--kl-text-faint);
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .kl-launch-link { color: var(--kl-accent); font-weight: 500; font-size: 13px; text-decoration: none; }
+  .kl-launch-link:hover { color: var(--kl-accent-hover); text-decoration: none; }
+  .kl-launch-link.kl-disabled { color: var(--kl-text-faint); cursor: not-allowed; }
+
+  .kl-badge {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+  .kl-badge.kl-ok { background: var(--kl-status-ok-bg); color: var(--kl-status-ok); }
+  .kl-badge.kl-coming { background: var(--kl-status-coming-bg); color: var(--kl-status-coming); }
+
+  .kl-panel {
+    background: var(--kl-surface);
+    border: 1px solid var(--kl-border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .kl-panel:last-child { margin-bottom: 0; }
+  .kl-panel.kl-compact { padding: 12px 14px; }
+
+  .kl-data-list { list-style: none; margin: 0; padding: 0; }
+  .kl-data-list li {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--kl-border);
+    cursor: pointer;
+  }
+  .kl-data-list li:last-child { border-bottom: none; padding-bottom: 0; }
+  .kl-data-list li:first-child { padding-top: 0; }
+  .kl-data-list li:hover .kl-path { color: var(--kl-accent); }
+  .kl-data-list .kl-label {
+    font-size: 10px;
+    color: var(--kl-text-muted);
+    margin-bottom: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+  .kl-data-list .kl-path {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--kl-text);
+    overflow-wrap: anywhere;
+    transition: color 0.15s;
+  }
+  .kl-data-list .kl-info { font-size: 11px; color: var(--kl-text-faint); margin-top: 3px; }
+
+  .kl-data-section-label {
+    font-size: 10px;
+    color: var(--kl-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+    margin: 14px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--kl-border);
+  }
+  .kl-data-section-label:first-child { margin-top: 0; }
+
+  .kl-upload-btn {
+    display: block;
+    width: 100%;
+    background: var(--kl-accent);
+    color: white;
+    border: none;
+    padding: 9px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    margin-top: 12px;
+    transition: background 0.15s;
+    text-align: center;
+    text-decoration: none;
+  }
+  .kl-upload-btn:hover { background: var(--kl-accent-hover); color: white; text-decoration: none; }
+  .kl-browse-link {
+    display: block;
+    text-align: center;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--kl-text-muted);
+    text-decoration: none;
+  }
+  .kl-browse-link:hover { color: var(--kl-accent); }
+
+  .kl-jobs-panel {
+    background: var(--kl-surface);
+    border: 1px solid var(--kl-border);
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .kl-job-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 14px;
+    align-items: center;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--kl-border);
+  }
+  .kl-job-row:last-child { border-bottom: none; padding-bottom: 0; }
+  .kl-job-row:first-child { padding-top: 0; }
+  .kl-job-row .kl-name { font-weight: 500; font-size: 13.5px; }
+  .kl-job-row .kl-jobmeta { font-size: 12px; color: var(--kl-text-muted); margin-top: 2px; }
+  .kl-job-row .kl-runtime {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--kl-text-muted);
+    min-width: 36px;
+    text-align: right;
+  }
+  .kl-job-empty { text-align: center; color: var(--kl-text-muted); padding: 16px 0; font-size: 13px; }
+
+  .kl-system-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .kl-metric .kl-metric-label {
+    font-size: 10px;
+    color: var(--kl-text-muted);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+  .kl-metric .kl-metric-value {
+    font-family: 'Fraunces', serif;
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--kl-text);
+  }
+  .kl-metric .kl-metric-sub {
+    font-size: 11px;
+    color: var(--kl-text-faint);
+    font-family: 'IBM Plex Mono', monospace;
+    margin-top: 2px;
+  }
+  .kl-bar { height: 4px; background: var(--kl-bg-deep); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .kl-bar > span { display: block; height: 100%; background: var(--kl-status-ok); border-radius: 2px; }
+  .kl-bar.kl-warn > span { background: var(--kl-status-beta); }
+
+  .kl-priority-tag {
+    display: inline-block;
+    background: var(--kl-status-ok-bg);
+    color: var(--kl-status-ok);
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    margin-top: 4px;
+  }
+
+  .kl-account-name { font-size: 13px; color: var(--kl-text); margin-bottom: 4px; }
+  .kl-account-role { font-size: 12px; color: var(--kl-text-muted); margin-bottom: 6px; }
+  .kl-onboard-text { font-size: 12px; color: var(--kl-text-muted); margin: 0; line-height: 1.5; }
+  .kl-onboard-text a { color: var(--kl-accent); }
+
+  .kl-footer {
+    border-top: 1px solid var(--kl-border);
+    padding: 16px 32px;
+    font-size: 12px;
+    color: var(--kl-text-muted);
+    display: flex;
+    justify-content: space-between;
+    margin-top: 32px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .kl-footer .kl-mono { font-family: 'IBM Plex Mono', monospace; }
+
+  @media (max-width: 1100px) {
+    .kl-tri { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="kl-home">
+  <div class="kl-brand-strip">
+    <div class="kl-lab">
+      <div class="kl-wordmark">Kapur Lab</div>
+      <div class="kl-tagline">WGS Analysis Pipelines</div>
+    </div>
+    <div class="kl-meta">
+      <span class="kl-host">host: <%= Socket.gethostname %></span>
+      <span class="kl-status-pill"><span class="kl-dot"></span>All systems normal</span>
+    </div>
+  </div>
+
+  <div class="kl-main">
+    <div class="kl-tri">
+
+      <aside class="kl-rail">
+        <div class="kl-panel">
+          <h3>Data</h3>
+
+          <% if data_shared.any? %>
+            <div class="kl-data-section-label">Shared</div>
+            <ul class="kl-data-list">
+              <% data_shared.each do |row| %>
+                <li>
+                  <div class="kl-label"><%= row['label'] %></div>
+                  <div class="kl-path"><%= row['path'] %></div>
+                  <% if row['info'] %><div class="kl-info"><%= row['info'] %></div><% end %>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+
+          <% if data_personal.any? %>
+            <div class="kl-data-section-label">Personal</div>
+            <ul class="kl-data-list">
+              <% data_personal.each do |row| %>
+                <li>
+                  <div class="kl-label"><%= row['label'] %></div>
+                  <div class="kl-path"><%= row['path'] %></div>
+                  <% if row['info'] %><div class="kl-info"><%= row['info'] %></div><% end %>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+
+          <a class="kl-upload-btn" href="/pun/sys/files/fs<%= ENV['HOME'] || "/home/#{request.env['REMOTE_USER']}" %>">↑ Upload data</a>
+          <a class="kl-browse-link" href="/pun/sys/files/fs/srv/kapurlab/projects">Browse all files →</a>
+        </div>
+      </aside>
+
+      <section class="kl-center">
+        <div class="kl-section">
+          <div class="kl-section-header">
+            <h2>Pipelines</h2>
+            <span class="kl-meta"><%= available_count %> available · <%= coming_count %> in development</span>
+          </div>
+          <div class="kl-pipeline-grid">
+            <% pipelines.each do |p| %>
+              <% available = p['status'] == 'available' %>
+              <% wrapper_tag = available ? 'a' : 'div' %>
+              <% href_attr = available && p['launch_url'] ? %{ href="#{p['launch_url']}"} : '' %>
+              <%= raw "<#{wrapper_tag} class=\"kl-pipeline-card #{available ? 'kl-available' : 'kl-unavailable'}\"#{href_attr}>" %>
+                <div class="kl-top">
+                  <div class="kl-icon"><%= p['icon'] %></div>
+                  <span class="kl-badge <%= available ? 'kl-ok' : 'kl-coming' %>">
+                    <%= available ? 'Available' : 'Coming soon' %>
+                  </span>
+                </div>
+                <h4><%= p['title'] %></h4>
+                <div class="kl-desc"><%= raw p['description'] %></div>
+                <div class="kl-cardfoot">
+                  <span class="kl-runtime"><%= p['runtime'] %></span>
+                  <% if available %>
+                    <span class="kl-launch-link">Launch →</span>
+                  <% else %>
+                    <span class="kl-launch-link kl-disabled">Unavailable</span>
+                  <% end %>
+                </div>
+              <%= raw "</#{wrapper_tag}>" %>
+            <% end %>
+          </div>
+        </div>
+
+        <div class="kl-section">
+          <div class="kl-section-header">
+            <h2>Active work</h2>
+            <span class="kl-meta"><%= running_count %> running · <%= queued_count %> queued</span>
+          </div>
+          <div class="kl-jobs-panel">
+            <% if jobs_list.empty? %>
+              <div class="kl-job-empty">No active jobs.</div>
+            <% else %>
+              <% jobs_list.each do |j| %>
+                <div class="kl-job-row">
+                  <div>
+                    <div class="kl-name"><%= j['name'] %></div>
+                    <div class="kl-jobmeta"><%= j['meta'] %></div>
+                  </div>
+                  <span class="kl-badge <%= j['status'] == 'running' ? 'kl-ok' : 'kl-coming' %>">
+                    <%= (j['status'] || '').capitalize %>
+                  </span>
+                  <span class="kl-runtime"><%= j['runtime'] %></span>
+                </div>
+              <% end %>
+            <% end %>
+          </div>
+        </div>
+      </section>
+
+      <aside class="kl-rail">
+        <div class="kl-panel">
+          <h3>System</h3>
+          <div class="kl-system-grid">
+            <% [
+              ['CPU',     sysm['cpu']],
+              ['Memory',  sysm['memory']],
+              ['Storage', sysm['storage']],
+              ['Queue',   sysm['queue']],
+            ].each do |label, m| %>
+              <% next unless m %>
+              <div class="kl-metric">
+                <div class="kl-metric-label"><%= label %></div>
+                <div class="kl-metric-value"><%= m['value'] %></div>
+                <% if m['percent'] %>
+                  <div class="kl-bar <%= m['warn'] ? 'kl-warn' : '' %>"><span style="width: <%= m['percent'] %>%"></span></div>
+                <% end %>
+                <% if m['sub'] %><div class="kl-metric-sub"><%= m['sub'] %></div><% end %>
+              </div>
+            <% end %>
+          </div>
+        </div>
+
+        <div class="kl-panel">
+          <h3>Your account</h3>
+          <div class="kl-account-name"><strong><%= request.env['REMOTE_USER'] %></strong></div>
+          <div class="kl-account-role">Lab member</div>
+          <span class="kl-priority-tag">High priority queue</span>
+        </div>
+
+        <% if onboarding['text'] %>
+          <div class="kl-panel kl-compact">
+            <h3 style="font-size: 13px; margin-bottom: 6px;">Onboarding</h3>
+            <p class="kl-onboard-text">
+              <%= onboarding['text'] %>
+              <% (onboarding['links'] || []).each_with_index do |lnk, i| %>
+                <% if i > 0 && i == (onboarding['links'].length - 1) %> and <% elsif i > 0 %>, <% end %>
+                <a href="<%= lnk['href'] %>"><%= lnk['label'] %></a><%
+              end %>.
+            </p>
+          </div>
+        <% end %>
+      </aside>
+
+    </div>
+  </div>
+
+  <div class="kl-footer">
+    <span><%= footer_cfg['left'] || 'Kapur Lab' %></span>
+    <span class="kl-mono"><%= footer_cfg['right'] %></span>
+  </div>
+</div>

@@ -1,12 +1,14 @@
 ---
-# Dashboard branding
+# Dashboard branding. The home page itself is rendered by the override
+# at /etc/ood/config/apps/dashboard/views/dashboard/index.html.erb (T-16
+# Phase 2). The values here only affect the OOD nav bar at the top of
+# every page.
 dashboard_title: "Kapur Lab Pipelines"
-brand_bg_color: "#1f3b66"
+brand_bg_color: "#1c3754"      # matches mockup --nav-bg
 brand_link_active_bg_color: "#13294b"
 
-# Apps pinned to the dashboard. Use category/subcategory from the app's
-# manifest.yml. Add new entries when kraken / MHC / etc. apps land under
-# /var/www/ood/apps/sys/.
-pinned_apps:
-  - type: sys
-    category: Bioinformatics
+# Pinned-apps grid is suppressed by the index.html.erb override; we
+# render the lab-curated Pipelines grid in its place. Leaving the
+# pinned_apps key empty here so the OOD config parser doesn't complain
+# if a future operator turns the override off.
+pinned_apps: []

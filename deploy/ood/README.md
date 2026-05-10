@@ -38,14 +38,31 @@ These customize the OOD dashboard for the whole portal. New apps
 
 ```bash
 sudo install -m 0644 deploy/ood/portal/ondemand.d/dashboard.yml /etc/ood/config/ondemand.d/dashboard.yml
-sudo mkdir -p /etc/ood/config/announcements.d
-sudo install -m 0644 deploy/ood/portal/announcements.d/welcome.yml /etc/ood/config/announcements.d/welcome.yml
+sudo install -m 0644 deploy/ood/portal/wgs_pipelines.yml         /etc/ood/config/wgs_pipelines.yml
+sudo install -D -m 0644 \
+  deploy/ood/portal/apps/dashboard/views/dashboard/index.html.erb \
+  /etc/ood/config/apps/dashboard/views/dashboard/index.html.erb
+
+# If migrating from the pre-T-16 setup, also drop the announcement banner —
+# the brand strip in the new index.html.erb supersedes it.
+sudo rm -f /etc/ood/config/announcements.d/welcome.yml
 ```
 
 Files:
-- `portal/ondemand.d/dashboard.yml` — dashboard title (`Kapur Lab Pipelines`),
-  brand color, pinned-apps config.
-- `portal/announcements.d/welcome.yml` — YAML banner (use .yml not .md — OOD 3.1.16 parses YAML frontmatter inconsistently from .md) above the dashboard.
+- `portal/ondemand.d/dashboard.yml` — dashboard title and nav-bar brand
+  color. The `pinned_apps` key is intentionally `[]` since the override
+  below renders its own Pipelines grid.
+- `portal/wgs_pipelines.yml` — declarative source of truth for everything
+  the landing page renders: pipeline cards, mocked job rows, data list,
+  system metrics, footer copy. Phase 2 reads it as YAML; Phase 3 swaps
+  the `jobs:` and `system:` blocks for live JobManager / df / loadavg
+  readers.
+- `portal/apps/dashboard/views/dashboard/index.html.erb` — full home
+  page override (T-16 Phase 2). Replaces OOD's default welcome banner
+  + pinned-apps grid with the A2 three-pane layout (Data |
+  Pipelines + Active work | System). Rails reloads partials live so
+  the change takes effect on the next browser refresh — no service
+  restart needed.
 
 ## Cluster config (Singularity bind paths)
 

@@ -35,10 +35,7 @@ Usage
     for s1 in pr.step1_runs:
         print(s1.sample, s1.run_id, s1.status)
 
-    drift = diff_dispatch_vs_final(
-        "step2/dispatch_metadata.json",
-        "step2/run_metadata.json",
-    )
+    drift = diff_dispatch_vs_final("step2/run_metadata.json")
     if drift:
         print("State changed between dispatch and finalize:", drift)
 """
@@ -280,6 +277,12 @@ class RunMetadataV2(_Base):
     outputs: list[Output] = Field(default_factory=list)
     qc: QcBlock = Field(default_factory=QcBlock)
 
+    # Frozen snapshot of dispatch-time state. Written once at dispatch by the
+    # writer; never modified at finalize. Used by diff_dispatch_vs_final()
+    # to detect drift between dispatch and finalize. May be None for records
+    # written before T-07 sub-block convention landed; reader is tolerant.
+    dispatch_state: dict[str, Any] | None = None
+
     # Convenience
     @property
     def is_terminal(self) -> bool:
@@ -287,11 +290,16 @@ class RunMetadataV2(_Base):
 
 
 class DispatchMetadataV2(_Base):
+    """DEPRECATED in V2 sub-block layout. Retained for backward compat with any
+    pre-locked-design records that wrote a separate dispatch_metadata.json.
+    New writes use the dispatch_state sub-block on RunMetadataV2.
+    """
+
     schema_version: Literal[2]
     run_id: str
     pipeline_run_id: str | None = None
     dispatched_at: datetime
-    dispatch_state: dict[str, Any]  # Same shape as RunMetadataV2 minus finalize fields
+    dispatch_state: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -434,16 +442,67 @@ class FieldDrift:
 
 
 def diff_dispatch_vs_final(
-    dispatch_path: str | Path,
-    final_path: str | Path,
+    record_or_path: str | Path | RunMetadataV2,
 ) -> list[FieldDrift]:
     """Return list of fields whose value changed between dispatch and finalize.
 
-    Compares the dispatch_state dict against the corresponding fields in the
-    finalized run_metadata. Drift on any of these is forensically interesting:
-    reference hashes, vsnp3 install path, vsnp_gui git_sha, environment hashes.
+    Reads the `dispatch_state` sub-block from a single run_metadata.json (the
+    locked V2 layout) and compares against the corresponding top-level fields.
+    Drift on any of these is forensically interesting: reference hashes,
+    vsnp3 install path, vsnp_gui git_sha, environment hashes.
 
-    Returns empty list if no drift.
+    Accepts either a path to a run_metadata.json or an already-loaded
+    RunMetadataV2 instance.
+
+    Returns empty list if no drift, or if the record has no dispatch_state
+    sub-block (records written before T-07 sub-block convention).
+    """
+    if isinstance(record_or_path, RunMetadataV2):
+        rec = record_or_path
+    else:
+        rec = load(record_or_path)
+
+    if not rec.dispatch_state:
+        return []
+
+    ds = rec.dispatch_state
+    drift: list[FieldDrift] = []
+    fields_to_check = [
+        ("vsnp_gui.git_sha",
+         lambda d: d.get("vsnp_gui", {}).get("git_sha"),
+         rec.vsnp_gui.git_sha),
+        ("vsnp3.version",
+         lambda d: d.get("vsnp3", {}).get("version"),
+         rec.vsnp3.version),
+        ("vsnp3.install_path",
+         lambda d: d.get("vsnp3", {}).get("install_path"),
+         rec.vsnp3.install_path),
+        ("reference.folder_manifest_sha256",
+         lambda d: d.get("reference", {}).get("folder_manifest_sha256"),
+         rec.reference.folder_manifest_sha256),
+        ("environment.conda_env_yaml_sha256",
+         lambda d: d.get("environment", {}).get("conda_env_yaml_sha256"),
+         rec.environment.conda_env_yaml_sha256),
+        ("environment.pip_freeze_sha256",
+         lambda d: d.get("environment", {}).get("pip_freeze_sha256"),
+         rec.environment.pip_freeze_sha256),
+    ]
+    for field_name, getter, final_val in fields_to_check:
+        disp_val = getter(ds)
+        if disp_val != final_val:
+            drift.append(
+                FieldDrift(field=field_name, dispatch_value=disp_val, final_value=final_val)
+            )
+    return drift
+
+
+def diff_dispatch_vs_final_from_files(
+    dispatch_path: str | Path,
+    final_path: str | Path,
+) -> list[FieldDrift]:
+    """Legacy two-file form. Prefer diff_dispatch_vs_final() against single file
+    with sub-block. Retained for any pre-T-07 records using the separate
+    dispatch_metadata.json layout.
     """
     disp = load_dispatch(dispatch_path)
     final = load(final_path)
@@ -602,5 +661,6 @@ __all__ = [
     "load_pipeline_run",
     "iter_run_metadata",
     "diff_dispatch_vs_final",
+    "diff_dispatch_vs_final_from_files",
     "reconstruct_pipeline_run_from_step2",
 ]

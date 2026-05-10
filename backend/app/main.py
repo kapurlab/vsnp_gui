@@ -19,6 +19,7 @@ import logging
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
+from app import qc_verdict
 from app import provenance_writer
 from app.projects import (
     create_project,
@@ -74,6 +75,27 @@ def _project_dir_for(cfg_in: Dict, name: str) -> Path:
     if found is not None:
         return found
     return Path(cfg_in.get("projects_root", "")) / name
+
+
+def _resolve_qc_thresholds(cfg: Dict, project_dir: Path | None = None) -> Dict:
+    """Merge thresholds: module DEFAULTS < user cfg < project.json override."""
+    project_layer = None
+    if project_dir is not None:
+        pj = project_dir / "project.json"
+        if pj.is_file():
+            try:
+                project_layer = json.loads(pj.read_text()).get("qc_thresholds")
+            except (json.JSONDecodeError, OSError):
+                project_layer = None
+    return qc_verdict.merge_thresholds(cfg.get("qc_thresholds"), project_layer)
+
+
+def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
+    """Attach `_qc_verdict` to each row in place. Returns the same list."""
+    for row in rows:
+        if isinstance(row, dict):
+            row["_qc_verdict"] = qc_verdict.compute_verdict(row, thresholds)
+    return rows
 
 
 def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
@@ -1746,9 +1768,10 @@ def qc_summary(project: str):
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"QC summary failed: {result.stderr.strip()}")
     try:
-        return json.loads(result.stdout.strip())
+        rows = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="QC summary parse failed")
+    return _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
 
 
 @app.get("/api/projects/{project}/qc_summary.csv")
@@ -1902,9 +1925,12 @@ def posthoc_step1_scan(payload: PosthocScanRequest):
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"Post-hoc scan failed: {result.stderr.strip()}")
     try:
-        return json.loads(result.stdout.strip())
+        rows = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Post-hoc scan parse failed")
+    # Post-hoc rows aggregate across many projects, so per-project overrides
+    # don't apply cleanly here — annotate with cfg-resolved thresholds only.
+    return _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg))
 
 
 @app.post("/api/posthoc/step1/resolve_samples")

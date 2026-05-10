@@ -505,6 +505,42 @@ label {
   text-transform: none;
 }
 
+/* T-09 sample QC verdict — pass/review/fail. The chip lives in the new "QC"
+   column on the Step 1 / post-hoc tables. Hover shows reasons via title=. */
+.qc-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  cursor: help;
+}
+.qc-badge-pass {
+  background: #ecfdf5;
+  color: #065f46;
+  border-color: #a7f3d0;
+}
+.qc-badge-review {
+  background: #fffbeb;
+  color: #92400e;
+  border-color: #fde68a;
+}
+.qc-badge-fail {
+  background: #fef2f2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+/* Subtle row tint mirrors the badge so the table scans at a glance. */
+.qc-row.qc-review td {
+  background: #fffdf6;
+}
+.qc-row.qc-fail td {
+  background: #fef7f7;
+}
+
 .log-viewer {
   margin-top: 10px;
   border-top: 1px dashed var(--border);
@@ -896,10 +932,6 @@ button:hover:not(:disabled) {
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   text-align: left;
   white-space: nowrap;
-}
-
-.qc-table tr.flagged {
-  background: rgba(255, 107, 107, 0.12);
 }
 
 .results-panel {

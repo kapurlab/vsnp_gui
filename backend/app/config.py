@@ -61,7 +61,14 @@ DEFAULTS: Dict[str, Any] = {
     "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
     # Per-user opt-out for shared DBs: paths the user has chosen to skip in
     # their analyses. Shared entries are visible but unchecked when in here.
-    "disabled_vcf_db_paths": []
+    "disabled_vcf_db_paths": [],
+    # T-09 QC verdict thresholds. A project-level override may live in
+    # project.json["qc_thresholds"]; backend merges project > user > defaults.
+    "qc_thresholds": {
+        "coverage": {"pass_min": 30.0, "review_min": 10.0},        # X (avg depth)
+        "mapping_rate": {"pass_min": 90.0, "review_min": 70.0},    # %
+        "contamination_review": True,                              # any positive flag → review
+    },
 }
 
 

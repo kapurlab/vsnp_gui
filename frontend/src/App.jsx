@@ -602,16 +602,20 @@ export default function App() {
     return Number.isFinite(n) ? n : null;
   }
 
+  // Backend (qc_verdict.py) ships a `_qc_verdict` field on every qc_summary
+  // / posthoc row: { level: "pass" | "review" | "fail", reasons: [...] }.
+  // "Flagged" — used by the "show only flagged" toggle and the row-tint —
+  // means anything that isn't a clean pass.
+  function qcLevel(row) {
+    return (row && row._qc_verdict && row._qc_verdict.level) || "pass";
+  }
+
+  function qcReasons(row) {
+    return (row && row._qc_verdict && row._qc_verdict.reasons) || [];
+  }
+
   function isFlagged(row) {
-    const avgDepth = parseDepth(row["Average Depth"]);
-    const dupPct = parsePercent(row["Duplicate Percent of Mapped Reads"]);
-    const r1q20 = parsePercent(row["R1 Passing Q20"]);
-    const r2q20 = parsePercent(row["R2 Passing Q20"]);
-    if (avgDepth !== null && avgDepth < 40) return true;
-    if (dupPct !== null && dupPct > 80) return true;
-    if (r1q20 !== null && r1q20 < 50) return true;
-    if (r2q20 !== null && r2q20 < 50) return true;
-    return false;
+    return qcLevel(row) !== "pass";
   }
 
   function normalizeReferenceName(ref) {
@@ -2479,6 +2483,7 @@ export default function App() {
                     <thead>
                       <tr>
                         <th>Exclude</th>
+                        <th>QC</th>
                         <th>Sample</th>
                         <th>Files</th>
                         <th>Reference</th>
@@ -2497,8 +2502,10 @@ export default function App() {
                         .map((row) => {
                           const key = sampleKey(row);
                           const editInfo = step1Edits[key];
+                          const level = qcLevel(row);
+                          const reasons = qcReasons(row);
                           return (
-                            <tr key={row._file} className={isFlagged(row) ? "flagged" : ""}>
+                            <tr key={row._file} className={`qc-row qc-${level}`}>
                               <td>
                                 <input
                                   type="checkbox"
@@ -2506,6 +2513,14 @@ export default function App() {
                                   onChange={(e) => toggleExcluded(row, e.target.checked)}
                                   title="Toggling auto-saves to remove_from_analysis.xlsx; the next Step 2 run honors it via -remove_by_name"
                                 />
+                              </td>
+                              <td>
+                                <span
+                                  className={`qc-badge qc-badge-${level}`}
+                                  title={reasons.length ? reasons.join("\n") : "All thresholds met"}
+                                >
+                                  {level}
+                                </span>
                               </td>
                               <td>
                                 <div className="cell-inline">
@@ -2640,6 +2655,7 @@ export default function App() {
                       <thead>
                         <tr>
                           <th>Source</th>
+                          <th>QC</th>
                           <th>Sample</th>
                           <th>Files</th>
                           <th>Reference</th>
@@ -2658,9 +2674,19 @@ export default function App() {
                           const sampleName = row._sample || row.sample || "-";
                           const isEdited = Boolean(row._edited);
                           const editLog = row._edit_log || "";
+                          const level = qcLevel(row);
+                          const reasons = qcReasons(row);
                           return (
-                          <tr key={row._file}>
+                          <tr key={row._file} className={`qc-row qc-${level}`}>
                             <td>{row._project || "-"}</td>
+                            <td>
+                              <span
+                                className={`qc-badge qc-badge-${level}`}
+                                title={reasons.length ? reasons.join("\n") : "All thresholds met"}
+                              >
+                                {level}
+                              </span>
+                            </td>
                             <td>
                               <div className="cell-inline">
                                 <span>{sampleName}</span>

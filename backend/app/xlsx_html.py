@@ -57,6 +57,32 @@ def _rgb_hex(color) -> str | None:
     return None
 
 
+def _cell_rotation_class(cell) -> str:
+    """Map openpyxl's text_rotation (Excel encoding) to one of our CSS classes.
+
+    Excel OOXML stores rotation as:
+      - 0          → horizontal
+      - 1..90      → that many degrees counter-clockwise from horizontal
+                     (90 = reads bottom-to-top)
+      - 91..180    → (rotation - 90) degrees clockwise from horizontal
+                     (180 = reads top-to-bottom)
+      - 255        → vertically stacked characters
+    vSNP3 cascade tables use 90 on the variant-position header row and 180
+    on the annotation row. We map both to vertical writing-mode + transform
+    so the cell becomes a narrow tall column.
+    """
+    rot = (cell.alignment.text_rotation or 0) if cell.alignment else 0
+    if rot == 0:
+        return ""
+    if 1 <= rot <= 90:
+        return "xlsx-rot-up"
+    if 91 <= rot <= 180:
+        return "xlsx-rot-down"
+    if rot == 255:
+        return "xlsx-rot-stacked"
+    return ""
+
+
 def _cell_inline_style(cell) -> str:
     parts: list[str] = []
 
@@ -324,7 +350,13 @@ def xlsx_to_html(xlsx_path: Path, title: str | None = None) -> str:
     for row in ws.iter_rows():
         if not row:
             continue
-        rows_html.append("<tr>")
+        # Per-row height. Excel stores row height in points (1pt ≈ 1.333px).
+        row_idx = row[0].row
+        row_dim = ws.row_dimensions.get(row_idx)
+        row_style = ""
+        if row_dim and row_dim.height:
+            row_style = f' style="height: {int(round(row_dim.height * 1.333))}px"'
+        rows_html.append(f"<tr{row_style}>")
         for cell in row:
             if cell.coordinate in merged_skip:
                 continue
@@ -342,14 +374,17 @@ def xlsx_to_html(xlsx_path: Path, title: str | None = None) -> str:
                     attrs += f' rowspan="{rs}"'
                 if cs > 1:
                     attrs += f' colspan="{cs}"'
-            # Frozen pane hints — sticky positioning for first N rows / cols
-            sticky_classes = []
+            # Class bundle: sticky pane hints + rotation
+            classes = []
             if cell.row <= freeze_row:
-                sticky_classes.append("xlsx-sticky-top")
+                classes.append("xlsx-sticky-top")
             if cell.column <= freeze_col:
-                sticky_classes.append("xlsx-sticky-left")
-            if sticky_classes:
-                attrs += f' class="{" ".join(sticky_classes)}"'
+                classes.append("xlsx-sticky-left")
+            rot_class = _cell_rotation_class(cell)
+            if rot_class:
+                classes.append(rot_class)
+            if classes:
+                attrs += f' class="{" ".join(classes)}"'
             value = _format_cell_value(cell)
             style_attr = f' style="{inline}"' if inline else ""
             rows_html.append(f"<td{attrs}{style_attr}>{value}</td>")
@@ -411,6 +446,17 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-sticky-top {{ position: sticky; top: 0; z-index: 2; background: var(--xlsx-header-bg); }}
   .xlsx-sticky-left {{ position: sticky; left: 0; z-index: 1; background: var(--xlsx-header-bg); }}
   .xlsx-sticky-top.xlsx-sticky-left {{ z-index: 3; }}
+  /* Excel text-rotation: 1..90 = bottom-to-top read; 91..180 = top-to-bottom. */
+  .xlsx-rot-up, .xlsx-rot-down, .xlsx-rot-stacked {{
+    white-space: nowrap;
+    vertical-align: bottom;
+    text-align: left;
+    padding: 6px 4px;
+    min-width: 18px;
+  }}
+  .xlsx-rot-up {{ writing-mode: vertical-rl; transform: rotate(180deg); }}
+  .xlsx-rot-down {{ writing-mode: vertical-rl; }}
+  .xlsx-rot-stacked {{ writing-mode: vertical-rl; text-orientation: upright; }}
 </style>
 </head>
 <body>

@@ -2387,8 +2387,14 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
 
 
 @app.get("/api/projects/{project}/download-file")
-def download_file(project: str, path: str = Query(...)):
-    """Download any file from within a project directory."""
+def download_file(project: str, path: str = Query(...), inline: int = 0):
+    """Serve a file from within a project directory.
+
+    Default (no ?inline) sets `Content-Disposition: attachment` so the browser
+    downloads. With ?inline=1, omits the attachment disposition so the browser
+    renders the file in-tab when it can (html, fasta, vcf, png, pdf, …) —
+    used by the "View" buttons on the step2 results panel.
+    """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
@@ -2408,6 +2414,8 @@ def download_file(project: str, path: str = Query(...)):
         media_type = "application/pdf"
     elif suffix in (".tre", ".nwk", ".nexus", ".nex", ".fasta", ".fa", ".vcf", ".txt", ".tsv", ".log"):
         media_type = "text/plain"
+    if inline:
+        return FileResponse(target, media_type=media_type)
     return FileResponse(target, media_type=media_type, filename=target.name)
 
 

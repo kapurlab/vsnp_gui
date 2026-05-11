@@ -827,8 +827,26 @@ export default function App() {
     window.open(url, "_blank", "noopener");
   }
 
-  function isXlsx(path) {
-    return /\.(xlsx|xlsm)$/i.test(path || "");
+  function viewInline(path) {
+    if (!selectedProject || !path) return;
+    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}&inline=1`;
+    window.open(url, "_blank", "noopener");
+  }
+
+  // Decide which preview button (if any) to render for a given output path.
+  // The legacy "Open" button calls /api/projects/<p>/open which shells out
+  // via xdg-open — useless in the web flow. So we replace it with browser-
+  // native previews when we can:
+  //   - xlsx/xlsm → formatted preview via /preview-xlsx (color-preserving)
+  //   - tre/nwk   → tree viewer (existing button)
+  //   - any text-ish / image / pdf / html → /download-file?inline=1 (new tab)
+  //   - zip / bam / binary archives → no View button (DL only)
+  function fileViewMode(path) {
+    const p = (path || "").toLowerCase();
+    if (/\.(xlsx|xlsm)$/.test(p)) return "xlsx";
+    if (/\.(tre|nwk)$/.test(p)) return "tree";
+    if (/\.(html?|fasta|fa|fna|nexus|nex|vcf|txt|tsv|csv|log|json|yaml|yml|md|pdf|png|jpe?g|gif|svg|webp)$/.test(p)) return "inline";
+    return "none";
   }
 
   async function openPosthocOutput(path) {
@@ -3450,11 +3468,16 @@ export default function App() {
                       <div className="results-path">{item.path}</div>
                     </div>
                     <div className="results-actions">
-                      {isXlsx(item.path) ? (
-                        <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>
-                      ) : (
-                        <button onClick={() => openOutput(item.path)}>Open</button>
-                      )}
+                      {(() => {
+                        const mode = fileViewMode(item.path);
+                        if (mode === "xlsx") {
+                          return <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>;
+                        }
+                        if (mode === "inline") {
+                          return <button onClick={() => viewInline(item.path)} title="Open in a new browser tab">View</button>;
+                        }
+                        return null;
+                      })()}
                       <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                     </div>
                   </div>
@@ -3476,14 +3499,19 @@ export default function App() {
                               <div className="results-path">{item.path}</div>
                             </div>
                             <div className="results-actions">
-                              {isTre ? (
-                                <button onClick={() => window.open(treeUrl, "_blank", "noopener")} title="Open tree viewer in a new tab">View tree</button>
-                              ) : null}
-                              {isXlsx(item.path) ? (
-                                <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>
-                              ) : (
-                                <button onClick={() => openOutput(item.path)}>Open</button>
-                              )}
+                              {(() => {
+                                const mode = fileViewMode(item.path);
+                                if (mode === "tree") {
+                                  return <button onClick={() => window.open(treeUrl, "_blank", "noopener")} title="Open tree viewer in a new tab">View tree</button>;
+                                }
+                                if (mode === "xlsx") {
+                                  return <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>;
+                                }
+                                if (mode === "inline") {
+                                  return <button onClick={() => viewInline(item.path)} title="Open in a new browser tab">View</button>;
+                                }
+                                return null;
+                              })()}
                               <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                             </div>
                           </div>

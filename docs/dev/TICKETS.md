@@ -32,6 +32,7 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 - **vsnp3 markupsafe DeprecationWarning suppression** — ✅ (`PYTHONWARNINGS` exported via `wrap_cmd`, scoped to `markupsafe` module so other DeprecationWarnings still surface)
 - **T-05 Real-time Step 1 log streaming via SSE** — ✅ (`/api/jobs/<id>/events` now multiplexes batch log + per-sample `run_step1.log` files for step1 jobs, prefixing lines with `[batch]`/`[<sample>]`; discovers late-arriving samples mid-stream; smoke test in `backend/app/test_step1_sse_smoke.py` covers the multiplex behavior)
 - **T-09 Sample QC badges** — ✅ (three-tier pass/review/fail chip in Step 1 + post-hoc tables, computed backend-side from `*_stats.xlsx` against thresholds in `config.DEFAULTS["qc_thresholds"]`; merge order is module defaults < user config < project.json override; reasons surfaced on hover)
+- **T-16 KapurLab landing page** — ✅ (custom `dashboard/index.html.erb` override at `/etc/ood/config/apps/dashboard/views/`; A2 three-pane layout Data | Pipelines + Active work | System; Phase 3 live data sources cpu/mem/storage from `/proc` + `df`, active sessions from `BatchConnect::Session.all`, data list from group-aware filesystem walk, account role from group membership; `wgs_pipelines.yml` carries the declarative pipeline cards + footer + onboarding)
 - **T-07 Run provenance** — ✅ (per-step `run_metadata.json` with dispatch→finalize drift detection, vsnp_gui git + vsnp3 patch + env snapshot + reference manifest + inputs + outputs all hashed; writer at `backend/app/provenance_writer.py`, reader/indexer at `backend/app/vsnp_provenance/`; JobManager `finalize_callback` indexes inline with soft-fail to `metadata_failures.jsonl`; SQLite indexer at `/srv/kapurlab/audit/runs.sqlite` with hourly gc + nightly crawl/export cron at `/etc/cron.d/vsnp_gui-provenance`; `deploy/admin/{verify_provenance.py,kapurlab-rename-project.sh,provenance-cron.sh,vsnp_gui-provenance.cron}`; verified end-to-end on `/home/vxk1/projects/quick2` — 89 PASS, 0 WARN)
 
 Side fixes shipped along the way: `API_BASE` localhost fallback, `step2_setup` manifest-write bug, reference alias map last-writer-wins, `step1_vcfs` count fix, vsnp3 column[0] pandas-2 patch, IGV Google OAuth nag.
@@ -117,15 +118,19 @@ Captures, per Step 1 / Step 2 invocation, everything needed to reproduce a run:
 
 ## Milestone B — Lab-friendly experience (polish + onboarding)
 
-### T-16 KapurLab landing page — ⏳ (3 phases)
+### T-16 KapurLab landing page — ✅
 
-Visual rebuild of the OOD dashboard per the layout mockup (`kapurlab_landing_mockup_v2.html` layout A2 — three-pane: Data | Pipelines + Active work | System).
+Replaces the OOD-default home (OnDemand logo + generic HPC welcome copy + pinned-apps grid) with a three-pane KapurLab dashboard: **Data | Pipelines + Active work | System**. Brand strip with live host pill + dynamic status pill above; Penn State / WGS3 footer below. Visual system per the v2 mockup — warm cream background, Fraunces serif for headings, IBM Plex Sans for body, IBM Plex Mono for paths and timestamps, terra-cotta accent for CTAs.
 
-- **Phase 1**: announcement frontmatter fix (the leaking `type: info`), brand bg/title polish, locale overrides, footer cleanup. Pure cosmetics + bug. ~2 h.
-- **Phase 2**: custom `welcome.html.erb` partial rendering A2 layout with mocked data (read from `wgs_pipelines.yml`). Validates the OOD Rails view-override path before backend wiring. ~½ day.
-- **Phase 3**: live data — group filtering on `/srv/kapurlab/projects/`, real `df`/`/proc/loadavg`, jobs from vsnp_gui's `JobManager` (no Slurm on this box), composite status pill. ~1 day.
+**Mechanism**: a Rails view override at `deploy/ood/portal/apps/dashboard/views/dashboard/index.html.erb`, installed at `/etc/ood/config/apps/dashboard/views/dashboard/index.html.erb`. Rails reloads partials on file change (PUN kill required only on the first install). Replaces the OOD-default welcome banner *and* the `dashboard_layout.rows` widget iteration — neither runs.
 
-Replaces the standalone "Open vSNP GUI" button as the home. Carries the foundation for adding kraken/MHC entries.
+- **Phase 1** (cosmetics + bug): announcement `type: info` leak fixed earlier in the day; `brand_bg_color` matched to mockup `#1c3754`; `pinned_apps: []` because the override renders its own grid.
+- **Phase 2** (Rails override path + mocked layout): partial installed at `/etc/ood/config/apps/dashboard/views/dashboard/index.html.erb`, mocked data sourced from `deploy/ood/portal/wgs_pipelines.yml`. Validated the OOD view-override mechanism before backend wiring.
+- **Phase 3** (live data): the partial now computes every section inline. System metrics from `/proc/loadavg` + `/proc/meminfo` + `df -B1 /srv/kapurlab`; active sessions from `BatchConnect::Session.all`; data lists from a group-aware filesystem walk (project visibility gated on `proj-<name>` group membership or `kapurlab-admins`); account role from `kapurlab-admins` / `kapurlab-members` group lookup with project count appended. Brand-strip status pill flips to a beta-coloured "Resource pressure" variant when any system metric crosses its 80–85% warn threshold.
+
+**Declarative bits remaining in `wgs_pipelines.yml`**: pipeline cards (vSNP3 available + Desktop / Kraken / MHC coming-soon), footer copy, onboarding links. Pipeline cards are the right place to evolve as kraken/MHC apps actually land.
+
+The "Open vSNP GUI" standalone button is gone; vSNP3 lives in the Pipelines grid.
 
 ### T-09 Sample QC badges — ✅
 

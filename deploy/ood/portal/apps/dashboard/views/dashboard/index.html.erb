@@ -56,9 +56,10 @@
   }
   fmt_kb = ->(kb) {
     case
-    when kb >= 1_048_576 then format('%.1f TB', kb / 1_048_576.0)
-    when kb >= 1_024     then format('%d GB',   kb / 1_024)
-    else                       format('%d MB',  kb)
+    when kb >= 1_073_741_824 then format('%.1f TB', kb / 1_073_741_824.0)  # 1 TiB = 1024**3 KiB
+    when kb >= 1_048_576     then format('%d GB',   kb / 1_048_576)         # 1 GiB = 1024**2 KiB
+    when kb >= 1_024         then format('%d MB',   kb / 1_024)             # 1 MiB = 1024 KiB
+    else                          format('%d KB',   kb)
     end
   }
 

@@ -821,6 +821,16 @@ export default function App() {
     window.open(url, "_blank");
   }
 
+  function previewXlsx(path) {
+    if (!selectedProject || !path) return;
+    const url = `${API_BASE}/api/projects/${selectedProject}/preview-xlsx?path=${encodeURIComponent(path)}`;
+    window.open(url, "_blank", "noopener");
+  }
+
+  function isXlsx(path) {
+    return /\.(xlsx|xlsm)$/i.test(path || "");
+  }
+
   async function openPosthocOutput(path) {
     if (!path) return;
     await fetch(`${API_BASE}/api/posthoc/open`, {
@@ -3440,7 +3450,11 @@ export default function App() {
                       <div className="results-path">{item.path}</div>
                     </div>
                     <div className="results-actions">
-                      <button onClick={() => openOutput(item.path)}>Open</button>
+                      {isXlsx(item.path) ? (
+                        <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>
+                      ) : (
+                        <button onClick={() => openOutput(item.path)}>Open</button>
+                      )}
                       <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                     </div>
                   </div>
@@ -3465,7 +3479,11 @@ export default function App() {
                               {isTre ? (
                                 <button onClick={() => window.open(treeUrl, "_blank", "noopener")} title="Open tree viewer in a new tab">View tree</button>
                               ) : null}
-                              <button onClick={() => openOutput(item.path)}>Open</button>
+                              {isXlsx(item.path) ? (
+                                <button onClick={() => previewXlsx(item.path)} title="View formatted xlsx in a new tab">View</button>
+                              ) : (
+                                <button onClick={() => openOutput(item.path)}>Open</button>
+                              )}
                               <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
                             </div>
                           </div>

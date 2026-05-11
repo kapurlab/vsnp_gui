@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -2356,6 +2356,34 @@ def open_path(project: str, payload: OpenRequest):
         raise HTTPException(status_code=404, detail="File not found")
     _open_path(target, cfg)
     return {"opened": str(target)}
+
+
+@app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
+def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
+    """Render an xlsx file as a self-contained HTML page (formatting preserved
+    via openpyxl). With ?download=1, returns the raw xlsx (for the "Download
+    xlsx" link inside the preview page)."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    target = Path(path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.suffix.lower() not in (".xlsx", ".xlsm"):
+        raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
+    if download:
+        return FileResponse(
+            target,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=target.name,
+        )
+    from app import xlsx_html
+    try:
+        html_page = xlsx_html.xlsx_to_html(target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
+    return HTMLResponse(content=html_page)
 
 
 @app.get("/api/projects/{project}/download-file")

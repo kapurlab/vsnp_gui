@@ -2404,15 +2404,35 @@ def download_file(project: str, path: str = Query(...), inline: int = 0):
         raise HTTPException(status_code=404, detail="File not found")
     media_type = "application/octet-stream"
     suffix = target.suffix.lower()
-    if suffix == ".html":
+    # Map suffix -> MIME so browsers render inline (?inline=1 path) for
+    # everything the frontend's fileViewMode() flags as viewable. Without
+    # this, e.g. JSON returns octet-stream and browsers force-download.
+    if suffix in (".html", ".htm"):
         media_type = "text/html"
     elif suffix == ".csv":
         media_type = "text/csv"
-    elif suffix in (".xlsx", ".xls"):
+    elif suffix in (".xlsx", ".xls", ".xlsm"):
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     elif suffix == ".pdf":
         media_type = "application/pdf"
-    elif suffix in (".tre", ".nwk", ".nexus", ".nex", ".fasta", ".fa", ".vcf", ".txt", ".tsv", ".log"):
+    elif suffix == ".json":
+        media_type = "application/json"
+    elif suffix == ".svg":
+        media_type = "image/svg+xml"
+    elif suffix == ".png":
+        media_type = "image/png"
+    elif suffix in (".jpg", ".jpeg"):
+        media_type = "image/jpeg"
+    elif suffix == ".gif":
+        media_type = "image/gif"
+    elif suffix == ".webp":
+        media_type = "image/webp"
+    elif suffix in (
+        ".tre", ".nwk", ".nexus", ".nex",
+        ".fasta", ".fa", ".fna",
+        ".vcf", ".txt", ".tsv", ".log",
+        ".yaml", ".yml", ".md",
+    ):
         media_type = "text/plain"
     if inline:
         return FileResponse(target, media_type=media_type)

@@ -326,13 +326,27 @@ def xlsx_to_html(xlsx_path: Path, title: str | None = None) -> str:
                 if coord != anchor:
                     merged_skip.add(coord)
 
-    # Column widths — openpyxl's `width` is in Excel character units;
-    # roughly 7px per unit gives a usable approximation.
+    # Column widths — openpyxl stores column-range widths under a single
+    # anchor key with `.min` / `.max` spanning the range (e.g. one entry on
+    # `B` covers cols 2..52). Resolve to a per-column-index map first, then
+    # emit the <colgroup>. Excel char-units → px is ~7 for Calibri 11pt.
+    col_widths_units: dict[int, float] = {}
+    for _letter, dim in ws.column_dimensions.items():
+        if dim.width is None:
+            continue
+        lo = dim.min if dim.min is not None else 1
+        hi = dim.max if dim.max is not None else lo
+        for ci in range(lo, hi + 1):
+            col_widths_units[ci] = float(dim.width)
+    default_width_units = (
+        float(ws.sheet_format.defaultColWidth)
+        if ws.sheet_format and ws.sheet_format.defaultColWidth
+        else 8.43  # Excel's documented default
+    )
     colgroup_parts: list[str] = []
     for col_idx in range(1, ws.max_column + 1):
-        letter = get_column_letter(col_idx)
-        dim = ws.column_dimensions.get(letter)
-        width_px = int(round(dim.width * 7)) if (dim and dim.width) else 80
+        w_units = col_widths_units.get(col_idx, default_width_units)
+        width_px = max(int(round(w_units * 7)), 16)  # never collapse a column to invisible
         colgroup_parts.append(f'<col style="width: {width_px}px">')
 
     # Frozen panes: openpyxl exposes ws.freeze_panes as the top-left of the
@@ -436,13 +450,19 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     background: white;
     font-size: 13px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    table-layout: fixed;  /* honor <colgroup> widths */
   }}
   table.xlsx td {{
-    padding: 3px 8px;
+    padding: 2px 4px;
     border: 1px solid #eee;  /* light default; cell inline styles override */
     white-space: nowrap;
     vertical-align: middle;
+    text-align: center;
+    overflow: visible;  /* let rotated annotation rows extend past the row when needed */
   }}
+  /* Sample-name column (anchored at first column) should left-align its long
+     identifiers rather than centering. */
+  table.xlsx td:first-child {{ text-align: left; padding-left: 8px; }}
   .xlsx-sticky-top {{ position: sticky; top: 0; z-index: 2; background: var(--xlsx-header-bg); }}
   .xlsx-sticky-left {{ position: sticky; left: 0; z-index: 1; background: var(--xlsx-header-bg); }}
   .xlsx-sticky-top.xlsx-sticky-left {{ z-index: 3; }}
@@ -451,8 +471,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     white-space: nowrap;
     vertical-align: bottom;
     text-align: left;
-    padding: 6px 4px;
-    min-width: 18px;
+    padding: 4px 1px;  /* tight horizontal — narrow column is already the rotated text height */
   }}
   .xlsx-rot-up {{ writing-mode: vertical-rl; transform: rotate(180deg); }}
   .xlsx-rot-down {{ writing-mode: vertical-rl; }}

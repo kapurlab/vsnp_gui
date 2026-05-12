@@ -994,6 +994,59 @@ export default function App() {
     }
   }
 
+  // Group paired-end fastq files into a single sample row in the
+  // "Files in download/" list. Matches SRA convention (SRR<n>_1.fastq.gz +
+  // _2.fastq.gz) and Illumina convention (Sample_R1[_001].fastq.gz +
+  // _R2[_001].fastq.gz). Anything that doesn't match either stays solo.
+  function groupPairedFiles(files) {
+    const PAIR_RE = /^(.+?)_R?([12])(?:_\d+)?\.(?:fastq|fq)(?:\.gz)?$/i;
+    const groups = [];
+    const sampleIdx = new Map();
+    for (const f of files) {
+      const m = f.name.match(PAIR_RE);
+      if (m) {
+        const sample = m[1];
+        if (sampleIdx.has(sample)) {
+          const g = groups[sampleIdx.get(sample)];
+          g.files.push(f);
+          g.totalSize += f.size;
+          g.isPair = g.files.length === 2;
+        } else {
+          sampleIdx.set(sample, groups.length);
+          groups.push({ sample, files: [f], totalSize: f.size, isPair: false });
+        }
+      } else {
+        groups.push({ sample: f.name, files: [f], totalSize: f.size, isPair: false });
+      }
+    }
+    return groups;
+  }
+
+  async function deletePair(groupFiles) {
+    if (!selectedProject || !groupFiles.length) return;
+    const label = groupFiles.length > 1
+      ? `${groupFiles.length} paired files (${groupFiles.map((f) => f.name).join(", ")})`
+      : groupFiles[0].name;
+    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    for (const f of groupFiles) {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/projects/${selectedProject}/inputs/${encodeURIComponent(f.name)}`,
+          { method: "DELETE" },
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          window.alert(`Delete of ${f.name} failed: ${err.detail || res.statusText}`);
+          return;
+        }
+      } catch (e) {
+        window.alert(`Delete of ${f.name} failed: ${e.message}`);
+        return;
+      }
+    }
+    loadInputs(selectedProject);
+  }
+
   async function deleteInput(filename) {
     if (!selectedProject) return;
     if (!window.confirm(`Delete ${filename}? This cannot be undone.`)) return;
@@ -2188,32 +2241,43 @@ export default function App() {
                     ) : null}
                     {inputs.files.length > 0 ? (
                       <div style={{display:"flex", flexDirection:"column", gap:"3px", maxHeight:"260px", overflowY:"auto"}}>
-                        {inputs.files.map((f) => (
-                          <div
-                            key={f.name}
-                            style={{
-                              display:"flex", alignItems:"center", gap:"8px",
-                              padding:"4px 8px",
-                              background:"var(--panel-2)",
-                              border:"1px solid var(--border)",
-                              borderRadius:"6px",
-                              fontSize:"12px",
-                            }}
-                          >
-                            <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={f.name}>
-                              {f.name}
-                            </span>
-                            <span className="muted" style={{minWidth:"70px", textAlign:"right"}}>{_formatBytes(f.size)}</span>
-                            <button
-                              type="button"
-                              className="chip-remove"
-                              onClick={() => deleteInput(f.name)}
-                              title={`Delete ${f.name}`}
+                        {groupPairedFiles(inputs.files).map((g) => {
+                          const tip = g.files.map((f) => `${f.name} (${_formatBytes(f.size)})`).join("\n");
+                          return (
+                            <div
+                              key={g.files.map((f) => f.name).join("|")}
+                              style={{
+                                display:"flex", alignItems:"center", gap:"8px",
+                                padding:"4px 8px",
+                                background:"var(--panel-2)",
+                                border:"1px solid var(--border)",
+                                borderRadius:"6px",
+                                fontSize:"12px",
+                              }}
                             >
-                              ×
-                            </button>
-                          </div>
-                        ))}
+                              <span
+                                style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}
+                                title={tip}
+                              >
+                                {g.sample}
+                                {g.isPair ? (
+                                  <span className="muted" style={{marginLeft:"6px", fontSize:"10.5px"}}>
+                                    paired · R1+R2
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="muted" style={{minWidth:"70px", textAlign:"right"}}>{_formatBytes(g.totalSize)}</span>
+                              <button
+                                type="button"
+                                className="chip-remove"
+                                onClick={() => deletePair(g.files)}
+                                title={g.isPair ? `Delete both ${g.files.map((f) => f.name).join(" + ")}` : `Delete ${g.files[0].name}`}
+                              >
+                                ×
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : null}
                   </div>

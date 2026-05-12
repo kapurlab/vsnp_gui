@@ -1432,26 +1432,37 @@ def step1_status(project: str):
             continue
         sample = sample_dir.name
         log_path = sample_dir / "run_step1.log"
+        exit_code_path = sample_dir / ".provenance" / "exit_code"
         vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
         nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+
+        # Status logic (in priority order):
+        #   1. .provenance/exit_code present  → authoritative per-sample terminal
+        #      state (T-07 sentinel written by the bash batch after vsnp3_step1.py
+        #      exits). 0 = success, non-zero = real failure.
+        #   2. Outputs (VCF + BAM) present     → complete (legacy projects pre-T-07
+        #      sentinels, or sentinel write raced).
+        #   3. log_path exists + job running   → still running.
+        #   4. log_path exists + job not running → unknown (sample's bash leg died
+        #      before writing the sentinel — kill / OOM / batch interrupted).
+        #   5. else                            → not_started.
+        # The previous heuristic grepped the running log for "Error:" / "Exception"
+        # / "Traceback", which false-positives on vsnp3's verbose intermediate
+        # output (deprecation warnings, etc) and made every sample flicker into
+        # "Error" before transitioning to "Complete" once the VCF landed.
         status = "not_started"
-        log_tail = ""
-        if log_path.exists():
+        exit_code_str = ""
+        if exit_code_path.exists():
             try:
-                with open(log_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()[-200:]
-                    log_tail = "".join(lines)
+                exit_code_str = exit_code_path.read_text(encoding="utf-8").strip()
             except OSError:
-                log_tail = ""
-        if vcf and nodup:
+                exit_code_str = ""
+        if exit_code_str:
+            status = "complete" if exit_code_str == "0" else "error"
+        elif vcf and nodup:
             status = "complete"
-        elif log_tail:
-            if "Traceback" in log_tail or "Error:" in log_tail or "Exception" in log_tail:
-                status = "error"
-            elif job_status == "running":
-                status = "running"
-            else:
-                status = "unknown"
+        elif log_path.exists():
+            status = "running" if job_status == "running" else "unknown"
         statuses.append({
             "sample": sample,
             "status": status,

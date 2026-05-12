@@ -104,8 +104,18 @@ def _expand_single(accession: str) -> List[str]:
         raise SRAExpansionError(f"could not resolve {accession}: {type(e).__name__}: {e}") from e
 
 
-def build_download_script(download_dir: Path, accessions: List[str], allow_insecure_https: bool) -> str:
+def build_download_script(
+    download_dir: Path,
+    accessions: List[str],
+    allow_insecure_https: bool,
+    concurrency: int = 4,
+) -> str:
+    """Generate a bash script that downloads each accession via xargs -P
+    parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
+    per-IP S3 throttling and the local fasterq-dump CPU/disk start to bite,
+    so 4 is the documented sweet spot."""
     curl_insecure = "-k" if allow_insecure_https else ""
+    concurrency = max(1, int(concurrency))
     acc_block = "\n".join([f'    "{a}"' for a in accessions])
 
     return f"""#!/bin/bash
@@ -283,26 +293,19 @@ method3() {{
   return 0
 }}
 
-# ── Main download loop ─────────────────────────────────────────
+# ── Per-accession worker (called by xargs in parallel) ─────────
 
-ACCESSIONS=(
-{acc_block}
-)
-
-SUCCEEDED=0
-FAILED_COUNT=0
-FAILED_LIST=""
-
-for acc in "${{ACCESSIONS[@]}}"; do
+download_one() {{
+  local acc="$1"
   echo "── $acc ──"
 
   if already_have "$acc"; then
-    echo "  Already have reads for $acc, skipping"
-    SUCCEEDED=$((SUCCEEDED + 1))
-    continue
+    echo "  [$acc] Already have reads, skipping"
+    echo "ok" > ".status_${{acc}}"
+    return 0
   fi
 
-  downloaded=0
+  local downloaded=0
   for method in method1 method2 method3; do
     if $method "$acc"; then
       downloaded=1
@@ -311,18 +314,56 @@ for acc in "${{ACCESSIONS[@]}}"; do
   done
 
   if [ "$downloaded" -eq 1 ] && already_have "$acc"; then
-    echo "  [OK] $acc downloaded successfully"
+    echo "  [$acc] [OK] downloaded"
+    echo "ok" > ".status_${{acc}}"
+  else
+    echo "  [$acc] [FAILED] all methods exhausted"
+    echo "fail" > ".status_${{acc}}"
+  fi
+}}
+
+# xargs subshells need our functions and the HAS_*/CAN_* state.
+export -f download_one already_have compress_fastqs method1 method2 method3
+export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ
+export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
+
+# ── Main download loop (parallel via xargs -P) ────────────────
+
+ACCESSIONS=(
+{acc_block}
+)
+
+# Clear any stale status files from a prior run in this same dir.
+for acc in "${{ACCESSIONS[@]}}"; do rm -f ".status_${{acc}}"; done
+
+echo "Dispatching ${{#ACCESSIONS[@]}} accessions across {concurrency} parallel workers..."
+echo "(per-accession lines will interleave; look for '[ACC]' prefix)"
+echo ""
+
+# -P {concurrency}: up to N workers. -I {{}}: substitute placeholder per call.
+# -n 1: one accession per worker call. bash -c '...' "" {{}} passes the
+# accession as $1 to download_one.
+printf '%s\n' "${{ACCESSIONS[@]}}" | \
+  xargs -P {concurrency} -n 1 -I {{}} bash -c 'download_one "$@"' _ {{}}
+
+# ── Tally results from status files ────────────────────────────
+
+SUCCEEDED=0
+FAILED_COUNT=0
+FAILED_LIST=""
+for acc in "${{ACCESSIONS[@]}}"; do
+  if [ -f ".status_${{acc}}" ] && [ "$(cat ".status_${{acc}}")" = "ok" ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
   else
-    echo "  [FAILED] All methods failed for $acc"
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_LIST="$FAILED_LIST $acc"
   fi
-  echo ""
+  rm -f ".status_${{acc}}"
 done
 
 # ── Summary ─────────────────────────────────────────────────────
 
+echo ""
 echo "== Summary =="
 echo "Succeeded: $SUCCEEDED / ${{#ACCESSIONS[@]}}"
 

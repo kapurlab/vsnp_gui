@@ -14,7 +14,16 @@ v2:
     site_timeout: 7200
     debug: true
     singularity_bin: /usr/bin/singularity
-    singularity_bindpath: /etc,/home,/tmp,/opt,/usr,/var,/srv
+    # /etc/resolv.conf on the host is a symlink to /run/systemd/resolve/
+    # stub-resolv.conf (pointing at the 127.0.0.53 systemd-resolved stub).
+    # Without an explicit bind, the symlink dangles inside the container
+    # (no /run is mounted) and DNS silently fails — which surfaces as
+    # "Temporary failure in name resolution" the moment any in-container
+    # process tries to talk to eutils.ncbi.nlm.nih.gov / ENA / S3 / etc.
+    # The :/etc/resolv.conf bind below pins the real resolv.conf (with
+    # upstream DNS IPs 128.118.25.3 / 128.118.70.5) over the broken
+    # symlink so SRA downloads work.
+    singularity_bindpath: /etc,/home,/tmp,/opt,/usr,/var,/srv,/run/systemd/resolve/resolv.conf:/etc/resolv.conf
     singularity_image: /opt/ood/ondemand/ood_default.sif
     strict_host_checking: false
     tmux_bin: /usr/bin/tmux

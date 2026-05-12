@@ -44,6 +44,11 @@ export default function App() {
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [excluded, setExcluded] = useState({});
   const [step1Status, setStep1Status] = useState([]);
+  // Batch-level status from /step1/status (returned alongside per-sample
+  // statuses). "running" disables the Run button so clicks can't spawn a
+  // second concurrent batch. Empty string when no batch has ever been
+  // run for this project.
+  const [step1JobStatus, setStep1JobStatus] = useState("");
   const [step1StatusError, setStep1StatusError] = useState("");
   const [step1LogSample, setStep1LogSample] = useState("");
   const [step1LogText, setStep1LogText] = useState("");
@@ -519,6 +524,15 @@ export default function App() {
     loadQC();
     setStep1AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step1AutoRefreshPending]);
+
+  // Poll /step1/status while a batch is in flight so the Run button
+  // accurately reflects the backend state (re-enables when the batch
+  // finishes, even on page reloads where the SSE jobId tracking is lost).
+  useEffect(() => {
+    if (step1JobStatus !== "running") return;
+    const t = setInterval(loadStep1Status, 5000);
+    return () => clearInterval(t);
+  }, [step1JobStatus, selectedProject]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -1382,6 +1396,7 @@ export default function App() {
       }
       const data = await res.json();
       setStep1Status(data.samples || []);
+      setStep1JobStatus(data.job_status || "");
     } catch (err) {
       setStep1StatusError("Failed to load Step 1 status");
     }
@@ -2576,7 +2591,13 @@ export default function App() {
               </label>
               <div className="step1-actions">
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
-                <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference}>Run</button>
+                <button
+                  onClick={step1Run}
+                  disabled={!selectedProject || !settingsReady || !reference || step1JobStatus === "running"}
+                  title={step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish" : ""}
+                >
+                  {step1JobStatus === "running" ? "Running…" : "Run"}
+                </button>
               </div>
             </div>
             <div className="step1-status">

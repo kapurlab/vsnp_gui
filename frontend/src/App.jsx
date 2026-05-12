@@ -1103,12 +1103,27 @@ export default function App() {
     if (!accessions.length) return;
     setSraStatus(`Downloading ${accessions.length} accession${accessions.length > 1 ? "s" : ""}...`);
     setShowRowLogs(true);
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/sra/download`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessions, folder: sraFolder || null })
-    });
-    const data = await res.json();
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/projects/${selectedProject}/sra/download`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessions, folder: sraFolder || null })
+      });
+    } catch (e) {
+      setSraStatus(`Download failed: ${e.message || "network error"}`);
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    if (!res.ok) {
+      // Backend surfaces NCBI eutils failures (rate-limit, etc.) as 502 with a
+      // useful `detail`. Surface it so users don't see a generic spinner that
+      // never clears.
+      const detail = data.detail || `HTTP ${res.status}`;
+      setSraStatus(`Download failed: ${detail}`);
+      return;
+    }
     setJobId(data.job_id);
     setSraJobId(data.job_id);
   }

@@ -1261,6 +1261,28 @@ def step1_run(project: str, payload: Step1Request):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
+    # Refuse to spawn a second batch while a prior step1 job is still
+    # running — concurrent batches share the same per-sample dirs and race
+    # over the SAM / log / .provenance/exit_code files, producing the
+    # FileNotFoundError-on-temp_fastq_seqkit_stats.txt class of failures
+    # we hit on the M. sciuri panel. 409 is the right shape; the frontend
+    # surfaces it via the same setSraStatus-style error handler.
+    prior_job_id_path = step1_dir / ".step1_job_id"
+    if prior_job_id_path.exists():
+        try:
+            prior_id = prior_job_id_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            prior_id = ""
+        if prior_id:
+            prior_job = job_manager.get_job(prior_id)
+            if prior_job and prior_job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Step 1 is already running (job {prior_id}). "
+                        "Wait for it to finish before clicking Run again."
+                    ),
+                )
     script_path = step1_dir / "run_step1.sh"
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
@@ -1349,18 +1371,26 @@ def step1_run(project: str, payload: Step1Request):
             "  cd ..",
             "  return $STATUS",
             "}",
+            # Rolling worker pool. `wait -n` (bash 4.3+) blocks until ANY
+            # backgrounded job finishes — vs the previous `wait $pids[0]`
+            # which blocked on a specific PID and stalled the queue when the
+            # head was the slowest sample, capping effective parallelism well
+            # below MAX_PARALLEL on heterogeneous inputs.
             "pids=()",
             "for d in */; do",
             "  run_sample \"$d\" &",
             "  pids+=(\"$!\")",
             "  if [ ${#pids[@]} -ge \"$MAX_PARALLEL\" ]; then",
-            "    pid=${pids[0]}",
-            "    wait \"$pid\" || FAIL=1",
-            "    pids=(\"${pids[@]:1}\")",
+            "    wait -n || FAIL=1",
+            "    new_pids=()",
+            "    for p in \"${pids[@]}\"; do",
+            "      if kill -0 \"$p\" 2>/dev/null; then new_pids+=(\"$p\"); fi",
+            "    done",
+            "    pids=(\"${new_pids[@]}\")",
             "  fi",
             "done",
-            "for pid in \"${pids[@]}\"; do",
-            "  wait \"$pid\" || FAIL=1",
+            "for p in \"${pids[@]}\"; do",
+            "  wait \"$p\" || FAIL=1",
             "done",
             "OVERALL_END=$(date +%s)",
             "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",

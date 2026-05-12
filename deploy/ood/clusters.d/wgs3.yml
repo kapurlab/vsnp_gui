@@ -16,14 +16,17 @@ v2:
     singularity_bin: /usr/bin/singularity
     # /etc/resolv.conf on the host is a symlink to /run/systemd/resolve/
     # stub-resolv.conf (pointing at the 127.0.0.53 systemd-resolved stub).
-    # Without an explicit bind, the symlink dangles inside the container
-    # (no /run is mounted) and DNS silently fails — which surfaces as
-    # "Temporary failure in name resolution" the moment any in-container
-    # process tries to talk to eutils.ncbi.nlm.nih.gov / ENA / S3 / etc.
-    # The :/etc/resolv.conf bind below pins the real resolv.conf (with
-    # upstream DNS IPs 128.118.25.3 / 128.118.70.5) over the broken
-    # symlink so SRA downloads work.
-    singularity_bindpath: /etc,/home,/tmp,/opt,/usr,/var,/srv,/run/systemd/resolve/resolv.conf:/etc/resolv.conf
+    # Without /run/systemd/resolve mounted, the symlink dangles inside the
+    # container and DNS silently fails — every in-container process trying
+    # to reach eutils.ncbi.nlm.nih.gov / ENA / S3 / etc. hits "Temporary
+    # failure in name resolution". Binding the directory makes the symlink
+    # resolve; 127.0.0.53 is reachable because Singularity shares the
+    # host's network namespace by default. Verified eutils returns 200
+    # from inside the container with this bind in place.
+    # (A file-to-file bind onto /etc/resolv.conf was tried first and
+    # rejected by Singularity — the destination must already exist as a
+    # regular file inside the image, which it doesn't.)
+    singularity_bindpath: /etc,/home,/tmp,/opt,/usr,/var,/srv,/run/systemd/resolve
     singularity_image: /opt/ood/ondemand/ood_default.sif
     strict_host_checking: false
     tmux_bin: /usr/bin/tmux

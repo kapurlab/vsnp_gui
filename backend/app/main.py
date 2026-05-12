@@ -3040,7 +3040,31 @@ def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
 
 
 def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
+    """Map every plausible FASTA stem -> reference directory name.
+
+    vsnp3_step1.py copies the reference FASTA into each sample's alignment
+    dir and renames it, stripping NCBI version suffixes — so a reference
+    FASTA shipped as `NZ_LS483305.1.fasta` becomes `NZ_LS483305.fasta` in
+    the sample dirs, and the resulting VCF's `##reference=` points at the
+    renamed file. To survive that rename, index both the original stem
+    and the version-stripped form (and a fully-extensionless variant for
+    multi-dot filenames like `MTBC0_v1.1.fasta`).
+    """
+    import re
     aliases: Dict[str, str] = {}
+
+    def _add(key: str, name: str) -> None:
+        if not key:
+            return
+        existing = aliases.get(key)
+        if existing is None:
+            aliases[key] = name
+            return
+        # Prefer the more-specific match if a stem collides across refs.
+        key_lc = key.lower()
+        if key_lc in name.lower() and key_lc not in existing.lower():
+            aliases[key] = name
+
     refs = list_references(vsnp3_path)
     for ref in refs:
         name = ref.get("name")
@@ -3050,13 +3074,17 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
         for ext in (".fa", ".fasta", ".fna", ".fas"):
             for fasta in base.rglob(f"*{ext}"):
                 stem = fasta.stem
-                existing = aliases.get(stem)
-                if existing is None:
-                    aliases[stem] = name
-                    continue
-                stem_lc = stem.lower()
-                if stem_lc in name.lower() and stem_lc not in existing.lower():
-                    aliases[stem] = name
+                _add(stem, name)
+                # NCBI version-suffix variant: `NZ_LS483305.1` -> `NZ_LS483305`.
+                stripped = re.sub(r"\.\d+$", "", stem)
+                if stripped != stem:
+                    _add(stripped, name)
+                # Fully extensionless variant for multi-dot stems like
+                # `MTBC0_v1.1` -> would still resolve via the previous rule,
+                # but covers anything else weird.
+                root = fasta.name.split(".", 1)[0]
+                if root and root != stem:
+                    _add(root, name)
             if name in aliases.values():
                 break
     return aliases

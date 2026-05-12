@@ -1,10 +1,64 @@
+import logging
+import os
+import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List
 
+logger = logging.getLogger(__name__)
 
-def expand_accessions(accessions: List[str]) -> List[str]:
+# NCBI eutils rate limits: 3 req/s without an API key, 10 req/s with one.
+# Stay slightly under either limit so we don't trip 429 under load. Once we
+# do trip 429 NCBI typically blocks for several seconds before recovering.
+_NCBI_API_KEY = (os.environ.get("NCBI_API_KEY") or "").strip()
+_MIN_INTERVAL = 0.11 if _NCBI_API_KEY else 0.40
+_RETRY_BACKOFFS = (1.0, 2.0, 4.0, 8.0)  # seconds to wait between retries on 429
+
+_last_call_at = 0.0
+
+
+class SRAExpansionError(Exception):
+    """Raised when SRA-accession expansion against eutils fails so the caller
+    can decide whether to abort or proceed with the unexpanded input."""
+
+
+def _eutils_get(url: str, timeout: int) -> bytes:
+    """GET an eutils URL with simple in-process rate limiting and 429 retry."""
+    global _last_call_at
+    if _NCBI_API_KEY and "api_key=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}api_key={_NCBI_API_KEY}"
+    for attempt in range(len(_RETRY_BACKOFFS) + 1):
+        # Throttle to MIN_INTERVAL since last call across the process.
+        elapsed = time.monotonic() - _last_call_at
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                _last_call_at = time.monotonic()
+                return response.read()
+        except urllib.error.HTTPError as e:
+            _last_call_at = time.monotonic()
+            if e.code == 429 and attempt < len(_RETRY_BACKOFFS):
+                wait = _RETRY_BACKOFFS[attempt]
+                logger.warning("eutils 429; backing off %.1fs (attempt %d)", wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
+def expand_accessions(accessions: List[str], *, strict: bool = False) -> List[str]:
+    """Expand a list of SRA project / study / experiment / sample accessions to
+    their underlying run accessions (SRR/ERR/DRR).
+
+    Already-run accessions pass through unchanged. With strict=True, a failed
+    expansion raises SRAExpansionError; with strict=False (default, legacy
+    behavior) the unexpanded input is returned for that entry. Callers that
+    care about expansion fidelity should use strict=True.
+    """
     expanded: List[str] = []
     for acc in accessions:
         acc = acc.strip()
@@ -13,37 +67,41 @@ def expand_accessions(accessions: List[str]) -> List[str]:
         if acc.startswith(("SRR", "ERR", "DRR")):
             expanded.append(acc)
             continue
-        expanded.extend(_expand_single(acc))
+        try:
+            expanded.extend(_expand_single(acc))
+        except SRAExpansionError:
+            if strict:
+                raise
+            logger.warning("SRA expansion failed for %s; using literal", acc)
+            expanded.append(acc)
     return expanded
 
 
 def _expand_single(accession: str) -> List[str]:
     try:
-        url = (
+        xml_data = _eutils_get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-            f"?db=sra&term={accession}&usehistory=y"
+            f"?db=sra&term={accession}&usehistory=y",
+            timeout=10,
         )
-        with urllib.request.urlopen(url, timeout=10) as response:
-            xml_data = response.read()
         root = ET.fromstring(xml_data)
         ids = [e.text for e in root.findall(".//Id") if e.text]
         if not ids:
             return [accession]
-        fetch_url = (
+        fetch_xml = _eutils_get(
             "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-            f"?db=sra&id={','.join(ids)}"
+            f"?db=sra&id={','.join(ids)}",
+            timeout=30,
         )
-        with urllib.request.urlopen(fetch_url, timeout=30) as response:
-            fetch_xml = response.read()
         fetch_root = ET.fromstring(fetch_xml)
-        runs = []
-        for run in fetch_root.findall(".//RUN"):
-            run_acc = run.get("accession")
-            if run_acc:
-                runs.append(run_acc)
+        runs = [
+            run.get("accession")
+            for run in fetch_root.findall(".//RUN")
+            if run.get("accession")
+        ]
         return runs or [accession]
-    except Exception:
-        return [accession]
+    except (urllib.error.HTTPError, urllib.error.URLError, ET.ParseError, TimeoutError) as e:
+        raise SRAExpansionError(f"could not resolve {accession}: {type(e).__name__}: {e}") from e
 
 
 def build_download_script(download_dir: Path, accessions: List[str], allow_insecure_https: bool) -> str:

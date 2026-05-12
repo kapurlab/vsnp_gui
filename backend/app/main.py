@@ -33,7 +33,7 @@ from app.projects import (
     SCOPE_SHARED,
 )
 from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
-from app.sra import expand_accessions, build_download_script
+from app.sra import expand_accessions, build_download_script, SRAExpansionError
 
 app = FastAPI(title="vSNP GUI API")
 logger = logging.getLogger("uvicorn.error")
@@ -1173,7 +1173,10 @@ def project_input_delete(project: str, filename: str):
 @app.post("/api/projects/{project}/sra/expand")
 def sra_expand(project: str, payload: SraRequest):
     _ = project
-    expanded = expand_accessions(payload.accessions)
+    try:
+        expanded = expand_accessions(payload.accessions, strict=True)
+    except SRAExpansionError as e:
+        raise HTTPException(status_code=502, detail=f"NCBI eutils unavailable: {e}")
     return {"expanded": expanded}
 
 
@@ -1184,7 +1187,22 @@ def sra_download(project: str, payload: SraRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
-    expanded = expand_accessions(payload.accessions)
+    try:
+        expanded = expand_accessions(payload.accessions, strict=True)
+    except SRAExpansionError as e:
+        # Fail fast — building a download script with the literal unexpanded
+        # accession (e.g. SRX*/SRP*) would just produce a guaranteed-fail job.
+        # The 502 status is a hint that the failure is upstream (NCBI), not
+        # the user's input.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Could not resolve SRA accessions via NCBI eutils: {e}. "
+                "This is usually NCBI rate-limiting; wait ~30 s and retry. "
+                "If it persists, set NCBI_API_KEY in the backend env to get a "
+                "10 req/s allowance instead of 3."
+            ),
+        )
     download_root = project_dir / "download"
     if payload.folder:
         safe = Path(payload.folder).name

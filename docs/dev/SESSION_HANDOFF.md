@@ -1,287 +1,189 @@
-# Session handover — May 10 2026
+# Session handover — May 12 2026
 
 Continuation notes for the next Claude session. Read this first, then
 `docs/dev/TICKETS.md` for the broader plan.
 
 ## TL;DR
 
-**Milestone A is ~95% done.** T-19, T-04, T-11, T-12a all ✅. T-21 deferred
-🪝 (Vivek's call — bulk Mac→wgs3 migration superseded by per-project ad-hoc
-upload). T-07 Phase 1 is code-complete, integrated into main.py, and
-verified end-to-end against a real run (`quick_test_NC_045512_wuhan-hu-1`)
-through six rounds of bug-fixing. **What's left: ~65 minutes of focused work
-to call Milestone A done** — re-run end-to-end, build Phase 3 ops glue,
-update TICKETS.md.
+The day was about **getting *Mammaliicoccus sciuri* up as a working
+reference and validating the full vSNP3 pipeline on a real-data panel** —
+turning up and fixing a chain of integration bugs that had never been
+exercised by the MTBC / SARS-CoV-2 work to date. Sixteen commits landed.
 
-**Then Milestone B starts.** Today already shipped T-05 (real-time SSE
-log streaming) as bonus work — the biggest UX pain Vivek hit during the
-session. T-09 (QC badges) and T-16 (KapurLab landing page, 3 phases)
-remain.
+Two test projects are live on wgs3, both pinned to the new
+**`Mammaliicoccus_sciuri_6942A_MS`** reference (cattle isolate, much
+better centroid than the type strain NCTC12103):
 
-`web` branch HEAD: `f04fa7a` Step 2 import: kill textarea write-back
-feedback loop. wgs3 deploy clone in sync. Frontend dist rebuilt.
+- **`Mscuiri_test_6942AMS`** — 8 SRA-derived isolates, step1+step2 ✅,
+  tree rendered, NOT yet re-run after the alias-map fix on `4320772`.
+  Worth a final Setup+Run on step2 to confirm everything is clean.
+- **`Shivasharanappa_panel`** — 7 paired Indian bovine mastitis samples
+  from the user's collaborator, **downsampled locally to ~200× target
+  coverage** before transfer (12 GB → 2.3 GB), pinned to the same
+  cattle reference. **Awaiting first Setup+Run.**
+
+`web` branch HEAD: `4320772` _reference_alias_map: handle vsnp3's
+NCBI-version stem strip. wgs3 deploy clone in sync. Frontend dist rebuilt
+where needed.
 
 ## State to verify when picking up
 
 ```bash
 # Branch + deploy clone match origin/web
 ssh wgs3 'sudo git -C /srv/kapurlab/tools/vsnp_gui log --oneline -1'
-# expect: f04fa7a Step 2 import: kill textarea write-back feedback loop
+# expect: 4320772 _reference_alias_map: handle vsnp3's NCBI-version stem strip
 
-# Latest dist bundle is built from current source
-ssh wgs3 'sudo ls -la /srv/kapurlab/tools/vsnp_gui/frontend/dist/assets/index-*.js'
+# Latest dist bundle on wgs3
+ssh wgs3 'sudo ls /srv/kapurlab/tools/vsnp_gui/frontend/dist/assets/index-*.js'
 
-# Indexer + writer + verifier all import cleanly
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui/backend && \
-    PYTHONPATH=. /srv/kapurlab/tools/vsnp3/bin/python -c \
-    "from app.main import step1_run, step2_run; \
-     from app import provenance_writer; \
-     from app.vsnp_provenance.index import Indexer; \
-     print(\"all imports OK\")"'
+# The two M. sciuri reference dirs exist with full file set
+ssh wgs3 'ls /srv/kapurlab/refs/vsnp3/reference_options/Mammaliicoccus_sciuri_NCTC12103/ && echo --- && ls /srv/kapurlab/refs/vsnp3/reference_options/Mammaliicoccus_sciuri_6942A_MS/'
 
-# Component-level smoke tests should still pass
+# Both M. sciuri projects exist; Shivasharanappa_panel has the downsampled fastqs
+ssh wgs3 'ls /home/vxk1/projects/Mscuiri_test_6942AMS/ /home/vxk1/projects/Shivasharanappa_panel/download/ | head -25'
+
+# Smoke tests still green (T-07 indexer + writer + jobs callback + SSE)
 ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui/backend/app && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_indexer.py 2>&1 | tail -3 && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_writer.py 2>&1 | tail -3 && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_jobs_callback.py 2>&1 | tail -3 && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_step1_sse_smoke.py 2>&1 | tail -3'
+    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_indexer.py 2>&1 | tail -2 && \
+    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_writer.py 2>&1 | tail -2 && \
+    /srv/kapurlab/tools/vsnp3/bin/python test_jobs_callback.py 2>&1 | tail -2'
 ```
 
-## What landed this session (May 10 chronological highlights)
+## What landed this session (May 12 chronological highlights)
 
-**Foundational T-07 work** (the headline):
-- Reader package at `backend/app/vsnp_provenance/{__init__.py, index.py}` — Opus-drafted, 30/30 indexer assertions pass.
-- Writer module at `backend/app/provenance_writer.py` — Opus-drafted against the writer-context doc, 35+ assertions pass. Captures vsnp_gui git, vsnp3 patches, env snapshot, reference folder manifest, edit record refs, VCF DB selections + inventory, all under a frozen `dispatch_state` sub-block per the locked design.
-- JobManager finalize_callback at `backend/app/jobs.py` — 17/17 assertions including soft-fail-with-metadata_failures.jsonl.
-- main.py wiring: `step1_run` and `step2_run` call `provenance_writer.dispatch_*()` before `start_job` and pass a `finalize_callback`. Bash batch script writes `.provenance/{started_at,finished_at,exit_code}` sentinels per sample.
-- Verifier CLI at `deploy/admin/verify_provenance.py` — color-coded PASS/WARN/FAIL punch list; cheaper than eyeballing JSON.
+Sixteen commits, every one shipped + synced. In rough order:
 
-**T-07 design + handoff docs** (substantive):
-- `docs/dev/T-07-red-team-brief.md` — original ask sent to Opus
-- `docs/dev/T-07-red-team-feedback.md` — verbatim schema diff Opus returned
-- `docs/dev/T-07-implementation-plan.md` — synthesis with 5 locked decisions
-- `docs/dev/T-07-writer-context-for-opus.md` — JobManager + main.py shape doc Opus coded against
-- `docs/dev/T-07-jobs-patch.md` — JobManager patch spec (now applied)
+**Browser xlsx preview (T-09 follow-up wave)**
+- `db06542` — initial xlsx → HTML preview endpoint + "View" buttons on step2 outputs. Uses openpyxl-based renderer that walks cells and emits inline-styled `<table>`. Was a placeholder formatting pass.
+- `6ddc685` — rotation 90/180 from `cell.alignment.text_rotation` mapped to CSS `writing-mode: vertical-rl`. Auditing the step2 Open buttons: `.tre/.nwk` get the existing tree-view button; html/fasta/nexus/vcf/txt/tsv/csv/log/json/yaml/md/pdf/png/jpg/svg get a new browser-native "View" via `?inline=1` on /download-file; zip/bam/binary drop the Open entirely.
+- `672086b` — fix column widths: openpyxl stores column-range widths under a single anchor key with `.min`/`.max` spanning the range. The previous lookup was per-letter and missed the implicit range, so cols got the 80px fallback instead of Excel's narrow 20px. Plus `table-layout: fixed` so colgroup widths are honored.
+- `9d9de16` — MIME types filled in on /download-file so inline=1 actually renders (.json → application/json, .svg → image/svg+xml, image types). The provenance "View" button on .json files was downloading instead of rendering.
+- `cd10d96` — fix missing app-logo icon in the OOD reverse-proxy context (origin-rooted `<img src="/...">` was 404'ing because OOD's main nginx doesn't serve from the per-session uvicorn's dist).
 
-**Six bugs caught + fixed during end-to-end testing** (in chronological order of discovery):
-1. `_provenance/` dir leaking as an "Unknown" sample — bash batch + step1_status both filter `_`/`.` prefixed dirs now.
-2. VCF DB filter not matching reference at build time — frontend now filters `vcfDbFolders` by `importReference`.
-3. Step2 reference inheritance — *not reproduced*; screenshot showed the dropdown DID auto-populate, suggesting timing not bug. Logged in commit message; needs reproducer if real.
-4. Env capture empty — diagnosed: no conda binary, no pip in env, dpkg-query empty for conda-installed tools. Added `conda-meta/*.json` fallback (synthesized yaml manifest from filenames) + `<install>/bin/` version probes for samtools/bcftools/bwa/raxml etc. Now produces a real env fingerprint.
-5. Step1 output scan missed `alignment_<ref>/*` files — switched to recursive `**/*` glob, added `_filtered_hapall_annotated.vcf` pattern.
-6. Step2 import textarea write-back feedback loop — auto-discovered DB paths were being written into `importSourcesText` after every build, then re-read on next build, bypassing the reference filter. Killed the write-back; clear textarea on project change.
+**SRA download flow** (the big chain — went from "broken silently" to "fast and informative")
+- `a44d38a` — SRA expander: rate-limit (process-local 0.4s gap, 0.11s with NCBI_API_KEY), retry-on-429 with exponential backoff, narrow exception catch + SRAExpansionError so failures surface instead of silently falling back to the unexpanded literal accession. Endpoint translates to 502 with `detail`.
+- `3061b4d` — frontend: check res.ok and surface backend errors in the SRA Download status line. Was silently swallowing 502s and leaving the spinner stuck forever.
+- `7e89493` → `ebe40ee` — DNS in the OOD Singularity container was broken: host /etc/resolv.conf is a symlink to /run/systemd/resolve/stub-resolv.conf, but /run isn't in the cluster's singularity_bindpath. The first attempt at a `source:dest` file bind got rejected by Singularity (file bind requires destination to exist in image). Switched to a directory bind of `/run/systemd/resolve`. Required killing the dashboard Passenger PUN to force config reload (OOD's `~/ondemand/restart_pun` sentinel didn't fire — see polish item below).
+- `5b21d15` — parallelize the bash download script via `xargs -P 4`. Was a strict for-loop; with 18 accessions that's serial network + serial fasterq-dump. Sweet spot is 4 parallel workers (past ~6 NCBI throttles per-IP). Also: installed `sra-toolkit` apt package on wgs3 so Method 1 (S3 + fasterq-dump) becomes the primary download path, not ENA-curl-only.
 
-**T-05 (Milestone B item, done as bonus)**: `/api/jobs/<id>/events` SSE endpoint multiplexes the batch log with every per-sample `run_step1.log`, prefixed `[batch]` / `[<sample>]`. Discovers late-arriving samples mid-stream. 8/8 multiplexer assertions pass.
+**File-list UX**
+- `ea5a9fe` — collapse paired R1+R2 fastqs into a single sample row in the "Files in download/" panel. SRA-naming (`_1`/`_2`) and Illumina-naming (`_R1`/`_R2[_001]`) both detected via one regex.
 
-**Step 2 + tree polish**:
-- VCF DB v2: auto-discover via `vcf_db_folders_root`, reference-scoped (`<root>/<ref>/<db>/`), per-user opt-out via `disabled_vcf_db_paths`, dropdown UI with sample counts and `[from-assembly]` markers, `shared` badge.
-- mtbc0_v1.1 reference + 4 MTBC VCF DBs (`representative`/`minimum_tree`/`canetti`/`synthetic`) installed at `/srv/kapurlab/refs/vsnp3/`.
-- step2_outputs hides unlabeled `.tre` files when a `_labeled.tre` sibling exists (per-group file panel was offering both, leading users to click into bare-accession leaves).
-- `vsnp3_step2.py` invocations now run quietly: SyntaxWarning fixes patched at source (`deploy/vsnp3-patches/v3.16-kapurlab.patch` extended), markupsafe DeprecationWarning suppressed via `PYTHONWARNINGS` exported by `wrap_cmd`.
+**Step1 reliability**
+- `5936c6e` — provenance_writer._build_step1_inputs accepts SRA `_1`/`_2` fastq naming. The bash step1 batch script already did; the writer only matched literal `R1`/`R2`. Every dispatch on an SRA-named panel was returning DispatchFailed before any job ran. Plus frontend's `step1Run` now surfaces 500 details via alert() (was silently swallowing them, same pattern as the SRA Download fix).
+- `83ea531` — step1 status uses T-07's `.provenance/exit_code` sentinel as the authoritative per-sample terminal signal. Drops the log-substring heuristic that was false-positiving on vsnp3's verbose intermediate output and making every sample flicker through "Error" before transitioning to "Complete".
+- `45a5592` — bash step1 batch loop: use `wait -n` (rolling pool, true throughput-limited parallelism) instead of `wait $pids[0]` (FIFO replacement, capped by slowest in the head batch). And: 409 guard at the top of /step1/run rejecting a second click while an existing step1 job is `running`. Two concurrent batches racing over the same per-sample dir was the actual cause of the seqkit "FileNotFoundError on temp_fastq_seqkit_stats.txt" we hit.
+- `80f59e5` — Run button frontend: disable + relabel "Running…" while step1JobStatus === "running". 5-second polling of /step1/status while the batch is in flight so the disable accurately re-enables after a page reload that lost SSE jobId tracking.
 
-**Step 1 / inputs polish**:
-- Upload UI: explicit "Choose Files" button (replaces flaky bare `<input type="file">`), XHR with real progress display (% / MB / s / MB/s), Cancel button during upload, FileList live-collection bug fix.
-- New "Files in download/" panel under the upload dropzone: lists all files in the project's `download/` with sizes, mtimes, per-file `×` delete. Auto-refreshes after upload completes (success or cancel) and after delete. Backed by new `GET/DELETE /api/projects/<p>/inputs[/<filename>]` endpoints.
-- "Bring Your Own FASTQ" Choose Folder: was a `window.prompt()` for a path in web mode; now a dropdown of every sibling project's `download/` (with `(shared)` annotation) plus a `Custom path…` escape hatch.
+**Reference alias resolution**
+- `4320772` — `_reference_alias_map` indexes both the literal FASTA stem and the NCBI-version-stripped stem. vsnp3_step1.py copies the reference FASTA into each sample's alignment dir and renames it to drop the version suffix (`NZ_LS483305.1.fasta` → `NZ_LS483305.fasta`), so the resulting VCF's `##reference=` points at the renamed file. step2's setup was string-matching on the original stem and pushing every VCF into mismatch_report.csv, leaving vcf_source/ empty and crashing vsnp3_step2.py with "After sample filter: 0".
 
-**QC table polish**:
-- `qc_exclude` auto-save on toggle (debounced 400 ms) + hydrate on project load. The old "Save Exclusions" button is now "Force-save Exclusions" — kept as a manual-flush + alert affordance.
+## Today's biology arc
 
-## Open items, in priority order (Milestone A close-out)
+- Set up **`Mammaliicoccus_sciuri_NCTC12103`** as a new reference (type strain, NCTC12103 = ATCC 29062 = DSM 20345, Sanger Centre 2018, chromosome `NZ_LS483305.1`, 2.81 Mb complete circular). Manual setup: download fasta/gbk/gff via `vsnp3_download_fasta_gbk_gff_by_acc.py`, faidx, .genome, best_reference marker, citation.
+- Search SRA directly for *M. sciuri* Illumina bovine WGS runs → 205 hits across major bovine studies. Curated to 18 representative SRRs, dropped down to 9 after QC review.
+- Ran step1+step2 on the 9-sample panel → tree showed huge branch lengths (~0.40 sub/site of the SNP alignment), suspicious. Investigated and found:
+  - Branch lengths are real, not a bug — high *M. sciuri* intra-species diversity.
+  - **NCTC12103 (squirrel skin, 1960s) is a poor reference for modern cattle isolates.** Most cattle samples are ~0.40 sub/site away on the SNP alignment.
+- Set up **`Mammaliicoccus_sciuri_6942A_MS`** as a second reference (USA cow strain, chromosome `CP099817.1`, 2.77 Mb, SUNY Albany 2022).
+- Re-ran on the cattle reference → root moves INTO the cattle clade (sister to the Swiss pair), sister-taxa structure preserved (WI pair, Swiss pair), but **per-sample branch lengths to the rest of the panel are unchanged** because the distances are intrinsic to the samples, not the reference choice. Confirms the panel has real population structure but the high SNP counts are not a methodological artifact.
+- One sample (`SRR37536882`, Bangladesh "buffalo mastitic milk") was deep outgroup in both trees. Ran sourmash containment as definitive species check:
+  - Cattle control SRR32134413 (known *M. sciuri* from tree): **80.1%** of 6942A_MS reference k-mers present in sample → clean same-species signal.
+  - SRR37536882: **47.5%** k-mer overlap → sibling-species territory (probably *M. lentus*, *M. fleurettii*, or *M. vitulinus*). Removed from both projects.
+- Confirmed Shivasharanappa's collaborator sent **clean replacement fastqs** for the 7 Indian bovine mastitis samples (the original delivery had been corrupted — wrapped/truncated/quality-scrubbed). Downsampled locally to ~200× target before transfer (12 GB → 2.3 GB, ~5× shrink).
 
-### 1. Re-run end-to-end on quick_test (or any project) and verify ✅
+## Live system state (May 12 EOD)
 
-Fresh OOD session → step1 → step2 → run the verifier:
-
-```bash
-ssh wgs3 'sudo -u vxk1 -H /srv/kapurlab/tools/vsnp3/bin/python \
-  /srv/kapurlab/tools/vsnp_gui/deploy/admin/verify_provenance.py \
-  /home/vxk1/projects/quick_test'
-```
-
-Expected after the May 10 fix bundle: ~all PASS, no env-block / outputs WARNs (those were what the May 10 fixes targeted). If anything still WARNs or FAILs, file as a regression — the writer + integration are stable as-of `f04fa7a`.
-
-### 2. Phase 3 ops glue (~45 min)
-
-- **Init the indexer DB on wgs3**:
-  ```bash
-  sudo -u vxk1 -H /srv/kapurlab/tools/vsnp3/bin/python -m vsnp_provenance.index \
-      --db /srv/kapurlab/audit/runs.sqlite init
-  ```
-  (Wrap with PYTHONPATH=/srv/kapurlab/tools/vsnp_gui/backend so the package is findable.)
-
-- **Pre-create env_snapshots dir** with appropriate group ownership so multi-user writes don't race:
-  ```bash
-  sudo install -d -o root -g kapurlab-admins -m 2775 /srv/kapurlab/audit/env_snapshots
-  ```
-  (Writer creates it lazily but explicit ownership is operationally cleaner.)
-
-- **Cron jobs at `/etc/cron.d/vsnp_gui-provenance`**:
-  ```cron
-  # Hourly: mark stuck `running` records as `unknown_terminated` after 48h,
-  # both in the index and on disk
-  0 * * * * vxk1 /srv/kapurlab/tools/vsnp3/bin/python -m vsnp_provenance.index \
-      --db /srv/kapurlab/audit/runs.sqlite gc --max-hours 48 \
-      --projects-root /srv/kapurlab/projects > /dev/null 2>&1
-
-  # Nightly at 02:00: crawl all projects to pick up any records the writer
-  # didn't index inline (failed finalize_callback fallback), then export
-  # to JSONL for archive grep-ability and offsite backup
-  0 2 * * * vxk1 /srv/kapurlab/tools/vsnp3/bin/python -m vsnp_provenance.index \
-      --db /srv/kapurlab/audit/runs.sqlite crawl /srv/kapurlab/projects > /dev/null 2>&1
-  5 2 * * * vxk1 /srv/kapurlab/tools/vsnp3/bin/python -m vsnp_provenance.index \
-      --db /srv/kapurlab/audit/runs.sqlite export \
-      --out /srv/kapurlab/audit/runs.sqlite.jsonl > /dev/null 2>&1
-  ```
-  (Test each command standalone first before installing cron.)
-
-- **`kapurlab-rename-project` admin script** at `deploy/admin/`:
-  ```bash
-  #!/bin/bash
-  set -euo pipefail
-  OLD="$1"; NEW="$2"
-  PROJECTS_ROOT=${PROJECTS_ROOT:-/srv/kapurlab/projects}
-  mv "$PROJECTS_ROOT/$OLD" "$PROJECTS_ROOT/$NEW"
-  /srv/kapurlab/tools/vsnp3/bin/python -m vsnp_provenance.index \
-      --db /srv/kapurlab/audit/runs.sqlite rename \
-      --old "$PROJECTS_ROOT/$OLD" --new "$PROJECTS_ROOT/$NEW" --by "$(whoami)"
-  echo "renamed $OLD -> $NEW; indexer updated"
-  ```
-  Without this, any future `mv` of a project would silently corrupt the indexer's path references.
-
-### 3. TICKETS.md update (~5 min)
-
-Mark T-07 ✅ in the chronological list and the Milestone A section. Note that T-22 (server-pull ingestion), T-23 (db.json metadata), T-24 (synthetic-DB default-off), T-25 (upstream vsnp3 PRs), T-26 (OOD upload size doc) remain as 🪝 follow-ups.
-
-After (1)+(2)+(3): Milestone A done. End-of-Milestone-A definition (per
-TICKETS.md): *"Tod logs in, runs vSNP on a real project, output is
-reproducible."* Will be honestly true after Phase 3.
-
-## Open items, in priority order (Milestone B)
-
-Per current TICKETS.md, Milestone B is "Lab-friendly experience (polish + onboarding)":
-
-### T-05 Real-time Step 1 log streaming — ✅ done in this session
-
-`/api/jobs/<id>/events` multiplexes batch + per-sample logs with `[batch]` / `[<sample>]` prefixes. Frontend renders the unified stream. A future polish iteration could parse the prefix and render per-sample collapsible panels — noted as separate ticket if anyone asks.
-
-### T-09 Sample QC badges — ⏳
-
-Pass / review / fail badges in the Step 1 sample table based on configurable thresholds (coverage, mapping rate, contamination flag from sourmash). Needs:
-- Threshold defaults stored where? (cfg file probably)
-- Per-sample QC computation source (the existing `qc_summary` endpoint already returns the metrics; just need threshold logic + UI badges)
-- The QC table just got auto-save / hydrate work; touching it again should integrate cleanly without conflicts.
-
-Smaller than T-16; do first.
-
-### T-16 KapurLab landing page — ⏳ (3 phases)
-
-Visual rebuild of the OOD dashboard per the layout mockup (`kapurlab_landing_mockup_v2.html` layout A2 — three-pane: Data | Pipelines + Active work | System).
-
-- **Phase 1**: announcement frontmatter fix (the leaking `type: info`), brand bg/title polish, locale overrides, footer cleanup. Pure cosmetics + bug. ~2 h.
-- **Phase 2**: custom `welcome.html.erb` partial rendering A2 layout with mocked data (read from `wgs_pipelines.yml`). Validates the OOD Rails view-override path before backend wiring. ~½ day.
-- **Phase 3**: live data — group filtering on `/srv/kapurlab/projects/`, real `df`/`/proc/loadavg`, jobs from vsnp_gui's `JobManager` (no Slurm on this box), composite status pill. ~1 day.
-
-Replaces the standalone "Open vSNP GUI" button as the home. Carries the foundation for adding kraken/MHC entries.
-
-## Live system state (May 10 EOD)
-
-- **Branch**: `web` at `f04fa7a` — both `origin/web` and the wgs3 deploy clone (`/srv/kapurlab/tools/vsnp_gui/`).
-- **Frontend dist**: rebuilt from `f04fa7a` source. Bundle hash visible at `/srv/kapurlab/tools/vsnp_gui/frontend/dist/assets/index-*.js`.
-- **Backend uvicorn**: any *running* OOD session has the OLD code in memory (uvicorn doesn't auto-reload). Backend changes only take effect on next session start.
-- **OOD apps**: only `vSNP GUI`. Pinned, "Bioinformatics" category.
-- **Users**: `vxk1` (admin), `ro_test` (project member, in `proj-sanity_test`). Other accounts in `/home/` are pre-existing system users — not lab users.
+- **Branch**: `web` at `4320772`. Both `origin/web` and the wgs3 deploy clone (`/srv/kapurlab/tools/vsnp_gui/`).
+- **Frontend dist**: rebuilt across multiple commits today; check the live bundle hash if anything looks stale.
+- **vSNP3 install**: `/srv/kapurlab/tools/vsnp3/` v3.16. Patched. New addition this session: **`sra-toolkit` apt package** (`/usr/bin/fasterq-dump`, `/usr/bin/prefetch`) — gives the SRA download script its primary path (S3 + fasterq-dump) instead of ENA-curl-only fallback.
+- **OOD cluster config**: `/etc/ood/config/clusters.d/wgs3.yml` has the updated `singularity_bindpath` including `/run/systemd/resolve` so in-container DNS works.
+- **References installed**:
+  - `Mammaliicoccus_sciuri_NCTC12103` (type strain — kept for posterity / type comparisons)
+  - `Mammaliicoccus_sciuri_6942A_MS` (cattle isolate — recommended default for cattle work)
+  - All sibling refs from prior sessions (MTBC, Brucella, NC_045512, Mycobacterium AF2122, etc.)
 - **Test projects on wgs3**:
-  - `/home/vxk1/projects/nagalingam_test` (MTBC, 16 samples, fully run through step1+step2 with the OLD code)
-  - `/home/vxk1/projects/quick_test` (NC_045512 SARS-CoV-2, 7 samples; this was the Milestone A end-to-end test bed — has provenance metadata from the May 10 runs)
-  - `/srv/kapurlab/projects/sanity_test` (MTBC SARS-CoV-2 deer samples, smoke-tested earlier)
-- **VCF DBs installed at `/srv/kapurlab/refs/vsnp3/vcf_db_folders/mtbc0_v1.1/`**: representative (n=57), minimum_tree (n=17), synthetic (n=16) [from-assembly], canetti (n=1).
-- **No NC_045512 VCF DBs installed** — for SARS-CoV-2 step2, only the project's own step1 outputs go in.
-- **vsnp3 install**: `/srv/kapurlab/tools/vsnp3/` v3.16. **Patched** with column[0] + VSNP3_BOOTSTRAP + new SyntaxWarning fixes. `apply.sh` is idempotent and uses `patch -N` so partial-applied installs pick up new hunks correctly.
-- **`/srv/kapurlab/audit/`**: contains `t21-migration.jsonl` (historical, abandoned T-21 attempt). Phase 3 will add `runs.sqlite`, `env_snapshots/`, `metadata_failures.jsonl` (the last is created lazily by JobManager when a finalize_callback raises).
-
-## Operational recipes
-
-### Sync deploy clone to origin/web (lesson learned)
-
-`sudo git fetch` from root fails because root's `~/.ssh/known_hosts` doesn't trust github. Always run the fetch as `vxk1` (whose ssh setup includes the GitHub host key from the existing self-loopback bootstrap):
-
-```bash
-ssh wgs3 'sudo -u vxk1 -H git -C /srv/kapurlab/tools/vsnp_gui fetch origin && \
-          sudo git -C /srv/kapurlab/tools/vsnp_gui reset --hard origin/web'
-```
-
-After a frontend file change, also rebuild:
-
-```bash
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui/frontend && sudo -u vxk1 npm run build'
-```
-
-### Verify provenance after a step1+step2 run
-
-```bash
-ssh wgs3 'sudo -u vxk1 -H /srv/kapurlab/tools/vsnp3/bin/python \
-  /srv/kapurlab/tools/vsnp_gui/deploy/admin/verify_provenance.py \
-  /home/vxk1/projects/<project>'
-```
-
-Color-coded PASS/WARN/FAIL counts. Use `--strict` to exit 1 on any FAIL.
-
-### Run the smoke test suite
-
-All four are sibling-of-test-target style — invoke from `backend/app/`:
-
-```bash
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui/backend/app && \
-  /srv/kapurlab/tools/vsnp3/bin/python test_provenance_indexer.py && \
-  /srv/kapurlab/tools/vsnp3/bin/python test_provenance_writer.py && \
-  /srv/kapurlab/tools/vsnp3/bin/python test_jobs_callback.py && \
-  /srv/kapurlab/tools/vsnp3/bin/python test_step1_sse_smoke.py'
-```
-
-### Pydantic version + Python version
-
-vsnp3 env runs Python 3.14.4, pydantic 2.13.4. The `__future__ import annotations` + `int | None` / `list[str]` syntax in writer/reader is fine.
-
-### Backend changes need OOD session restart
-
-uvicorn runs without `--reload`. Any backend change requires a fresh OOD session to take effect. Frontend changes need a hard refresh (Cmd+Shift+R) once dist is rebuilt.
-
-## Files of note (full list)
-
-- **Source of truth**: `docs/dev/MULTIUSER.md` + `docs/dev/TICKETS.md` on `web` branch.
-- **Runbooks**: `docs/dev/runbooks/{T-19-storage-layout.md, ood-debugging.md}`.
-- **T-07 design corpus**: `docs/dev/T-07-{red-team-brief,red-team-feedback,implementation-plan,jobs-patch,writer-context-for-opus}.md`.
-- **Admin scripts**: `deploy/admin/{kapurlab-setup-project,kapurlab-add-user,t21-mac-manifest,t21-mac-migrate,verify_provenance}.{sh,py}`.
-- **OOD deploy artifacts**: `deploy/ood/{template,portal,clusters.d}/`.
-- **vsnp3 patches**: `deploy/vsnp3-patches/{v3.16-kapurlab.patch,apply.sh,README.md}` — extended with SyntaxWarning fixes; idempotency uses `patch -N`.
-- **T-07 reader package**: `backend/app/vsnp_provenance/__init__.py` (reader) + `backend/app/vsnp_provenance/index.py` (SQLite indexer + janitor + CLI).
-- **T-07 writer module**: `backend/app/provenance_writer.py` (NOT yet wired anywhere outside main.py's step1_run/step2_run).
-- **JobManager**: `backend/app/jobs.py` (with finalize_callback + soft-fail metadata_failures.jsonl).
-- **Smoke tests**: `backend/app/test_{provenance_indexer,provenance_writer,jobs_callback,step1_sse_smoke}.py`.
-- **Live working tree on wgs3**: `/home/vxk1/vsnp_gui/` (vxk1's dev clone).
-- **Live deploy clone on wgs3**: `/srv/kapurlab/tools/vsnp_gui/` (what every user's session runs from).
+  - `/home/vxk1/projects/Mscuiri_test/` — 8 SRA-derived isolates, step1+step2 done against NCTC12103. After dropping SRR37536882.
+  - `/home/vxk1/projects/Mscuiri_test_6942AMS/` — same 8 isolates as symlinks to `Mscuiri_test/download/`, pinned to 6942A_MS reference, step1+step2 done. (Note: step2 was run before the `4320772` alias-map fix; *should* still be correct because alias map used a different fallback path, but a re-run would confirm.)
+  - `/home/vxk1/projects/Shivasharanappa_panel/` — 7 Indian bovine mastitis samples downsampled to ~200× target, pinned to 6942A_MS reference. **Awaiting first Setup+Run on step1.**
+- **`/srv/kapurlab/audit/`**: T-07 provenance index (`runs.sqlite`) auto-populated from today's runs. env_snapshots dir continues to dedupe.
+- **Cron**: `/etc/cron.d/vsnp_gui-provenance` unchanged (hourly gc, nightly crawl/export).
 
 ## What to do first when you pick up
 
 1. Verify the state-checks above pass (~2 min).
-2. Decide: finish Milestone A first (recommended; ~65 min) or pivot straight to Milestone B (T-09 is the natural starting point).
-3. If finishing Milestone A:
-   - Have Vivek run a fresh end-to-end on `quick_test` (or any project), then run the verifier — expect all PASS now that the May 10 fix bundle is deployed.
-   - Phase 3 ops glue: init `runs.sqlite`, pre-create `env_snapshots/`, install cron, write `kapurlab-rename-project`. Test each piece standalone before chaining.
-   - Mark T-07 ✅ in TICKETS.md.
-4. If pivoting to Milestone B:
-   - Start with T-09 (QC badges) since it's smaller and the QC table is freshly modified, so context is current.
-   - Save T-16 (landing page rebuild) for its own session — bigger lift, different headspace (frontend polish + OOD Rails view overrides), worth focused time.
+2. **Pick up the M. sciuri analysis**:
+   - The user's most likely next move is **Setup + Run step1 + step2 on `Shivasharanappa_panel`**. ~15 min wall time. Compare the tree to `Mscuiri_test_6942AMS`'s tree — see whether the Indian bovine isolates land inside the cattle clade (good — same lineage as the WI/CH/Belgium samples) or break out as their own sublineage (interesting — publishable observation about Indian cattle).
+   - The *M. sciuri* `define_filter.xlsx` is still empty. Cascade tables won't have lineage-defining-SNP coloring until that's populated. Not a blocker but an obvious follow-up.
+3. **Land the queued polish features** (see list below) in whatever order suits the next session's priority.
+
+## Polish features queued (deferred from this session, in rough priority)
+
+1. **OOD `restart_pun` reliability** — touching `~/ondemand/restart_pun` did not reliably trigger the dashboard PUN restart on config changes. Workaround was a direct kill of the Passenger RubyApp process for the dashboard. Worth: (a) investigating why the sentinel didn't fire on this OOD version, (b) documenting the kill recipe in `deploy/ood/README.md`, (c) adding a small admin script that does the kill cleanly.
+2. **Auto-housekeeping for Reference downloads.** Backend should run a post-download step that parses the FASTA defline, derives a friendly `Genus_species_strain` directory name (with optional GUI override), runs `samtools faidx`, generates `.genome`, touches `best_reference.txt`, writes `citation.txt`, and renames the dir. We did this manually for both M. sciuri references today; the GUI's "Download New Reference" form should do it automatically. ~1 hr of work; design notes:
+   - Defline parsing: `>ACC <Genus> <species> [strain <name>] [chromosome|complete|genome|plasmid…]`. Strip "strain" / "isolate" filler words. Sanitize strain name (keep alnum/_/-).
+   - Frontend: optional "Reference name (auto if blank)" text input.
+   - Backend: JobManager finalize_callback on the existing download job runs the housekeeping. Mirror the T-07 pattern.
+3. **Downsampling at Step 1 Setup time.** Project-level config `step1_max_coverage` (default 0 = no downsample). Setup uses `seqkit stats` to estimate per-sample coverage as `total_bases × map_rate / ref_size`, then `seqkit sample -p <frac> -s <seed>` with the same seed for R1 and R2 to preserve pair sync. Original fastqs stay in `download/`; downsampled go into the sample dir, the existing symlink points at them. Add a "downsampled to Nx" indicator in the QC table. ~2 hr.
+4. **Coverage breadth as a T-09 QC signal.** Currently T-09 verdicts depend on depth (`Average Depth`) + mapping rate (`100 − Unmapped Percent`) + contamination flag. Add `Genome with Coverage %` (column already in the *_stats.xlsx output) with a reasonable threshold (≥80% pass / ≥60% review / <60% fail). Would have flagged SRR21002857 (33%) / SRR37251701 (49%) / ERR3358320 (63%) cleanly — these were the cases mapping-rate alone missed. ~30 min.
+5. **Sourmash species check at Setup or Step 1 time.** vsnp3 ships sourmash already, and we used it successfully today to confirm the Bangladesh sample wasn't *M. sciuri*. Could integrate as a Step 1 Setup-time check: sketch each sample's fastqs, compare containment against the chosen reference's sketch, flag samples with <70% containment as likely-wrong-species. Surfaces as a third badge state on the Step 1 sample row. ~1.5 hr (mostly the GUI plumbing).
+6. **Better per-sample step1 progress UI.** The "Running…" disabled Run button is fine but tells you nothing about *which* sample is on what stage (BWA / fixmate / markdup / variant calling). Parsing `run_step1.log` for the standard vsnp3 phase markers and surfacing them in the sample table would be a nice touch. ~2-3 hr.
 
 ## Known minor follow-ups (deferred, not blocking)
 
-- **"VCFs in set: N" UI label** is technically misleading after the textarea fix — it shows `total_found` (imported + skipped + mismatched) when only `imported` actually ends up in `vcf_source/`. Cosmetic; the count is now usually correct in practice because the textarea-bleed bug is gone. Could rename to "VCFs considered" or use `imported` as the headline. ~10 LoC.
-- **mafft / iqtree binary probes return None** — they're genuinely not installed in this vsnp3 env (only raxml variants for tree building). Not a probe gap.
-- **Bug 3 (step2 reference inheritance)** — Vivek reported "reference not inherited from step1" but the screenshot showed the dropdown DID auto-populate to `NC_045512_wuhan-hu-1`. May be a timing issue (importReference loads after the step2 panel renders). Needs a reproducer if it surfaces again.
-- **OOD nginx_file_upload_max** at default (10 GB). Confirmed working at 345 MB; haven't stress-tested above 2 GB. Bump or document if anyone hits it.
-- **T-22 server-pull ingestion** — for true fire-and-forget bulk fastq, the per-user `/home/<user>/uploads/` drop-dir + scan-and-import flow. Browser uploads die when the tab closes; this is the long-term answer. Overlaps with T-20 staged ingestion.
-- **T-23 VCF DB v3** — per-DB `db.json` metadata for friendly display names + citations. Folder names cover V1; add when ambiguity surfaces.
-- **T-25 upstream vsnp3 PRs** — file the new SyntaxWarning fixes alongside the existing column[0] (USDA-VS/vSNP3#22) and bootstrap (#23) issues.
+- **vsnp3_download_GCA_fasta_get_metadata.py is broken** (missing `usda_file_setup` import). Standalone fix is a one-line shim; the bulk-fetch flow we discussed is unused for now since we use SRA reads directly.
+- **NCBI_API_KEY env var** is not yet set on the backend. With it, eutils rate limit jumps from 3/sec to 10/sec. Free to register. Per the install plan we discussed: put key at `/etc/ood/secrets/ncbi_api_key` (mode 0640, group kapurlab-members) and patch `deploy/ood/template/before.sh` to export it. Today's two transient 502s could have been avoided.
+- **define_filter.xlsx for M. sciuri** is empty. Cascade tables don't have lineage-defining SNP coloring. Real work — needs literature review or a defining-SNP discovery analysis on a representative isolate panel.
+- **Bangladesh sample species ID** — confirmed it's not *M. sciuri* (47% containment) but didn't nail the exact sibling species. Could pull type-strain assemblies for *M. lentus*, *M. fleurettii*, *M. vitulinus*, *M. stepanovicii* and run a 5-way containment comparison. ~5 min if anyone needs it.
+- **The Mscuiri_test_6942AMS step2 re-run.** Step1+step2 was run against the cattle reference earlier today, *before* the alias-map fix landed (`4320772`). The path it took to populate vcf_source/ worked via a different fallback (since the user had already manually re-set up the project after the alias issue surfaced). Worth a final Setup+Run on step2 to confirm clean state, but not strictly required — the tree we got was sensible.
+- **Local seqkit on the Mac** — installed via `brew install seqkit` for the downsampling. Documented in this handoff; not a long-term ask of the user but worth noting if anyone else picks this up.
+
+## Files of note (added or substantially modified today)
+
+- `backend/app/sra.py` — rate-limited expander, SRAExpansionError, parallelized download script via xargs -P
+- `backend/app/main.py` — _reference_alias_map alias fix, step1_run wait -n loop + duplicate-Run guard, step1_status exit_code sentinel, /download-file MIME table, /preview-xlsx endpoint
+- `backend/app/xlsx_html.py` — openpyxl → HTML converter with formatting / CF rules / rotation / column widths
+- `backend/app/provenance_writer.py` — _build_step1_inputs accepts SRA _1/_2 fastq naming
+- `frontend/src/App.jsx` — paired-file grouping in download list, View buttons for xlsx/inline-renderable types, step1 Run button disabled-while-running with 5s polling, sraDownload + step1Run error surfacing
+- `deploy/ood/clusters.d/wgs3.yml` — singularity_bindpath includes /run/systemd/resolve
+
+## Operational recipes
+
+### Re-run step2 after a tree-rooting / reference change
+
+In the same project, switching reference is *not* clean (it'd mix old `alignment_<ref>/` dirs with new ones). Use a new project; symlink the existing `download/` fastqs to avoid re-transfer. Today's `Mscuiri_test_6942AMS` was created exactly this way — 9 symlinks back into `Mscuiri_test/download/`, project.json pinned to the new reference, Setup + Run.
+
+### Force OOD dashboard PUN restart (when `restart_pun` sentinel doesn't fire)
+
+```bash
+ssh wgs3 'ps -fu vxk1 | grep "Passenger RubyApp.*dashboard" | grep -v grep | awk "{print \$2}" | xargs -r kill'
+```
+
+Next dashboard request spawns a fresh PUN that re-reads cluster.yml / dashboard.yml.
+
+### Downsample fastqs to target coverage
+
+```bash
+seqkit sample -p <fraction> -s 42 <input.fastq.gz> -o <output.fastq.gz>
+# Same -s for R1 and R2 to preserve pair sync.
+# fraction = target_depth × ref_size / (map_rate × total_input_bases)
+```
+
+We did this locally on the Mac for the Shivasharanappa fastqs today. The 12 GB → 2.3 GB shrink.
+
+### Sourmash species check (containment direction matters)
+
+```bash
+# Sketch the sample's R1+R2 merged
+sourmash sketch dna -p k=31,scaled=1000 --merge <sample> R1.fastq.gz R2.fastq.gz -o sample.sig
+
+# Sketch the reference
+sourmash sketch dna -p k=31,scaled=1000 --name <ref> ref.fasta -o ref.sig
+
+# CRITICAL: query the reference's k-mers IN the sample's k-mers (not the
+# other way round — sample has way more error k-mers).
+sourmash search --containment ref.sig sample.sig
+# Expected: 75-100% for same species, 30-60% for sibling species, <10% for different genus.
+```
 
 That's the lot. Good luck.

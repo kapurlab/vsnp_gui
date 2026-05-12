@@ -1282,12 +1282,25 @@ export default function App() {
     setStep2Groups([]);
     setStep2OutputsError("");
     setStep2RunId("");
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
-    });
-    const data = await res.json();
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
+      });
+    } catch (e) {
+      window.alert(`Step 1 run failed: ${e.message || "network error"}`);
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    if (!res.ok) {
+      // Backend raises HTTPException with a `detail` for things like provenance
+      // dispatch failures. Surface that instead of silently swallowing.
+      window.alert(`Step 1 run failed: ${data.detail || `HTTP ${res.status}`}`);
+      return;
+    }
     setJobId(data.job_id);
     setStep1AutoRefreshPending(true);
     await loadStep1Status();

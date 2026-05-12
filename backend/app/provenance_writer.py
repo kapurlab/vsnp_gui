@@ -1178,13 +1178,23 @@ def _build_step1_inputs(
     sample: str,
     threshold_bytes: int,
 ) -> list[dict[str, Any]]:
-    """Find R1/R2 fastq files for a sample and build the inputs block."""
+    """Find R1/R2 fastq files for a sample and build the inputs block.
+
+    Handles both Illumina (`<sample>_R1.fastq.gz`) and SRA (`<sample>_1.fastq.gz`)
+    naming conventions — same as the bash step1 batch script.
+    """
     inputs: list[dict[str, Any]] = []
-    for label in ("R1", "R2"):
-        # Tolerant matching: handle Sample_R1.fastq.gz, Sample-R1.fq.gz, etc.
-        candidates = sorted(sample_dir.glob(f"{sample}*{label}*.f*q.gz"))
-        if not candidates:
-            candidates = sorted(sample_dir.glob(f"*{label}*.f*q.gz"))
+    # (mate_label, [glob_patterns_to_try_in_order])
+    mate_patterns = (
+        ("R1", [f"{sample}*R1*.f*q.gz", f"{sample}*_1.f*q.gz", "*R1*.f*q.gz", "*_1.f*q.gz"]),
+        ("R2", [f"{sample}*R2*.f*q.gz", f"{sample}*_2.f*q.gz", "*R2*.f*q.gz", "*_2.f*q.gz"]),
+    )
+    for label, patterns in mate_patterns:
+        candidates: list[Path] = []
+        for pat in patterns:
+            candidates = sorted(sample_dir.glob(pat))
+            if candidates:
+                break
         if not candidates:
             raise DispatchFailed(f"no {label} fastq found for sample {sample} in {sample_dir}")
         # Take the first match if multiple

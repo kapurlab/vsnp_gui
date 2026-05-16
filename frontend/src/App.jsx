@@ -42,6 +42,7 @@ export default function App() {
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [excluded, setExcluded] = useState({});
   const [step1Status, setStep1Status] = useState([]);
+  const [step1JobStatus, setStep1JobStatus] = useState("");
   const [step1StatusError, setStep1StatusError] = useState("");
   const [step1LogSample, setStep1LogSample] = useState("");
   const [step1LogText, setStep1LogText] = useState("");
@@ -962,7 +963,12 @@ export default function App() {
 
   async function step1Run() {
     if (!selectedProject || !settingsReady || !reference) return;
+    if (step1JobStatus === "running") {
+      setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
+      return;
+    }
     const refValue = reference === "__auto__" ? null : reference;
+    setStep1StatusError("");
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
@@ -975,6 +981,12 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      setStep1StatusError(err.detail || `Failed to start Step 1 (${res.status})`);
+      await loadStep1Status();
+      return;
+    }
     const data = await res.json();
     setJobId(data.job_id);
     setStep1AutoRefreshPending(true);
@@ -1056,6 +1068,7 @@ export default function App() {
       }
       const data = await res.json();
       setStep1Status(data.samples || []);
+      setStep1JobStatus(data.job_status || "");
     } catch (err) {
       setStep1StatusError("Failed to load Step 1 status");
     }
@@ -1958,7 +1971,9 @@ export default function App() {
               </label>
               <div className="step1-actions">
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
-                <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference}>Run</button>
+                <button onClick={step1Run} disabled={!selectedProject || !settingsReady || !reference || step1JobStatus === "running"}>
+                  {step1JobStatus === "running" ? "Running…" : "Run"}
+                </button>
               </div>
             </div>
             <div className="step1-status">

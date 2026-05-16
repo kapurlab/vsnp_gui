@@ -43,6 +43,25 @@ projects_root.mkdir(parents=True, exist_ok=True)
 job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
 
 
+def _wrapper_process_alive(script_path: Path) -> bool:
+    """Return True if any process has the given wrapper script in its command line.
+
+    Used as a fallback concurrency guard that survives backend reloads, where
+    in-memory JobManager state is lost but an orphaned bash wrapper may still
+    be running.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _script_bin_dir(cfg: Dict) -> Optional[Path]:
     vsnp3_path = cfg.get("vsnp3_path", "").strip()
     if not vsnp3_path:
@@ -584,7 +603,7 @@ def ref_download(payload: RefDownloadRequest):
     add_reference_path(vsnp3_path, str(output_dir))
     job_id = job_manager.start_job(
         name="ref_download",
-        command=wrap_cmd(cfg, f"bash {script_path}"),
+        command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=acc_dir,
         env=build_env(cfg)
     )
@@ -919,7 +938,7 @@ def sra_download(project: str, payload: SraRequest):
     script_path.chmod(0o755)
     job_id = job_manager.start_job(
         name="sra_download",
-        command=wrap_cmd(cfg, f"bash {script_path}"),
+        command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=download_root,
         env=build_env(cfg)
     )
@@ -967,6 +986,33 @@ def step1_run(project: str, payload: Step1Request):
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
     script_path = step1_dir / "run_step1.sh"
+
+    # Concurrency guard: reject duplicate runs so parallel wrappers don't
+    # trample each other's output directories (the wrapper's per-sample
+    # cleanup deletes alignment_* on entry, which corrupts any in-flight run).
+    job_id_path = step1_dir / ".step1_job_id"
+    if job_id_path.exists():
+        existing_id = job_id_path.read_text(encoding="utf-8").strip()
+        if existing_id:
+            existing_job = job_manager.get_job(existing_id)
+            if existing_job and existing_job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Step 1 is already running for this project (job {existing_id}). "
+                        "Wait for it to finish before starting a new run."
+                    ),
+                )
+    if script_path.exists() and _wrapper_process_alive(script_path):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Step 1 is already running for this project "
+                "(a previous wrapper process is still active). "
+                "Wait for it to finish before starting a new run."
+            ),
+        )
+
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
@@ -1070,7 +1116,7 @@ def step1_run(project: str, payload: Step1Request):
     script_path.chmod(0o755)
     job_id = job_manager.start_job(
         name="step1",
-        command=wrap_cmd(cfg, f"bash {script_path}"),
+        command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=step1_dir,
         env=build_env(cfg)
     )
@@ -1243,11 +1289,11 @@ def step2_run(project: str, payload: Step2Request):
     if payload.density_window is not None:
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
-    cmd = f"vsnp3_step2.py -wd {vcf_run_dir} {flags_str} -t {payload.reference}"
+    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(vcf_run_dir))} {flags_str} -t {payload.reference}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(step2_dir, cfg, label_style)
     if label_script:
-        cmd = f"{cmd} && python {label_script}"
+        cmd = f"{cmd} && python {shlex.quote(str(label_script))}"
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),

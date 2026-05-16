@@ -90,6 +90,10 @@ export default function App() {
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
   const [step2EditedCount, setStep2EditedCount] = useState(0);
+  const [posthocTools, setPosthocTools] = useState([]);
+  const [posthocStatus, setPosthocStatus] = useState({});
+  const [posthocRunError, setPosthocRunError] = useState("");
+  const [posthocScopeByGroup, setPosthocScopeByGroup] = useState({});
   const [step2Mode, setStep2Mode] = useState("custom");
   // Step 2 run options
   const [s2NoFilters, setS2NoFilters] = useState(false);
@@ -373,16 +377,18 @@ export default function App() {
   }
 
   async function loadAll() {
-    const [cfg, proj, refs, dbFolders] = await Promise.all([
+    const [cfg, proj, refs, dbFolders, posthocToolsResp] = await Promise.all([
       fetch(`${API_BASE}/api/config`).then((r) => r.json()),
       fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
       fetch(`${API_BASE}/api/references`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => [])
+      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
+      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => [])
     ]);
     setConfig(cfg);
     setProjects(proj);
     setReferences(refs);
     setVcfDbFolders(dbFolders || []);
+    setPosthocTools(posthocToolsResp || []);
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
@@ -541,6 +547,16 @@ export default function App() {
     loadStep2Outputs();
     setStep2AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step2AutoRefreshPending]);
+
+  useEffect(() => {
+    if (!selectedProject || !settingsReady) return;
+    const hasRunning = Object.values(posthocStatus).some((status) => status?.running);
+    if (!hasRunning) return;
+    const id = setInterval(() => {
+      loadStep2Outputs();
+    }, 3000);
+    return () => clearInterval(id);
+  }, [selectedProject, settingsReady, posthocStatus]);
 
   async function createProject() {
     if (!newProjectName.trim()) return;
@@ -803,12 +819,14 @@ export default function App() {
       return;
     }
     const data = await res.json();
+    let groups = [];
     if (Array.isArray(data)) {
       setStep2Outputs(data);
       setStep2Groups([]);
     } else {
       setStep2Outputs(data.top || []);
-      setStep2Groups(data.groups || []);
+      groups = data.groups || [];
+      setStep2Groups(groups);
     }
     const countRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_count`);
     if (countRes.ok) {
@@ -818,6 +836,49 @@ export default function App() {
     } else {
       setStep2EditedCount(0);
     }
+    if (groups.length) {
+      loadPosthocStatuses(groups);
+    } else {
+      setPosthocStatus({});
+    }
+  }
+
+  async function loadPosthocStatuses(groups) {
+    if (!selectedProject) return;
+    const statusMap = {};
+    await Promise.all(
+      groups.map(async (group) => {
+        try {
+          const res = await fetch(
+            `${API_BASE}/api/projects/${selectedProject}/posthoc/status?group=${encodeURIComponent(group.name)}&tool=snp_analysis`
+          );
+          if (!res.ok) return;
+          const data = await res.json();
+          statusMap[group.name] = data;
+        } catch {
+          // ignore
+        }
+      })
+    );
+    setPosthocStatus(statusMap);
+  }
+
+  async function runPosthoc(groupName) {
+    if (!selectedProject) return;
+    setPosthocRunError("");
+    const scope = posthocScopeByGroup[groupName] || "all";
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/posthoc/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group: groupName, tool: "snp_analysis", scope })
+    });
+    if (!res.ok) {
+      const msg = await res.json().catch(() => ({}));
+      setPosthocRunError(msg.detail || "Failed to start SNP analysis");
+      window.alert(msg.detail || "Failed to start SNP analysis");
+      return;
+    }
+    loadPosthocStatuses([{ name: groupName }]);
   }
 
   async function openOutput(path) {
@@ -829,9 +890,10 @@ export default function App() {
     });
   }
 
-  function downloadOutput(path) {
+  function downloadOutput(path, downloadName) {
     if (!selectedProject) return;
-    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}`;
+    const nameParam = downloadName ? `&download_name=${encodeURIComponent(downloadName)}` : "";
+    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}${nameParam}`;
     window.open(url, "_blank");
   }
 
@@ -1288,7 +1350,12 @@ export default function App() {
 
   async function step1Run() {
     if (!selectedProject || !settingsReady || !reference) return;
+    if (step1JobStatus === "running") {
+      setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
+      return;
+    }
     const refValue = reference === "__auto__" ? null : reference;
+    setStep1StatusError("");
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
@@ -3538,11 +3605,22 @@ export default function App() {
                 </button>
               </div>
             ) : null}
+            {posthocRunError ? <div className="note error">{posthocRunError}</div> : null}
             {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
             {(() => {
+              const snpTool = posthocTools.find((tool) => tool.id === "snp_analysis");
+              const snpToolAvailable = snpTool ? snpTool.available : true;
+              const snpToolMissing = snpTool && !snpTool.available;
               const shouldHideOutput = (item) => {
                 const path = item?.path || "";
+                const fileName = path.split("/").pop() || "";
+                if (fileName.startsWith("~$")) return true;
+                if (fileName.endsWith(".lock")) return true;
+                if (fileName === "filtered_step1.fasta") return true;
+                if (fileName === "snp_distances.txt") return true;
+                if (fileName === "snp_matrix.tsv") return true;
+                if (fileName === "stats.json") return true;
                 return path.includes("_labeled_labeled");
               };
               const filteredStep2Outputs = step2Outputs.filter((item) => !shouldHideOutput(item));
@@ -3572,6 +3650,11 @@ export default function App() {
               });
               return (
                 <>
+                  {snpToolMissing ? (
+                    <div className="note warning">
+                      SNP Analysis unavailable: missing {snpTool.missing?.join(", ") || "dependencies"}.
+                    </div>
+                  ) : null}
                   <div className="results-list">
                   {sortedStep2Outputs.length ? (
                     sortedStep2Outputs.map((item) => (
@@ -3591,7 +3674,7 @@ export default function App() {
                         }
                         return null;
                       })()}
-                      <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
+                      <button onClick={() => downloadOutput(item.path, item.download_name)} title="Download file">DL</button>
                     </div>
                   </div>
                 ))
@@ -3600,7 +3683,58 @@ export default function App() {
                 <div className="results-groups">
                   {sortedStep2Groups.map((group) => (
                     <details key={group.name} className="results-group">
-                      <summary>{group.name}</summary>
+                      <summary>
+                        <div className="group-summary">
+                          <span>{group.name}</span>
+                          <div className="group-actions">
+                            {(() => {
+                              const canRunPosthoc = snpToolAvailable && group.posthoc_possible;
+                              const hasPosthocOutputs = posthocStatus[group.name]?.outputs?.some((o) => o.exists);
+                              if (!canRunPosthoc && !hasPosthocOutputs) {
+                                return null;
+                              }
+                              const posthocTitle = "Runs post-hoc SNP distance/KDP using the group FASTA.";
+                              return (
+                                <>
+                                  {hasPosthocOutputs ? (
+                                    <span className="group-chip">posthoc ready</span>
+                                  ) : null}
+                                  {canRunPosthoc ? (
+                                    <>
+                                      <select
+                                        className="small-select"
+                                        value={posthocScopeByGroup[group.name] || "all"}
+                                        title="Choose isolates for SNP analysis (Step 1 only excludes reference VCFs)."
+                                        onChange={(e) =>
+                                          setPosthocScopeByGroup((prev) => ({
+                                            ...prev,
+                                            [group.name]: e.target.value
+                                          }))
+                                        }
+                                      >
+                                        <option value="all">All VCFs</option>
+                                        <option value="step1_only">Step 1 only</option>
+                                      </select>
+                                      <button
+                                        className="small"
+                                        disabled={posthocStatus[group.name]?.running}
+                                        title={posthocStatus[group.name]?.running ? "SNP Analysis is running." : posthocTitle}
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          runPosthoc(group.name);
+                                        }}
+                                      >
+                                        {posthocStatus[group.name]?.running ? "SNP Analysis (running)" : "SNP Analysis"}
+                                      </button>
+                                    </>
+                                  ) : null}
+                                </>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </summary>
                       {group.files.map((item) => {
                         const isTre = (item.label || "").toLowerCase().endsWith(".tre");
                         const treeBase = window.location.pathname.replace(/[^/]*$/, "");
@@ -3625,7 +3759,7 @@ export default function App() {
                                 }
                                 return null;
                               })()}
-                              <button onClick={() => downloadOutput(item.path)} title="Download file">DL</button>
+                              <button onClick={() => downloadOutput(item.path, item.download_name)} title="Download file">DL</button>
                             </div>
                           </div>
                         );

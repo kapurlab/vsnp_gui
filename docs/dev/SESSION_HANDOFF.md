@@ -1,256 +1,143 @@
-# Session handover — May 16 2026
+# Session handover — May 16 2026 (afternoon)
 
 Continuation notes for the next Claude session. Read this first, then
-[`docs/dev/PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) for the design
-direction and [`docs/dev/TICKETS.md`](TICKETS.md) for the broader plan.
+[`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) and
+[`TICKETS.md`](TICKETS.md).
 
-## TL;DR
+The morning-of-May-16 handoff (Shivasharanappa panel + AMR fixture +
+PIPELINES_PACKAGE design) is preserved at commit `3abbb1a` in git history.
+Open in browser via GitHub if you need the kraken/AMR run details.
 
-The day was about three things, in order:
+## TL;DR — what landed today (afternoon)
 
-1. **Diagnosing the Shivasharanappa panel** — kraken2 + bracken showed
-   all 7 samples are heavily polymicrobial (4–38% *M. sciuri*, dominant
-   *Proteus mirabilis* / *Enterococcus* / *Paraclostridium*). Source is
-   almost certainly direct-from-clinical-specimen (mastitis milk), not
-   colony picks — even though the collaborator's published methods
-   describe a single-isolate workflow.
+1. **Merged `codex/snp-analysis` into `main`** (commit `56a8e06`). The
+   posthoc SNP analysis subsystem is now live in production. Resolved 11
+   conflict regions across `main.py` (8), `App.jsx` (5), `requirements.txt`,
+   `styles.css`. Detailed resolution log lives in the merge commit message.
 
-2. **Reconstructing the panel from the collaborator's NCBI submissions** —
-   pulled the 8 *M. sciuri* WGS assemblies they uploaded to BioProject
-   PRJNA1358531 (one strain not in our fastq set: HW110, a water isolate),
-   synthesized 50× paired Illumina reads from each, and re-ran step1
-   alongside the raw fastqs. Combined tree confirms their *M. sciuri*
-   contig bins faithfully match what BWA recovers from the raw
-   polymicrobial fastqs — every NivediXXX synthetic clusters tightly with
-   its real-fastq sibling.
+2. **Smoke-tested every merge region live on the OOD GUI.** All green —
+   step2 dispatch (T-07 + shlex.quote), preview-xlsx, download-file with
+   `download_name`, labeled-tre suppression, AND the brand-new
+   `/posthoc/run` endpoint producing snp_matrix.csv + KDP + closest-neighbor
+   plots on a 6-sample deer SARS-CoV-2 group.
 
-3. **Installing AMRFinderPlus on wgs3 and running it on the 8 NivediXXX
-   assemblies** — established the canonical fixture for the future shared
-   pipelines package. Found *mecA1* and *sal(A)* universal; arsB / arsC /
-   cadD scattered; nothing else of clinical concern.
+3. **Filed T-36/37/38** for post-hoc resolver UX gaps surfaced during
+   smoke testing (none are merge regressions — pre-existing on main).
 
-The architectural payoff: a 632-line design doc
-**[`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md)** committed to `web` as
-`51ae6df`. Specifies the `AnalysisPrimitive` contract and a shared
-**project filesystem workspace** that every future OOD card (vSNP /
-Kraken / AMR / Sourmash / MLST) reads-and-writes against. Today's AMR
-run becomes the regression fixture for the first concrete primitive
-(`pipelines/amrfinder.py`).
+## Current state
 
-## Commits landed today
+**Branches**: `main` is the canonical branch at `06c35ef` (= merge +
+tickets). `merge/snp-analysis-into-main` and `codex/snp-analysis` are
+deleted everywhere (local, remote, wgs3). `main-electron-archive` and
+the kept feature/spike branches untouched.
 
-**On `web`** (1 unpushed commit at HEAD):
-- `51ae6df` docs: PIPELINES_PACKAGE design — shared analysis primitives
-  + project workspace
+**wgs3** (`/srv/kapurlab/tools/vsnp_gui`): on `main` @ `06c35ef`. Running
+uvicorn (port 26911) was spawned at 09:18 on the merge content — content
+hasn't changed since (fast-forward), no restart needed unless new code
+lands. The deployed bundle hashes match what was built locally:
+`index-dc8fef81.js`, `TreeStandalone-d281d2b6.js`.
 
-**On `codex/snp-analysis`** (1 unpushed commit at HEAD):
-- `b6c474d` step1 concurrency hardening + openpyxl dep
-  (committed the 3 uncommitted edits that had been sitting in the main
-  worktree: `_wrapper_process_alive()` pgrep fallback in `main.py`,
-  step1 "already running" guard in `App.jsx`, `openpyxl==3.1.5` for
-  posthoc `_stats.xlsx` reading)
+**New deps installed on wgs3** (into `/srv/kapurlab/tools/vsnp3` conda env):
+- `aiofiles==24.1.0` (via mamba conda-forge)
+- `snp-dists==1.2.0` (via mamba bioconda)
 
-Both branches are local-only. **Nothing was pushed today.** Push when
-the next session has reviewed the handoff and decided how to proceed.
+Both verified via `shutil.which` from the running uvicorn — no restart
+needed (registry checks per-request).
 
-## State on wgs3
-
-**`/home/vxk1/projects/Shivasharanappa_panel/`** is the working dataset:
-
-```
-download/
-  IN{47,50,107,108,109,185,240}_R{1,2}.fastq.gz          ← real polymicrobial fastqs, downsampled to 200× target
-  NivediHW110_R{1,2}.fastq.gz, NivediIN{47,...}_R{1,2}.fastq.gz ← synthetic 50× from NCBI assemblies
-step1/<sample>/                                          ← already populated for the 7 real samples
-step2/                                                   ← tree from the combined run (15 samples)
-synthetic_from_assembly/
-  fasta/{HW110,IN47,...,IN240}.fasta                     ← 8 NCBI-deposited M. sciuri assemblies
-  fastq/                                                 ← wgsim-simulated paired reads (50× depth, 251bp, seed 42)
-kraken/                                                  ← kraken2 + bracken + krona + per-sample bracken pies + panel_kraken_summary.xlsx
-amrfinder/                                               ← 8 .amr.tsv files — THE FIXTURE for pipelines/amrfinder.py regression test
-```
-
-**Conda envs on wgs3** (under `~/miniforge3/envs/`):
-- `vsnp3` — pre-existing, vsnp3 + samtools/bcftools/wgsim
-- `kraken_report` — kraken2 2.17.1, bracken 3.1, krona, krakentools, matplotlib, pandas, openpyxl
-- `amrfinder` — ncbi-amrfinderplus 4.2.7 with DB 2026-03-24.1 at
-  `~/miniforge3/envs/amrfinder/share/amrfinderplus/data/2026-03-24.1/`
-
-**Shared refs**:
-- Kraken Standard-8: `/srv/kapurlab/refs/kraken/standard-8_20250402/`
-
-**Local pulled artifacts** (on the Mac):
-- `~/Downloads/Shivasharanappa_kraken_reports/` — krona HTMLs, bracken pies, xlsx, `Nivedi_panel_metadata.csv`
-- `~/Downloads/Shivasharanappa_kraken_reports/Nivedi_panel_metadata.csv` — BioSample-derived host / source / village / date / collector
-- `~/Downloads/Shivasharanappa_panel_kraken.zip` — email-ready bundle for the collaborator
-- `~/Downloads/Shivasharanappa_amrfinder/{*.amr.tsv,amr_matrix.csv}`
-- `~/Downloads/Shivasharanappa_assemblies/*.fasta` — 8 NivediXXX FASTAs
+**Test fixture for `/posthoc/run`**: project `Retest` on wgs3 (deer
+SARS-CoV-2 samples) has a complete posthoc run at
+`/home/vxk1/projects/Retest/step2/name-All/posthoc/` — snp_matrix.csv,
+kdp.{pdf,png}, closest_neighbor.{pdf,png}, stats.json. Useful regression
+artifact when iterating on the SNP analysis primitive.
 
 ## Open items for the next session
 
-### Priority 1 — codex/snp-analysis → web merge (deferred today)
+### Priority 1 — red-team `PIPELINES_PACKAGE.md`
 
-Attempted in this session, **aborted** because the conflicts span months
-of independent evolution in shared code regions that include T-07
-provenance plumbing. Don't auto-resolve.
+This is the deferred Priority 4 from the morning handoff. Spawn parallel
+sub-agents to review the design doc from four angles before implementing
+Phase 1 (`pipelines/amrfinder.py`):
 
-`codex/snp-analysis` has 5 unmerged commits (4 from March/April + 1
-today: `b6c474d`). The branch adds a complete `backend/app/posthoc/`
-subsystem that **`web` is already calling into** (web's `main.py` /
-`App.jsx` / `styles.css` reference posthoc routes and state, but the
-implementation directory doesn't exist on web). The merge fills in the
-missing subsystem.
+- software architecture (interface contracts, dependency injection,
+  testability)
+- ops/deployment (multi-app conda envs, version pinning, secrets)
+- bioinformatics workflow (does the contract fit real tools' I/O shapes?)
+- code-review hygiene (naming, error handling, observability)
 
-**Conflict regions in `main.py`** (5+):
+Today's working `posthoc/snp_analysis.py` is a *de facto* prototype of
+what a primitive looks like, but it predates the PIPELINES_PACKAGE design.
+Worth comparing: does posthoc fit the contract? If not, why?
 
-| Region | Web (HEAD) has | codex has | Resolution hint |
-|---|---|---|---|
-| imports | `SRAExpansionError` | `posthoc_*` registry imports | take both |
-| helper block at L61 | `_project_roots`, `_project_dir_for`, `_resolve_qc_thresholds`, `_annotate_qc_rows`, `_path_under_any_project_root` | `_wrapper_process_alive`, `_script_bin_dir`, `_tool_bin_dir` | take both — orthogonal |
-| `wrap_cmd` at L231 | PYTHONWARNINGS prefix + vsnp3 PATH | tool_bin + script_bin PATH builder | merge: PYTHONWARNINGS prefix + codex's PATH builder logic |
-| step2 dispatch at L1714 | full T-07 `provenance_writer.dispatch_step2` + `Step2DispatchBlocked` + finalize callback | `shlex.quote` on paths | keep web's T-07 dispatch wholesale; apply codex's shlex.quote to the cmd construction |
-| step2 outputs at L2561 | labeled-tre suppression logic | (different change) | inspect — likely keep web |
+### Priority 2 — file T-27 through T-35
 
-**Conflict in `requirements.txt`**: codex adds aiofiles, numpy, pandas,
-matplotlib, scipy, openpyxl. Take all (they're needed by the posthoc
-SNP analysis).
+The PIPELINES_PACKAGE design implies 9 new tickets. The morning handoff
+sketched them; they were never added to `TICKETS.md` because the
+afternoon went to the merge instead. Block of tickets:
 
-**Conflict in `App.jsx`**: UI overlap in the posthoc tab/state region.
-Web has more recent UI state (posthocFolders, posthocRows, posthocFilteredRows
-memo, fetch calls to /api/posthoc/{step1/scan,step1/resolve_samples,open}).
-Codex's frontend additions are an earlier generation of that UI plus a
-step1JobStatus guard. Take web's UI but graft codex's step1JobStatus
-guard into `step1Run()`.
+- T-27 implement `pipelines/common/` (`AnalysisPrimitive` + `Project`
+  workspace + provenance/badge/runner shims)
+- T-28 implement `pipelines/amrfinder.py` against the contract; regression
+  against today's 8 NivediXXX `amr_matrix.csv`
+- T-29 wire AMR into vsnp_gui (post-step1 hook, badge, "Run AMR" button)
+- T-30 re-deploy kraken_gui as OOD batch_connect; import `pipelines/kraken.py`
+- T-31 standalone AMR OOD card
+- T-32 sourmash card + `pipelines/sourmash.py`
+- T-33 port NAHLN_AMR's MLST / Abricate / SeqSero2 wrappers
+- T-34 cross-card navigation protocol (`?project=X&sample=Y`)
+- T-35 `samples.json` schema + concurrent-write strategy (atomic
+  tempfile+rename + per-project lockfile)
 
-**Web has its own implementations of `/api/posthoc/step1/scan` and
-`/api/posthoc/step1/resolve_samples` at L1930/1995** — codex has them at
-L1478/1540. These may have diverged. Read both before deciding which to
-keep — web's are likely newer (post-T-07), but verify they're not
-regressing capability codex had.
+Filing them is a 15-min markdown task. Either before or after Priority 1
+red-team is fine — having them filed makes the red-team scoping easier.
 
-**`/api/posthoc/tools` and `/api/projects/{p}/posthoc/run`** exist only on
-codex side — take wholesale.
+### Priority 3 — start T-29 (AMR wiring) once design is settled
 
-**`/api/posthoc/open`** exists only on web side — keep.
+T-29 is the first **end-to-end** consumer of the pipelines package. It
+proves the contract works by being a real button users press. The
+NivediXXX AMR fixture from the morning is the regression seed.
 
-Recommend a **focused merge session**: open both branches' main.py
-side-by-side, resolve each hunk with intent visible, run the test suite
-(`backend/app/test_*.py`), smoke-test the posthoc dropdown end-to-end.
-~30–60 min of careful work.
+### Priority 4 (small) — T-36/37/38
 
-### Priority 2 — GitHub-side branch rename (user does this in browser)
+Post-hoc sample resolver UX gaps. All three are scoped well in
+`TICKETS.md:232-234`. Total work ~1-2 hours. Good warm-up if Priority 1
+needs incubation time.
 
-After the codex/snp-analysis merge lands cleanly, promote `web` → `main`:
+## Other observations
 
-```
-1. Push web to origin (the 51ae6df doc commit + any merge commits)
-2. GitHub UI → repo Settings → Branches:
-   a. Rename `main` → `main-electron-archive`
-   b. Rename `web` → `main`
-   c. Change default branch to `main` (the new one)
-3. Update any branch protections / required checks pointed at "main"
-4. Locally: git fetch + reconcile
-   git branch -d main             # delete stale local main
-   git branch -m web main          # rename local web
-   git branch --set-upstream-to=origin/main main
-```
+- **`docs/dev/TICKETS.md` "Branching" section is stale.** Line 237 still
+  says "`web` is the OOD/FastAPI rewrite branch off `main`". That branch
+  no longer exists — `web` → `main` rename happened earlier. Trivial
+  cleanup: rewrite that paragraph to reflect current branching reality.
 
-The Mac copy of the repo is a viewer (do NOT run a local uvicorn there
-— it shadows the OOD backend in the browser, see `API_BASE` note in
-`TICKETS.md`).
+- **OOD batch_connect deployment model worth documenting.** The deploy
+  is *literally whatever's checked out* in `/srv/kapurlab/tools/vsnp_gui`
+  on wgs3 (or `/home/${USER}/vsnp_gui` fallback). No CI, no per-session
+  clone — `git checkout X` on wgs3 = deploy. Worth adding to README or
+  runbook so the next person doesn't have to discover it by reading
+  `deploy/ood/template/script.sh.erb`.
 
-### Priority 3 — Stale branch cleanup (after rename)
+- **GitHub branch protection still unset.** Got 403 "Upgrade to Pro or
+  make public" earlier even though the repo is supposedly on a paid
+  plan. Worth a 1-min check at github.com/settings/billing — might be
+  on a different account/org.
 
-**Deleted today**: `codex/collab-latest` (local) — confirmed 0 unique
-commits vs web, 74 behind.
-
-**Still to clean up**:
-- `claude/charming-sanderson-f6840e` (local + remote) — 0 unique commits
-  vs web after today's commit landed there
-- `claude/happy-haslett-9b4f56` (local + remote) — 0 unique commits vs
-  web after `PIPELINES_PACKAGE.md` was copied to charming-sanderson
-- `codex/collab-review` — check if unique commits vs web; likely stale
-- `codex/browser-folder-picker` — check
-- `baseline-test` — old experimental branch; user should decide
-- Worktrees: `git worktree remove .claude/worktrees/{charming-sanderson-f6840e,happy-haslett-9b4f56}`
-  AFTER confirming nothing important left in them. happy-haslett's only
-  notable content was `docs/dev/PIPELINES_PACKAGE.md`, which is now
-  committed on web.
-
-Keep: `t03-spike` (A/B record), `feature/posthoc-step1` /
-`feature/vcf-edit` (live feature branches), `codex/snp-analysis`
-(active work).
-
-### Priority 4 — Red team the PIPELINES_PACKAGE design
-
-Before implementing Phase 1 (`pipelines/amrfinder.py`), spawn parallel
-sub-agents to red-team the design from four angles: software
-architecture, ops/deployment, bioinformatics workflow, code-review
-hygiene. The PIPELINES_PACKAGE doc is at a natural point where outside
-perspectives would catch problems before they get baked in.
-
-Real-human review (Lingling, Tod, Dev, Dee) should also happen for UX
-and bioinformatics domain expertise.
-
-### Priority 5 — Tickets to add (Milestone C, post-rename)
-
-The PIPELINES_PACKAGE.md design implies these tickets — add to
-`docs/dev/TICKETS.md` Milestone C:
-
-| Ticket | What |
-|---|---|
-| **T-15+T-08** (existing — promote) | Multi-app deployment template is now load-bearing for pipelines work |
-| **T-27** | Implement `pipelines/common/` (`AnalysisPrimitive` contract + `Project` workspace helper + provenance/badge/runner shims). Lives initially inside `vsnp_gui/backend/app/pipelines/`. |
-| **T-28** | Implement `pipelines/amrfinder.py` against the contract; regression-test against today's 8 NivediXXX amr_matrix.csv |
-| **T-29** | Wire AMR into vsnp_gui: post-step1 hook, badge, "Run AMR" button. First end-to-end card-to-card consumption. |
-| **T-30** | Re-deploy kraken_gui as an OOD batch_connect app on wgs3; drop electron build; import `pipelines/kraken.py` from the shared package. |
-| **T-31** | Standalone AMR OOD card (sister to vSNP / Kraken). Driven by the same shared module. |
-| **T-32** | Sourmash card + `pipelines/sourmash.py` |
-| **T-33** | NAHLN_AMR vendored reference: port MLST / Abricate / SeqSero2 wrappers as additional primitives |
-| **T-34** | Cross-card navigation protocol (`?project=X&sample=Y` on every card) |
-| **T-35** | `samples.json` schema + concurrent-write strategy (atomic tempfile+rename + per-project lockfile) |
-
-## Other observations worth noting (not blocking)
-
-- **Collaborator data caveat**: their methods section claims FastQC →
-  fastp → Trimmomatic → Shovill v1.0.9 → CheckM → FastANI → Prokka →
-  AMRFinder pipeline. GenBank assembly metadata says SPAdes v4.2.0
-  (Shovill v1.0.9 can't wrap SPAdes 4.x — methods are wrong on at least
-  that point). No SRA was deposited. They likely binned *M. sciuri*
-  contigs from polymicrobial SPAdes output and submitted only those.
-  Legitimate workflow but undisclosed in their methods.
-
-- **Collaborator email open**: I helped draft a request for their
-  ConFindr / CheckM TSVs to settle whether the read sets they analysed
-  are the read sets they sent us. They mentioned using "Kraken,
-  Confinder, CheckM" — output never shared. Worth following up.
-
-- **9th BioSample in the project (Nivedi_IN208)** registered at
-  SAMN53117686 but with `/strain="Not applicable"` and no WGS assembly
-  submitted — likely failed their QC and was dropped. He didn't send
-  you that one.
-
-- **OOD `step1_max_parallel` is 8** — on a 128-core / 503 GB box. Was
-  the bottleneck today when running 15 samples. Bumping to 16 in the
-  user config (or adding it to the GUI's Settings panel) is a 1-line
-  change.
-
-- **NAHLN_AMR upstream is gold** — `bin/latex_reporter.py` (58 KB) is a
-  direct cousin of the kapurlab fork's `Latex_Report` class.
-  `bracken_pie.py` is identical lineage. When porting tools into the
-  pipelines package, NAHLN_AMR's existing wrappers cut the work
-  substantially.
+- **`charming-sanderson-f6840e` worktree** was removed earlier today
+  (was orphan on `main`). If you see references to it in old notes,
+  ignore — gone.
 
 ## Verify when picking up
 
-1. `git log --oneline -5` on `web` — last commit should be
-   `51ae6df docs: PIPELINES_PACKAGE design …`
-2. `git log --oneline -5` on `codex/snp-analysis` — last commit should
-   be `b6c474d step1 concurrency hardening + openpyxl dep`
-3. `git status` on both worktrees — should be clean (no uncommitted)
-4. Neither branch is pushed yet — `git push` decisions belong to the
-   next session
-5. `ssh wgs3 'ls /home/vxk1/projects/Shivasharanappa_panel/amrfinder/'` —
-   should show 8 `.amr.tsv` files
-6. `ssh wgs3 'mamba run -n amrfinder amrfinder --version'` — should
-   report 4.2.7
+1. `git log --oneline -5` on `main` should show this handoff commit
+   on top, then `06c35ef` (T-36/37/38), then `56a8e06` (the merge),
+   then `3abbb1a` (the morning handoff).
+
+2. `git status` — clean (no uncommitted; `.claude/` untracked is fine).
+
+3. `ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -2'`
+   should match origin/main.
+
+4. `ssh wgs3 'curl -s http://localhost:26911/api/posthoc/tools | python3 -c "import sys,json; print(json.load(sys.stdin)[0][\"available\"])"'`
+   should print `True`. (Port may differ if a new OOD session was
+   started — read `connection.yml` in the most recent
+   `~/ondemand/data/sys/dashboard/batch_connect/sys/vsnp_gui/output/<UUID>/`
+   for the current port.)

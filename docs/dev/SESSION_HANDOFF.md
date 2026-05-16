@@ -1,189 +1,256 @@
-# Session handover — May 12 2026
+# Session handover — May 16 2026
 
 Continuation notes for the next Claude session. Read this first, then
-`docs/dev/TICKETS.md` for the broader plan.
+[`docs/dev/PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) for the design
+direction and [`docs/dev/TICKETS.md`](TICKETS.md) for the broader plan.
 
 ## TL;DR
 
-The day was about **getting *Mammaliicoccus sciuri* up as a working
-reference and validating the full vSNP3 pipeline on a real-data panel** —
-turning up and fixing a chain of integration bugs that had never been
-exercised by the MTBC / SARS-CoV-2 work to date. Sixteen commits landed.
+The day was about three things, in order:
 
-Two test projects are live on wgs3, both pinned to the new
-**`Mammaliicoccus_sciuri_6942A_MS`** reference (cattle isolate, much
-better centroid than the type strain NCTC12103):
+1. **Diagnosing the Shivasharanappa panel** — kraken2 + bracken showed
+   all 7 samples are heavily polymicrobial (4–38% *M. sciuri*, dominant
+   *Proteus mirabilis* / *Enterococcus* / *Paraclostridium*). Source is
+   almost certainly direct-from-clinical-specimen (mastitis milk), not
+   colony picks — even though the collaborator's published methods
+   describe a single-isolate workflow.
 
-- **`Mscuiri_test_6942AMS`** — 8 SRA-derived isolates, step1+step2 ✅,
-  tree rendered, NOT yet re-run after the alias-map fix on `4320772`.
-  Worth a final Setup+Run on step2 to confirm everything is clean.
-- **`Shivasharanappa_panel`** — 7 paired Indian bovine mastitis samples
-  from the user's collaborator, **downsampled locally to ~200× target
-  coverage** before transfer (12 GB → 2.3 GB), pinned to the same
-  cattle reference. **Awaiting first Setup+Run.**
+2. **Reconstructing the panel from the collaborator's NCBI submissions** —
+   pulled the 8 *M. sciuri* WGS assemblies they uploaded to BioProject
+   PRJNA1358531 (one strain not in our fastq set: HW110, a water isolate),
+   synthesized 50× paired Illumina reads from each, and re-ran step1
+   alongside the raw fastqs. Combined tree confirms their *M. sciuri*
+   contig bins faithfully match what BWA recovers from the raw
+   polymicrobial fastqs — every NivediXXX synthetic clusters tightly with
+   its real-fastq sibling.
 
-`web` branch HEAD: `4320772` _reference_alias_map: handle vsnp3's
-NCBI-version stem strip. wgs3 deploy clone in sync. Frontend dist rebuilt
-where needed.
+3. **Installing AMRFinderPlus on wgs3 and running it on the 8 NivediXXX
+   assemblies** — established the canonical fixture for the future shared
+   pipelines package. Found *mecA1* and *sal(A)* universal; arsB / arsC /
+   cadD scattered; nothing else of clinical concern.
 
-## State to verify when picking up
+The architectural payoff: a 632-line design doc
+**[`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md)** committed to `web` as
+`51ae6df`. Specifies the `AnalysisPrimitive` contract and a shared
+**project filesystem workspace** that every future OOD card (vSNP /
+Kraken / AMR / Sourmash / MLST) reads-and-writes against. Today's AMR
+run becomes the regression fixture for the first concrete primitive
+(`pipelines/amrfinder.py`).
 
-```bash
-# Branch + deploy clone match origin/web
-ssh wgs3 'sudo git -C /srv/kapurlab/tools/vsnp_gui log --oneline -1'
-# expect: 4320772 _reference_alias_map: handle vsnp3's NCBI-version stem strip
+## Commits landed today
 
-# Latest dist bundle on wgs3
-ssh wgs3 'sudo ls /srv/kapurlab/tools/vsnp_gui/frontend/dist/assets/index-*.js'
+**On `web`** (1 unpushed commit at HEAD):
+- `51ae6df` docs: PIPELINES_PACKAGE design — shared analysis primitives
+  + project workspace
 
-# The two M. sciuri reference dirs exist with full file set
-ssh wgs3 'ls /srv/kapurlab/refs/vsnp3/reference_options/Mammaliicoccus_sciuri_NCTC12103/ && echo --- && ls /srv/kapurlab/refs/vsnp3/reference_options/Mammaliicoccus_sciuri_6942A_MS/'
+**On `codex/snp-analysis`** (1 unpushed commit at HEAD):
+- `b6c474d` step1 concurrency hardening + openpyxl dep
+  (committed the 3 uncommitted edits that had been sitting in the main
+  worktree: `_wrapper_process_alive()` pgrep fallback in `main.py`,
+  step1 "already running" guard in `App.jsx`, `openpyxl==3.1.5` for
+  posthoc `_stats.xlsx` reading)
 
-# Both M. sciuri projects exist; Shivasharanappa_panel has the downsampled fastqs
-ssh wgs3 'ls /home/vxk1/projects/Mscuiri_test_6942AMS/ /home/vxk1/projects/Shivasharanappa_panel/download/ | head -25'
+Both branches are local-only. **Nothing was pushed today.** Push when
+the next session has reviewed the handoff and decided how to proceed.
 
-# Smoke tests still green (T-07 indexer + writer + jobs callback + SSE)
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui/backend/app && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_indexer.py 2>&1 | tail -2 && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_provenance_writer.py 2>&1 | tail -2 && \
-    /srv/kapurlab/tools/vsnp3/bin/python test_jobs_callback.py 2>&1 | tail -2'
+## State on wgs3
+
+**`/home/vxk1/projects/Shivasharanappa_panel/`** is the working dataset:
+
+```
+download/
+  IN{47,50,107,108,109,185,240}_R{1,2}.fastq.gz          ← real polymicrobial fastqs, downsampled to 200× target
+  NivediHW110_R{1,2}.fastq.gz, NivediIN{47,...}_R{1,2}.fastq.gz ← synthetic 50× from NCBI assemblies
+step1/<sample>/                                          ← already populated for the 7 real samples
+step2/                                                   ← tree from the combined run (15 samples)
+synthetic_from_assembly/
+  fasta/{HW110,IN47,...,IN240}.fasta                     ← 8 NCBI-deposited M. sciuri assemblies
+  fastq/                                                 ← wgsim-simulated paired reads (50× depth, 251bp, seed 42)
+kraken/                                                  ← kraken2 + bracken + krona + per-sample bracken pies + panel_kraken_summary.xlsx
+amrfinder/                                               ← 8 .amr.tsv files — THE FIXTURE for pipelines/amrfinder.py regression test
 ```
 
-## What landed this session (May 12 chronological highlights)
+**Conda envs on wgs3** (under `~/miniforge3/envs/`):
+- `vsnp3` — pre-existing, vsnp3 + samtools/bcftools/wgsim
+- `kraken_report` — kraken2 2.17.1, bracken 3.1, krona, krakentools, matplotlib, pandas, openpyxl
+- `amrfinder` — ncbi-amrfinderplus 4.2.7 with DB 2026-03-24.1 at
+  `~/miniforge3/envs/amrfinder/share/amrfinderplus/data/2026-03-24.1/`
 
-Sixteen commits, every one shipped + synced. In rough order:
+**Shared refs**:
+- Kraken Standard-8: `/srv/kapurlab/refs/kraken/standard-8_20250402/`
 
-**Browser xlsx preview (T-09 follow-up wave)**
-- `db06542` — initial xlsx → HTML preview endpoint + "View" buttons on step2 outputs. Uses openpyxl-based renderer that walks cells and emits inline-styled `<table>`. Was a placeholder formatting pass.
-- `6ddc685` — rotation 90/180 from `cell.alignment.text_rotation` mapped to CSS `writing-mode: vertical-rl`. Auditing the step2 Open buttons: `.tre/.nwk` get the existing tree-view button; html/fasta/nexus/vcf/txt/tsv/csv/log/json/yaml/md/pdf/png/jpg/svg get a new browser-native "View" via `?inline=1` on /download-file; zip/bam/binary drop the Open entirely.
-- `672086b` — fix column widths: openpyxl stores column-range widths under a single anchor key with `.min`/`.max` spanning the range. The previous lookup was per-letter and missed the implicit range, so cols got the 80px fallback instead of Excel's narrow 20px. Plus `table-layout: fixed` so colgroup widths are honored.
-- `9d9de16` — MIME types filled in on /download-file so inline=1 actually renders (.json → application/json, .svg → image/svg+xml, image types). The provenance "View" button on .json files was downloading instead of rendering.
-- `cd10d96` — fix missing app-logo icon in the OOD reverse-proxy context (origin-rooted `<img src="/...">` was 404'ing because OOD's main nginx doesn't serve from the per-session uvicorn's dist).
+**Local pulled artifacts** (on the Mac):
+- `~/Downloads/Shivasharanappa_kraken_reports/` — krona HTMLs, bracken pies, xlsx, `Nivedi_panel_metadata.csv`
+- `~/Downloads/Shivasharanappa_kraken_reports/Nivedi_panel_metadata.csv` — BioSample-derived host / source / village / date / collector
+- `~/Downloads/Shivasharanappa_panel_kraken.zip` — email-ready bundle for the collaborator
+- `~/Downloads/Shivasharanappa_amrfinder/{*.amr.tsv,amr_matrix.csv}`
+- `~/Downloads/Shivasharanappa_assemblies/*.fasta` — 8 NivediXXX FASTAs
 
-**SRA download flow** (the big chain — went from "broken silently" to "fast and informative")
-- `a44d38a` — SRA expander: rate-limit (process-local 0.4s gap, 0.11s with NCBI_API_KEY), retry-on-429 with exponential backoff, narrow exception catch + SRAExpansionError so failures surface instead of silently falling back to the unexpanded literal accession. Endpoint translates to 502 with `detail`.
-- `3061b4d` — frontend: check res.ok and surface backend errors in the SRA Download status line. Was silently swallowing 502s and leaving the spinner stuck forever.
-- `7e89493` → `ebe40ee` — DNS in the OOD Singularity container was broken: host /etc/resolv.conf is a symlink to /run/systemd/resolve/stub-resolv.conf, but /run isn't in the cluster's singularity_bindpath. The first attempt at a `source:dest` file bind got rejected by Singularity (file bind requires destination to exist in image). Switched to a directory bind of `/run/systemd/resolve`. Required killing the dashboard Passenger PUN to force config reload (OOD's `~/ondemand/restart_pun` sentinel didn't fire — see polish item below).
-- `5b21d15` — parallelize the bash download script via `xargs -P 4`. Was a strict for-loop; with 18 accessions that's serial network + serial fasterq-dump. Sweet spot is 4 parallel workers (past ~6 NCBI throttles per-IP). Also: installed `sra-toolkit` apt package on wgs3 so Method 1 (S3 + fasterq-dump) becomes the primary download path, not ENA-curl-only.
+## Open items for the next session
 
-**File-list UX**
-- `ea5a9fe` — collapse paired R1+R2 fastqs into a single sample row in the "Files in download/" panel. SRA-naming (`_1`/`_2`) and Illumina-naming (`_R1`/`_R2[_001]`) both detected via one regex.
+### Priority 1 — codex/snp-analysis → web merge (deferred today)
 
-**Step1 reliability**
-- `5936c6e` — provenance_writer._build_step1_inputs accepts SRA `_1`/`_2` fastq naming. The bash step1 batch script already did; the writer only matched literal `R1`/`R2`. Every dispatch on an SRA-named panel was returning DispatchFailed before any job ran. Plus frontend's `step1Run` now surfaces 500 details via alert() (was silently swallowing them, same pattern as the SRA Download fix).
-- `83ea531` — step1 status uses T-07's `.provenance/exit_code` sentinel as the authoritative per-sample terminal signal. Drops the log-substring heuristic that was false-positiving on vsnp3's verbose intermediate output and making every sample flicker through "Error" before transitioning to "Complete".
-- `45a5592` — bash step1 batch loop: use `wait -n` (rolling pool, true throughput-limited parallelism) instead of `wait $pids[0]` (FIFO replacement, capped by slowest in the head batch). And: 409 guard at the top of /step1/run rejecting a second click while an existing step1 job is `running`. Two concurrent batches racing over the same per-sample dir was the actual cause of the seqkit "FileNotFoundError on temp_fastq_seqkit_stats.txt" we hit.
-- `80f59e5` — Run button frontend: disable + relabel "Running…" while step1JobStatus === "running". 5-second polling of /step1/status while the batch is in flight so the disable accurately re-enables after a page reload that lost SSE jobId tracking.
+Attempted in this session, **aborted** because the conflicts span months
+of independent evolution in shared code regions that include T-07
+provenance plumbing. Don't auto-resolve.
 
-**Reference alias resolution**
-- `4320772` — `_reference_alias_map` indexes both the literal FASTA stem and the NCBI-version-stripped stem. vsnp3_step1.py copies the reference FASTA into each sample's alignment dir and renames it to drop the version suffix (`NZ_LS483305.1.fasta` → `NZ_LS483305.fasta`), so the resulting VCF's `##reference=` points at the renamed file. step2's setup was string-matching on the original stem and pushing every VCF into mismatch_report.csv, leaving vcf_source/ empty and crashing vsnp3_step2.py with "After sample filter: 0".
+`codex/snp-analysis` has 5 unmerged commits (4 from March/April + 1
+today: `b6c474d`). The branch adds a complete `backend/app/posthoc/`
+subsystem that **`web` is already calling into** (web's `main.py` /
+`App.jsx` / `styles.css` reference posthoc routes and state, but the
+implementation directory doesn't exist on web). The merge fills in the
+missing subsystem.
 
-## Today's biology arc
+**Conflict regions in `main.py`** (5+):
 
-- Set up **`Mammaliicoccus_sciuri_NCTC12103`** as a new reference (type strain, NCTC12103 = ATCC 29062 = DSM 20345, Sanger Centre 2018, chromosome `NZ_LS483305.1`, 2.81 Mb complete circular). Manual setup: download fasta/gbk/gff via `vsnp3_download_fasta_gbk_gff_by_acc.py`, faidx, .genome, best_reference marker, citation.
-- Search SRA directly for *M. sciuri* Illumina bovine WGS runs → 205 hits across major bovine studies. Curated to 18 representative SRRs, dropped down to 9 after QC review.
-- Ran step1+step2 on the 9-sample panel → tree showed huge branch lengths (~0.40 sub/site of the SNP alignment), suspicious. Investigated and found:
-  - Branch lengths are real, not a bug — high *M. sciuri* intra-species diversity.
-  - **NCTC12103 (squirrel skin, 1960s) is a poor reference for modern cattle isolates.** Most cattle samples are ~0.40 sub/site away on the SNP alignment.
-- Set up **`Mammaliicoccus_sciuri_6942A_MS`** as a second reference (USA cow strain, chromosome `CP099817.1`, 2.77 Mb, SUNY Albany 2022).
-- Re-ran on the cattle reference → root moves INTO the cattle clade (sister to the Swiss pair), sister-taxa structure preserved (WI pair, Swiss pair), but **per-sample branch lengths to the rest of the panel are unchanged** because the distances are intrinsic to the samples, not the reference choice. Confirms the panel has real population structure but the high SNP counts are not a methodological artifact.
-- One sample (`SRR37536882`, Bangladesh "buffalo mastitic milk") was deep outgroup in both trees. Ran sourmash containment as definitive species check:
-  - Cattle control SRR32134413 (known *M. sciuri* from tree): **80.1%** of 6942A_MS reference k-mers present in sample → clean same-species signal.
-  - SRR37536882: **47.5%** k-mer overlap → sibling-species territory (probably *M. lentus*, *M. fleurettii*, or *M. vitulinus*). Removed from both projects.
-- Confirmed Shivasharanappa's collaborator sent **clean replacement fastqs** for the 7 Indian bovine mastitis samples (the original delivery had been corrupted — wrapped/truncated/quality-scrubbed). Downsampled locally to ~200× target before transfer (12 GB → 2.3 GB, ~5× shrink).
+| Region | Web (HEAD) has | codex has | Resolution hint |
+|---|---|---|---|
+| imports | `SRAExpansionError` | `posthoc_*` registry imports | take both |
+| helper block at L61 | `_project_roots`, `_project_dir_for`, `_resolve_qc_thresholds`, `_annotate_qc_rows`, `_path_under_any_project_root` | `_wrapper_process_alive`, `_script_bin_dir`, `_tool_bin_dir` | take both — orthogonal |
+| `wrap_cmd` at L231 | PYTHONWARNINGS prefix + vsnp3 PATH | tool_bin + script_bin PATH builder | merge: PYTHONWARNINGS prefix + codex's PATH builder logic |
+| step2 dispatch at L1714 | full T-07 `provenance_writer.dispatch_step2` + `Step2DispatchBlocked` + finalize callback | `shlex.quote` on paths | keep web's T-07 dispatch wholesale; apply codex's shlex.quote to the cmd construction |
+| step2 outputs at L2561 | labeled-tre suppression logic | (different change) | inspect — likely keep web |
 
-## Live system state (May 12 EOD)
+**Conflict in `requirements.txt`**: codex adds aiofiles, numpy, pandas,
+matplotlib, scipy, openpyxl. Take all (they're needed by the posthoc
+SNP analysis).
 
-- **Branch**: `web` at `4320772`. Both `origin/web` and the wgs3 deploy clone (`/srv/kapurlab/tools/vsnp_gui/`).
-- **Frontend dist**: rebuilt across multiple commits today; check the live bundle hash if anything looks stale.
-- **vSNP3 install**: `/srv/kapurlab/tools/vsnp3/` v3.16. Patched. New addition this session: **`sra-toolkit` apt package** (`/usr/bin/fasterq-dump`, `/usr/bin/prefetch`) — gives the SRA download script its primary path (S3 + fasterq-dump) instead of ENA-curl-only fallback.
-- **OOD cluster config**: `/etc/ood/config/clusters.d/wgs3.yml` has the updated `singularity_bindpath` including `/run/systemd/resolve` so in-container DNS works.
-- **References installed**:
-  - `Mammaliicoccus_sciuri_NCTC12103` (type strain — kept for posterity / type comparisons)
-  - `Mammaliicoccus_sciuri_6942A_MS` (cattle isolate — recommended default for cattle work)
-  - All sibling refs from prior sessions (MTBC, Brucella, NC_045512, Mycobacterium AF2122, etc.)
-- **Test projects on wgs3**:
-  - `/home/vxk1/projects/Mscuiri_test/` — 8 SRA-derived isolates, step1+step2 done against NCTC12103. After dropping SRR37536882.
-  - `/home/vxk1/projects/Mscuiri_test_6942AMS/` — same 8 isolates as symlinks to `Mscuiri_test/download/`, pinned to 6942A_MS reference, step1+step2 done. (Note: step2 was run before the `4320772` alias-map fix; *should* still be correct because alias map used a different fallback path, but a re-run would confirm.)
-  - `/home/vxk1/projects/Shivasharanappa_panel/` — 7 Indian bovine mastitis samples downsampled to ~200× target, pinned to 6942A_MS reference. **Awaiting first Setup+Run on step1.**
-- **`/srv/kapurlab/audit/`**: T-07 provenance index (`runs.sqlite`) auto-populated from today's runs. env_snapshots dir continues to dedupe.
-- **Cron**: `/etc/cron.d/vsnp_gui-provenance` unchanged (hourly gc, nightly crawl/export).
+**Conflict in `App.jsx`**: UI overlap in the posthoc tab/state region.
+Web has more recent UI state (posthocFolders, posthocRows, posthocFilteredRows
+memo, fetch calls to /api/posthoc/{step1/scan,step1/resolve_samples,open}).
+Codex's frontend additions are an earlier generation of that UI plus a
+step1JobStatus guard. Take web's UI but graft codex's step1JobStatus
+guard into `step1Run()`.
 
-## What to do first when you pick up
+**Web has its own implementations of `/api/posthoc/step1/scan` and
+`/api/posthoc/step1/resolve_samples` at L1930/1995** — codex has them at
+L1478/1540. These may have diverged. Read both before deciding which to
+keep — web's are likely newer (post-T-07), but verify they're not
+regressing capability codex had.
 
-1. Verify the state-checks above pass (~2 min).
-2. **Pick up the M. sciuri analysis**:
-   - The user's most likely next move is **Setup + Run step1 + step2 on `Shivasharanappa_panel`**. ~15 min wall time. Compare the tree to `Mscuiri_test_6942AMS`'s tree — see whether the Indian bovine isolates land inside the cattle clade (good — same lineage as the WI/CH/Belgium samples) or break out as their own sublineage (interesting — publishable observation about Indian cattle).
-   - The *M. sciuri* `define_filter.xlsx` is still empty. Cascade tables won't have lineage-defining-SNP coloring until that's populated. Not a blocker but an obvious follow-up.
-3. **Land the queued polish features** (see list below) in whatever order suits the next session's priority.
+**`/api/posthoc/tools` and `/api/projects/{p}/posthoc/run`** exist only on
+codex side — take wholesale.
 
-## Polish features queued (deferred from this session, in rough priority)
+**`/api/posthoc/open`** exists only on web side — keep.
 
-1. **OOD `restart_pun` reliability** — touching `~/ondemand/restart_pun` did not reliably trigger the dashboard PUN restart on config changes. Workaround was a direct kill of the Passenger RubyApp process for the dashboard. Worth: (a) investigating why the sentinel didn't fire on this OOD version, (b) documenting the kill recipe in `deploy/ood/README.md`, (c) adding a small admin script that does the kill cleanly.
-2. **Auto-housekeeping for Reference downloads.** Backend should run a post-download step that parses the FASTA defline, derives a friendly `Genus_species_strain` directory name (with optional GUI override), runs `samtools faidx`, generates `.genome`, touches `best_reference.txt`, writes `citation.txt`, and renames the dir. We did this manually for both M. sciuri references today; the GUI's "Download New Reference" form should do it automatically. ~1 hr of work; design notes:
-   - Defline parsing: `>ACC <Genus> <species> [strain <name>] [chromosome|complete|genome|plasmid…]`. Strip "strain" / "isolate" filler words. Sanitize strain name (keep alnum/_/-).
-   - Frontend: optional "Reference name (auto if blank)" text input.
-   - Backend: JobManager finalize_callback on the existing download job runs the housekeeping. Mirror the T-07 pattern.
-3. **Downsampling at Step 1 Setup time.** Project-level config `step1_max_coverage` (default 0 = no downsample). Setup uses `seqkit stats` to estimate per-sample coverage as `total_bases × map_rate / ref_size`, then `seqkit sample -p <frac> -s <seed>` with the same seed for R1 and R2 to preserve pair sync. Original fastqs stay in `download/`; downsampled go into the sample dir, the existing symlink points at them. Add a "downsampled to Nx" indicator in the QC table. ~2 hr.
-4. **Coverage breadth as a T-09 QC signal.** Currently T-09 verdicts depend on depth (`Average Depth`) + mapping rate (`100 − Unmapped Percent`) + contamination flag. Add `Genome with Coverage %` (column already in the *_stats.xlsx output) with a reasonable threshold (≥80% pass / ≥60% review / <60% fail). Would have flagged SRR21002857 (33%) / SRR37251701 (49%) / ERR3358320 (63%) cleanly — these were the cases mapping-rate alone missed. ~30 min.
-5. **Sourmash species check at Setup or Step 1 time.** vsnp3 ships sourmash already, and we used it successfully today to confirm the Bangladesh sample wasn't *M. sciuri*. Could integrate as a Step 1 Setup-time check: sketch each sample's fastqs, compare containment against the chosen reference's sketch, flag samples with <70% containment as likely-wrong-species. Surfaces as a third badge state on the Step 1 sample row. ~1.5 hr (mostly the GUI plumbing).
-6. **Better per-sample step1 progress UI.** The "Running…" disabled Run button is fine but tells you nothing about *which* sample is on what stage (BWA / fixmate / markdup / variant calling). Parsing `run_step1.log` for the standard vsnp3 phase markers and surfacing them in the sample table would be a nice touch. ~2-3 hr.
+Recommend a **focused merge session**: open both branches' main.py
+side-by-side, resolve each hunk with intent visible, run the test suite
+(`backend/app/test_*.py`), smoke-test the posthoc dropdown end-to-end.
+~30–60 min of careful work.
 
-## Known minor follow-ups (deferred, not blocking)
+### Priority 2 — GitHub-side branch rename (user does this in browser)
 
-- **vsnp3_download_GCA_fasta_get_metadata.py is broken** (missing `usda_file_setup` import). Standalone fix is a one-line shim; the bulk-fetch flow we discussed is unused for now since we use SRA reads directly.
-- **NCBI_API_KEY env var** is not yet set on the backend. With it, eutils rate limit jumps from 3/sec to 10/sec. Free to register. Per the install plan we discussed: put key at `/etc/ood/secrets/ncbi_api_key` (mode 0640, group kapurlab-members) and patch `deploy/ood/template/before.sh` to export it. Today's two transient 502s could have been avoided.
-- **define_filter.xlsx for M. sciuri** is empty. Cascade tables don't have lineage-defining SNP coloring. Real work — needs literature review or a defining-SNP discovery analysis on a representative isolate panel.
-- **Bangladesh sample species ID** — confirmed it's not *M. sciuri* (47% containment) but didn't nail the exact sibling species. Could pull type-strain assemblies for *M. lentus*, *M. fleurettii*, *M. vitulinus*, *M. stepanovicii* and run a 5-way containment comparison. ~5 min if anyone needs it.
-- **The Mscuiri_test_6942AMS step2 re-run.** Step1+step2 was run against the cattle reference earlier today, *before* the alias-map fix landed (`4320772`). The path it took to populate vcf_source/ worked via a different fallback (since the user had already manually re-set up the project after the alias issue surfaced). Worth a final Setup+Run on step2 to confirm clean state, but not strictly required — the tree we got was sensible.
-- **Local seqkit on the Mac** — installed via `brew install seqkit` for the downsampling. Documented in this handoff; not a long-term ask of the user but worth noting if anyone else picks this up.
+After the codex/snp-analysis merge lands cleanly, promote `web` → `main`:
 
-## Files of note (added or substantially modified today)
-
-- `backend/app/sra.py` — rate-limited expander, SRAExpansionError, parallelized download script via xargs -P
-- `backend/app/main.py` — _reference_alias_map alias fix, step1_run wait -n loop + duplicate-Run guard, step1_status exit_code sentinel, /download-file MIME table, /preview-xlsx endpoint
-- `backend/app/xlsx_html.py` — openpyxl → HTML converter with formatting / CF rules / rotation / column widths
-- `backend/app/provenance_writer.py` — _build_step1_inputs accepts SRA _1/_2 fastq naming
-- `frontend/src/App.jsx` — paired-file grouping in download list, View buttons for xlsx/inline-renderable types, step1 Run button disabled-while-running with 5s polling, sraDownload + step1Run error surfacing
-- `deploy/ood/clusters.d/wgs3.yml` — singularity_bindpath includes /run/systemd/resolve
-
-## Operational recipes
-
-### Re-run step2 after a tree-rooting / reference change
-
-In the same project, switching reference is *not* clean (it'd mix old `alignment_<ref>/` dirs with new ones). Use a new project; symlink the existing `download/` fastqs to avoid re-transfer. Today's `Mscuiri_test_6942AMS` was created exactly this way — 9 symlinks back into `Mscuiri_test/download/`, project.json pinned to the new reference, Setup + Run.
-
-### Force OOD dashboard PUN restart (when `restart_pun` sentinel doesn't fire)
-
-```bash
-ssh wgs3 'ps -fu vxk1 | grep "Passenger RubyApp.*dashboard" | grep -v grep | awk "{print \$2}" | xargs -r kill'
+```
+1. Push web to origin (the 51ae6df doc commit + any merge commits)
+2. GitHub UI → repo Settings → Branches:
+   a. Rename `main` → `main-electron-archive`
+   b. Rename `web` → `main`
+   c. Change default branch to `main` (the new one)
+3. Update any branch protections / required checks pointed at "main"
+4. Locally: git fetch + reconcile
+   git branch -d main             # delete stale local main
+   git branch -m web main          # rename local web
+   git branch --set-upstream-to=origin/main main
 ```
 
-Next dashboard request spawns a fresh PUN that re-reads cluster.yml / dashboard.yml.
+The Mac copy of the repo is a viewer (do NOT run a local uvicorn there
+— it shadows the OOD backend in the browser, see `API_BASE` note in
+`TICKETS.md`).
 
-### Downsample fastqs to target coverage
+### Priority 3 — Stale branch cleanup (after rename)
 
-```bash
-seqkit sample -p <fraction> -s 42 <input.fastq.gz> -o <output.fastq.gz>
-# Same -s for R1 and R2 to preserve pair sync.
-# fraction = target_depth × ref_size / (map_rate × total_input_bases)
-```
+**Deleted today**: `codex/collab-latest` (local) — confirmed 0 unique
+commits vs web, 74 behind.
 
-We did this locally on the Mac for the Shivasharanappa fastqs today. The 12 GB → 2.3 GB shrink.
+**Still to clean up**:
+- `claude/charming-sanderson-f6840e` (local + remote) — 0 unique commits
+  vs web after today's commit landed there
+- `claude/happy-haslett-9b4f56` (local + remote) — 0 unique commits vs
+  web after `PIPELINES_PACKAGE.md` was copied to charming-sanderson
+- `codex/collab-review` — check if unique commits vs web; likely stale
+- `codex/browser-folder-picker` — check
+- `baseline-test` — old experimental branch; user should decide
+- Worktrees: `git worktree remove .claude/worktrees/{charming-sanderson-f6840e,happy-haslett-9b4f56}`
+  AFTER confirming nothing important left in them. happy-haslett's only
+  notable content was `docs/dev/PIPELINES_PACKAGE.md`, which is now
+  committed on web.
 
-### Sourmash species check (containment direction matters)
+Keep: `t03-spike` (A/B record), `feature/posthoc-step1` /
+`feature/vcf-edit` (live feature branches), `codex/snp-analysis`
+(active work).
 
-```bash
-# Sketch the sample's R1+R2 merged
-sourmash sketch dna -p k=31,scaled=1000 --merge <sample> R1.fastq.gz R2.fastq.gz -o sample.sig
+### Priority 4 — Red team the PIPELINES_PACKAGE design
 
-# Sketch the reference
-sourmash sketch dna -p k=31,scaled=1000 --name <ref> ref.fasta -o ref.sig
+Before implementing Phase 1 (`pipelines/amrfinder.py`), spawn parallel
+sub-agents to red-team the design from four angles: software
+architecture, ops/deployment, bioinformatics workflow, code-review
+hygiene. The PIPELINES_PACKAGE doc is at a natural point where outside
+perspectives would catch problems before they get baked in.
 
-# CRITICAL: query the reference's k-mers IN the sample's k-mers (not the
-# other way round — sample has way more error k-mers).
-sourmash search --containment ref.sig sample.sig
-# Expected: 75-100% for same species, 30-60% for sibling species, <10% for different genus.
-```
+Real-human review (Lingling, Tod, Dev, Dee) should also happen for UX
+and bioinformatics domain expertise.
 
-That's the lot. Good luck.
+### Priority 5 — Tickets to add (Milestone C, post-rename)
+
+The PIPELINES_PACKAGE.md design implies these tickets — add to
+`docs/dev/TICKETS.md` Milestone C:
+
+| Ticket | What |
+|---|---|
+| **T-15+T-08** (existing — promote) | Multi-app deployment template is now load-bearing for pipelines work |
+| **T-27** | Implement `pipelines/common/` (`AnalysisPrimitive` contract + `Project` workspace helper + provenance/badge/runner shims). Lives initially inside `vsnp_gui/backend/app/pipelines/`. |
+| **T-28** | Implement `pipelines/amrfinder.py` against the contract; regression-test against today's 8 NivediXXX amr_matrix.csv |
+| **T-29** | Wire AMR into vsnp_gui: post-step1 hook, badge, "Run AMR" button. First end-to-end card-to-card consumption. |
+| **T-30** | Re-deploy kraken_gui as an OOD batch_connect app on wgs3; drop electron build; import `pipelines/kraken.py` from the shared package. |
+| **T-31** | Standalone AMR OOD card (sister to vSNP / Kraken). Driven by the same shared module. |
+| **T-32** | Sourmash card + `pipelines/sourmash.py` |
+| **T-33** | NAHLN_AMR vendored reference: port MLST / Abricate / SeqSero2 wrappers as additional primitives |
+| **T-34** | Cross-card navigation protocol (`?project=X&sample=Y` on every card) |
+| **T-35** | `samples.json` schema + concurrent-write strategy (atomic tempfile+rename + per-project lockfile) |
+
+## Other observations worth noting (not blocking)
+
+- **Collaborator data caveat**: their methods section claims FastQC →
+  fastp → Trimmomatic → Shovill v1.0.9 → CheckM → FastANI → Prokka →
+  AMRFinder pipeline. GenBank assembly metadata says SPAdes v4.2.0
+  (Shovill v1.0.9 can't wrap SPAdes 4.x — methods are wrong on at least
+  that point). No SRA was deposited. They likely binned *M. sciuri*
+  contigs from polymicrobial SPAdes output and submitted only those.
+  Legitimate workflow but undisclosed in their methods.
+
+- **Collaborator email open**: I helped draft a request for their
+  ConFindr / CheckM TSVs to settle whether the read sets they analysed
+  are the read sets they sent us. They mentioned using "Kraken,
+  Confinder, CheckM" — output never shared. Worth following up.
+
+- **9th BioSample in the project (Nivedi_IN208)** registered at
+  SAMN53117686 but with `/strain="Not applicable"` and no WGS assembly
+  submitted — likely failed their QC and was dropped. He didn't send
+  you that one.
+
+- **OOD `step1_max_parallel` is 8** — on a 128-core / 503 GB box. Was
+  the bottleneck today when running 15 samples. Bumping to 16 in the
+  user config (or adding it to the GUI's Settings panel) is a 1-line
+  change.
+
+- **NAHLN_AMR upstream is gold** — `bin/latex_reporter.py` (58 KB) is a
+  direct cousin of the kapurlab fork's `Latex_Report` class.
+  `bracken_pie.py` is identical lineage. When porting tools into the
+  pipelines package, NAHLN_AMR's existing wrappers cut the work
+  substantially.
+
+## Verify when picking up
+
+1. `git log --oneline -5` on `web` — last commit should be
+   `51ae6df docs: PIPELINES_PACKAGE design …`
+2. `git log --oneline -5` on `codex/snp-analysis` — last commit should
+   be `b6c474d step1 concurrency hardening + openpyxl dep`
+3. `git status` on both worktrees — should be clean (no uncommitted)
+4. Neither branch is pushed yet — `git push` decisions belong to the
+   next session
+5. `ssh wgs3 'ls /home/vxk1/projects/Shivasharanappa_panel/amrfinder/'` —
+   should show 8 `.amr.tsv` files
+6. `ssh wgs3 'mamba run -n amrfinder amrfinder --version'` — should
+   report 4.2.7

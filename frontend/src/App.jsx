@@ -1566,6 +1566,20 @@ export default function App() {
     return data;
   }
 
+  // Open the latest *_stats.xlsx for a sample as a formatted HTML preview
+  // in a new tab — same xlsx_html renderer used by the Reference Editor
+  // View buttons. The preview page has an embedded "Download xlsx" link
+  // (via ?download=1) so users can still pull the file for offline edits
+  // without leaving the preview.
+  function viewStep1Stats(project, sample) {
+    if (!project || !sample) return;
+    const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/stats/preview`;
+    window.open(url, "_blank", "noopener");
+  }
+
+  // Kept for callers that explicitly want the raw xlsx (none today after the
+  // Stats button migration, but the underlying download endpoint stays in
+  // place for scripting / future use).
   function downloadStep1Stats(project, sample) {
     if (!project || !sample) return;
     const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/stats/download`;
@@ -2919,7 +2933,7 @@ export default function App() {
                                       <button onClick={() => viewInline(editInfo.edit_log)}>Edit Log</button>
                                     ) : null}
                                     {sampleKey(row) ? (
-                                      <button onClick={() => downloadStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
+                                      <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
                                   </div>
                                 </details>
@@ -3080,7 +3094,7 @@ export default function App() {
                                   {editLog ? (
                                     <button onClick={() => viewInline(editLog, row._project)}>Edit Log</button>
                                   ) : null}
-                                  {row._project && (row._sample || row.sample) ? <button onClick={() => downloadStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
+                                  {row._project && (row._sample || row.sample) ? <button onClick={() => viewStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
                                 </div>
                               </details>
                             </td>

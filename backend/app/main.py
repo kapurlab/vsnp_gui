@@ -2591,8 +2591,9 @@ def step1_files(project: str, sample: str = Query(...)):
     }
 
 
-@app.get("/api/projects/{project}/step1/samples/{sample}/stats/download")
-def step1_sample_stats_download(project: str, sample: str):
+def _latest_step1_stats(project: str, sample: str) -> Path:
+    """Discover the latest *_stats.xlsx for a sample. Shared by the download
+    and preview endpoints so they stay in sync on the resolution rules."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
@@ -2602,12 +2603,39 @@ def step1_sample_stats_download(project: str, sample: str):
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     if not stats_files:
         raise HTTPException(status_code=404, detail="Stats file not found")
-    target = stats_files[-1]
+    return stats_files[-1]
+
+
+@app.get("/api/projects/{project}/step1/samples/{sample}/stats/download")
+def step1_sample_stats_download(project: str, sample: str):
+    target = _latest_step1_stats(project, sample)
     return FileResponse(
         target,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{sample}_stats.xlsx",
     )
+
+
+@app.get("/api/projects/{project}/step1/samples/{sample}/stats/preview", response_class=HTMLResponse)
+def step1_sample_stats_preview(project: str, sample: str, download: int = 0):
+    """Render the latest stats xlsx for a sample as a formatted HTML preview
+    (cell colors + conditional formatting preserved via openpyxl). With
+    ?download=1, returns the raw xlsx — used by the "Download xlsx" link
+    inside the preview page so users can still grab the file for offline
+    spreadsheet work without leaving the preview."""
+    target = _latest_step1_stats(project, sample)
+    if download:
+        return FileResponse(
+            target,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=f"{sample}_stats.xlsx",
+        )
+    from app import xlsx_html
+    try:
+        html_page = xlsx_html.xlsx_to_html(target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
+    return HTMLResponse(content=html_page)
 
 
 @app.get("/api/projects/{project}/step1/samples/{sample}/files")

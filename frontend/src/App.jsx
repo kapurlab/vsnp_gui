@@ -893,15 +893,6 @@ export default function App() {
     loadPosthocStatuses([{ name: groupName }]);
   }
 
-  async function openOutput(path) {
-    if (!selectedProject) return;
-    await fetch(`${API_BASE}/api/projects/${selectedProject}/open`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path })
-    });
-  }
-
   function downloadOutput(path, downloadName) {
     if (!selectedProject) return;
     const nameParam = downloadName ? `&download_name=${encodeURIComponent(downloadName)}` : "";
@@ -915,10 +906,29 @@ export default function App() {
     window.open(url, "_blank", "noopener");
   }
 
-  function viewInline(path) {
-    if (!selectedProject || !path) return;
-    const url = `${API_BASE}/api/projects/${selectedProject}/download-file?path=${encodeURIComponent(path)}&inline=1`;
+  // Open a project file in a new tab via the existing inline-download endpoint.
+  // Optional `project` arg lets post-hoc cross-project rows view files for a
+  // project other than the currently-selected one.
+  function viewInline(path, project) {
+    const proj = project || selectedProject;
+    if (!proj || !path) return;
+    const url = `${API_BASE}/api/projects/${encodeURIComponent(proj)}/download-file?path=${encodeURIComponent(path)}&inline=1`;
     window.open(url, "_blank", "noopener");
+  }
+
+  // Copy an absolute path to clipboard with a brief confirmation. Used in
+  // place of the legacy "open folder in OS file manager" buttons, which were
+  // a no-op under OOD (xdg-open on the server has no display, the user is
+  // on a remote browser). The path is still actionable — paste into the OOD
+  // Files app or scp.
+  async function copyPathToClipboard(path, label) {
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      window.alert(`Copied path to clipboard:\n${path}\n\nPaste into the OOD Files app or scp from a terminal.`);
+    } catch (err) {
+      window.prompt(`Copy this path (${label || "path"}):`, path);
+    }
   }
 
   // Decide which preview button (if any) to render for a given output path.
@@ -935,15 +945,6 @@ export default function App() {
     if (/\.(tre|nwk)$/.test(p)) return "tree";
     if (/\.(html?|fasta|fa|fna|nexus|nex|vcf|txt|tsv|csv|log|json|yaml|yml|md|pdf|png|jpe?g|gif|svg|webp)$/.test(p)) return "inline";
     return "none";
-  }
-
-  async function openPosthocOutput(path) {
-    if (!path) return;
-    await fetch(`${API_BASE}/api/posthoc/open`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path })
-    });
   }
 
   async function runBootstrap() {
@@ -1510,15 +1511,6 @@ export default function App() {
     const data = await res.json();
     setStep1FilesCache((prev) => ({ ...prev, [sample]: data }));
     return data;
-  }
-
-  async function openStep1File(sample, type) {
-    const data = await getStep1Files(sample);
-    if (!data) return;
-    const path = data[type];
-    if (path) {
-      await openOutput(path);
-    }
   }
 
   function downloadStep1Stats(project, sample) {
@@ -2864,7 +2856,7 @@ export default function App() {
                                       Edit VCF
                                     </button>
                                     {editInfo?.edit_log ? (
-                                      <button onClick={() => openOutput(editInfo.edit_log)}>Edit Log</button>
+                                      <button onClick={() => viewInline(editInfo.edit_log)}>Edit Log</button>
                                     ) : null}
                                     {sampleKey(row) ? (
                                       <button onClick={() => downloadStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
@@ -3026,7 +3018,7 @@ export default function App() {
                                     Edit VCF
                                   </button>
                                   {editLog ? (
-                                    <button onClick={() => openPosthocOutput(editLog)}>Edit Log</button>
+                                    <button onClick={() => viewInline(editLog, row._project)}>Edit Log</button>
                                   ) : null}
                                   {row._project && (row._sample || row.sample) ? <button onClick={() => downloadStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
                                 </div>
@@ -3459,10 +3451,11 @@ export default function App() {
                   <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady}>Clear VCF set</button>
                   <button
                     className="ghost action"
-                    onClick={() => openOutput(`${settings.projects_root}/${selectedProject}/step2/vcf_source`)}
+                    onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_source`, "vcf_source path")}
                     disabled={!selectedProject}
+                    title="Copy the absolute server path to clipboard — paste into the OOD Files app or scp"
                   >
-                    Open vcf_source
+                    Copy vcf_source path
                   </button>
                 </div>
                 <div className="note">
@@ -3472,9 +3465,9 @@ export default function App() {
                 {importMismatchReport ? (
                   <button
                     className="ghost action"
-                    onClick={() => openOutput(importMismatchReport)}
+                    onClick={() => viewInline(importMismatchReport)}
                   >
-                    Open mismatch report
+                    View mismatch report
                   </button>
                 ) : null}
                 {importStatus ? <div className="note">{importStatus}</div> : null}
@@ -3619,7 +3612,7 @@ export default function App() {
                 <button
                   className="link-button"
                   onClick={() =>
-                    openOutput(`${settings.projects_root}/${selectedProject}/step2/edited_samples.json`)
+                    viewInline(`${settings.projects_root}/${selectedProject}/step2/edited_samples.json`)
                   }
                 >
                   View edited sample list

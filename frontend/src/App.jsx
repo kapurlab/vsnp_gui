@@ -943,7 +943,7 @@ export default function App() {
     const p = (path || "").toLowerCase();
     if (/\.(xlsx|xlsm)$/.test(p)) return "xlsx";
     if (/\.(tre|nwk)$/.test(p)) return "tree";
-    if (/\.(html?|fasta|fa|fna|nexus|nex|vcf|txt|tsv|csv|log|json|yaml|yml|md|pdf|png|jpe?g|gif|svg|webp)$/.test(p)) return "inline";
+    if (/\.(html?|fasta|fa|fna|nexus|nex|vcf|txt|tsv|csv|log|json|jsonl|ndjson|yaml|yml|md|pdf|png|jpe?g|gif|svg|webp)$/.test(p)) return "inline";
     return "none";
   }
 

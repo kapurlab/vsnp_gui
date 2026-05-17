@@ -773,10 +773,6 @@ class RefDownloadRequest(BaseModel):
     output_dir: str
 
 
-class RefOpenFileRequest(BaseModel):
-    filename: str
-
-
 @app.get("/api/references")
 def references():
     cfg = load_config()
@@ -873,24 +869,6 @@ def ref_files(ref_name: str):
     for f in remove_from:
         files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "remove_from_analysis"})
     return {"ref_name": ref_name, "ref_path": str(ref_dir), "files": files}
-
-
-@app.post("/api/references/{ref_name}/open-file")
-def ref_open_file(ref_name: str, payload: RefOpenFileRequest):
-    cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
-    ref = next((r for r in refs if r["name"] == ref_name), None)
-    if not ref:
-        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
-    ref_dir = Path(ref["path"])
-    target = (ref_dir / payload.filename).resolve()
-    if not str(target).startswith(str(ref_dir.resolve())):
-        raise HTTPException(status_code=400, detail="Path not allowed")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target)
-    return {"opened": str(target)}
 
 
 class RefCreateFileRequest(BaseModel):
@@ -2309,10 +2287,6 @@ class ExcludeRequest(BaseModel):
     samples: List[str]
 
 
-class OpenRequest(BaseModel):
-    path: str
-
-
 @app.get("/api/projects/{project}/step2/vcf_count")
 def step2_vcf_count(project: str):
     cfg = load_config()
@@ -2686,19 +2660,6 @@ def bootstrap():
     return {"job_id": job_id}
 
 
-@app.post("/api/projects/{project}/open")
-def open_path(project: str, payload: OpenRequest):
-    cfg = load_config()
-    project_dir = _project_dir_for(cfg, project)
-    target = Path(payload.path).resolve()
-    if not str(target).startswith(str(project_dir.resolve())):
-        raise HTTPException(status_code=400, detail="Path not allowed")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target, cfg)
-    return {"opened": str(target)}
-
-
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
@@ -2760,6 +2721,11 @@ def download_file(project: str, path: str = Query(...), inline: int = 0, downloa
         media_type = "application/pdf"
     elif suffix == ".json":
         media_type = "application/json"
+    elif suffix in (".jsonl", ".ndjson"):
+        # NDJSON / JSON-lines — not valid as a single JSON document, so
+        # render as plain text (browser shows the lines; doesn't try to
+        # parse a tree). Used by Mg***_patchlog.jsonl from VCF edits.
+        media_type = "text/plain"
     elif suffix == ".svg":
         media_type = "image/svg+xml"
     elif suffix == ".png":
@@ -2778,6 +2744,14 @@ def download_file(project: str, path: str = Query(...), inline: int = 0, downloa
     ):
         media_type = "text/plain"
     if inline:
+        # Defensive: if we didn't recognise the suffix and would otherwise
+        # serve application/octet-stream, force text/plain so the browser
+        # shows the file in-tab instead of triggering a download. This is
+        # the safe default for "View" buttons — research data files often
+        # have idiosyncratic extensions (e.g. `.amr.tsv`, `.patchlog.jsonl`)
+        # that we don't want to enumerate exhaustively.
+        if media_type == "application/octet-stream":
+            media_type = "text/plain"
         return FileResponse(target, media_type=media_type)
     filename = target.name
     if download_name:
@@ -2881,18 +2855,6 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
     suffix = target.suffix.lower()
     media_type = _IGV_SERVE_MEDIA_TYPES.get(suffix, "application/octet-stream")
     return _range_response(target, request, media_type)
-
-
-@app.post("/api/posthoc/open")
-def posthoc_open_path(payload: OpenRequest):
-    cfg = load_config()
-    target = Path(payload.path).resolve()
-    if not _path_under_any_project_root(cfg, target):
-        raise HTTPException(status_code=400, detail="Path not allowed")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    _open_path(target, cfg)
-    return {"opened": str(target)}
 
 
 @app.post("/api/projects/{project}/vcf_edit")
@@ -3260,24 +3222,6 @@ def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
     if not candidates:
         return None
     return sorted(candidates, key=lambda p: p.stat().st_mtime)[-1]
-
-
-def _open_path(target: Path, cfg: Optional[Dict] = None) -> None:
-    suffix = target.suffix.lower()
-    if sys.platform.startswith("darwin"):
-        if suffix in {".json", ".jsonl", ".txt", ".log", ".csv", ".tsv"}:
-            subprocess.run(["open", "-e", str(target)])
-        else:
-            subprocess.run(["open", str(target)])
-        return
-    if sys.platform.startswith("linux"):
-        opener = shutil.which("xdg-open")
-        if opener:
-            subprocess.run([opener, str(target)])
-            return
-    if sys.platform.startswith("win"):
-        subprocess.run(["explorer", str(target)])
-        return
 
 
 def _resolve_bcftools(cfg: Dict) -> str:

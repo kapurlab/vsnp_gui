@@ -934,6 +934,65 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
     return {"created": str(dest), "name": dest_name}
 
 
+def _resolve_ref_file(ref_name: str, filename: str) -> Path:
+    """Resolve a reference-dir-relative filename to an absolute path with
+    a directory traversal guard. Raises HTTPException on validation
+    failures. Used by the reference preview / download endpoints."""
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"]).resolve()
+    if "/" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    target = (ref_dir / filename).resolve()
+    if not str(target).startswith(str(ref_dir) + "/") and target != ref_dir:
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return target
+
+
+@app.get("/api/references/{ref_name}/preview-xlsx", response_class=HTMLResponse)
+def ref_preview_xlsx(ref_name: str, filename: str = Query(...)):
+    """Render a reference-dir xlsx as a self-contained HTML page. Used by
+    the Reference Editor's View buttons in lieu of the broken-in-OOD
+    'Edit in Spreadsheet App' flow that tried to launch xdg-open on the
+    server."""
+    target = _resolve_ref_file(ref_name, filename)
+    if target.suffix.lower() not in (".xlsx", ".xlsm"):
+        raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
+    from app import xlsx_html
+    try:
+        html_page = xlsx_html.xlsx_to_html(target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
+    return HTMLResponse(content=html_page)
+
+
+@app.get("/api/references/{ref_name}/download-file")
+def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0):
+    """Serve a file from a reference directory. Default = attachment;
+    ?inline=1 lets the browser render in-tab where it can. Used by the
+    Reference Editor's Download button."""
+    target = _resolve_ref_file(ref_name, filename)
+    suffix = target.suffix.lower()
+    if suffix in (".xlsx", ".xlsm"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif suffix == ".xls":
+        media_type = "application/vnd.ms-excel"
+    elif suffix == ".csv":
+        media_type = "text/csv"
+    else:
+        media_type = "application/octet-stream"
+    headers = {}
+    if not inline:
+        headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
+    return FileResponse(target, media_type=media_type, headers=headers)
+
+
 @app.get("/api/projects")
 def projects():
     cfg = load_config()

@@ -354,12 +354,24 @@ export default function App() {
     }
   }
 
-  async function openRefFile(refName, filename) {
-    await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/open-file`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename })
-    });
+  // Open the xlsx in a formatted in-browser preview tab. Replaces the old
+  // "Edit in Spreadsheet App" POST -> _open_path(xdg-open) flow, which was
+  // a desktop-app launcher and silently no-ops in an OOD session (no display
+  // on the container side; user is on a remote browser).
+  function viewRefFile(refName, filename) {
+    if (!refName || !filename) return;
+    const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/preview-xlsx?filename=${encodeURIComponent(filename)}`;
+    window.open(url, "_blank", "noopener");
+  }
+
+  // Download the raw xlsx so the user can edit offline (Excel / LibreOffice
+  // / Numbers). After editing, the file currently has to be put back via the
+  // reference dir directly (scp / OOD file manager). A re-upload route is a
+  // follow-up.
+  function downloadRefFile(refName, filename) {
+    if (!refName || !filename) return;
+    const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/download-file?filename=${encodeURIComponent(filename)}`;
+    window.open(url, "_blank", "noopener");
   }
 
   async function createRefFile(refName, fileType) {
@@ -2533,8 +2545,11 @@ export default function App() {
                           {hasDefine && defineFile ? (
                             <div className="ref-editor-file-row">
                               <span className="ref-editor-filename">{defineFile.name}</span>
-                              <button onClick={() => openRefFile(refEditorRef, defineFile.name)}>
-                                Edit in Spreadsheet App
+                              <button onClick={() => viewRefFile(refEditorRef, defineFile.name)}>
+                                View
+                              </button>
+                              <button className="ghost" onClick={() => downloadRefFile(refEditorRef, defineFile.name)}>
+                                Download
                               </button>
                             </div>
                           ) : (
@@ -2555,8 +2570,11 @@ export default function App() {
                           {hasRemove && removeFile ? (
                             <div className="ref-editor-file-row">
                               <span className="ref-editor-filename">{removeFile.name}</span>
-                              <button onClick={() => openRefFile(refEditorRef, removeFile.name)}>
-                                Edit in Spreadsheet App
+                              <button onClick={() => viewRefFile(refEditorRef, removeFile.name)}>
+                                View
+                              </button>
+                              <button className="ghost" onClick={() => downloadRefFile(refEditorRef, removeFile.name)}>
+                                Download
                               </button>
                             </div>
                           ) : (
@@ -2570,7 +2588,10 @@ export default function App() {
                         </div>
 
                         <div className="note" style={{marginTop:"0.8em"}}>
-                          Clicking "Edit in Spreadsheet App" opens the .xlsx file in your default spreadsheet application (e.g. Excel, LibreOffice). Save and close the file before running Step 2.
+                          <strong>View</strong> opens a formatted, read-only preview in a new tab (cell colors and conditional formatting preserved).
+                          <br />
+                          <strong>Download</strong> saves the .xlsx so you can edit it locally in Excel, Numbers, or LibreOffice.
+                          After editing, place the updated file back in the reference directory before running Step 2.
                         </div>
                         <button
                           className="ghost action"

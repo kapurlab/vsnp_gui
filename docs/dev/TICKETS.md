@@ -10,7 +10,10 @@ Legend: ✅ done · 🚧 in progress · ⏳ pending · 🪝 follow-up
 
 ## Done so far (chronological)
 
-- **T-01 Stats & Open Folder via downloads** — ✅
+- **T-01 Stats & Open Folder via downloads** — ✅ (initial scope: sample-row Open Folder + Stats. Broader sweep of `_open_path`/`xdg-open`-shelling buttons completed 2026-05-17 across two commits — see T-39/T-40 in this list for the full retirement of the legacy desktop-app launcher pattern across Reference Editor xlsx files, Edit Log buttons, Step 2 vcf_source, mismatch report, edited samples list)
+- **T-39 Reference-file re-upload route** — ✅ (commit `b7554fd`. `POST /api/references/{ref}/upload-file` with filename whitelist, 10 MB cap, atomic write, old-version archive under `<ref>/.history/`, audit log to `/srv/kapurlab/audit/reference-changes.jsonl`. Frontend "Replace" button next to View/Download. Minimum-viable replace flow; T-17a will layer proposal+admin-review on top later — audit format is forward-compatible.)
+- **T-40 Retire dead xdg-open endpoints** — ✅ (commit `50210a7`. Deleted backend `POST /api/projects/{p}/open`, `POST /api/posthoc/open`, `POST /api/references/{ref}/open-file`, the `_open_path()` helper, and the `OpenRequest`/`RefOpenFileRequest` Pydantic models. Frontend callers all migrated in `8d74fe1` and `7c7351d`.)
+- **Edit Log JSONL inline view** — ✅ (commit `50210a7`. `.jsonl`/`.ndjson` added to the project download-file MIME map as `text/plain`; defensive fallback added so any inline view of an unknown suffix renders as text rather than triggering an octet-stream download. Frontend `fileViewMode()` regex also updated.)
 - **T-02 igv.js replaces desktop IGV** — ✅
 - **T-02 follow-up: retire desktop IGV backend** — ✅
 - **T-02 follow-up: drop OOD virtual desktop (Xvfb/x11vnc/websockify) + noVNC backend proxy** — ✅
@@ -314,6 +317,8 @@ These were uncovered while working tickets and weren't separate items, but worth
 
 ## Branching / source of truth
 
-`web` is the OOD/FastAPI rewrite branch off `main`. The pre-Apr-10 Electron history on `main` is preserved but is **not** the path forward for OOD deployment. Daily work happens on wgs3 against this branch. The Mac copy (`/Users/vivekkapur/vsnp_gui/`) is a viewer; do not run a local uvicorn there or it will shadow the OOD backend in the browser (see the `API_BASE` note above).
+`main` is the canonical branch — OOD/FastAPI rewrite history, daily work on wgs3. The pre-Apr-10 Electron history is preserved on the `main-electron-archive` branch but is **not** the path forward for OOD deployment. The Mac copy (`/Users/vivekkapur/vsnp_gui/`) is a viewer / authoring environment; do not run a local uvicorn there or it will shadow the OOD backend in the browser (see the `API_BASE` note above).
+
+Historical note: the rewrite branch was originally called `web` and got renamed to `main` (with the prior `main` archived). Older session handoffs and commit messages may still reference `web` — substitute `main` mentally.
 
 `t03-spike` retained as the A/B record for phylotree.js vs phylocanvas.gl.

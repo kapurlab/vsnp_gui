@@ -163,6 +163,60 @@ Future polish (separate ticket if it ever surfaces): frontend could parse the pr
 
 ## Milestone C — Second app + cross-project flows (scale-out)
 
+The pipelines-package work (T-27 – T-35) is the architectural spine for everything else in this milestone. It implements [`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) — one `AnalysisPrimitive` contract that vsnp_gui, a re-deployed kraken_gui, and future OOD cards all consume. T-30 / T-31 / T-32 depend on it; T-15 / T-18 / T-13 are orthogonal scaffolding that becomes more valuable once primitives are landing.
+
+### T-27 `pipelines/common/` shared base — ⏳
+
+Shared building blocks for the pipelines package per [`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md): `AnalysisPrimitive` ABC + `PrimitiveResult` / `Badge` / `SampleContext` / `PrimitiveError` dataclasses, `Project` workspace helper (`ensure_assembly`, `record_finding`, `sample_context`, `provenance_dir`), `runners.run_in_conda_env` (single chokepoint for env activation — apptainer swap = one-file change), and thin shims around the existing T-07 provenance writer + T-09 verdict helpers (re-export, do not fork). Initial home: `backend/app/pipelines/`; extract to a standalone `kapurlab-pipelines` repo when a second front-end imports it (design doc §11.1).
+
+**Falsification test before declaring done**: retrofit `backend/app/posthoc/snp_analysis.py` onto `AnalysisPrimitive`. It predates the contract and already works in production — if it doesn't fit cleanly, the contract is wrong, not the prototype.
+
+Blocked on red-team of [`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md). Filed now to surface design questions; freeze scope after red-team.
+
+### T-28 `pipelines/amrfinder.py` — ⏳
+
+First primitive against the T-27 contract. Wraps `ncbi-amrfinderplus 4.2.7` in `~/miniforge3/envs/amrfinder/` (smoke-tested on wgs3 2026-05-12, DB `2026-03-24.1`). Implements all six abstract methods (`run` / `latex` / `excel` / `web` / `badge` / `provenance`) plus the `applicable` classmethod. Runs in generic mode (no `-O`) for *Mammaliicoccus*-like organisms — design doc §5 caveat.
+
+Regression fixture: 8 NivediXXX *M. sciuri* FASTAs at `/home/vxk1/projects/Shivasharanappa_panel/synthetic_from_assembly/fasta/`; expected matrix in design doc §13. Tests assert findings reproduce that matrix byte-for-byte (modulo column order). Depends on T-27.
+
+### T-29 vsnp_gui AMR integration — ⏳
+
+End-to-end consumer of T-27 + T-28 — the proof that the contract works as a real button users press.
+1. Post-step1 hook: when step1 finalizes and an assembly FASTA exists (or `Project.ensure_assembly` runs SPAdes/Shovill once), queue AMRFinder in the background; don't block step1 finalize.
+2. Manual "Run AMR" button on the step1 result row for the missed-trigger case.
+3. Badge column sourced from `AMRFinder.badge()` via a new `/api/projects/{p}/samples/{s}/badges` endpoint that iterates every completed primitive.
+
+This is the first end-to-end test of the pipelines package. Depends on T-27, T-28.
+
+### T-30 kraken_gui re-deploy as OOD batch_connect — ⏳
+
+Drop the electron wrapper. Same FastAPI/React code, new `deploy/ood/kraken/` template alongside vsnp_gui. Imports `pipelines/kraken.py` (ported from `~/kraken/pipeline/bin/` in `kapurlab/kraken_id_parse_gui`) instead of bundling pipeline scripts. Adds a card to the T-16 KapurLab dashboard. Depends on T-27, T-18 (kraken DB layout), T-34; best done after T-15 (`install_app.py` scaffold).
+
+### T-31 standalone AMR OOD card — ⏳
+
+OOD card for users who want AMR-only workflows (no vSNP context). Imports `pipelines/amrfinder.py`; minimal FastAPI/React at `deploy/ood/amr/`. Reads/writes the canonical project tree (`assembly/` + `amr/` + `samples.json`) so vsnp_gui and kraken_gui see its outputs without coordination. Depends on T-27, T-28, T-34.
+
+### T-32 sourmash card + `pipelines/sourmash.py` — ⏳
+
+Port the current ad-hoc sourmash usage out of vsnp3 wrappers into a contract-conformant primitive, then ship a standalone OOD card the way T-31 ships AMR. Project-tree convention: `sourmash/<sample>/`. Depends on T-27.
+
+### T-33 NAHLN_AMR wrappers (MLST / Abricate / SeqSero2) — ⏳
+
+Port USDA-VS's three Nextflow process wrappers ([NAHLN_AMR](https://github.com/USDA-VS/NAHLN_AMR)) into `pipelines/{mlst,abricate,seqsero2}.py`. One conda env each per design doc §7. NAHLN_AMR becomes a vendored reference, not a runtime dependency — we explicitly do not adopt Nextflow as the orchestration layer (§10). Depends on T-27.
+
+### T-34 Cross-card navigation protocol — ⏳
+
+One route handler per OOD card: `GET /open?project=X&sample=Y` (or `?project=X` for project-level landing). Pre-fills the picker; no re-picking when jumping between cards. Cards generate cross-links via `Project.cross_card_url(card, sample)`. Tiny in isolation, but **prerequisite for T-30 / T-31** — the second OOD card is when cross-navigation becomes useful.
+
+### T-35 `samples.json` schema + concurrent-write strategy — ⏳
+
+The shared knowledge base across cards ([`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) §3 rule 3).
+- **Schema**: top-level keys are sample IDs; per-sample dict has `fastqs[]`, `organism`, `host`, `isolation_source`, plus one key per primitive (`step1`, `kraken`, `amr`, `sourmash`, `mlst`, …) holding that primitive's accumulated findings. JSON Schema published at `pipelines/common/schemas/samples.schema.json`.
+- **Write strategy**: atomic `tempfile + os.replace`, per-project advisory lockfile (`samples.json.lock`) around the read-modify-write critical section. `Project.record_finding(sample, primitive, finding)` is the sole mutator.
+- `Project` validates on read; refuses to write malformed entries.
+
+**Land before the second primitive starts writing into `samples.json`** — half-baked schema with multiple writers is the highest-cost mistake to make in this milestone. T-35 effectively blocks T-29 from going past sample #1.
+
 ### T-15 + T-08 (merged) Multi-app deployment template + install script — ⏳
 
 `deploy/install_app.py <app_name>` scaffolds a new OOD app dir under `deploy/ood/<app>/` from a template, with the same uvicorn-on-FastAPI + byte-range serve + lazy-loaded React routes pattern. Folds in T-08 (the per-app install command we run by hand today).
@@ -178,6 +232,29 @@ Index every `*_zc.vcf` across projects + users (scoped by T-12a) into a queryabl
 ### T-17 MHC approval chain — ⏳
 
 `pending/` → `<panel>_current/` flow with admin CLI (`kapurlab-mhc review <id>`) and append-only ledger at `/srv/kapurlab/audit/mhc-approvals.jsonl`. See [`MULTIUSER.md`](MULTIUSER.md) for the full design.
+
+### T-17a Reference-file edit + approval chain — ⏳
+
+Reference-file analog of T-17. The vsnp3 reference xlsx files (`*_define_filter.xlsx`, `*_remove_from_analysis.xlsx`) are shared across all users and define analysis correctness — a bad edit silently changes every subsequent run. Builds on the View/Download primitives shipped 2026-05-17 (commit `8d74fe1`).
+
+**Phase 1 (~1 day) — propose + approve queue, no in-browser editor.** Users still edit offline; the *submission* changes:
+- Frontend: "Propose Change" button next to View / Download in the Reference Editor.
+- Modal: upload edited file + `rationale` (markdown) + `evidence` (free-form: linked project IDs, sample IDs, publications, URLs).
+- Backend: `POST /api/references/{ref}/propose-change` writes a proposal to `/srv/kapurlab/refs/vsnp3/reference_options/<ref>/.proposals/<user>/<ts>-<id>/` containing `before.sha256`, `after.xlsx`, `rationale.md`, `evidence.json`.
+- New admin page lists pending proposals across all references: semantic diff vs current, rationale, evidence, "projects that last used this reference" (queryable from T-07 runs.sqlite).
+- `POST /api/references/proposals/{id}/approve` → atomic `os.replace()` into place + archive old to `<ref>/.history/<ts>/` + append to `/srv/kapurlab/audit/reference-changes.jsonl`.
+- `POST /api/references/proposals/{id}/reject` → move to `.rejected/` with reason; kept for audit.
+
+**Permission model.** Approvers: members of `kapurlab-admins`. Self-approve is allowed (lab reality: 1–2 admins) but every approval — including self-approval — records `submitter`, `approver`, and a `self_approved: true` flag in the audit log. Reviewers external to the lab can grep for self-approvals if regulatory questions arise.
+
+**Phase 2 (deferred) — schema-aware in-browser editor.** A React component that knows the xlsx schema (position columns, group blocks, conditional-format-encoded grouping). Edits become semantic ("added position 3,456,789 to TbD1 group") rather than cell-byte changes. Eliminates the download/edit-locally hop for routine adds/removes. Spreadsheet-grid alternative (Univer/AG-Grid) considered and explicitly deferred — schema-aware gives better validation and better admin-review diffs.
+
+**Integration points.**
+- T-07: every approve/reject is a `reference-changes.jsonl` entry alongside the existing run-provenance audit stream.
+- T-09 / future QC: reference change history exposed via a "this reference was last modified <date> by <user> with rationale '...'" badge in the Reference Editor read view.
+- Notification: in-app inbox v1 (poll an unread-proposal count endpoint); email-on-pending later if anyone asks.
+
+**Deferred until red-team decisions settle** ([`redteam/FINDINGS.md`](redteam/FINDINGS.md) UNRESOLVED-1 and UNRESOLVED-2 — T-17a touches the same provenance and locking patterns that the unresolved decisions affect).
 
 ### T-20 Staged ingestion flow — ⏳
 

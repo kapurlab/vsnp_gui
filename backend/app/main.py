@@ -17,6 +17,8 @@ import gzip
 import sys
 import logging
 import shlex
+import re
+import hashlib
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -969,6 +971,166 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
     if not inline:
         headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
     return FileResponse(target, media_type=media_type, headers=headers)
+
+
+# T-39: re-upload reference xlsx to replace in place. Closes the offline-edit
+# loop (download → edit locally in Excel/Numbers/LibreOffice → re-upload).
+# Intentionally narrow:
+#   - Only the two known reference xlsx filenames are accepted (defining filter
+#     and remove_from_analysis). Other reference files (.fasta, .gbk, .gff,
+#     best_reference.txt) are read-only via this endpoint.
+#   - 10 MB hard cap; these files are typically < 100 KB.
+#   - Old file moved aside to <ref>/.history/ with a timestamp prefix —
+#     recoverable without `git`.
+#   - Audit log appended to /srv/kapurlab/audit/reference-changes.jsonl
+#     (best-effort; fall back to <ref>/.history/_audit.jsonl if the shared
+#     audit dir isn't writable).
+#   - No approval queue. T-17a will layer the proposal+admin-review flow on
+#     top when shipped.
+_T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis)\.xlsx$")
+_T39_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+_T39_SHARED_AUDIT_PATH = Path("/srv/kapurlab/audit/reference-changes.jsonl")
+
+
+def _sha256_of_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _t39_audit_append(record: dict, fallback_dir: Path) -> str:
+    """Append one JSON line to the audit log. Returns the path actually used."""
+    line = json.dumps(record, sort_keys=True) + "\n"
+    try:
+        _T39_SHARED_AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _T39_SHARED_AUDIT_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+        return str(_T39_SHARED_AUDIT_PATH)
+    except (OSError, PermissionError):
+        fallback = fallback_dir / "_audit.jsonl"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        with fallback.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+        return str(fallback)
+
+
+@app.post("/api/references/{ref_name}/upload-file")
+async def ref_upload_file(
+    ref_name: str,
+    file: UploadFile = File(...),
+    rationale: str = Query(..., min_length=1, max_length=4000),
+):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"]).resolve()
+
+    # Filename validation: client-provided name only; we ignore any path
+    # components and enforce the strict whitelist.
+    upload_name = Path(file.filename or "").name
+    if not upload_name or not _T39_ALLOWED_REF_FILENAMES.match(upload_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Only *_define_filter.xlsx or *_remove_from_analysis.xlsx may be replaced via this endpoint",
+        )
+
+    target = (ref_dir / upload_name).resolve()
+    if not str(target).startswith(str(ref_dir) + "/"):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+
+    # Spool to a temp file in the same dir (so the os.replace is atomic on
+    # the same filesystem) while enforcing the size cap. Read in chunks so
+    # we don't load 10 MB into memory.
+    history_dir = ref_dir / ".history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    tmp_path = ref_dir / f".{upload_name}.{ts}.tmp"
+    bytes_written = 0
+    try:
+        with tmp_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1 << 20)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > _T39_MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large (max {_T39_MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+                    )
+                out.write(chunk)
+        if bytes_written == 0:
+            raise HTTPException(status_code=400, detail="Empty upload")
+    except HTTPException:
+        try: tmp_path.unlink()
+        except OSError: pass
+        raise
+
+    # Minimal sanity check that it's actually an xlsx (zip magic bytes).
+    with tmp_path.open("rb") as fh:
+        magic = fh.read(4)
+    if magic[:2] != b"PK":
+        try: tmp_path.unlink()
+        except OSError: pass
+        raise HTTPException(status_code=400, detail="File is not a valid xlsx (missing zip magic)")
+
+    new_sha = _sha256_of_path(tmp_path)
+    old_sha = ""
+    archived_old_path = ""
+    if target.exists():
+        old_sha = _sha256_of_path(target)
+        # Move existing file aside under .history/ before replacing.
+        archived = history_dir / f"{ts}_{old_sha[:8]}_{upload_name}"
+        try:
+            target.replace(archived)  # atomic rename
+            archived_old_path = str(archived)
+        except OSError as e:
+            try: tmp_path.unlink()
+            except OSError: pass
+            raise HTTPException(status_code=500, detail=f"Failed to archive previous file: {e}")
+
+    # Atomic install of the new file.
+    try:
+        tmp_path.replace(target)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to install new file: {e}")
+
+    # Best-effort user identification (uvicorn runs under one OS user per OOD session).
+    try:
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        user = os.environ.get("USER", "")
+
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "replace",
+        "reference": ref_name,
+        "filename": upload_name,
+        "user": user,
+        "rationale": rationale.strip(),
+        "old_sha256": old_sha,
+        "new_sha256": new_sha,
+        "size_bytes": bytes_written,
+        "archived_old": archived_old_path,
+        "target": str(target),
+    }
+    audit_path = _t39_audit_append(record, history_dir)
+
+    return {
+        "ok": True,
+        "filename": upload_name,
+        "new_sha256": new_sha,
+        "old_sha256": old_sha,
+        "archived_old": archived_old_path,
+        "audit_log": audit_path,
+        "size_bytes": bytes_written,
+    }
 
 
 @app.get("/api/projects")

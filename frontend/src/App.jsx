@@ -365,13 +365,66 @@ export default function App() {
   }
 
   // Download the raw xlsx so the user can edit offline (Excel / LibreOffice
-  // / Numbers). After editing, the file currently has to be put back via the
-  // reference dir directly (scp / OOD file manager). A re-upload route is a
-  // follow-up.
+  // / Numbers). Pair with Replace to close the offline-edit loop.
   function downloadRefFile(refName, filename) {
     if (!refName || !filename) return;
     const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/download-file?filename=${encodeURIComponent(filename)}`;
     window.open(url, "_blank", "noopener");
+  }
+
+  // T-39: re-upload an edited reference xlsx to replace in place. Opens a
+  // hidden file picker, prompts for a rationale, posts multipart to the
+  // upload endpoint. The backend enforces filename whitelist, size cap,
+  // atomic write, and archives the old file under <ref>/.history/.
+  function replaceRefFile(refName, expectedFilename) {
+    if (!refName || !expectedFilename) return;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".xlsx";
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.addEventListener("change", async () => {
+      try {
+        const picked = input.files && input.files[0];
+        if (!picked) return;
+        if (picked.name !== expectedFilename) {
+          const ok = window.confirm(
+            `The file you picked is named "${picked.name}" but the slot expects "${expectedFilename}". ` +
+            `Continue anyway? The server will reject it if the filename doesn't match the allowed pattern.`
+          );
+          if (!ok) return;
+        }
+        const rationale = window.prompt(
+          `Rationale for replacing ${expectedFilename}? ` +
+          `(e.g. "added 12 newly characterised positions from Lingling 2026 panel"). Required.`
+        );
+        if (!rationale || !rationale.trim()) {
+          window.alert("Replace cancelled — rationale is required.");
+          return;
+        }
+        const fd = new FormData();
+        fd.append("file", picked, picked.name);
+        const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/upload-file?rationale=${encodeURIComponent(rationale.trim())}`;
+        const res = await fetch(url, { method: "POST", body: fd });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          window.alert(`Replace failed: ${detail.detail || res.status}`);
+          return;
+        }
+        const data = await res.json();
+        window.alert(
+          `Replaced ${data.filename}.\n` +
+          `new sha256: ${data.new_sha256.slice(0, 12)}…\n` +
+          `old archived: ${data.archived_old || "(no previous file)"}\n` +
+          `audit log: ${data.audit_log}`
+        );
+        // Reload the reference editor's file list so the row reflects the new file.
+        await loadRefEditorFiles(refName);
+      } finally {
+        input.remove();
+      }
+    });
+    input.click();
   }
 
   async function createRefFile(refName, fileType) {
@@ -2543,6 +2596,9 @@ export default function App() {
                               <button className="ghost" onClick={() => downloadRefFile(refEditorRef, defineFile.name)}>
                                 Download
                               </button>
+                              <button className="ghost" onClick={() => replaceRefFile(refEditorRef, defineFile.name)}>
+                                Replace
+                              </button>
                             </div>
                           ) : (
                             <div className="ref-editor-file-row">
@@ -2568,6 +2624,9 @@ export default function App() {
                               <button className="ghost" onClick={() => downloadRefFile(refEditorRef, removeFile.name)}>
                                 Download
                               </button>
+                              <button className="ghost" onClick={() => replaceRefFile(refEditorRef, removeFile.name)}>
+                                Replace
+                              </button>
                             </div>
                           ) : (
                             <div className="ref-editor-file-row">
@@ -2583,7 +2642,8 @@ export default function App() {
                           <strong>View</strong> opens a formatted, read-only preview in a new tab (cell colors and conditional formatting preserved).
                           <br />
                           <strong>Download</strong> saves the .xlsx so you can edit it locally in Excel, Numbers, or LibreOffice.
-                          After editing, place the updated file back in the reference directory before running Step 2.
+                          <br />
+                          <strong>Replace</strong> uploads your edited copy back to the reference dir. You'll be asked for a rationale (recorded in <code>/srv/kapurlab/audit/reference-changes.jsonl</code>); the previous version is archived under <code>.history/</code> and is recoverable. Filename must match exactly — only <code>*_define_filter.xlsx</code> and <code>*_remove_from_analysis.xlsx</code> can be replaced via this path.
                         </div>
                         <button
                           className="ghost action"

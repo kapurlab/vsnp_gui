@@ -36,7 +36,7 @@ from app.projects import (
     SCOPE_SHARED,
 )
 from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
-from app.sra import expand_accessions, build_download_script, SRAExpansionError
+from app.sra import expand_accessions, expand_accessions_with_mapping, build_download_script, SRAExpansionError, write_crosswalk_tsv
 from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
 
 app = FastAPI(title="vSNP GUI API")
@@ -1471,7 +1471,7 @@ def sra_download(project: str, payload: SraRequest):
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
     try:
-        expanded = expand_accessions(payload.accessions, strict=True)
+        expanded, mapping = expand_accessions_with_mapping(payload.accessions, strict=True)
     except SRAExpansionError as e:
         # Fail fast — building a download script with the literal unexpanded
         # accession (e.g. SRX*/SRP*) would just produce a guaranteed-fail job.
@@ -1491,6 +1491,14 @@ def sra_download(project: str, payload: SraRequest):
         safe = Path(payload.folder).name
         download_root = download_root / safe
     download_root.mkdir(parents=True, exist_ok=True)
+    # Persist the input→runs crosswalk so the user can map any downloaded
+    # SRR/DRR back to the SRS/DRS/SRX they originally submitted. Without
+    # this the resolution is computed at download time and then discarded,
+    # leaving no way to reconcile post-hoc.
+    try:
+        write_crosswalk_tsv(download_root, mapping)
+    except OSError as e:
+        logger.warning("Failed to write sra_crosswalk.tsv: %s", e)
     script = build_download_script(download_root, expanded, cfg["sra"]["allow_insecure_https"])
     script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")

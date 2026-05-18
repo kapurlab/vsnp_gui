@@ -59,22 +59,64 @@ def expand_accessions(accessions: List[str], *, strict: bool = False) -> List[st
     behavior) the unexpanded input is returned for that entry. Callers that
     care about expansion fidelity should use strict=True.
     """
+    return expand_accessions_with_mapping(accessions, strict=strict)[0]
+
+
+def expand_accessions_with_mapping(
+    accessions: List[str], *, strict: bool = False
+) -> tuple[List[str], List[tuple[str, List[str]]]]:
+    """Like `expand_accessions`, but also returns the input→runs mapping so
+    callers can persist a crosswalk file alongside the downloaded fastqs.
+
+    Returns (flat_run_list, mapping) where:
+      - flat_run_list is what `expand_accessions` returns (used to build the
+        download script)
+      - mapping is a list of (input_accession, [resolved_run, ...]) tuples
+        preserving input order, including duplicates if the caller passed
+        the same SRS twice. Each mapping entry tells you which sample-level
+        accession produced which runs — essential for cross-walking results
+        back to the original input list.
+    """
     expanded: List[str] = []
+    mapping: List[tuple[str, List[str]]] = []
     for acc in accessions:
         acc = acc.strip()
         if not acc:
             continue
         if acc.startswith(("SRR", "ERR", "DRR")):
             expanded.append(acc)
+            mapping.append((acc, [acc]))
             continue
         try:
-            expanded.extend(_expand_single(acc))
+            runs = _expand_single(acc)
+            expanded.extend(runs)
+            mapping.append((acc, runs))
         except SRAExpansionError:
             if strict:
                 raise
             logger.warning("SRA expansion failed for %s; using literal", acc)
             expanded.append(acc)
-    return expanded
+            mapping.append((acc, [acc]))
+    return expanded, mapping
+
+
+def write_crosswalk_tsv(download_dir: Path, mapping: List[tuple[str, List[str]]]) -> Path:
+    """Write a 2-column TSV recording the input→runs resolution. One line per
+    input accession; multiple runs joined by comma in the second column.
+
+    Lives at <download_dir>/sra_crosswalk.tsv. Appended to (not overwritten)
+    so multiple download batches into the same project preserve history;
+    duplicate input rows are tolerated and intentional (they mean the user
+    submitted the same accession in two batches)."""
+    crosswalk_path = download_dir / "sra_crosswalk.tsv"
+    is_new = not crosswalk_path.exists()
+    with crosswalk_path.open("a", encoding="utf-8") as fh:
+        if is_new:
+            fh.write("# SRS/DRS/SRX → SRR/DRR resolution. Generated at download time.\n")
+            fh.write("input\tresolved_runs\n")
+        for inp, runs in mapping:
+            fh.write(f"{inp}\t{','.join(runs)}\n")
+    return crosswalk_path
 
 
 def _expand_single(accession: str) -> List[str]:

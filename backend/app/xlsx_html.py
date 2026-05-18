@@ -150,6 +150,15 @@ def _format_cell_value(cell) -> str:
     # Integer-like
     if isinstance(v, float) and v.is_integer():
         return html.escape(str(int(v)))
+    # Non-integer float with no specific number format → vsnp3's cascade-table
+    # MQ row produces values like 59.5833333333 / 59.9090909091 because it's
+    # averaging integer-bounded scores across samples. Python's `str()` gives
+    # full precision repr which is unreadable in the preview. If the cell
+    # author didn't specify a format, round to 2 decimals and strip trailing
+    # zeros so 59.5833... → 59.58, 59.50 → 59.5, 60.00 → 60.
+    if isinstance(v, float) and nf in ("General", "@"):
+        s = f"{v:.2f}".rstrip("0").rstrip(".")
+        return html.escape(s)
     return html.escape(str(v))
 
 

@@ -153,12 +153,13 @@ def _format_cell_value(cell) -> str:
     # Non-integer float with no specific number format → vsnp3's cascade-table
     # MQ row produces values like 59.5833333333 / 59.9090909091 because it's
     # averaging integer-bounded scores across samples. Python's `str()` gives
-    # full precision repr which is unreadable in the preview. If the cell
-    # author didn't specify a format, round to 2 decimals and strip trailing
-    # zeros so 59.5833... → 59.58, 59.50 → 59.5, 60.00 → 60.
+    # full precision repr which is unreadable in the preview AND produces
+    # variable-width cells (59.58 vs 60 vs 59.5) that look ragged. If the
+    # cell author didn't specify a format, round to a whole number — the
+    # MQ-average use case is what produces these values and 1-point
+    # differences (60 vs 59) aren't biologically meaningful.
     if isinstance(v, float) and nf in ("General", "@"):
-        s = f"{v:.2f}".rstrip("0").rstrip(".")
-        return html.escape(s)
+        return html.escape(str(int(round(v))))
     return html.escape(str(v))
 
 

@@ -1,143 +1,184 @@
-# Session handover — May 16 2026 (afternoon)
+# Session handover — May 17–18 2026
 
 Continuation notes for the next Claude session. Read this first, then
-[`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md) and
-[`TICKETS.md`](TICKETS.md).
+[`docs/dev/redteam/FINDINGS.md`](redteam/FINDINGS.md),
+[`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md), and
+[`docs/dev/TICKETS.md`](TICKETS.md).
 
-The morning-of-May-16 handoff (Shivasharanappa panel + AMR fixture +
-PIPELINES_PACKAGE design) is preserved at commit `3abbb1a` in git history.
-Open in browser via GitHub if you need the kraken/AMR run details.
+Prior handoff (afternoon of May 16 — merge + smoke green) is preserved at
+commit `81944c7` in git history. The session that just ended started with
+the red-team review setup from that handoff and pivoted hard into a long
+stretch of bug fixes triggered by Vivek using the GUI on a real 41-sample
+LSDV India dataset.
 
-## TL;DR — what landed today (afternoon)
+## TL;DR — what landed (21 commits since `81944c7`)
 
-1. **Merged `codex/snp-analysis` into `main`** (commit `56a8e06`). The
-   posthoc SNP analysis subsystem is now live in production. Resolved 11
-   conflict regions across `main.py` (8), `App.jsx` (5), `requirements.txt`,
-   `styles.css`. Detailed resolution log lives in the merge commit message.
+**The big one:** [`redteam/`](redteam/) — a self-contained archive of a
+3-round adversarial design review of [`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md)
+before T-27 (`pipelines/common/`) implementation begins. 8 R1 attack
+angles + 6 R2 cross-examinations + 1 R3 synthesis = 54 attack vectors
+binned. Bottom line: **12 confirmed blockers, 9 majors, 5 narrowed,
+10 refuted, 3 tradeoffs, 2 UNRESOLVED.** The two unresolved items are
+called out explicitly below — they need your decision before T-27 starts.
 
-2. **Smoke-tested every merge region live on the OOD GUI.** All green —
-   step2 dispatch (T-07 + shlex.quote), preview-xlsx, download-file with
-   `download_name`, labeled-tre suppression, AND the brand-new
-   `/posthoc/run` endpoint producing snp_matrix.csv + KDP + closest-neighbor
-   plots on a 6-sample deer SARS-CoV-2 group.
+**The unglamorous pile:** 18 bug-fix / UX-improvement commits triggered by
+the LSDV India end-to-end run. Class signature: every one of them was an
+"obvious in retrospect" mismatch between what the discovery layer accepts
+and what the dispatch layer can actually process. See "Pattern worth
+documenting" at the bottom.
 
-3. **Filed T-36/37/38** for post-hoc resolver UX gaps surfaced during
-   smoke testing (none are merge regressions — pre-existing on main).
+## Two UNRESOLVED red-team decisions you need to make
 
-## Current state
+Both have all sides preserved verbatim in
+[`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md). Skim that first.
 
-**Branches**: `main` is the canonical branch at `06c35ef` (= merge +
-tickets). `merge/snp-analysis-into-main` and `codex/snp-analysis` are
-deleted everywhere (local, remote, wgs3). `main-electron-archive` and
-the kept feature/spike branches untouched.
+1. **`ensure_assembly()` locking posture** — pre-T-27 blocker, or P2
+   annotation? Real 5-way R2 split (REBUT / UNRESOLVED / ESCALATE /
+   ESCALATE-blocker / PARTIAL-REBUT). The question is whether to fix
+   the race now (`fcntl.flock` in the sketch) or annotate-and-defer
+   until concurrent OOD cards actually materialize at Step 6.
 
-**wgs3** (`/srv/kapurlab/tools/vsnp_gui`): on `main` @ `06c35ef`. Running
-uvicorn (port 26911) was spawned at 09:18 on the merge content — content
-hasn't changed since (fast-forward), no restart needed unless new code
-lands. The deployed bundle hashes match what was built locally:
-`index-dc8fef81.js`, `TreeStandalone-d281d2b6.js`.
+2. **§6 provenance schema vs T-07** — port `capture_env_snapshot()` into
+   §6 now, or accept the reduction? R2-ops empirically confirmed the
+   regression with file:line evidence (`provenance_writer.py:476-487`
+   captures 6+ env fields where §6 captures one); R2-ux rebutted as
+   "not a UX concern, defer." Coherent positions on both sides.
 
-**New deps installed on wgs3** (into `/srv/kapurlab/tools/vsnp3` conda env):
-- `aiofiles==24.1.0` (via mamba conda-forge)
-- `snp-dists==1.2.0` (via mamba bioconda)
+Once these are decided, the T-27–T-35 ticket block (filed earlier today
+in `TICKETS.md`) can have its scope frozen and implementation can start.
 
-Both verified via `shutil.which` from the running uvicorn — no restart
-needed (registry checks per-request).
+## What shipped (commit graph since `81944c7`)
 
-**Test fixture for `/posthoc/run`**: project `Retest` on wgs3 (deer
-SARS-CoV-2 samples) has a complete posthoc run at
-`/home/vxk1/projects/Retest/step2/name-All/posthoc/` — snp_matrix.csv,
-kdp.{pdf,png}, closest_neighbor.{pdf,png}, stats.json. Useful regression
-artifact when iterating on the SNP analysis primitive.
+```
+3a5a818 step2_setup: honor remove_from_analysis.xlsx when building VCF source
+4212688 T-46 Phase 1: auto-skip single-end + junk fastqs at Step 1 dispatch
+9417773 SRA crosswalk: surface in GUI (Inputs panel + SRA download section)
+0e86b9a xlsx preview: fix "Download xlsx" link to preserve existing query params
+b5edfa9 SRA download: persist input→runs crosswalk to download dir
+a62f34f xlsx preview: round General-format floats to whole numbers
+ea1a9a5 xlsx preview: round non-integer floats to 2 decimals (superseded)
+9e1d7ea kapurlab-rename-project: rewrite intra-project absolute symlinks
+2f6c0d5 kapurlab-rename-project: update project.json to match new dir name
+4edbc9e Project create: auto-normalize names (spaces → underscores) + T-43
+eb631e3 Reference download: optional display name for dropdown clarity
+c2eccc1 Reference download: auto-fill output dir + load refPaths on mount
+14acf47 docs: T-42 — SRA download progress UI + status-writer bug fix
+d237abd Stats button: open xlsx preview in tab instead of downloading
+ac86e15 docs: T-41 — record T-39/T-40 done, broaden T-01 scope note
+b7554fd T-39: reference-file re-upload route (close offline-edit loop)
+50210a7 Edit Log: render JSONL inline; remove dead xdg-open endpoints (T-40)
+7c7351d Reference Editor sweep follow-up: replace xdg-open helpers w/ in-browser viewers
+3df0383 docs: T-17a — reference-file edit + approval chain
+21a604a docs: red-team adversarial review of PIPELINES_PACKAGE.md
+8d74fe1 Reference Editor: fix broken 'Edit in Spreadsheet App' in OOD context
+```
 
-## Open items for the next session
+## Tickets filed / resolved this session
 
-### Priority 1 — red-team `PIPELINES_PACKAGE.md`
+| Ticket | Status | What |
+|---|---|---|
+| **T-17a** | filed (deferred pending UNRESOLVEDs) | Reference-file edit + approval chain — generalizes T-17 MHC approval pattern to reference xlsx files. Phase 1: upload + rationale + admin queue. Phase 2: schema-aware in-browser editor. Permission model: kapurlab-admins; self-approve allowed but logged. |
+| **T-27–T-35** | filed (blocked on UNRESOLVEDs) | Pipelines-package architectural backbone — filed earlier today in TICKETS.md before the red-team. Currently the load-bearing forward work; should not start until UNRESOLVED-1/2 are decided. |
+| **T-39** | ✅ done (commit `b7554fd`) | Reference-file re-upload route. POST /api/references/{ref}/upload-file with whitelist + atomic write + audit log to `/srv/kapurlab/audit/reference-changes.jsonl`. Forward-compatible with T-17a's schema. |
+| **T-40** | ✅ done (commit `50210a7`) | Retired dead xdg-open endpoints. Three `/open` endpoints + `_open_path()` helper deleted. Frontend already on in-browser viewers across two prior sweeps. |
+| **T-41** | ✅ done (commit `ac86e15`) | Docs cleanup: TICKETS.md T-01 scope note + T-39/T-40 done entries + stale "Branching" prose. |
+| **T-42** | filed | SRA download progress UI (Phase 1: counts + bar, Phase 2: per-accession chips) + prerequisite status-writer bug fix (3 successful runs without `.status_*` sentinel; 5 successful runs falsely reported as `[FAILED]`). |
+| **T-43** | filed | vsnp3 upstream patch for unquoted seqkit subprocess invocation (the bug that broke Step 1 on the `LSDV India` project before the rename). Also audit bwa/samtools/bcftools for the same quoting weakness. |
+| **T-46** | Phase 1 ✅ done (commit `4212688`); Phase 2 filed | Single-end + junk-fastq handling. Phase 1: `_step1_dispatch_plan()` auto-filters single-end and <1 MB fastqs at dispatch time, surfaces skipped list via the response so the GUI alerts the user. Phase 2: real single-end Illumina support (vsnp3 patch). |
 
-This is the deferred Priority 4 from the morning handoff. Spawn parallel
-sub-agents to review the design doc from four angles before implementing
-Phase 1 (`pipelines/amrfinder.py`):
+**Not filed but discussed:**
+- T-44 / T-45 — depth-cap on mapping (post-mapping cap at 300× via vsnp3 `--max-mapped-depth` patch). Vivek deferred ("still not sure"). The use case is real for over-deep samples on small viral genomes (LSDV India had a few 1000×+ samples) but problematic for low-yield mapping (LSDV samples are 2% viral due to host contamination, so pre-mapping caps would discard real viral reads). Right semantic is cap-mapped-not-raw; revisit when there's real per-sample mapping-rate data to decide on.
 
-- software architecture (interface contracts, dependency injection,
-  testability)
-- ops/deployment (multi-app conda envs, version pinning, secrets)
-- bioinformatics workflow (does the contract fit real tools' I/O shapes?)
-- code-review hygiene (naming, error handling, observability)
+## Production state on wgs3 right now
 
-Today's working `posthoc/snp_analysis.py` is a *de facto* prototype of
-what a primitive looks like, but it predates the PIPELINES_PACKAGE design.
-Worth comparing: does posthoc fit the contract? If not, why?
+- `main` @ `3a5a818` on both `/srv/kapurlab/tools/vsnp_gui` (deployed) and origin/main
+- Frontend dist freshly rebuilt; new hashes are live
+- **uvicorn restart needed for the latest backend changes to be active** —
+  start a fresh OOD session to pick up step2_setup exclusion filtering,
+  T-46 dispatch plan, and SRA crosswalk endpoint
+- Active project: `/home/vxk1/projects/LSDV_India/` — 73 LSDV samples
+  ran Step 1 successfully against `LSDV_Neethling_2490` reference;
+  Step 2 in flight with 3 samples excluded per QC
+- Reference: `LSDV_Neethling_2490` lives at
+  `/srv/kapurlab/refs/vsnp3/reference_options/LSDV_Neethling_2490/`
+  (AF325528.1 fasta + gbk + gff, plus templates copied from vsnp3
+  dependencies, plus a `_define_filter.xlsx` and `_remove_from_analysis.xlsx`)
 
-### Priority 2 — file T-27 through T-35
+## Pattern worth documenting (and using to design T-27)
 
-The PIPELINES_PACKAGE design implies 9 new tickets. The morning handoff
-sketched them; they were never added to `TICKETS.md` because the
-afternoon went to the merge instead. Block of tickets:
+Three bugs landed in this session share an underlying shape:
 
-- T-27 implement `pipelines/common/` (`AnalysisPrimitive` + `Project`
-  workspace + provenance/badge/runner shims)
-- T-28 implement `pipelines/amrfinder.py` against the contract; regression
-  against today's 8 NivediXXX `amr_matrix.csv`
-- T-29 wire AMR into vsnp_gui (post-step1 hook, badge, "Run AMR" button)
-- T-30 re-deploy kraken_gui as OOD batch_connect; import `pipelines/kraken.py`
-- T-31 standalone AMR OOD card
-- T-32 sourmash card + `pipelines/sourmash.py`
-- T-33 port NAHLN_AMR's MLST / Abricate / SeqSero2 wrappers
-- T-34 cross-card navigation protocol (`?project=X&sample=Y`)
-- T-35 `samples.json` schema + concurrent-write strategy (atomic
-  tempfile+rename + per-project lockfile)
+1. **Step 1 setup created sample dirs for single-end fastqs** but T-07
+   provenance dispatch couldn't process them → batch aborts (fixed in
+   T-46 Phase 1).
+2. **Project rename moved the dir** but T-07 provenance dispatch followed
+   absolute symlinks to the old space-path → batch aborts (fixed in
+   `9e1d7ea`).
+3. **Step 2 setup linked every step1 VCF into vcf_source/** but vsnp3
+   honored the exclusion list at run time → file count lied, user
+   confusion (fixed in `3a5a818`).
 
-Filing them is a 15-min markdown task. Either before or after Priority 1
-red-team is fine — having them filed makes the red-team scoping easier.
+Common shape: **discovery accepts more samples than dispatch can honor.**
 
-### Priority 3 — start T-29 (AMR wiring) once design is settled
+This is exactly what the red-team's BLOCKER-2 (`applicable()` TOCTOU +
+undefined `PrimitiveError`) and NARROWED-2 (`applicable()` expressiveness
+needs `pre_run_check()` for environment validation) are pointing at for
+T-27. The shared design principle to encode in the `AnalysisPrimitive`
+contract: **if discovery says "this is a valid sample," dispatch must
+either run it or surface a non-fatal skip with a clear reason — never
+abort the whole batch.** Worth documenting in `PIPELINES_PACKAGE.md`
+§4 as a design invariant before T-27 starts.
 
-T-29 is the first **end-to-end** consumer of the pipelines package. It
-proves the contract works by being a real button users press. The
-NivediXXX AMR fixture from the morning is the regression seed.
+## Tod onboarding — open
 
-### Priority 4 (small) — T-36/37/38
+The user asked me to confirm Tod can access the pipeline + populate a
+few trial projects. State on wgs3 right now:
 
-Post-hoc sample resolver UX gaps. All three are scoped well in
-`TICKETS.md:232-234`. Total work ~1-2 hours. Good warm-up if Priority 1
-needs incubation time.
+- **Tod has no Linux account.** Not in `kapurlab-members` (which has
+  only `vxk1` and `ro_test`).
+- **No shared trial projects** yet — only `sanity_test` from the T-12a
+  rollout exists under `/srv/kapurlab/projects/`.
+- **Onboarding tooling exists**:
+  `/srv/kapurlab/tools/vsnp_gui/deploy/admin/kapurlab-add-user.sh`
+  handles the user + group + SSH-self-loopback bootstrap idempotently.
 
-## Other observations
+A welcome note for Tod is staged at [`docs/dev/TOD_WELCOME.md`](TOD_WELCOME.md).
+The next session can either pick this up or it gets handled inline.
+Decision points: admin vs member, password vs SSH key, which trial
+projects to seed.
 
-- **`docs/dev/TICKETS.md` "Branching" section is stale.** Line 237 still
-  says "`web` is the OOD/FastAPI rewrite branch off `main`". That branch
-  no longer exists — `web` → `main` rename happened earlier. Trivial
-  cleanup: rewrite that paragraph to reflect current branching reality.
+## Open follow-ups for next session
 
-- **OOD batch_connect deployment model worth documenting.** The deploy
-  is *literally whatever's checked out* in `/srv/kapurlab/tools/vsnp_gui`
-  on wgs3 (or `/home/${USER}/vsnp_gui` fallback). No CI, no per-session
-  clone — `git checkout X` on wgs3 = deploy. Worth adding to README or
-  runbook so the next person doesn't have to discover it by reading
-  `deploy/ood/template/script.sh.erb`.
+In rough priority order:
 
-- **GitHub branch protection still unset.** Got 403 "Upgrade to Pro or
-  make public" earlier even though the repo is supposedly on a paid
-  plan. Worth a 1-min check at github.com/settings/billing — might be
-  on a different account/org.
-
-- **`charming-sanderson-f6840e` worktree** was removed earlier today
-  (was orphan on `main`). If you see references to it in old notes,
-  ignore — gone.
+1. **Adjudicate UNRESOLVED-1 and UNRESOLVED-2** from the red-team. Until
+   these are decided, T-27 is blocked.
+2. **Sequence T-27 → T-29** once UNRESOLVEDs settle. The scope-freeze
+   punch list is at the bottom of [`FINDINGS.md`](redteam/FINDINGS.md);
+   work it top-to-bottom.
+3. **Onboard Tod** (or kick it back to user) — admin tooling is ready,
+   need user decision on credentials/role.
+4. **Pick up T-42 / T-43 / T-46 Phase 2** opportunistically — each is
+   independently scoped and could ride along with whatever the user is
+   doing.
+5. **Document the "discovery vs dispatch" invariant** in
+   `PIPELINES_PACKAGE.md` §4 before T-27 implementation starts (see
+   "Pattern worth documenting" above).
 
 ## Verify when picking up
 
-1. `git log --oneline -5` on `main` should show this handoff commit
-   on top, then `06c35ef` (T-36/37/38), then `56a8e06` (the merge),
-   then `3abbb1a` (the morning handoff).
+```bash
+git log --oneline -3
+# 3a5a818 step2_setup: honor remove_from_analysis.xlsx ...
+# 4212688 T-46 Phase 1: auto-skip single-end + junk fastqs ...
+# 9417773 SRA crosswalk: surface in GUI ...
 
-2. `git status` — clean (no uncommitted; `.claude/` untracked is fine).
+ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -1'
+# Should match the local HEAD.
 
-3. `ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -2'`
-   should match origin/main.
+ls docs/dev/redteam/  # should contain FINDINGS.md, DECISIONS.md, R1-*.md, R2-*.md, sources/, etc.
 
-4. `ssh wgs3 'curl -s http://localhost:26911/api/posthoc/tools | python3 -c "import sys,json; print(json.load(sys.stdin)[0][\"available\"])"'`
-   should print `True`. (Port may differ if a new OOD session was
-   started — read `connection.yml` in the most recent
-   `~/ondemand/data/sys/dashboard/batch_connect/sys/vsnp_gui/output/<UUID>/`
-   for the current port.)
+# Confirm the LSDV India project finished step1 cleanly:
+ssh wgs3 'ls /home/vxk1/projects/LSDV_India/step1/*/alignment_*/*_filtered_hapall_annotated.vcf 2>/dev/null | wc -l'
+# Should be 73 (the non-skipped paired samples)
+```

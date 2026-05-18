@@ -50,4 +50,32 @@ fi
 mv -- "$OLD_PATH" "$NEW_PATH"
 "$PY" -m app.vsnp_provenance.index --db "$DB" rename \
     --old "$OLD_PATH" --new "$NEW_PATH" --by "$(whoami)"
+
+# Rewrite project.json so name + display_name match the new directory.
+# Without this the GUI keeps showing the old name in the project list,
+# because the frontend renders `p.display_name || p.name` and both
+# fields are written from the original creation-time name. Skip
+# silently if project.json is absent (legacy projects from before
+# we started writing metadata).
+OLD_NAME="$(basename "$OLD_PATH")"
+NEW_NAME="$(basename "$NEW_PATH")"
+META="$NEW_PATH/project.json"
+if [[ -f "$META" ]]; then
+    "$PY" - <<PYEOF
+import json
+from pathlib import Path
+p = Path("$META")
+m = json.loads(p.read_text())
+m["name"] = "$NEW_NAME"
+# If display_name was the auto-generated "<old>_<reference>" form, swap
+# the old project name for the new one. Leave it alone if the user has
+# customised it to something that doesn't start with the old name.
+dn = m.get("display_name")
+if isinstance(dn, str) and dn.startswith("$OLD_NAME"):
+    m["display_name"] = "$NEW_NAME" + dn[len("$OLD_NAME"):]
+p.write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
+PYEOF
+    echo "updated metadata: $META (name + display_name)"
+fi
+
 echo "renamed: $OLD_PATH -> $NEW_PATH"

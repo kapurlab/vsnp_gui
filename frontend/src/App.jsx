@@ -442,13 +442,15 @@ export default function App() {
   }
 
   async function loadAll() {
-    const [cfg, proj, refs, dbFolders, posthocToolsResp] = await Promise.all([
+    const [cfg, proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
       fetch(`${API_BASE}/api/config`).then((r) => r.json()),
       fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
       fetch(`${API_BASE}/api/references`).then((r) => r.json()),
       fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
-      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => [])
+      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
     ]);
+    setRefPaths(paths.paths || []);
     setConfig(cfg);
     setProjects(proj);
     setReferences(refs);
@@ -476,6 +478,18 @@ export default function App() {
   useEffect(() => {
     document.title = `vSNP GUI ${APP_VERSION}`;
   }, []);
+
+  // Auto-fill the "Download New Reference" output directory from the first
+  // configured reference root once we have one. Under OOD the Browse button
+  // isn't shown (no Electron bridge), so without this default the user has
+  // to type the absolute server path by hand — and the Download button
+  // stays disabled until they do. The field remains editable in case they
+  // want to point somewhere else.
+  useEffect(() => {
+    if (!genomeOutputDir && refPaths && refPaths.length > 0) {
+      setGenomeOutputDir(refPaths[0]);
+    }
+  }, [refPaths, genomeOutputDir]);
 
   useEffect(() => {
     let cancelled = false;

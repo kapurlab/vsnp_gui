@@ -1475,6 +1475,19 @@ export default function App() {
     }
     setJobId(data.job_id);
     setStep1AutoRefreshPending(true);
+    // T-46: surface samples auto-skipped from the dispatch (single-end,
+    // junk-sized fastqs) so the user knows what didn't run and why. Without
+    // this banner the GUI just silently runs N-of-M samples.
+    if (Array.isArray(data.skipped_samples) && data.skipped_samples.length > 0) {
+      const lines = data.skipped_samples
+        .map((s) => `  • ${s.sample}: ${s.reason}`)
+        .join("\n");
+      window.alert(
+        `Step 1 dispatched — ${data.skipped_samples.length} sample(s) auto-skipped:\n\n` +
+        lines +
+        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run. Single-end Illumina support is a separate ticket (T-46 Phase 2).`
+      );
+    }
     await loadStep1Status();
   }
 

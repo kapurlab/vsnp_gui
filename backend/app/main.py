@@ -214,6 +214,11 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
 
     Filters out hidden / underscore-prefixed dirs (the writer's _provenance/
     sibling) so they don't get treated as samples.
+
+    NB: this is the *discovery* function — it accepts any dir that looks
+    sample-shaped, including single-end-only. Callers that actually
+    dispatch a batch should use `_step1_dispatch_plan()` which applies the
+    stricter "paired + non-junk" gate.
     """
     samples = []
     for p in sorted(step1_dir.iterdir()):
@@ -222,6 +227,83 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
         if any(p.glob("*_R1*.fastq.gz")) or any(p.glob("*_1*.fastq.gz")) or any(p.glob("*.fastq.gz")):
             samples.append(p.name)
     return samples
+
+
+# T-46 Phase 1: filter at dispatch time so Step 1 doesn't abort on samples
+# that vsnp3 can't actually process (single-end, or suspiciously small
+# fastqs that are usually SRA submission errors). Without this, one bad
+# sample takes down the whole batch because T-07 provenance dispatch
+# requires every sample's inputs hash cleanly. 1 MB is a deliberately
+# generous floor — real WGS fastqs are usually multi-MB minimum.
+_T46_JUNK_FASTQ_BYTES = 1024 * 1024  # 1 MB
+
+
+def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any]]]:
+    """Decide which sample dirs to actually dispatch and which to skip.
+
+    Returns (samples_to_run, skipped) where `skipped` is a list of
+    {"sample", "reason", "size_bytes"} dicts surfaced back to the UI so the
+    user knows what was excluded and why. Reasons are user-readable
+    strings — they end up in an alert in the GUI.
+
+    Skip rules (in order):
+      1. R1 not found (no *_R1*/*_1* pattern) → single-end-only. Phase 1
+         skips these; Phase 2 (separate ticket) will add real single-end
+         Illumina support via a vsnp3 patch.
+      2. R1 found but no R2 → incomplete download or single-end with R1
+         naming. Skip with a distinct message.
+      3. R1 < 1 MB OR R2 < 1 MB → suspiciously small. Real WGS fastqs are
+         multi-MB minimum; sub-MB are almost always SRA submission errors
+         (we've seen 43-47 KB ones in the LSDV batch).
+    """
+    samples: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    for p in sorted(step1_dir.iterdir()):
+        if not p.is_dir() or p.name.startswith(("_", ".")):
+            continue
+        r1_matches = sorted(p.glob("*_R1*.fastq.gz")) or sorted(p.glob("*_1.fastq.gz"))
+        r2_matches = sorted(p.glob("*_R2*.fastq.gz")) or sorted(p.glob("*_2.fastq.gz"))
+        all_fq = sorted(p.glob("*.fastq.gz"))
+        if not r1_matches:
+            if not all_fq:
+                skipped.append({
+                    "sample": p.name,
+                    "reason": "no fastq files in sample directory",
+                    "size_bytes": 0,
+                })
+            else:
+                total = sum(f.stat().st_size for f in all_fq if f.is_file())
+                if total < _T46_JUNK_FASTQ_BYTES:
+                    skipped.append({
+                        "sample": p.name,
+                        "reason": f"single-end and suspiciously small ({total} bytes); likely SRA submission error",
+                        "size_bytes": total,
+                    })
+                else:
+                    skipped.append({
+                        "sample": p.name,
+                        "reason": "single-end (paired-end required; single-end support is T-46 Phase 2)",
+                        "size_bytes": total,
+                    })
+            continue
+        if not r2_matches:
+            skipped.append({
+                "sample": p.name,
+                "reason": "R1 found but no R2 — paired download incomplete or single-end with R1 naming",
+                "size_bytes": r1_matches[0].stat().st_size,
+            })
+            continue
+        r1_size = r1_matches[0].stat().st_size
+        r2_size = r2_matches[0].stat().st_size
+        if r1_size < _T46_JUNK_FASTQ_BYTES or r2_size < _T46_JUNK_FASTQ_BYTES:
+            skipped.append({
+                "sample": p.name,
+                "reason": f"suspiciously small paired fastqs (R1={r1_size}, R2={r2_size} bytes); likely junk",
+                "size_bytes": r1_size + r2_size,
+            })
+            continue
+        samples.append(p.name)
+    return samples, skipped
 
 
 def wrap_cmd(cfg: Dict, command: str) -> str:
@@ -1751,8 +1833,8 @@ def step1_run(project: str, payload: Step1Request):
     # sample metadata as terminal once the batch exits. Skip provenance if
     # no reference is set (legacy/unconfigured runs) — the bash still runs.
     prov_finalize_cb = None
+    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
     if payload.reference:
-        samples = _step1_sample_names(step1_dir)
         if samples:
             try:
                 prov_batch_run_id, _sample_run_ids = provenance_writer.dispatch_step1_batch(
@@ -1779,7 +1861,10 @@ def step1_run(project: str, payload: Step1Request):
         finalize_callback=prov_finalize_cb,
     )
     (step1_dir / ".step1_job_id").write_text(job_id, encoding="utf-8")
-    return {"job_id": job_id}
+    # T-46 Phase 1: surface samples auto-excluded from the dispatch so the
+    # user can see what didn't run and why. The frontend renders this in
+    # the Step 1 status panel.
+    return {"job_id": job_id, "skipped_samples": skipped_samples}
 
 
 @app.get("/api/projects/{project}/step1/status")

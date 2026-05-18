@@ -773,6 +773,7 @@ class RefPathRequest(BaseModel):
 class RefDownloadRequest(BaseModel):
     accession: str
     output_dir: str
+    display_name: Optional[str] = None
 
 
 @app.get("/api/references")
@@ -810,6 +811,9 @@ def ref_path_remove(payload: RefPathRequest):
     return {"paths": updated, "references": refs}
 
 
+_REF_DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 @app.post("/api/references/download")
 def ref_download(payload: RefDownloadRequest):
     cfg = load_config()
@@ -822,7 +826,31 @@ def ref_download(payload: RefDownloadRequest):
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"Cannot create output directory: {e}")
-    acc_dir = output_dir / accession
+
+    # Optional display name controls the subdir name (and therefore the entry
+    # shown in the Reference dropdown). File stems inside still use the
+    # accession — matches the lab's existing convention where dir name and
+    # file prefixes can differ (e.g. mtbc0_v1.1/ dir contains H37_*.xlsx).
+    display_name = (payload.display_name or "").strip()
+    if display_name:
+        if len(display_name) > 100:
+            raise HTTPException(status_code=400, detail="Display name too long (max 100 chars)")
+        if display_name.startswith("."):
+            raise HTTPException(status_code=400, detail="Display name cannot start with '.'")
+        if not _REF_DISPLAY_NAME_RE.match(display_name):
+            raise HTTPException(
+                status_code=400,
+                detail="Display name may only contain letters, digits, underscore, hyphen, and period",
+            )
+        subdir_name = display_name
+    else:
+        subdir_name = accession
+    acc_dir = output_dir / subdir_name
+    if acc_dir.exists() and any(acc_dir.iterdir()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reference directory already exists and is non-empty: {acc_dir}",
+        )
     acc_dir.mkdir(parents=True, exist_ok=True)
     # Copy template files from dependencies, renaming "template" to accession
     template_dir = vsnp3_path / "dependencies"

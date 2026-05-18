@@ -147,6 +147,7 @@ export default function App() {
   // Item 3: Genome download
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
   const [genomeAccession, setGenomeAccession] = useState("");
+  const [genomeDisplayName, setGenomeDisplayName] = useState("");
   const [genomeOutputDir, setGenomeOutputDir] = useState("");
   const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
   const [genomeJobId, setGenomeJobId] = useState("");
@@ -322,11 +323,16 @@ export default function App() {
       return;
     }
     const finalDir = genomeOutputDir.trim();
+    const finalDisplayName = genomeDisplayName.trim();
     setGenomeDownloadStatus("Starting download...");
     const res = await fetch(`${API_BASE}/api/references/download`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accession: genomeAccession.trim(), output_dir: finalDir })
+      body: JSON.stringify({
+        accession: genomeAccession.trim(),
+        output_dir: finalDir,
+        display_name: finalDisplayName || null,
+      })
     });
     if (!res.ok) {
       const data = await res.json();
@@ -2547,6 +2553,13 @@ export default function App() {
                       value={genomeAccession}
                       onChange={(e) => setGenomeAccession(e.target.value)}
                       style={{width:"100%", marginBottom:"0.3em"}}
+                    />
+                    <input
+                      placeholder="Display name — optional, e.g. LSDV_NW-LW_AF325528.1"
+                      value={genomeDisplayName}
+                      onChange={(e) => setGenomeDisplayName(e.target.value)}
+                      style={{width:"100%", marginBottom:"0.3em"}}
+                      title="Becomes the directory name and the entry in the Reference dropdown. Letters, digits, _ - . only. Blank → uses the accession."
                     />
                     <div className="row" style={{gap:"0.3em", alignItems:"center"}}>
                       <input

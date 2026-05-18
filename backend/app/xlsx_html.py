@@ -492,7 +492,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-bar">
   <span class="filename">{filename}</span>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
-  <span style="margin-left: auto;"><a href="?download=1">Download xlsx</a></span>
+  <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');window.location.href=u.toString();return false;">Download xlsx</a></span>
 </div>
 <div class="xlsx-wrap">
 {table}

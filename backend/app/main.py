@@ -964,14 +964,20 @@ def _resolve_ref_file(ref_name: str, filename: str) -> Path:
 
 
 @app.get("/api/references/{ref_name}/preview-xlsx", response_class=HTMLResponse)
-def ref_preview_xlsx(ref_name: str, filename: str = Query(...)):
-    """Render a reference-dir xlsx as a self-contained HTML page. Used by
-    the Reference Editor's View buttons in lieu of the broken-in-OOD
-    'Edit in Spreadsheet App' flow that tried to launch xdg-open on the
-    server."""
+def ref_preview_xlsx(ref_name: str, filename: str = Query(...), download: int = 0):
+    """Render a reference-dir xlsx as a self-contained HTML page. With
+    ?download=1, return the raw xlsx instead — used by the "Download xlsx"
+    link inside the preview page (JS handler in xlsx_html appends
+    download=1 to the current URL preserving the filename param)."""
     target = _resolve_ref_file(ref_name, filename)
     if target.suffix.lower() not in (".xlsx", ".xlsm"):
         raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
+    if download:
+        return FileResponse(
+            target,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=target.name,
+        )
     from app import xlsx_html
     try:
         html_page = xlsx_html.xlsx_to_html(target)

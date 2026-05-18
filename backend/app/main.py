@@ -1961,7 +1961,31 @@ def step2_setup(project: str):
             existing.unlink()
         except FileNotFoundError:
             pass
+
+    # Read the persisted exclusion set (written by qc_exclude when the user
+    # toggles checkboxes). Previously step2_setup ignored this list — it
+    # symlinked every step1 VCF regardless, leaving the user with a
+    # "VCFs in set: N" count that didn't match what they'd checked. vsnp3
+    # later filtered them out via -remove_by_name at run time, so the final
+    # analysis was correct, but the UI display lied. Filter at link time so
+    # the count and the file list reflect what'll actually be analyzed.
+    excluded_names: set[str] = set()
+    remove_xlsx = project_dir / "step2" / "remove_from_analysis.xlsx"
+    if remove_xlsx.exists():
+        try:
+            import pandas as pd  # vsnp3 env always has pandas
+            df = pd.read_excel(remove_xlsx, header=None)
+            for s in df.iloc[:, 0].tolist():
+                name = str(s).strip()
+                if name and name.lower() != "nan":
+                    excluded_names.add(name)
+        except Exception as exc:
+            # Don't fail the whole build for a broken xlsx — vsnp3's
+            # -remove_by_name at run time is the backstop. Surface a warning.
+            logger.warning("step2_setup: failed to parse exclusion xlsx %s: %s", remove_xlsx, exc)
+
     count = 0
+    skipped_excluded = 0
     edited_samples = []
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
@@ -1970,6 +1994,9 @@ def step2_setup(project: str):
             if not sample_dir.is_dir():
                 continue
             sample = sample_dir.name
+            if sample in excluded_names:
+                skipped_excluded += 1
+                continue
             vcf_candidates = sorted(sample_dir.glob("**/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
             if not vcf_candidates:
                 continue
@@ -1987,7 +2014,12 @@ def step2_setup(project: str):
                 edited_samples.append(sample)
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
     total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
-    return {"linked": count, "total": total, "edited": len(set(edited_samples))}
+    return {
+        "linked": count,
+        "total": total,
+        "edited": len(set(edited_samples)),
+        "skipped_excluded": skipped_excluded,
+    }
 
 
 @app.post("/api/projects/{project}/step2/run")

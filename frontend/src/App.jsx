@@ -1497,7 +1497,9 @@ export default function App() {
     if (res.ok) {
       const data = await res.json();
       const total = data.total ?? data.linked;
-      setStep2SetupMsg(`VCFs ready for Step 2: ${total} (linked ${data.linked})`);
+      const excluded = data.skipped_excluded || 0;
+      const suffix = excluded > 0 ? ` · ${excluded} excluded per QC` : "";
+      setStep2SetupMsg(`VCFs ready for Step 2: ${total} (linked ${data.linked})${suffix}`);
     }
     await loadAll();
   }

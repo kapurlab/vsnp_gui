@@ -51,6 +51,30 @@ mv -- "$OLD_PATH" "$NEW_PATH"
 "$PY" -m app.vsnp_provenance.index --db "$DB" rename \
     --old "$OLD_PATH" --new "$NEW_PATH" --by "$(whoami)"
 
+# Rewrite intra-project absolute symlinks. step1_setup creates fastq
+# symlinks with an *absolute* target (Path.symlink_to(absolute_path)), so
+# after the directory rename every symlink under step1/ that pointed at
+# files in the old download/ dir is now broken. vsnp3 itself works fine
+# (it doesn't follow these), but the T-07 provenance dispatch tries to
+# stat() each input via the symlink → FileNotFoundError → the whole
+# Step 1 run aborts with "Provenance dispatch failed". Fix in place:
+# rewrite every absolute symlink whose target starts with $OLD_PATH/ to
+# instead start with $NEW_PATH/.
+SYMLINKS_FIXED=0
+while IFS= read -r link; do
+    target="$(readlink "$link")"
+    case "$target" in
+        "$OLD_PATH"/*)
+            new_target="$NEW_PATH${target#$OLD_PATH}"
+            ln -snf "$new_target" "$link"
+            SYMLINKS_FIXED=$((SYMLINKS_FIXED+1))
+            ;;
+    esac
+done < <(find "$NEW_PATH" -type l 2>/dev/null)
+if [[ "$SYMLINKS_FIXED" -gt 0 ]]; then
+    echo "rewrote $SYMLINKS_FIXED intra-project symlink(s) to new path"
+fi
+
 # Rewrite project.json so name + display_name match the new directory.
 # Without this the GUI keeps showing the old name in the project list,
 # because the frontend renders `p.display_name || p.name` and both

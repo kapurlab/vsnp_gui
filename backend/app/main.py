@@ -1175,7 +1175,9 @@ def project_create(payload: ProjectCreate):
         project_dir = create_project(_project_roots(cfg), payload.name, scope=scope)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"path": str(project_dir), "name": payload.name, "scope": scope}
+    # Return the actual (normalized) directory name so the frontend can
+    # update its state if the name differs from what the user typed.
+    return {"path": str(project_dir), "name": project_dir.name, "scope": scope}
 
 
 @app.post("/api/projects/{project}/archive")

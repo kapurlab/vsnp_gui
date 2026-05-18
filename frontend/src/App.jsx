@@ -645,11 +645,16 @@ export default function App() {
 
   async function createProject() {
     if (!newProjectName.trim()) return;
-    await fetch(`${API_BASE}/api/projects`, {
+    const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: newProjectName.trim() })
     });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      window.alert(`Could not create project: ${detail.detail || res.status}`);
+      return;
+    }
     setNewProjectName("");
     await loadAll();
   }
@@ -2193,9 +2198,10 @@ export default function App() {
             <h2>Projects</h2>
             <div className="row">
               <input
-                placeholder="New project name"
+                placeholder="New project name (e.g. LSDV_India)"
                 value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
+                onChange={(e) => setNewProjectName(e.target.value.replace(/\s+/g, "_"))}
+                title="Spaces are auto-converted to underscores. Letters, digits, _ - . are allowed; other characters will be rejected."
               />
               <button onClick={createProject}>Create</button>
             </div>

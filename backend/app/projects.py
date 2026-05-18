@@ -1,7 +1,40 @@
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+
+
+_PROJECT_NAME_OK_CHARSET = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def normalize_project_name(name: str) -> str:
+    """Turn a user-supplied project name into a filesystem-safe directory name.
+
+    Auto-converts internal whitespace to underscores (regression fix —
+    callers like seqkit, called via vsnp3, don't quote paths properly, so a
+    space in the project dir produces a truncated path and a confusing
+    `[ERRO] stat /path: no such file or directory` error). Rejects any
+    other shell-unfriendly characters with a clear ValueError so the
+    caller surfaces it as HTTP 400 instead of letting it explode at
+    `seqkit stat` / `bwa mem` / similar downstream.
+    """
+    if not isinstance(name, str):
+        raise ValueError("Project name must be a string")
+    cleaned = re.sub(r"\s+", "_", name.strip())
+    if not cleaned:
+        raise ValueError("Project name is empty")
+    if cleaned.startswith("."):
+        raise ValueError("Project name cannot start with '.'")
+    if len(cleaned) > 100:
+        raise ValueError("Project name too long (max 100 characters)")
+    if not _PROJECT_NAME_OK_CHARSET.match(cleaned):
+        bad = sorted(set(ch for ch in cleaned if not re.match(r"[A-Za-z0-9._-]", ch)))
+        raise ValueError(
+            f"Project name contains characters that cause downstream tool failures: {''.join(bad)!r}. "
+            "Only letters, digits, _ - . are allowed (spaces are auto-converted to underscores)."
+        )
+    return cleaned
 
 ARCHIVE_DIR_NAME = "projects_archive"
 
@@ -43,7 +76,11 @@ def project_meta_path(project_dir: Path) -> Path:
 
 def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> Path:
     """Create a project under the requested scope. Defaults to the first root
-    (personal) when scope is unspecified."""
+    (personal) when scope is unspecified. The supplied name is normalized via
+    `normalize_project_name` (spaces → underscores, other unsafe chars
+    rejected) before being used as both the directory name and the project
+    metadata."""
+    name = normalize_project_name(name)
     norm = _normalize_roots(roots)
     if not norm:
         raise ValueError("No project root configured")
@@ -58,6 +95,8 @@ def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> 
     if chosen is None:
         raise ValueError(f"No project root with scope={scope!r}")
     project_dir = chosen / name
+    if project_dir.exists():
+        raise ValueError(f"Project already exists: {name}")
     ensure_project_dirs(project_dir)
     meta = {
         "name": name,

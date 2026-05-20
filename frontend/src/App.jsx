@@ -155,6 +155,8 @@ export default function App() {
   const [genomeOutputDir, setGenomeOutputDir] = useState("");
   const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
   const [genomeJobId, setGenomeJobId] = useState("");
+  const [step1JobId, setStep1JobId] = useState("");
+  const [step2JobId, setStep2JobId] = useState("");
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -546,6 +548,18 @@ export default function App() {
       if (line.startsWith("[job:")) {
         const status = line.replace("[job:", "").replace("]", "");
         setJobStatus(status);
+        // Step 1 job completed: refresh sample statuses, QC table, project counts
+        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
+          loadStep1Status();
+          loadQC();
+          refreshProjects(selectedProject);
+        }
+        // Step 2 job completed: refresh run list (auto-selects newest → triggers
+        // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
+        if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+          loadStep2Runs(true);
+          refreshProjects(selectedProject);
+        }
         // Update SRA status if this was an SRA job
         if (sraJobId && jobId === sraJobId) {
           if (status === "succeeded") {
@@ -604,6 +618,14 @@ export default function App() {
       setReference(importReference);
     }
   }, [step2Mode, importReference, reference]);
+
+  // Auto-populate importReference from the project-level reference so VCF
+  // database filtering and import tagging always use the project's reference
+  // without the user having to re-select it in the VCF Databases panel.
+  useEffect(() => {
+    const projectRef = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    if (projectRef) setImportReference(projectRef);
+  }, [projectReference, refLock.references]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -1524,6 +1546,7 @@ export default function App() {
       return;
     }
     setJobId(data.job_id);
+    setStep1JobId(data.job_id);
     setStep1AutoRefreshPending(true);
     // T-46: surface samples auto-skipped from the dispatch (single-end,
     // junk-sized fastqs) so the user knows what didn't run and why. Without
@@ -1606,6 +1629,7 @@ export default function App() {
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
+    setStep2JobId(data.job_id);
   }
 
   async function loadStep1Status() {
@@ -3504,27 +3528,39 @@ export default function App() {
                   VCF Databases (Step 2)
                   <span
                     className="help-icon"
-                    data-tooltip="Select the reference type, then add one or more VCF database folders. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
+                    data-tooltip="VCF database folders for the project's reference. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
                   >
                     ?
                   </span>
                 </h3>
-                <select
-                  value={importReference}
-                  onChange={(e) => setImportReference(e.target.value)}
-                >
-                  <option value="">Select reference</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
-                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "6px" }}>
+                  <span className="muted" style={{ fontSize: "0.85em" }}>Reference:</span>
+                  {importReference ? (
+                    <span
+                      style={{
+                        padding: "2px 8px",
+                        borderRadius: "10px",
+                        background: "#e8f5e9",
+                        color: "#1b5e20",
+                        fontWeight: 600,
+                        fontSize: "0.85em",
+                      }}
+                    >
+                      {importReference}
+                    </span>
+                  ) : (
+                    <span className="muted" style={{ fontSize: "0.85em" }}>
+                      not set — select a reference in the Projects panel
+                    </span>
+                  )}
+                </div>
                 <div style={{marginTop:"8px"}}>
                   {(() => {
                     const visible = importReference
                       ? vcfDbFolders.filter((f) => (f.reference || "") === importReference)
                       : [];
                     if (!importReference) {
-                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Select a reference above to see matching VCF databases.</div>;
+                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Set the project reference in the Projects panel to see matching VCF databases.</div>;
                     }
                     if (!visible.length) {
                       return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF databases configured for {importReference} yet.</div>;
@@ -3606,7 +3642,7 @@ export default function App() {
                           className="ghost action"
                           style={{fontSize:"12px"}}
                           disabled={!importReference}
-                          title={importReference ? "Browse for a VCF folder" : "Select a reference first"}
+                          title={importReference ? "Browse for a VCF folder" : "Set the project reference first"}
                           onClick={async () => {
                             const picked = await window.vsnp.selectPath({
                               kind: "folder",
@@ -3625,7 +3661,7 @@ export default function App() {
                         value={manualVcfFolderPath}
                         onChange={(e) => setManualVcfFolderPath(e.target.value)}
                         disabled={!importReference}
-                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Select a reference first"}
+                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Set the project reference first"}
                         title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
                         style={{flex:1, fontSize:"12px"}}
                         onKeyDown={(e) => {

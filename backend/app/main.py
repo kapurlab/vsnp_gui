@@ -1415,7 +1415,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     on_conflict = (payload.on_conflict or "skip").lower()
 
     imported = 0
-    skipped = 0
+    already_present = 0  # already in vcf_source, not re-copied (on_conflict=skip)
+    skipped = 0          # excluded: ref mismatch or dedup
     renamed = 0
     mismatched = []
     seen_samples = {}
@@ -1447,7 +1448,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             target = vcf_source_dir / vcf.name
             if target.exists():
                 if on_conflict == "skip":
-                    skipped += 1
+                    already_present += 1
                     continue
                 if on_conflict == "rename":
                     if payload.prefix_duplicates:
@@ -1485,6 +1486,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     return {
         "imported": imported,
+        "already_present": already_present,
         "skipped": skipped,
         "renamed": renamed,
         "detected_reference": detected_ref or payload.reference or "",

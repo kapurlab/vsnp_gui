@@ -66,6 +66,7 @@ export default function App() {
   const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
+  const step1JobStatusRef = useRef("");
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -651,23 +652,49 @@ export default function App() {
     setStep1AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step1AutoRefreshPending]);
 
-  // Poll /step1/status while a batch is in flight so the Run button
-  // accurately reflects the backend state (re-enables when the batch
-  // finishes, even on page reloads where the SSE jobId tracking is lost).
+  // Poll /step1/status every 5 s while the batch is running. Reliable
+  // regardless of whether the SSE connection survives the OOD proxy timeout.
   useEffect(() => {
     if (step1JobStatus !== "running") return;
     const t = setInterval(loadStep1Status, 5000);
     return () => clearInterval(t);
   }, [step1JobStatus, selectedProject]);
 
+  // When step1JobStatus transitions from "running" → terminal, trigger the
+  // same refreshes that the SSE handler would have fired. This fires via the
+  // polling interval above, so it works even when SSE drops under the proxy.
   useEffect(() => {
-    if (!selectedProject || !settingsReady) return;
-    if (!step2AutoRefreshPending) return;
-    if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
-    loadStep2Runs(true);
-    loadStep2Outputs();
-    setStep2AutoRefreshPending(false);
-  }, [jobStatus, selectedProject, step2AutoRefreshPending]);
+    const prev = step1JobStatusRef.current;
+    step1JobStatusRef.current = step1JobStatus;
+    if (prev === "running" && step1JobStatus !== "running" && step1JobStatus !== "") {
+      loadQC();
+      refreshProjects(selectedProject);
+    }
+  }, [step1JobStatus]);
+
+  // Poll the job endpoint directly for step2 completion. SSE connections
+  // drop under the OOD proxy for jobs that run longer than the proxy
+  // read-timeout (~60 s); polling is the reliable fallback.
+  useEffect(() => {
+    if (!step2JobId || !selectedProject) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/jobs/${step2JobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+        if (job.status === "succeeded" || job.status === "failed") {
+          cancelled = true;
+          clearInterval(t);
+          loadStep2Runs(true);
+          refreshProjects(selectedProject);
+        }
+      } catch {}
+    };
+    const t = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [step2JobId, selectedProject]);
 
   useEffect(() => {
     if (!selectedProject) return;
@@ -1492,8 +1519,9 @@ export default function App() {
     }
     const parts = [
       `Imported ${data.imported}`,
+      data.already_present ? `Already in set: ${data.already_present}` : null,
       data.renamed ? `Renamed ${data.renamed}` : null,
-      data.skipped ? `Skipped ${data.skipped}` : null,
+      data.skipped ? `Excluded ${data.skipped}` : null,
       data.mismatched ? `Mismatched ${data.mismatched}` : null,
       data.detected_reference ? `Ref: ${data.detected_reference}` : null
     ].filter(Boolean);

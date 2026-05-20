@@ -1529,9 +1529,9 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
-    if (typeof data.total_found === "number") {
-      setStep2VcfCount(data.total_found);
-    }
+    // Use actual set size (imported + already_present + renamed), not total_found
+    // which counts all source VCFs including deduped/mismatched ones.
+    setStep2VcfCount((data.imported || 0) + (data.already_present || 0) + (data.renamed || 0));
     const parts = [
       `Imported ${data.imported}`,
       data.already_present ? `Already in set: ${data.already_present}` : null,

@@ -168,6 +168,15 @@ export default function App() {
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
   const [refEditorPath, setRefEditorPath] = useState("");
+  const [metaRows, setMetaRows] = useState([]);
+  const [metaFilename, setMetaFilename] = useState(null);
+  const [metaExists, setMetaExists] = useState(false);
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaSingleOrig, setMetaSingleOrig] = useState("");
+  const [metaSingleDisplay, setMetaSingleDisplay] = useState("");
+  const [metaBulkText, setMetaBulkText] = useState("");
+  const [metaBulkOpen, setMetaBulkOpen] = useState(false);
+  const [metaStatus, setMetaStatus] = useState("");
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -367,6 +376,40 @@ export default function App() {
       const data = await res.json();
       setRefEditorFiles(data.files || []);
       setRefEditorPath(data.ref_path || "");
+    }
+  }
+
+  async function loadMetadata(refName) {
+    if (!refName) { setMetaRows([]); setMetaFilename(null); setMetaExists(false); return; }
+    setMetaLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/metadata`);
+      if (res.ok) {
+        const data = await res.json();
+        setMetaRows(data.rows || []);
+        setMetaFilename(data.filename || null);
+        setMetaExists(data.exists || false);
+      }
+    } finally {
+      setMetaLoading(false);
+    }
+  }
+
+  async function addMetadataRows(rows) {
+    if (!refEditorRef || !rows.length) return;
+    setMetaStatus("Saving…");
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/metadata/add-rows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setMetaStatus(`Saved — ${data.added} added, ${data.updated} updated (${data.rows_total} total)`);
+      await loadMetadata(refEditorRef);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setMetaStatus(`Error: ${err.detail || res.status}`);
     }
   }
 
@@ -2804,7 +2847,12 @@ export default function App() {
                   value={refEditorRef}
                   onChange={(e) => {
                     setRefEditorRef(e.target.value);
+                    setMetaStatus("");
+                    setMetaSingleOrig("");
+                    setMetaSingleDisplay("");
+                    setMetaBulkText("");
                     loadRefEditorFiles(e.target.value);
+                    loadMetadata(e.target.value);
                   }}
                 >
                   <option value="">Choose a reference...</option>
@@ -2886,6 +2934,129 @@ export default function App() {
                           )}
                         </div>
 
+                        <div className="ref-editor-card">
+                          <h3>Sample Metadata</h3>
+                          <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.4em"}}>
+                            Maps VCF file-stem names to human-readable labels in vSNP3 trees and tables. Column 1 = original name (VCF stem, e.g. <code>99-0100</code>), Column 2 = display label.
+                          </div>
+                          {metaLoading ? (
+                            <div className="note"><span className="pulse-dot" /> Loading…</div>
+                          ) : metaExists && metaFilename ? (
+                            <>
+                              <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
+                                <span className="ref-editor-filename">{metaFilename}</span>
+                                <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download xlsx</button>
+                              </div>
+                              {metaRows.length > 0 ? (
+                                <div style={{overflowX:"auto", maxHeight:"14em", overflowY:"auto", marginBottom:"0.5em", fontSize:"0.82em"}}>
+                                  <table style={{width:"100%", borderCollapse:"collapse"}}>
+                                    <thead>
+                                      <tr>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)", whiteSpace:"nowrap"}}>Original name</th>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)"}}>Display label</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {metaRows.map((r, i) => (
+                                        <tr key={i} style={{background: i % 2 === 0 ? "transparent" : "var(--row-alt,rgba(0,0,0,0.03))"}}>
+                                          <td style={{padding:"0.1em 0.4em", fontFamily:"monospace"}}>{r.original}</td>
+                                          <td style={{padding:"0.1em 0.4em"}}>{r.display_name}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>File exists but contains no rows yet.</div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>No metadata file found — one will be created as <code>{refEditorRef}_metadata.xlsx</code> when you add the first entry.</div>
+                          )}
+
+                          <div style={{marginTop:"0.5em"}}>
+                            <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add single entry</div>
+                            <div style={{display:"flex", gap:"0.3em", alignItems:"center", flexWrap:"wrap"}}>
+                              <input
+                                placeholder="Original name (VCF stem)"
+                                value={metaSingleOrig}
+                                onChange={(e) => setMetaSingleOrig(e.target.value)}
+                                style={{flex:"1 1 10em", minWidth:"8em"}}
+                              />
+                              <span style={{color:"var(--muted,#888)"}}>→</span>
+                              <input
+                                placeholder="Display label"
+                                value={metaSingleDisplay}
+                                onChange={(e) => setMetaSingleDisplay(e.target.value)}
+                                style={{flex:"1 1 10em", minWidth:"8em"}}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && metaSingleOrig.trim() && metaSingleDisplay.trim()) {
+                                    addMetadataRows([{original: metaSingleOrig.trim(), display_name: metaSingleDisplay.trim()}]);
+                                    setMetaSingleOrig("");
+                                    setMetaSingleDisplay("");
+                                  }
+                                }}
+                              />
+                              <button
+                                disabled={!metaSingleOrig.trim() || !metaSingleDisplay.trim()}
+                                onClick={() => {
+                                  addMetadataRows([{original: metaSingleOrig.trim(), display_name: metaSingleDisplay.trim()}]);
+                                  setMetaSingleOrig("");
+                                  setMetaSingleDisplay("");
+                                }}
+                              >Add</button>
+                            </div>
+                          </div>
+
+                          <div style={{marginTop:"0.5em"}}>
+                            <button
+                              className="ghost action"
+                              style={{fontSize:"0.85em"}}
+                              onClick={() => setMetaBulkOpen(!metaBulkOpen)}
+                            >
+                              {metaBulkOpen ? "Hide bulk paste" : "Bulk paste (tab-delimited)"}
+                            </button>
+                            {metaBulkOpen && (
+                              <div style={{marginTop:"0.3em"}}>
+                                <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.2em"}}>
+                                  Paste two tab-separated columns, one row per line: <code>original_name{"\\t"}display_label</code>. Existing originals will be overwritten.
+                                </div>
+                                <textarea
+                                  rows={6}
+                                  style={{width:"100%", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
+                                  placeholder={"99-0100\tBovine TB isolate A\n2023-0055\tBrucella field strain"}
+                                  value={metaBulkText}
+                                  onChange={(e) => setMetaBulkText(e.target.value)}
+                                />
+                                <button
+                                  style={{marginTop:"0.3em"}}
+                                  disabled={!metaBulkText.trim()}
+                                  onClick={() => {
+                                    const rows = metaBulkText
+                                      .split("\n")
+                                      .map((line) => line.split("\t").map((s) => s.trim()))
+                                      .filter((parts) => parts.length >= 2 && parts[0] && parts[1])
+                                      .map(([original, display_name]) => ({ original, display_name }));
+                                    if (!rows.length) {
+                                      setMetaStatus("No valid rows found — ensure two tab-separated columns.");
+                                      return;
+                                    }
+                                    addMetadataRows(rows);
+                                    setMetaBulkText("");
+                                    setMetaBulkOpen(false);
+                                  }}
+                                >
+                                  Add {metaBulkText.split("\n").filter((l) => l.includes("\t") && l.trim()).length} rows
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          {metaStatus && (
+                            <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{metaStatus}</div>
+                          )}
+                        </div>
+
                         <div className="note" style={{marginTop:"0.8em"}}>
                           <strong>View</strong> opens a formatted, read-only preview in a new tab (cell colors and conditional formatting preserved).
                           <br />
@@ -2896,7 +3067,7 @@ export default function App() {
                         <button
                           className="ghost action"
                           style={{marginTop:"0.4em"}}
-                          onClick={() => loadRefEditorFiles(refEditorRef)}
+                          onClick={() => { loadRefEditorFiles(refEditorRef); loadMetadata(refEditorRef); }}
                         >
                           Refresh file list
                         </button>
@@ -2906,7 +3077,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="block">
-                  <div className="note">Select a reference type on the left to edit its filter and exclusion spreadsheets.</div>
+                  <div className="note">Select a reference type on the left to edit its filter, exclusion, and metadata spreadsheets.</div>
                 </div>
               )}
             </section>

@@ -19,6 +19,7 @@ import logging
 import shlex
 import re
 import hashlib
+import tempfile
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -995,7 +996,108 @@ def ref_files(ref_name: str):
         files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "define_filter"})
     for f in remove_from:
         files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "remove_from_analysis"})
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    for f in meta_files:
+        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "metadata"})
     return {"ref_name": ref_name, "ref_path": str(ref_dir), "files": files}
+
+
+def _read_metadata_xlsx(cfg: Dict, meta_path: Path) -> List[Dict[str, str]]:
+    code = (
+        "import pandas as pd, json, sys; "
+        "df = pd.read_excel(sys.argv[1], header=None, usecols=[0,1], names=['original','display_name']); "
+        "df = df.dropna(subset=['original']); "
+        "df['original'] = df['original'].astype(str); "
+        "df['display_name'] = df['display_name'].astype(str); "
+        "print(json.dumps(df.to_dict(orient='records')))"
+    )
+    result = subprocess.run(conda_python_cmd(cfg, code, [str(meta_path)]), text=True, capture_output=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return []
+
+
+@app.get("/api/references/{ref_name}/metadata")
+def ref_get_metadata(ref_name: str):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    if not meta_files:
+        return {"rows": [], "filename": None, "exists": False}
+    meta_path = meta_files[0]
+    rows = _read_metadata_xlsx(cfg, meta_path)
+    return {"rows": rows, "filename": meta_path.name, "exists": True}
+
+
+class MetadataAddRequest(BaseModel):
+    rows: List[Dict[str, str]]
+
+
+@app.post("/api/references/{ref_name}/metadata/add-rows")
+def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows provided")
+    for row in payload.rows:
+        if not str(row.get("original", "")).strip():
+            raise HTTPException(status_code=400, detail="Each row requires a non-empty 'original' field")
+        if not str(row.get("display_name", "")).strip():
+            raise HTTPException(status_code=400, detail="Each row requires a non-empty 'display_name' field")
+
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    meta_path = meta_files[0] if meta_files else ref_dir / f"{ref_name}_metadata.xlsx"
+
+    existing_rows: List[Dict[str, str]] = []
+    if meta_path.exists():
+        existing_rows = _read_metadata_xlsx(cfg, meta_path)
+
+    orig_to_idx = {r["original"]: i for i, r in enumerate(existing_rows)}
+    added, updated = 0, 0
+    for row in payload.rows:
+        orig = str(row["original"]).strip()
+        disp = str(row["display_name"]).strip()
+        if orig in orig_to_idx:
+            existing_rows[orig_to_idx[orig]]["display_name"] = disp
+            updated += 1
+        else:
+            existing_rows.append({"original": orig, "display_name": disp})
+            orig_to_idx[orig] = len(existing_rows) - 1
+            added += 1
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
+        json.dump(existing_rows, tf)
+        tmp_json = tf.name
+    try:
+        code = (
+            "import pandas as pd, json, sys; "
+            "rows = json.load(open(sys.argv[2])); "
+            "df = pd.DataFrame([[r['original'], r['display_name']] for r in rows]); "
+            "df.to_excel(sys.argv[1], index=False, header=False)"
+        )
+        result = subprocess.run(
+            conda_python_cmd(cfg, code, [str(meta_path), tmp_json]),
+            text=True, capture_output=True
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Failed to write metadata: {result.stderr.strip()}")
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+
+    return {"filename": meta_path.name, "rows_total": len(existing_rows), "added": added, "updated": updated}
 
 
 class RefCreateFileRequest(BaseModel):

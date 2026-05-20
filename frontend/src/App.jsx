@@ -88,6 +88,8 @@ export default function App() {
   const [refLock, setRefLock] = useState({ references: [] });
   const [projectReference, setProjectReference] = useState("");
   const [newProjectReference, setNewProjectReference] = useState("");
+  const [step2Runs, setStep2Runs] = useState([]);
+  const [step2SelectedRun, setStep2SelectedRun] = useState(null);
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
@@ -579,6 +581,9 @@ export default function App() {
     setExcluded({});
     loadQC();
     loadStep1Status();
+    setStep2Runs([]);
+    setStep2SelectedRun(null);
+    loadStep2Runs(true);
     loadStep2Outputs();
     loadInputs(selectedProject);
     setStep2RunId("");
@@ -637,9 +642,15 @@ export default function App() {
     if (!selectedProject || !settingsReady) return;
     if (!step2AutoRefreshPending) return;
     if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
+    loadStep2Runs(true);
     loadStep2Outputs();
     setStep2AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step2AutoRefreshPending]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    loadStep2Outputs();
+  }, [step2SelectedRun]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -921,10 +932,26 @@ export default function App() {
     setQcLoading(false);
   }
 
+  async function loadStep2Runs(autoSelectLatest = false) {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/runs`);
+      if (!res.ok) return;
+      const runs = await res.json();
+      setStep2Runs(runs);
+      if (autoSelectLatest && runs.length > 0) {
+        setStep2SelectedRun(runs[0].run_id);
+      }
+    } catch {
+      // keep existing state on network error
+    }
+  }
+
   async function loadStep2Outputs() {
     if (!selectedProject) return;
     setStep2OutputsError("");
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2_outputs`);
+    const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2_outputs${runParam}`);
     if (!res.ok) {
       const msg = await res.json();
       setStep2OutputsError(msg.detail || "Failed to load Step 2 outputs");
@@ -3859,6 +3886,24 @@ export default function App() {
                 <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
               </div>
             </div>
+            {step2Runs.length > 0 ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                <label style={{ fontWeight: 600, whiteSpace: "nowrap", fontSize: "0.9em" }}>Comparison:</label>
+                <select
+                  value={step2SelectedRun || ""}
+                  onChange={(e) => setStep2SelectedRun(e.target.value || null)}
+                  style={{ flex: 1 }}
+                >
+                  {step2Runs.map((r) => (
+                    <option key={r.run_id} value={r.run_id}>
+                      {r.run_id === "legacy" ? "Legacy (flat)" : r.run_id.replace(/_/g, " ").replace("T", " ")}
+                      {r.status === "ok" ? " ✓" : r.status === "failed" ? " ✗" : r.status === "running" ? " …" : ""}
+                      {r.group_count > 0 ? ` (${r.group_count} groups)` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
             {step2EditedCount > 0 && settings.projects_root && selectedProject ? (
               <div className="note">
                 Edited samples included in this run.{" "}

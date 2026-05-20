@@ -2082,19 +2082,38 @@ def step2_run(project: str, payload: Step2Request):
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
     # Store the resolved reference back into project.json
     update_project_meta(project_dir, {"reference": payload.reference})
+
     step2_dir = project_dir / "step2"
+    step2_dir.mkdir(parents=True, exist_ok=True)
+
+    # Concurrency guard: one step2 run at a time per project
+    job_id_path = step2_dir / ".step2_job_id"
+    if job_id_path.exists():
+        prior_id = job_id_path.read_text(encoding="utf-8").strip()
+        if prior_id:
+            prior_job = job_manager.get_job(prior_id)
+            if prior_job and prior_job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Step 2 is already running for this project (job {prior_id}). "
+                        "Wait for it to finish before starting a new run."
+                    ),
+                )
+
     vcf_source_dir = step2_dir / "vcf_source"
-    starting_files = step2_dir / "vcf_starting_files"
-    if starting_files.exists():
-        shutil.rmtree(starting_files)
-    # Clean previous group output folders (keep vcf_source)
-    for child in step2_dir.iterdir():
-        if child.is_dir() and child.name != "vcf_source":
-            shutil.rmtree(child)
+
+    # Timestamped run directory — each run gets its own subdirectory so
+    # multiple comparisons accumulate without overwriting previous outputs.
+    from datetime import datetime as _dt
+    run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = step2_dir / "runs" / run_ts
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     remove_file = step2_dir / "remove_from_analysis.xlsx"
     remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
-    _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
-    _write_figtree_groups(step2_dir, vcf_source_dir, cfg, payload.label_style or "short")
+    _write_step2_edit_summary(run_dir, _edited_samples_in_dir(vcf_source_dir))
+    _write_figtree_groups(run_dir, vcf_source_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -2124,7 +2143,7 @@ def step2_run(project: str, payload: Step2Request):
     flags_str = " ".join(step2_flags)
     cmd = f"vsnp3_step2.py -wd {shlex.quote(str(vcf_source_dir))} {flags_str} -t {payload.reference}{remove_arg}"
     label_style = payload.label_style or "short"
-    label_script = _build_tree_label_script(step2_dir, cfg, label_style)
+    label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:
         cmd = f"{cmd} && python {shlex.quote(str(label_script))}"
     step2_env = build_env(cfg)
@@ -2144,6 +2163,7 @@ def step2_run(project: str, payload: Step2Request):
             ood_session_id=_ood_session_id(),
             is_shared=_is_shared_project(cfg, project_dir),
             resolved_vcf_db_folders=_resolved_vcf_db_folders(cfg),
+            step2_run_dir=run_dir,
         )
     except provenance_writer.Step2DispatchBlocked as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -2156,17 +2176,20 @@ def step2_run(project: str, payload: Step2Request):
     def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
         provenance_writer.finalize_step2(
             project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
+            step2_run_dir=run_dir,
         )
-
 
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
-        cwd=step2_dir,
+        cwd=run_dir,
         env=step2_env,
         finalize_callback=prov_finalize_cb,
     )
-    return {"job_id": job_id}
+    # Record the active job and the current run so the frontend can auto-select it
+    job_id_path.write_text(job_id, encoding="utf-8")
+    (step2_dir / ".current_run").write_text(run_ts, encoding="utf-8")
+    return {"job_id": job_id, "run_id": run_ts}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2692,6 +2715,68 @@ def step2_vcf_count(project: str):
     }
 
 
+@app.get("/api/projects/{project}/step2/runs")
+def step2_runs_list(project: str):
+    """List all timestamped step2 runs newest-first. Falls back to a synthetic
+    'legacy' entry when the flat layout is present but runs/ does not exist."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        return []
+    runs_dir = step2_dir / "runs"
+    results = []
+    if runs_dir.is_dir():
+        for run_entry in sorted(runs_dir.iterdir(), reverse=True):
+            if not run_entry.is_dir():
+                continue
+            meta_path = run_entry / "run_metadata.json"
+            started_at = None
+            status = "unknown"
+            reference = ""
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    started_at = meta.get("started_at")
+                    status = meta.get("status", "running")
+                    reference = (
+                        meta.get("dispatch_state", {})
+                        .get("reference", {})
+                        .get("name", "")
+                    )
+                except (json.JSONDecodeError, OSError):
+                    pass
+            else:
+                # run_metadata.json missing → job is still running or very new
+                status = "running"
+            group_count = sum(1 for d in run_entry.iterdir() if d.is_dir() and not d.name.startswith("_"))
+            results.append({
+                "run_id": run_entry.name,
+                "started_at": started_at,
+                "status": status,
+                "reference": reference,
+                "group_count": group_count,
+            })
+    else:
+        # Legacy flat layout: any group dirs directly under step2/
+        has_groups = any(
+            d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
+            for d in step2_dir.iterdir()
+        )
+        if has_groups:
+            results.append({
+                "run_id": "legacy",
+                "started_at": None,
+                "status": "ok",
+                "reference": "",
+                "group_count": sum(
+                    1 for d in step2_dir.iterdir()
+                    if d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
+                ),
+            })
+    return results
+
+
 @app.post("/api/projects/{project}/qc_exclude")
 def qc_exclude(project: str, payload: ExcludeRequest):
     cfg = load_config()
@@ -2925,13 +3010,47 @@ def step1_edits(project: str):
 
 
 
+def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
+    """Resolve which directory to read step2 outputs from.
+
+    Priority:
+    1. Explicit run_id → step2/runs/{run_id}/
+    2. .current_run sentinel → step2/runs/{value}/
+    3. Latest entry in step2/runs/ by directory name (lexicographic = chronological)
+    4. Legacy flat layout: step2/ itself
+    """
+    runs_dir = step2_dir / "runs"
+    if run_id and run_id != "legacy":
+        candidate = runs_dir / run_id
+        if candidate.is_dir():
+            return candidate
+    if run_id == "legacy":
+        return step2_dir
+    current_file = step2_dir / ".current_run"
+    if current_file.exists():
+        current_ts = current_file.read_text(encoding="utf-8").strip()
+        candidate = runs_dir / current_ts
+        if candidate.is_dir():
+            return candidate
+    if runs_dir.is_dir():
+        entries = sorted(
+            (d for d in runs_dir.iterdir() if d.is_dir()),
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        if entries:
+            return entries[0]
+    return step2_dir  # legacy flat
+
+
 @app.get("/api/projects/{project}/step2_outputs")
-def step2_outputs(project: str):
+def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
 
     def _safe_name(value: str) -> str:
         return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
@@ -2954,7 +3073,7 @@ def step2_outputs(project: str):
         return count
 
     top = []
-    html_files = sorted(step2_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
+    html_files = sorted(output_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
     if html_files:
         latest_html = html_files[-1]
         top.append({
@@ -2963,14 +3082,14 @@ def step2_outputs(project: str):
             "type": "html",
             "download_name": f"{_safe_name(project)}__{latest_html.name}",
         })
-    for f in step2_dir.glob("*.zip"):
+    for f in output_dir.glob("*.zip"):
         top.append({
             "label": f.name,
             "path": str(f),
             "type": "zip",
             "download_name": f"{_safe_name(project)}__{f.name}",
         })
-    mismatch_report = step2_dir / "mismatch_report.csv"
+    mismatch_report = output_dir / "mismatch_report.csv"
     if mismatch_report.exists():
         top.append({
             "label": mismatch_report.name,
@@ -2981,10 +3100,12 @@ def step2_outputs(project: str):
     top.sort(key=lambda x: x["label"])
 
     groups = []
-    for d in sorted(step2_dir.iterdir()):
+    for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name == "vcf_source":
+        if d.name in ("vcf_source", "runs", "_provenance"):
+            continue
+        if d.name.startswith("."):
             continue
         fasta_path = _find_group_fasta(d)
         fasta_count = _count_fasta_sequences(fasta_path)
@@ -3029,20 +3150,23 @@ def step2_outputs(project: str):
                 "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
                 "posthoc_sequence_count": fasta_count,
             })
-    return {"top": top, "groups": groups}
+    return {"top": top, "groups": groups, "run_id": output_dir.name if output_dir != step2_dir else "legacy"}
 
 
 @app.get("/api/projects/{project}/step2/trees")
-def step2_trees(project: str):
+def step2_trees(project: str, run_id: Optional[str] = Query(None)):
     """List the latest .tre file per group under step2/."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
     trees = []
-    for d in sorted(step2_dir.iterdir()):
-        if not d.is_dir() or d.name == "vcf_source":
+    for d in sorted(output_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name in ("vcf_source", "runs", "_provenance") or d.name.startswith("."):
             continue
         tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
         if not tre_files:

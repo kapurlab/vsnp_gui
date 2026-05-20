@@ -256,8 +256,10 @@ def capture_vsnp_gui_state(deploy_path: Path) -> dict[str, Any]:
 
 
 def _git(cwd: Path, *args: str) -> str:
+    # -c safe.directory bypasses CVE-2022-24765 ownership check when the
+    # backend process runs as a different user than the repo owner (OOD context).
     result = subprocess.run(
-        ["git", *args],
+        ["git", f"-c", f"safe.directory={cwd.resolve()}", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,

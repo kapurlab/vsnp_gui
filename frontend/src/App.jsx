@@ -1042,7 +1042,9 @@ export default function App() {
     if (!selectedProject) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_source/samples`);
     if (res.ok) {
-      setVcfSourceSamples(await res.json());
+      const samples = await res.json();
+      setVcfSourceSamples(samples);
+      setStep2VcfCount(samples.length);
     }
   }
 
@@ -1529,9 +1531,6 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
-    // Use actual set size (imported + already_present + renamed), not total_found
-    // which counts all source VCFs including deduped/mismatched ones.
-    setStep2VcfCount((data.imported || 0) + (data.already_present || 0) + (data.renamed || 0));
     const parts = [
       `Imported ${data.imported}`,
       data.already_present ? `Already in set: ${data.already_present}` : null,

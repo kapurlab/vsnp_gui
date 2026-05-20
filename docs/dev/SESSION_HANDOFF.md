@@ -91,18 +91,24 @@ b7554fd T-39: reference-file re-upload route (close offline-edit loop)
 
 ## Production state on wgs3 right now
 
-- `main` @ `3a5a818` on both `/srv/kapurlab/tools/vsnp_gui` (deployed) and origin/main
-- Frontend dist freshly rebuilt; new hashes are live
-- **uvicorn restart needed for the latest backend changes to be active** —
-  start a fresh OOD session to pick up step2_setup exclusion filtering,
-  T-46 dispatch plan, and SRA crosswalk endpoint
-- Active project: `/home/vxk1/projects/LSDV_India/` — 73 LSDV samples
-  ran Step 1 successfully against `LSDV_Neethling_2490` reference;
-  Step 2 in flight with 3 samples excluded per QC
-- Reference: `LSDV_Neethling_2490` lives at
+- **`/srv/kapurlab/tools/vsnp_gui` is on `tstuber_2026-05-20` (Tod's branch)**,
+  NOT on `main`. Currently 11 commits ahead of `origin/main`. See
+  "Tod's branch" section below for the review queue.
+- `origin/main` is at `eb36c18` (May 17–18 handoff); local Mac matches.
+- The Tod-branch dist served by wgs3's Apache is freshly built.
+- **uvicorn restart needed for any backend change to be active** — fresh
+  OOD session picks up the current Tod-branch state including timestamped
+  step2 dirs, project-level reference, VCF browser, and metadata editor.
+- Active projects on wgs3:
+  - `/home/vxk1/projects/LSDV_India/` — 73 LSDV samples, Step 1 done
+    against `LSDV_Neethling_2490`; some Step 2 work in flight.
+  - `/srv/kapurlab/projects/demo_sars_cov_2/` — Tod's pre-populated demo
+    project (copy of `Retest`, 6 deer SARS-CoV-2, full step1+step2
+    finished).
+- Reference: `LSDV_Neethling_2490` at
   `/srv/kapurlab/refs/vsnp3/reference_options/LSDV_Neethling_2490/`
-  (AF325528.1 fasta + gbk + gff, plus templates copied from vsnp3
-  dependencies, plus a `_define_filter.xlsx` and `_remove_from_analysis.xlsx`)
+  (AF325528.1 fasta + gbk + gff + templates + define_filter +
+  remove_from_analysis).
 
 ## Pattern worth documenting (and using to design T-27)
 
@@ -129,56 +135,164 @@ either run it or surface a non-fatal skip with a clear reason — never
 abort the whole batch.** Worth documenting in `PIPELINES_PACKAGE.md`
 §4 as a design invariant before T-27 starts.
 
-## Tod onboarding — open
+## Tod onboarding — done
 
-The user asked me to confirm Tod can access the pipeline + populate a
-few trial projects. State on wgs3 right now:
+Resolved inline at the end of the session:
 
-- **Tod has no Linux account.** Not in `kapurlab-members` (which has
-  only `vxk1` and `ro_test`).
-- **No shared trial projects** yet — only `sanity_test` from the T-12a
-  rollout exists under `/srv/kapurlab/projects/`.
-- **Onboarding tooling exists**:
-  `/srv/kapurlab/tools/vsnp_gui/deploy/admin/kapurlab-add-user.sh`
-  handles the user + group + SSH-self-loopback bootstrap idempotently.
+- **`tks5563` already had a Linux account** (UID 1000, sudo group). Just
+  needed kapurlab-{members,admins} group membership + SSH self-loopback
+  bootstrap. Done via `kapurlab-add-user.sh tks5563 --admin`.
+- **Demo project staged**: `/srv/kapurlab/projects/demo_sars_cov_2/` —
+  copy of `Retest` (6 deer SARS-CoV-2 samples, step1+step2 complete),
+  group-owned `proj-demo_sars_cov_2` (tks5563 + vxk1 members),
+  project.json corrected (`name: demo_sars_cov_2`), 12 intra-project
+  absolute symlinks rewritten to the new path.
+- **PSU VPN access enabled**: OOD `ood_portal.yml` now has
+  `server_aliases: [172.29.62.6, a8-an-vxk1-u5]` so Apache stops
+  301-redirecting non-Tailscale traffic to the Tailscale IP. Apache
+  vhost regenerated and reloaded. PSU campus / PSU VPN + Tailscale all
+  work as access paths. Backup at
+  `/etc/ood/config/ood_portal.yml.pre-server-aliases-bak` for rollback.
+- Welcome note at [`TOD_WELCOME.md`](TOD_WELCOME.md), polished
+  email-ready version delivered inline at session end for Vivek to send.
 
-A welcome note for Tod is staged at [`docs/dev/TOD_WELCOME.md`](TOD_WELCOME.md).
-The next session can either pick this up or it gets handled inline.
-Decision points: admin vs member, password vs SSH key, which trial
-projects to seed.
+## Tod's branch: `tstuber_2026-05-20` — review needed
+
+Tod has been working in parallel on his own feature branch and that work
+is now on origin (pushed at session end). **It is not yet merged into
+main**, but wgs3 is currently running it (the deployed checkout is
+`tstuber_2026-05-20`, not main). The next session should review and
+either merge or sequence the integration.
+
+**State**:
+- Branch is 11 commits ahead of `main`, based on `eb36c18` (the May 17-18
+  handoff commit — the last thing we shipped before Tod started)
+- Zero merge conflicts (main hasn't advanced since Tod branched)
+- Touches 4 files: `backend/app/main.py` (+476 lines),
+  `frontend/src/App.jsx` (+748), `backend/app/projects.py` (+17),
+  `backend/app/provenance_writer.py` (+19). Net +1162 / -98 lines.
+- Available on GitHub at
+  https://github.com/vkapur/vsnp_gui/tree/tstuber_2026-05-20
+
+**11 commits (oldest → newest)**:
+
+```
+11e18c9 provenance: fix git safe.directory for OOD cross-user deployment
+29f913a Commit A: project-level reference
+89cad60 Commit B: timestamped step2 runs + concurrency guard
+ee94915 Auto-refresh after step1/step2 complete; fix VCF DB reference display
+a03507f Fix import count labels; polling-based auto-refresh for step1/step2
+24293c7 Separate dedup vs ref-mismatch exclusion counts in import result
+79bfe23 Add searchable VCF sample browser to VCF Databases panel
+93d5cb4 Fix VCF set count to show actual files in set, not total source VCFs
+6539e5e Make VCF set count authoritative from sample manifest
+a430228 Add sample metadata editor to Reference Editor panel
+a815b4b Add <project>_VCFs accumulation folder wired through Step 1, Step 2, and metadata
+```
+
+**Tod's own summary of what's in there** (verbatim from the user's message):
+
+- **Bug fix**: Step 1 provenance dispatch failure caused by missing git
+  state in `/srv/kapurlab/tools/vsnp_gui`. New branch was created and
+  fix applied there. (Likely the `11e18c9` provenance/safe.directory
+  commit — relates to the same provenance dispatch class as our T-46
+  Phase 1 work.)
+- **Step 2 timestamped subdirs**: `step2/2026-05-20_08-52-00/` so
+  multiple comparisons coexist; UI option to switch between past runs.
+- **Reference selection moved to project level**: reference type is now
+  picked at the project level (not repeated per-step). Reference
+  Selection pane relocated alongside Projects pane. (**Overlaps with
+  our `c2eccc1` auto-fill output dir + `eb631e3` display name work** —
+  worth checking the integration is coherent.)
+- **Auto-refresh after step completion** for Steps 1 and 2. Tod flagged
+  "for some reason this still doesn't seem to be working as it should"
+  — known incomplete.
+- **VCF file browser**: searchable browser for VCF sample names in a
+  build, scaled for large sample sets.
+- **Metadata editor (Reference Editor)**: vSNP3 two-column Excel
+  metadata format. Bulk paste of tab-delimited text or single entries.
+  Persists to the reference xlsx file. (**Overlaps with our `b7554fd`
+  T-39 reference-file re-upload + `3df0383` T-17a approval-chain
+  design** — Tod's edits write directly to the reference xlsx, our
+  T-17a design routes through a propose+approve queue. Need to
+  reconcile whether this is the "direct edit for admins, queue for
+  others" pattern from T-17a or a separate primitive.)
+
+**What the next session should do**:
+
+1. **Read Tod's diff** —
+   `git diff main..origin/tstuber_2026-05-20 -- backend/app/main.py frontend/src/App.jsx`
+   — look for code-quality issues, style alignment with the rest of
+   main.py / App.jsx, anything that conflicts with our T-46 dispatch
+   plan or the T-17a approval-chain design.
+2. **Verify the auto-refresh issue Tod flagged** by exercising step1 +
+   step2 in the GUI and watching whether the status panel updates
+   without manual refresh. May just need a poll-interval tweak.
+3. **Decide on merge strategy**: (a) fast-forward merge if review is
+   clean, (b) squash-merge if you want a tidier main history, or
+   (c) cherry-pick selected commits and leave others for follow-up.
+4. **Reconcile metadata editor with T-17a**: Tod's direct-edit-to-xlsx
+   for metadata is different from the proposal-queue flow T-17a
+   specifies for `*_define_filter.xlsx` / `*_remove_from_analysis.xlsx`.
+   The metadata sheet is a *separate* xlsx in the reference dir, so it
+   may legitimately live outside T-17a's scope — but document the
+   distinction before either ships permanently.
 
 ## Open follow-ups for next session
 
 In rough priority order:
 
-1. **Adjudicate UNRESOLVED-1 and UNRESOLVED-2** from the red-team. Until
+1. **Review Tod's `tstuber_2026-05-20` branch** (see section above) —
+   blocks rolling main forward.
+2. **Adjudicate UNRESOLVED-1 and UNRESOLVED-2** from the red-team. Until
    these are decided, T-27 is blocked.
-2. **Sequence T-27 → T-29** once UNRESOLVEDs settle. The scope-freeze
+3. **Sequence T-27 → T-29** once UNRESOLVEDs settle. The scope-freeze
    punch list is at the bottom of [`FINDINGS.md`](redteam/FINDINGS.md);
    work it top-to-bottom.
-3. **Onboard Tod** (or kick it back to user) — admin tooling is ready,
-   need user decision on credentials/role.
 4. **Pick up T-42 / T-43 / T-46 Phase 2** opportunistically — each is
    independently scoped and could ride along with whatever the user is
    doing.
 5. **Document the "discovery vs dispatch" invariant** in
    `PIPELINES_PACKAGE.md` §4 before T-27 implementation starts (see
    "Pattern worth documenting" above).
+6. **PSU networking** — Scott (PSU IT) confirmed inter-VLAN routing
+   between Wartik (172.17.243.0/24) and Ag IoT (172.29.62.0/23) works
+   both directions; sustained throughput ~65–70 MB/s on 1 Gbps links
+   (only ~6% slower over Tailscale, so the perf gap is modest). The
+   GlobalProtect → HTTP/HTTPS path to wgs3 is still pending the network
+   lead's review (SSH works via GP; HTTP doesn't yet). Once HTTP via GP
+   is open, the OOD server_aliases we added (`172.29.62.6` +
+   `a8-an-vxk1-u5`) make PSU VPN access work without further config.
+7. **Real-rsync throughput test** on sequencer → wgs3 once there's a
+   representative fastq batch to move. nc-based test showed 65–70 MB/s
+   lower bound on a 1 Gbps link; rsync with parallelism should do
+   better in practice.
 
 ## Verify when picking up
 
 ```bash
-git log --oneline -3
+# Local main HEAD (origin)
+git log --oneline -3 main
+# eb36c18 docs: session handoff (May 17-18) + Tod welcome note
 # 3a5a818 step2_setup: honor remove_from_analysis.xlsx ...
 # 4212688 T-46 Phase 1: auto-skip single-end + junk fastqs ...
-# 9417773 SRA crosswalk: surface in GUI ...
 
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -1'
-# Should match the local HEAD.
+# Tod's branch on origin (review-and-merge queue)
+git fetch origin && git log --oneline main..origin/tstuber_2026-05-20 | wc -l
+# 11
 
-ls docs/dev/redteam/  # should contain FINDINGS.md, DECISIONS.md, R1-*.md, R2-*.md, sources/, etc.
+# wgs3 is currently on Tod's branch (deployed state):
+ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git branch --show-current && git log --oneline -1'
+# tstuber_2026-05-20
+# a815b4b Add <project>_VCFs accumulation folder ...
 
-# Confirm the LSDV India project finished step1 cleanly:
+# Red-team archive should be intact
+ls docs/dev/redteam/  # FINDINGS.md, DECISIONS.md, R1-*.md, R2-*.md, sources/, etc.
+
+# Confirm LSDV India Step 1 finished cleanly
 ssh wgs3 'ls /home/vxk1/projects/LSDV_India/step1/*/alignment_*/*_filtered_hapall_annotated.vcf 2>/dev/null | wc -l'
-# Should be 73 (the non-skipped paired samples)
+# 73
+
+# Confirm Tod's demo project is in place
+ssh wgs3 'ls /srv/kapurlab/projects/demo_sars_cov_2/step1/ | head -5'
 ```

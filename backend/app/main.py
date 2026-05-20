@@ -2026,6 +2026,13 @@ def step1_status(project: str):
     job = job_manager.get_job(job_id) if job_id else None
     job_status = job["status"] if job else "unknown"
 
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    in_vcfs_folder: set = set()
+    if vcfs_dir.exists():
+        for vf in vcfs_dir.glob("*_zc.vcf*"):
+            stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            in_vcfs_folder.add(stem)
+
     statuses = []
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir():
@@ -2039,6 +2046,7 @@ def step1_status(project: str):
         exit_code_path = sample_dir / ".provenance" / "exit_code"
         vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
         nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+        zc_vcf = next(sample_dir.glob("**/*_zc.vcf"), None) or next(sample_dir.glob("**/*_zc.vcf.gz"), None)
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
@@ -2073,6 +2081,8 @@ def step1_status(project: str):
             "log_path": str(log_path),
             "has_log": log_path.exists(),
             "has_outputs": bool(vcf and nodup),
+            "has_zc_vcf": bool(zc_vcf),
+            "in_vcfs_folder": sample in in_vcfs_folder,
         })
     return {"job_status": job_status, "samples": statuses}
 
@@ -2090,6 +2100,97 @@ def step1_log(project: str, sample: str):
     except OSError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"sample": sample, "log": "".join(lines)}
+
+
+@app.get("/api/projects/{project}/vcfs")
+def project_vcfs_list(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir.mkdir(parents=True, exist_ok=True)
+    vcfs = sorted([*vcfs_dir.glob("*_zc.vcf"), *vcfs_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name)
+    samples = []
+    for v in vcfs:
+        stem = v.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        samples.append({"filename": v.name, "sample": stem})
+    return {"count": len(samples), "path": str(vcfs_dir), "folder_name": vcfs_dir.name, "samples": samples}
+
+
+class VcfsCollectRequest(BaseModel):
+    force_samples: List[str] = []
+
+
+@app.post("/api/projects/{project}/vcfs/collect")
+def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
+    """Scan step1/ for passing _zc.vcf files and symlink them into <project>_VCFs/.
+    Samples in force_samples are included even if they did not pass Step 1."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    step1_dir = project_dir / "step1"
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir.mkdir(parents=True, exist_ok=True)
+
+    force_set = set(payload.force_samples or [])
+    auto_added: List[str] = []
+    force_added: List[str] = []
+    already_present: List[str] = []
+    no_vcf: List[str] = []
+
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
+            continue
+        sample = sample_dir.name
+
+        # Determine pass/fail from provenance sentinel, fall back to output presence
+        exit_code_path = sample_dir / ".provenance" / "exit_code"
+        passed = False
+        if exit_code_path.exists():
+            try:
+                passed = exit_code_path.read_text(encoding="utf-8").strip() == "0"
+            except OSError:
+                pass
+        else:
+            vcf_out = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
+            nodup_out = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+            passed = bool(vcf_out and nodup_out)
+
+        if not passed and sample not in force_set:
+            continue
+
+        # Find the latest _zc.vcf (prefer uncompressed; fall back to .gz)
+        candidates = sorted(sample_dir.glob("**/*_zc.vcf"), key=lambda p: p.stat().st_mtime)
+        candidates_gz = sorted(sample_dir.glob("**/*_zc.vcf.gz"), key=lambda p: p.stat().st_mtime)
+        all_candidates = candidates + candidates_gz
+        if not all_candidates:
+            if sample in force_set:
+                no_vcf.append(sample)
+            continue
+
+        source_vcf = all_candidates[-1].resolve()
+        target = vcfs_dir / source_vcf.name
+
+        if target.exists():
+            already_present.append(sample)
+            continue
+
+        target.symlink_to(source_vcf)
+        if sample in force_set and not passed:
+            force_added.append(sample)
+        else:
+            auto_added.append(sample)
+
+    total = len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
+    return {
+        "auto_added": auto_added,
+        "force_added": force_added,
+        "already_present": already_present,
+        "no_vcf": no_vcf,
+        "total": total,
+    }
 
 
 @app.post("/api/projects/{project}/step2/setup")

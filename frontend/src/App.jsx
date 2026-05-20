@@ -177,6 +177,14 @@ export default function App() {
   const [metaBulkText, setMetaBulkText] = useState("");
   const [metaBulkOpen, setMetaBulkOpen] = useState(false);
   const [metaStatus, setMetaStatus] = useState("");
+  // _VCFs accumulation folder
+  const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
+  const [vcfsFolderPath, setVcfsFolderPath] = useState("");
+  const [vcfsFolderName, setVcfsFolderName] = useState("");
+  const [vcfsFolderSamples, setVcfsFolderSamples] = useState([]);
+  const [vcfsCollectResult, setVcfsCollectResult] = useState(null);
+  const [vcfsForceSet, setVcfsForceSet] = useState(new Set());
+  const [vcfsIncludeFolder, setVcfsIncludeFolder] = useState(true);
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -500,6 +508,36 @@ export default function App() {
     }
   }
 
+  async function loadVcfsFolder(project) {
+    if (!project) {
+      setVcfsFolderCount(0); setVcfsFolderPath(""); setVcfsFolderName(""); setVcfsFolderSamples([]);
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/vcfs`);
+    if (res.ok) {
+      const data = await res.json();
+      setVcfsFolderCount(data.count || 0);
+      setVcfsFolderPath(data.path || "");
+      setVcfsFolderName(data.folder_name || "");
+      setVcfsFolderSamples(data.samples || []);
+    }
+  }
+
+  async function collectVcfs(forceSamples) {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/vcfs/collect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force_samples: forceSamples || [] })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setVcfsCollectResult(data);
+      await loadVcfsFolder(selectedProject);
+      await refreshProjects(selectedProject);
+    }
+  }
+
   async function loadAll() {
     const [cfg, proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
       fetch(`${API_BASE}/api/config`).then((r) => r.json()),
@@ -556,6 +594,9 @@ export default function App() {
     setImportReference("");
     setRefLock({ references: [] });
     setProjectReference("");
+    setVcfsCollectResult(null);
+    setVcfsForceSet(new Set());
+    loadVcfsFolder(selectedProject);
     if (!selectedProject) return () => { cancelled = true; };
     // Seed projectReference from the already-loaded projects list (fast, no extra fetch)
     const proj = projects.find((p) => p.name === selectedProject);
@@ -595,11 +636,12 @@ export default function App() {
       if (line.startsWith("[job:")) {
         const status = line.replace("[job:", "").replace("]", "");
         setJobStatus(status);
-        // Step 1 job completed: refresh sample statuses, QC table, project counts
+        // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
         if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
           loadStep1Status();
           loadQC();
           refreshProjects(selectedProject);
+          collectVcfs([]);
         }
         // Step 2 job completed: refresh run list (auto-selects newest → triggers
         // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
@@ -1517,7 +1559,8 @@ export default function App() {
       .filter((f) => f.enabled && (f.reference || "") === importReference)
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
-    const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
+    const vcfsFolderPaths = vcfsIncludeFolder && vcfsFolderPath ? [vcfsFolderPath] : [];
+    const allPaths = [...new Set([...vcfsFolderPaths, ...enabledPaths, ...manualPaths])];
     // Don't write allPaths back into the textarea. The textarea is
     // reserved for *user-typed* extra paths only; auto-discovered DB
     // selections bleed in here would create a feedback loop where a
@@ -2444,7 +2487,7 @@ export default function App() {
                       ) : null}
                     </div>
                     <div className="list-meta">
-                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
+                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
                     </div>
                   </div>
                   <div className="list-actions">
@@ -2974,6 +3017,40 @@ export default function App() {
                             <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>No metadata file found — one will be created as <code>{refEditorRef}_metadata.xlsx</code> when you add the first entry.</div>
                           )}
 
+                          {selectedProject && vcfsFolderSamples.length > 0 ? (() => {
+                            const metaOrigSet = new Set(metaRows.map(r => r.original));
+                            const missing = vcfsFolderSamples.filter(s => !metaOrigSet.has(s.sample));
+                            const covered = vcfsFolderSamples.length - missing.length;
+                            return (
+                              <div style={{marginTop:"0.4em", padding:"0.4em 0.5em", background:"var(--panel-2,rgba(0,0,0,0.03))", borderRadius:"6px", fontSize:"0.82em"}}>
+                                <div style={{fontWeight:600, marginBottom:"0.2em"}}>
+                                  {vcfsFolderName} coverage: {covered} / {vcfsFolderSamples.length} samples have metadata
+                                </div>
+                                {missing.length > 0 ? (
+                                  <details>
+                                    <summary style={{cursor:"pointer", color:"var(--muted,#666)"}}>
+                                      {missing.length} missing — click to pre-fill
+                                    </summary>
+                                    <ul style={{listStyle:"none", padding:0, margin:"0.3em 0"}}>
+                                      {missing.map(s => (
+                                        <li key={s.sample} style={{display:"flex", gap:"0.4em", alignItems:"center", marginBottom:"0.15em"}}>
+                                          <code style={{flex:"0 0 auto"}}>{s.sample}</code>
+                                          <button
+                                            className="ghost action"
+                                            style={{fontSize:"0.8em", padding:"0 0.3em"}}
+                                            onClick={() => { setMetaSingleOrig(s.sample); setMetaSingleDisplay(s.sample); }}
+                                          >
+                                            Fill
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                ) : <div style={{color:"var(--accent,green)"}}>All samples covered</div>}
+                              </div>
+                            );
+                          })() : null}
+
                           <div style={{marginTop:"0.5em"}}>
                             <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add single entry</div>
                             <div style={{display:"flex", gap:"0.3em", alignItems:"center", flexWrap:"wrap"}}>
@@ -3203,6 +3280,75 @@ export default function App() {
                 <div className="note">No Step 1 samples yet.</div>
               )}
               {step1Status.length > 6 ? <div className="scroll-note">Scroll for more samples.</div> : null}
+              {step1Status.length > 0 ? (
+                <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
+                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
+                    <span><strong>{vcfsFolderName || `${selectedProject}_VCFs`}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
+                    <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect</button>
+                  </div>
+                  {vcfsCollectResult ? (
+                    <div className="note" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
+                      {[
+                        vcfsCollectResult.auto_added.length ? `+${vcfsCollectResult.auto_added.length} added` : null,
+                        vcfsCollectResult.force_added.length ? `+${vcfsCollectResult.force_added.length} force-added` : null,
+                        vcfsCollectResult.already_present.length ? `${vcfsCollectResult.already_present.length} already present` : null,
+                      ].filter(Boolean).join(" • ") || "Up to date"}
+                    </div>
+                  ) : null}
+                  {(() => {
+                    const notCollected = step1Status.filter(s =>
+                      !s.in_vcfs_folder &&
+                      s.status !== "not_started" &&
+                      s.status !== "running"
+                    );
+                    if (!notCollected.length) return null;
+                    const hasAnyVcf = notCollected.some(s => s.has_zc_vcf);
+                    return (
+                      <details style={{marginTop:"0.3em"}}>
+                        <summary style={{cursor:"pointer", fontSize:"0.82em", color:"var(--muted,#666)"}}>
+                          {notCollected.length} sample{notCollected.length !== 1 ? "s" : ""} not in _VCFs
+                          {hasAnyVcf ? " — check to add" : ""}
+                        </summary>
+                        <ul style={{listStyle:"none", padding:0, margin:"0.3em 0 0.2em 0"}}>
+                          {notCollected.map(s => (
+                            <li key={s.sample} style={{display:"flex", gap:"0.3em", alignItems:"center", fontSize:"0.82em", marginBottom:"0.15em"}}>
+                              <input
+                                type="checkbox"
+                                checked={vcfsForceSet.has(s.sample)}
+                                disabled={!s.has_zc_vcf}
+                                onChange={(e) => {
+                                  setVcfsForceSet(prev => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(s.sample);
+                                    else next.delete(s.sample);
+                                    return next;
+                                  });
+                                }}
+                                style={{width:"auto"}}
+                              />
+                              <span className={`badge ${s.status}`} style={{fontSize:"0.75em"}}>{s.status.replace("_"," ")}</span>
+                              <span style={{opacity: s.has_zc_vcf ? 1 : 0.5}}>{s.sample}</span>
+                              {!s.has_zc_vcf ? <span className="muted" style={{fontSize:"0.78em"}}>(no VCF)</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                        {hasAnyVcf ? (
+                          <button
+                            style={{fontSize:"0.82em"}}
+                            disabled={vcfsForceSet.size === 0}
+                            onClick={() => {
+                              collectVcfs(Array.from(vcfsForceSet));
+                              setVcfsForceSet(new Set());
+                            }}
+                          >
+                            Add {vcfsForceSet.size > 0 ? `${vcfsForceSet.size} ` : ""}checked to _VCFs
+                          </button>
+                        ) : null}
+                      </details>
+                    );
+                  })()}
+                </div>
+              ) : null}
               {step1LogSample ? (
                 <div className="log-viewer">
                   <div className="log-title">
@@ -3771,6 +3917,23 @@ export default function App() {
                     </span>
                   )}
                 </div>
+                {selectedProject && vcfsFolderPath ? (
+                  <div style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"6px", fontSize:"12px", marginBottom:"6px"}}>
+                    <input
+                      type="checkbox"
+                      checked={vcfsIncludeFolder}
+                      onChange={(e) => setVcfsIncludeFolder(e.target.checked)}
+                      style={{width:"auto"}}
+                    />
+                    <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontWeight:600}} title={vcfsFolderPath}>
+                      {vcfsFolderName}
+                    </span>
+                    <span className="muted" style={{fontSize:"11px", whiteSpace:"nowrap"}}>(n={vcfsFolderCount})</span>
+                    <span style={{fontSize:"10px", padding:"1px 6px", borderRadius:"6px", background:"var(--accent)", color:"#f7faf9", textTransform:"uppercase", letterSpacing:"0.04em"}}>
+                      this project
+                    </span>
+                  </div>
+                ) : null}
                 <div style={{marginTop:"8px"}}>
                   {(() => {
                     const visible = importReference

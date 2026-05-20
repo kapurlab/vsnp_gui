@@ -1521,8 +1521,8 @@ export default function App() {
       `Imported ${data.imported}`,
       data.already_present ? `Already in set: ${data.already_present}` : null,
       data.renamed ? `Renamed ${data.renamed}` : null,
-      data.skipped ? `Excluded ${data.skipped}` : null,
-      data.mismatched ? `Mismatched ${data.mismatched}` : null,
+      data.dedup_skipped ? `Deduped (older copy): ${data.dedup_skipped}` : null,
+      data.ref_skipped ? `Ref mismatch: ${data.ref_skipped}` : null,
       data.detected_reference ? `Ref: ${data.detected_reference}` : null
     ].filter(Boolean);
     setImportStatus(parts.join(" | "));

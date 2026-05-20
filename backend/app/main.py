@@ -1416,7 +1416,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     imported = 0
     already_present = 0  # already in vcf_source, not re-copied (on_conflict=skip)
-    skipped = 0          # excluded: ref mismatch or dedup
+    ref_skipped = 0      # excluded: reference mismatch or unknown ref
+    dedup_skipped = 0    # excluded: older duplicate sample name (dedupe=true)
     renamed = 0
     mismatched = []
     seen_samples = {}
@@ -1430,19 +1431,19 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
                 mismatched.append({"path": str(vcf), "reference": vcf_ref})
                 if not payload.allow_mismatch:
-                    skipped += 1
+                    ref_skipped += 1
                     continue
             if not vcf_ref:
                 mismatched.append({"path": str(vcf), "reference": "unknown"})
                 if not payload.allow_mismatch:
-                    skipped += 1
+                    ref_skipped += 1
                     continue
             if payload.dedupe:
                 sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
                 if sample in seen_samples:
                     prev = seen_samples[sample]
                     if vcf.stat().st_mtime <= prev.stat().st_mtime:
-                        skipped += 1
+                        dedup_skipped += 1
                         continue
                 seen_samples[sample] = vcf
             target = vcf_source_dir / vcf.name
@@ -1487,7 +1488,9 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     return {
         "imported": imported,
         "already_present": already_present,
-        "skipped": skipped,
+        "ref_skipped": ref_skipped,
+        "dedup_skipped": dedup_skipped,
+        "skipped": ref_skipped + dedup_skipped,  # backward compat
         "renamed": renamed,
         "detected_reference": detected_ref or payload.reference or "",
         "mismatched": len(mismatched),

@@ -102,6 +102,20 @@ def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
     return rows
 
 
+def _project_reference(project_dir: Path) -> str:
+    """Return the project's locked reference, or "" if not yet set.
+    Reads project.json["reference"] only — callers that want the inferred
+    value should call the reference_lock endpoint and let it write it back."""
+    meta_path = project_dir / "project.json"
+    if not meta_path.exists():
+        return ""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return (meta.get("reference") or "").strip()
+
+
 def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
     """Security check for /serve, /download-file, /posthoc/open: target
     must resolve under any configured projects root."""
@@ -655,6 +669,7 @@ class ConfigUpdate(BaseModel):
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     scope: Optional[str] = None  # "personal" (default) or "shared"
+    reference: Optional[str] = None
 
 
 class SraRequest(BaseModel):
@@ -1259,13 +1274,14 @@ def projects():
 def project_create(payload: ProjectCreate):
     cfg = load_config()
     scope = getattr(payload, "scope", None) or SCOPE_PERSONAL
+    reference = (payload.reference or "").strip()
     try:
-        project_dir = create_project(_project_roots(cfg), payload.name, scope=scope)
+        project_dir = create_project(_project_roots(cfg), payload.name, scope=scope, reference=reference)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # Return the actual (normalized) directory name so the frontend can
     # update its state if the name differs from what the user typed.
-    return {"path": str(project_dir), "name": project_dir.name, "scope": scope}
+    return {"path": str(project_dir), "name": project_dir.name, "scope": scope, "reference": reference}
 
 
 @app.post("/api/projects/{project}/archive")
@@ -1290,6 +1306,26 @@ def project_delete(project: str):
     if deleted is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"deleted": project}
+
+
+class SetReferenceRequest(BaseModel):
+    reference: str
+
+
+@app.post("/api/projects/{project}/set_reference")
+def project_set_reference(project: str, payload: SetReferenceRequest):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    reference = (payload.reference or "").strip()
+    meta = update_project_meta(project_dir, {"reference": reference} if reference else {})
+    if not reference:
+        # Explicitly clearing — remove the key
+        meta.pop("reference", None)
+        with open(project_dir / "project.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+    return {"reference": reference, "name": project}
 
 
 @app.post("/api/projects/{project}/link-local")
@@ -1712,6 +1748,9 @@ def step1_run(project: str, payload: Step1Request):
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
+    # Auto-populate reference from project.json if not supplied in payload
+    if not payload.reference:
+        payload.reference = _project_reference(project_dir)
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
@@ -2028,6 +2067,9 @@ def step2_run(project: str, payload: Step2Request):
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
+    # Auto-populate reference: project.json first, then reference_lock inference
+    if not payload.reference:
+        payload.reference = _project_reference(project_dir)
     refs = reference_lock(project)["references"]
     if len(refs) > 1:
         raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(refs)}")
@@ -2038,6 +2080,8 @@ def step2_run(project: str, payload: Step2Request):
             raise HTTPException(status_code=400, detail="Reference type is required for Step 2")
     if len(refs) == 1 and payload.reference != refs[0]:
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
+    # Store the resolved reference back into project.json
+    update_project_meta(project_dir, {"reference": payload.reference})
     step2_dir = project_dir / "step2"
     vcf_source_dir = step2_dir / "vcf_source"
     starting_files = step2_dir / "vcf_starting_files"

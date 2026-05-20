@@ -74,12 +74,12 @@ def project_meta_path(project_dir: Path) -> Path:
     return project_dir / "project.json"
 
 
-def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> Path:
+def create_project(roots: RootsLike, name: str, scope: Optional[str] = None, reference: str = "") -> Path:
     """Create a project under the requested scope. Defaults to the first root
     (personal) when scope is unspecified. The supplied name is normalized via
     `normalize_project_name` (spaces → underscores, other unsafe chars
     rejected) before being used as both the directory name and the project
-    metadata."""
+    metadata. If `reference` is given it is stored in project.json immediately."""
     name = normalize_project_name(name)
     norm = _normalize_roots(roots)
     if not norm:
@@ -98,11 +98,13 @@ def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> 
     if project_dir.exists():
         raise ValueError(f"Project already exists: {name}")
     ensure_project_dirs(project_dir)
-    meta = {
+    meta: Dict[str, Any] = {
         "name": name,
         "created_at": _now_iso(),
         "status": "created",
     }
+    if reference:
+        meta["reference"] = reference
     with open(project_meta_path(project_dir), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
     return project_dir

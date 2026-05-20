@@ -86,6 +86,8 @@ export default function App() {
   const [editVcfCurrent, setEditVcfCurrent] = useState(null);
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
+  const [projectReference, setProjectReference] = useState("");
+  const [newProjectReference, setNewProjectReference] = useState("");
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
@@ -502,7 +504,11 @@ export default function App() {
     setReference("");
     setImportReference("");
     setRefLock({ references: [] });
+    setProjectReference("");
     if (!selectedProject) return () => { cancelled = true; };
+    // Seed projectReference from the already-loaded projects list (fast, no extra fetch)
+    const proj = projects.find((p) => p.name === selectedProject);
+    if (proj?.reference) setProjectReference(proj.reference);
     (async () => {
       try {
         const lockRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/reference_lock`);
@@ -513,6 +519,8 @@ export default function App() {
         if (lock.references && lock.references.length === 1) {
           setReference(lock.references[0]);
           setImportReference(lock.references[0]);
+          // Sync projectReference when inferred from step1 stats
+          if (!projectReference) setProjectReference(lock.references[0]);
         }
       } catch {
         // keep defaults
@@ -645,10 +653,12 @@ export default function App() {
 
   async function createProject() {
     if (!newProjectName.trim()) return;
+    const body = { name: newProjectName.trim() };
+    if (newProjectReference) body.reference = newProjectReference;
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newProjectName.trim() })
+      body: JSON.stringify(body)
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -656,7 +666,19 @@ export default function App() {
       return;
     }
     setNewProjectName("");
+    setNewProjectReference("");
     await loadAll();
+  }
+
+  async function setProjectRef(ref) {
+    if (!selectedProject) return;
+    await fetch(`${API_BASE}/api/projects/${selectedProject}/set_reference`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference: ref })
+    });
+    setProjectReference(ref);
+    setReference(ref);
   }
 
   async function refreshProjects(nextSelected = selectedProject) {
@@ -1440,12 +1462,13 @@ export default function App() {
   }
 
   async function step1Run() {
-    if (!selectedProject || !settingsReady || !reference) return;
+    const effectiveRef = reference || projectReference;
+    if (!selectedProject || !settingsReady || !effectiveRef) return;
     if (step1JobStatus === "running") {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
     }
-    const refValue = reference === "__auto__" ? null : reference;
+    const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
     setStep1StatusError("");
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
     setStep2BuiltAt("");
@@ -1522,11 +1545,12 @@ export default function App() {
 
   async function step2Run() {
     if (!selectedProject || !settingsReady) return;
+    const effectiveRef = reference || projectReference || null;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        reference: reference || null,
+        reference: effectiveRef,
         no_filters: s2NoFilters,
         qual_threshold: s2QualThreshold,
         n_threshold: s2NThreshold,
@@ -2218,6 +2242,17 @@ export default function App() {
                 onChange={(e) => setNewProjectName(e.target.value.replace(/\s+/g, "_"))}
                 title="Spaces are auto-converted to underscores. Letters, digits, _ - . are allowed; other characters will be rejected."
               />
+              <select
+                value={newProjectReference}
+                onChange={(e) => setNewProjectReference(e.target.value)}
+                title="Optional: set the reference at project creation"
+                style={{ minWidth: "10rem" }}
+              >
+                <option value="">-- reference (optional) --</option>
+                {references.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name}</option>
+                ))}
+              </select>
               <button onClick={createProject}>Create</button>
             </div>
             <div className="list">
@@ -2251,6 +2286,22 @@ export default function App() {
                           shared
                         </span>
                       ) : null}
+                      {p.reference ? (
+                        <span
+                          title={`Reference: ${p.reference}`}
+                          style={{
+                            fontSize: "0.7em",
+                            padding: "1px 6px",
+                            borderRadius: "10px",
+                            background: "#e8f5e9",
+                            color: "#1b5e20",
+                            fontWeight: 600,
+                            letterSpacing: "0.02em",
+                          }}
+                        >
+                          {p.reference}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
@@ -2279,6 +2330,22 @@ export default function App() {
                 </div>
               ))}
             </div>
+            {selectedProject ? (
+              <div className="row" style={{ marginTop: "0.75rem", alignItems: "center", gap: "0.5rem" }}>
+                <label style={{ fontWeight: 600, whiteSpace: "nowrap" }}>Project reference:</label>
+                <select
+                  value={projectReference}
+                  onChange={(e) => setProjectRef(e.target.value)}
+                  style={{ flex: 1 }}
+                  title="Reference type locked to this project. All Step 1 and Step 2 runs use this reference."
+                >
+                  <option value="">-- not set --</option>
+                  {references.map((r) => (
+                    <option key={r.name} value={r.name}>{r.name}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
           </section>
 
           <section className="panel">
@@ -2762,31 +2829,53 @@ export default function App() {
             <h2>Step 1</h2>
             <div className="block">
               <h3>Reference</h3>
-              <select
-                value={reference}
-                onChange={(e) => setReference(e.target.value)}
-              >
-                <option value="">Select reference</option>
-                <option value="__auto__">Auto-detect (best match)</option>
-                {references.map((r) => (
-                  <option key={r.name} value={r.name}>{r.name}</option>
-                ))}
-              </select>
-              {refLock.references && refLock.references.length > 1 ? (
-                <div className="note error">
-                  Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
-                </div>
-              ) : refLock.references && refLock.references.length === 1 ? (
-                <div className="inline-help">
-                  <span className="muted">Reference detected</span>
+              {projectReference ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                   <span
-                    className="help-icon"
-                    data-tooltip={`Detected reference from Step 1: ${refLock.references[0]}. You can override for a new Step 1 run.`}
+                    style={{
+                      padding: "3px 10px",
+                      borderRadius: "10px",
+                      background: "#e8f5e9",
+                      color: "#1b5e20",
+                      fontWeight: 600,
+                      fontSize: "0.9em",
+                    }}
                   >
-                    ?
+                    {projectReference}
+                  </span>
+                  <span className="muted" style={{ fontSize: "0.8em" }}>
+                    (set at project level — change in Projects panel)
                   </span>
                 </div>
-              ) : null}
+              ) : (
+                <>
+                  <select
+                    value={reference}
+                    onChange={(e) => setReference(e.target.value)}
+                  >
+                    <option value="">Select reference</option>
+                    <option value="__auto__">Auto-detect (best match)</option>
+                    {references.map((r) => (
+                      <option key={r.name} value={r.name}>{r.name}</option>
+                    ))}
+                  </select>
+                  {refLock.references && refLock.references.length > 1 ? (
+                    <div className="note error">
+                      Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+                    </div>
+                  ) : refLock.references && refLock.references.length === 1 ? (
+                    <div className="inline-help">
+                      <span className="muted">Reference detected</span>
+                      <span
+                        className="help-icon"
+                        data-tooltip={`Detected reference from Step 1: ${refLock.references[0]}. You can override for a new Step 1 run.`}
+                      >
+                        ?
+                      </span>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
             <div className="block">
               <label className="checkbox">
@@ -2817,7 +2906,7 @@ export default function App() {
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || !reference || step1JobStatus === "running"}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}
                   title={step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish" : ""}
                 >
                   {step1JobStatus === "running" ? "Running…" : "Run"}
@@ -3709,12 +3798,32 @@ export default function App() {
               {step2Mode === "step1" ? (
                 <button onClick={step2Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
               ) : null}
+                {(reference || projectReference) ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
+                    <span className="muted" style={{ fontSize: "0.8em" }}>Reference:</span>
+                    <span
+                      style={{
+                        padding: "2px 8px",
+                        borderRadius: "10px",
+                        background: "#e8f5e9",
+                        color: "#1b5e20",
+                        fontWeight: 600,
+                        fontSize: "0.85em",
+                      }}
+                    >
+                      {reference || projectReference}
+                    </span>
+                    {projectReference && !reference ? (
+                      <span className="muted" style={{ fontSize: "0.75em" }}>(from project)</span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <button
                   onClick={step2Run}
                   disabled={
                     !selectedProject ||
                     !settingsReady ||
-                    !reference ||
+                    (!reference && !projectReference) ||
                     (step2Mode === "custom"
                       ? step2VcfCount === 0
                       : selected && selected.step2_vcfs === 0) ||

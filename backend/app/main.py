@@ -2720,6 +2720,44 @@ def step2_vcf_count(project: str):
     }
 
 
+@app.get("/api/projects/{project}/step2/vcf_source/samples")
+def step2_vcf_source_samples(project: str):
+    """Return all sample names in the vcf_source directory, parsed from the manifest."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    if not vcf_source_dir.exists():
+        return []
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    samples = []
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            seen: set = set()
+            for row in reader:
+                fn = row.get("filename", "").strip()
+                if not fn or fn in seen:
+                    continue
+                seen.add(fn)
+                samples.append({
+                    "filename": fn,
+                    "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+                    "source_type": row.get("source_type", ""),
+                    "source_path": row.get("source_path", ""),
+                })
+    else:
+        for vcf in sorted(vcf_source_dir.glob("*.vcf")) + sorted(vcf_source_dir.glob("*.vcf.gz")):
+            fn = vcf.name
+            samples.append({
+                "filename": fn,
+                "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+                "source_type": "",
+                "source_path": str(vcf),
+            })
+    samples.sort(key=lambda x: x["sample"].lower())
+    return samples
+
+
 @app.get("/api/projects/{project}/step2/runs")
 def step2_runs_list(project: str):
     """List all timestamped step2 runs newest-first. Falls back to a synthetic

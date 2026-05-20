@@ -133,6 +133,9 @@ export default function App() {
   const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
+  const [vcfSourceSamples, setVcfSourceSamples] = useState([]);
+  const [vcfSourceFilter, setVcfSourceFilter] = useState("");
+  const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
   const [vcfDbDropdownOpen, setVcfDbDropdownOpen] = useState(false);
   const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
@@ -600,10 +603,14 @@ export default function App() {
     setStep2SelectedRun(null);
     loadStep2Runs(true);
     loadStep2Outputs();
+    loadVcfSourceSamples();
     loadInputs(selectedProject);
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
+    setVcfSourceSamples([]);
+    setVcfSourceFilter("");
+    setVcfSourceOpen(false);
     // Clear the import-sources textarea on project change. Otherwise paths
     // from a previous project's import (a different reference, possibly
     // different shared DBs) survive the switch and get re-injected into
@@ -1028,6 +1035,14 @@ export default function App() {
       loadPosthocStatuses(groups);
     } else {
       setPosthocStatus({});
+    }
+  }
+
+  async function loadVcfSourceSamples() {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_source/samples`);
+    if (res.ok) {
+      setVcfSourceSamples(await res.json());
     }
   }
 
@@ -1529,6 +1544,7 @@ export default function App() {
     setImportProjectLock(selectedProject);
     setStep2BuiltAt(new Date().toISOString());
     await refreshProjects(selectedProject);
+    await loadVcfSourceSamples();
   }
 
   async function step1Setup() {
@@ -1614,6 +1630,9 @@ export default function App() {
       setStep2VcfCount(0);
       setImportStatus("");
       setImportMismatchReport("");
+      setVcfSourceSamples([]);
+      setVcfSourceFilter("");
+      setVcfSourceOpen(false);
       setStep2Outputs([]);
       setStep2Groups([]);
       setStep2OutputsError("");
@@ -3795,6 +3814,68 @@ export default function App() {
                   </button>
                 ) : null}
                 {importStatus ? <div className="note">{importStatus}</div> : null}
+                {vcfSourceSamples.length > 0 && (
+                  <div style={{marginTop:"6px"}}>
+                    <button
+                      className="ghost action"
+                      onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); }}
+                      style={{fontSize:"0.85em"}}
+                    >
+                      {vcfSourceOpen ? "▲ Hide" : "▼ Browse"} {vcfSourceSamples.length} samples
+                    </button>
+                    {vcfSourceOpen && (
+                      <div style={{marginTop:"6px", border:"1px solid var(--border)", borderRadius:"4px", overflow:"hidden"}}>
+                        <div style={{padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                          <input
+                            type="text"
+                            placeholder="Filter samples…"
+                            value={vcfSourceFilter}
+                            onChange={e => setVcfSourceFilter(e.target.value)}
+                            style={{width:"100%", boxSizing:"border-box", fontSize:"0.85em", padding:"3px 6px"}}
+                            autoFocus
+                          />
+                        </div>
+                        <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
+                          {(() => {
+                            const q = vcfSourceFilter.trim().toLowerCase();
+                            const filtered = q
+                              ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
+                              : vcfSourceSamples;
+                            return (
+                              <>
+                                <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                                  {filtered.length === vcfSourceSamples.length
+                                    ? `${filtered.length} samples`
+                                    : `${filtered.length} of ${vcfSourceSamples.length} samples`}
+                                </div>
+                                {filtered.map(s => (
+                                  <div key={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)"}}>
+                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={s.filename}>{s.sample}</span>
+                                    {s.source_type && (
+                                      <span style={{
+                                        flexShrink:0,
+                                        fontSize:"0.8em",
+                                        padding:"0 4px",
+                                        borderRadius:"3px",
+                                        background: s.source_type === "step1" ? "var(--accent-subtle, #dff0d8)" : "var(--info-subtle, #d9edf7)",
+                                        color: s.source_type === "step1" ? "var(--accent-dark, #3c763d)" : "var(--info-dark, #31708f)",
+                                      }}>
+                                        {s.source_type === "step1" ? "step1" : "ref db"}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                                {filtered.length === 0 && (
+                                  <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>No samples match</div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {importProjectLock && selectedProject !== importProjectLock ? (
                   <div className="note error">
                     VCF set built for {importProjectLock}. Switch back to run Step 2 there.

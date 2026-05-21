@@ -1,0 +1,7 @@
+---
+name: vSNP GUI
+description: "Per-user vSNP3 SNP analysis pipeline"
+icon: fa://dna
+category: Bioinformatics
+subcategory: SNP Analysis
+role: batch_connect

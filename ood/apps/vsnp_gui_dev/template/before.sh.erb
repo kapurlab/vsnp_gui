@@ -32,9 +32,27 @@ echo "Workdir — ${worktree_dir}"
 set -e
 saved_cwd="${PWD}"
 
-# Fetch the branch on the prod checkout (shared object store)
+# Refresh the branch on the prod checkout (shared object store). Fetch can
+# fail for non-fatal reasons — e.g. the user running the OOD session lacks
+# a GitHub SSH key (vkapur/vsnp_gui is private) or there's a transient
+# network blip. Fall back to whatever ref is already cached locally so the
+# session still launches against the last known good commit. If neither
+# fetch nor a local ref exists, fail with a clear message.
 cd "${prod_repo}"
-git fetch origin "${branch}"
+fetch_exit=0
+git fetch origin "${branch}" 2>&1 || fetch_exit=$?
+if [[ ${fetch_exit} -ne 0 ]]; then
+  echo "WARN: git fetch origin ${branch} failed (exit ${fetch_exit})."
+  echo "      Falling back to whatever origin/${branch} is cached locally."
+  echo "      If that's stale, ask a user with GitHub access to fetch first."
+fi
+if ! git rev-parse --verify --quiet "origin/${branch}" >/dev/null; then
+  echo "ERROR: origin/${branch} not available locally and fetch failed." >&2
+  echo "       Have someone with GitHub access run:" >&2
+  echo "         cd ${prod_repo} && git fetch origin ${branch}" >&2
+  echo "       then relaunch this dev session." >&2
+  exit 1
+fi
 git worktree add --detach "${worktree_dir}" "origin/${branch}"
 
 # Symlink node_modules from prod so we do not re-install per session

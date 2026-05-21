@@ -80,7 +80,7 @@ built (no process change there — it's just enabling).
 
 ### Test ask: cascade/sorted xlsx → IGV click — Open (2026-05-21)
 
-New on branch `t02-cascade-igv-click`. Quick test (5 min):
+New on branch `t02-cascade-igv-click`. Quick test (~5 min):
 
 1. OOD dashboard → Bioinformatics → **SNP Analysis (dev)** → **vSNP GUI (dev)**
 2. **Git branch** field: `t02-cascade-igv-click` → Launch
@@ -89,16 +89,24 @@ New on branch `t02-cascade-igv-click`. Quick test (5 min):
    `name-All_sorted_*` xlsx
 4. Hover a colored variant cell → a small dark "↗ this  ↗ all" pill
    appears in the corner. Click either:
-   - **↗ this**: opens IGV in a new tab with just that sample's BAM at
-     the cell's locus
-   - **↗ all**: opens IGV with every sample in the table at that locus
+   - **↗ this**: IGV opens in a new tab, just that sample at the locus
+   - **↗ all**: IGV opens with every sample in the table at the locus
 
-Edge case worth poking: try the `nagalingam_test` project. Its SRR/ERR
-rows came in as direct VCF imports (no Step 1 alignment, no BAM). For
-those rows, "↗ this" should be greyed out with a "no Step 1 BAM"
-tooltip; "↗ all" still works and reports the no-BAM samples as
-"imported VCF — no BAM to load" in the IGV header.
+The IGV view stacks (top → bottom):
 
-The dev session has `uvicorn --reload` so backend tweaks hot-pickup —
-useful if he wants to iterate on anything from his laptop. Frontend
+- **Reference annotation** — gene structure from the reference GFF
+- For each sample: **`<sample> · calls`** (thin variant track from
+  `_filtered_hapall_annotated.vcf`; hover any marker for the rich
+  annotation Tod is used to seeing in the xlsx — gene, product, codon,
+  AA change, mutation_type)
+- For each sample: **`<sample> · reads`** (BAM pile-up)
+
+Edge case worth poking — try the `nagalingam_test` project. Its
+SRR/ERR rows came in as direct VCF imports (no Step 1 alignment,
+no BAM). For those rows, "↗ this" should be greyed out with a tooltip;
+"↗ all" still works and reports the no-BAM samples as "imported VCF —
+no BAM to load" in the IGV header.
+
+Dev session has `uvicorn --reload` so backend tweaks hot-pickup —
+useful if Tod wants to iterate on anything from his laptop. Frontend
 edits still need a `vite build`.

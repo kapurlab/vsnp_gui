@@ -3466,7 +3466,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
         )
     from app import xlsx_html
     try:
-        html_page = xlsx_html.xlsx_to_html(target)
+        html_page = xlsx_html.xlsx_to_html(target, project=project)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)

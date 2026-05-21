@@ -36,6 +36,7 @@ export default function IgvStandalone() {
   })();
 
   const distinctProjects = Array.from(new Set(initialTracks.map((t) => t.project).filter(Boolean)));
+  const initialLocus = (params.get("locus") || "").trim();
 
   const [status, setStatus] = useState(initialTracks.length ? "Loading…" : "No samples specified.");
   const [meta, setMeta] = useState({ reference: "", trackCount: 0 });
@@ -150,6 +151,7 @@ export default function IgvStandalone() {
           fastaURL: serveUrl(refProject, referenceFastaPath),
           indexURL: serveUrl(refProject, referenceFaiPath),
         },
+        ...(initialLocus ? { locus: initialLocus } : {}),
         tracks: tracks.map((t) => {
           const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
           return {

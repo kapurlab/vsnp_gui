@@ -125,14 +125,17 @@ def _igv_launch_html(project: str, this_stem: str, all_stems: list[str], locus: 
 
     Two small text links — "this" and "all" — open the IgvStandalone viewer
     page in a new tab (`?view=igv&tracks=…&locus=…`). The URL is constructed
-    relative to the current page so it survives the OOD proxy prefix.
+    relative to the current preview path so it survives the OOD proxy
+    prefix: the preview is served at `/api/projects/{p}/preview-xlsx`, so
+    `../../../` climbs back out to the SPA root regardless of the OOD
+    rnode prefix in front of it (`/rnode/host/port/api/projects/p/...`).
     """
     enc_proj = quote(project, safe="")
     enc_locus = quote(locus, safe="")
     this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
     all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
-    this_href = f"./?view=igv&tracks={this_track}&locus={enc_locus}"
-    all_href = f"./?view=igv&tracks={all_tracks}&locus={enc_locus}"
+    this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
+    all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
         f'<a target="_blank" rel="noopener" href="{html.escape(this_href, quote=True)}" '

@@ -136,44 +136,60 @@ export default function IgvStandalone() {
       let refProject = "";
       let refName = "";
       const skipped = [];
-      for (const t of initialTracks) {
-        const { project: tProject, sample } = t;
-        try {
-          const res = await fetch(
-            `${API_BASE}/api/projects/${encodeURIComponent(tProject)}/step1/files?sample=${encodeURIComponent(sample)}`
-          );
-          if (!res.ok) {
-            skipped.push(`${tProject}/${sample} (${await describeStep1FilesError(res)})`);
-            continue;
-          }
-          const data = await res.json();
-          if (!data.bam || !data.reference_fasta) {
-            skipped.push(`${tProject}/${sample} (missing BAM/FASTA)`);
-            continue;
-          }
-          if (!referenceFastaPath) {
-            referenceFastaPath = data.reference_fasta;
-            referenceFaiPath = `${data.reference_fasta}.fai`;
-            referenceGffPath = data.reference_gff || "";
-            refName = data.reference_fasta.split("/").pop();
-            refProject = tProject;
-          } else {
-            const candidate = data.reference_fasta.split("/").pop();
-            if (candidate !== refName) {
-              skipped.push(`${tProject}/${sample} (reference ${candidate} ≠ ${refName})`);
-              continue;
+      // Resolve every sample's step1 files in parallel — the per-call cost
+      // is ~200ms RTT and a sequential for/await chain serializes that into
+      // N×RTT (~3s wall time for 14 samples). Promise.all collapses it to
+      // ~1×RTT. Reference-consistency check runs after all responses are
+      // in, so it stays single-pass and deterministic.
+      const resolutions = await Promise.all(
+        initialTracks.map(async (t) => {
+          const { project: tProject, sample } = t;
+          try {
+            const res = await fetch(
+              `${API_BASE}/api/projects/${encodeURIComponent(tProject)}/step1/files?sample=${encodeURIComponent(sample)}`
+            );
+            if (!res.ok) {
+              return { t, error: await describeStep1FilesError(res) };
             }
+            const data = await res.json();
+            return { t, data };
+          } catch (e) {
+            return { t, error: e && e.message ? e.message : String(e) };
           }
-          tracks.push({
-            project: tProject,
-            sample,
-            bamPath: data.bam,
-            baiPath: `${data.bam}.bai`,
-            annotatedVcfPath: data.annotated_vcf || "",
-          });
-        } catch (e) {
-          skipped.push(`${tProject}/${sample} (${e && e.message ? e.message : e})`);
+        })
+      );
+
+      for (const r of resolutions) {
+        const { project: tProject, sample } = r.t;
+        if (r.error) {
+          skipped.push(`${tProject}/${sample} (${r.error})`);
+          continue;
         }
+        const data = r.data;
+        if (!data.bam || !data.reference_fasta) {
+          skipped.push(`${tProject}/${sample} (missing BAM/FASTA)`);
+          continue;
+        }
+        if (!referenceFastaPath) {
+          referenceFastaPath = data.reference_fasta;
+          referenceFaiPath = `${data.reference_fasta}.fai`;
+          referenceGffPath = data.reference_gff || "";
+          refName = data.reference_fasta.split("/").pop();
+          refProject = tProject;
+        } else {
+          const candidate = data.reference_fasta.split("/").pop();
+          if (candidate !== refName) {
+            skipped.push(`${tProject}/${sample} (reference ${candidate} ≠ ${refName})`);
+            continue;
+          }
+        }
+        tracks.push({
+          project: tProject,
+          sample,
+          bamPath: data.bam,
+          baiPath: `${data.bam}.bai`,
+          annotatedVcfPath: data.annotated_vcf || "",
+        });
       }
       if (cancelled) return;
       if (!referenceFastaPath || tracks.length === 0) {

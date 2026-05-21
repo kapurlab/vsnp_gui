@@ -7,6 +7,18 @@ function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
 }
 
+// Translate the backend's structured 404 details for /step1/files into a
+// human-readable label. Matches the contract in main.py:step1_files.
+async function describeStep1FilesError(res) {
+  if (res.status !== 404) return `HTTP ${res.status}`;
+  try {
+    const body = await res.json();
+    if (body && body.detail === "imported_vcf") return "imported VCF — no BAM to load";
+    if (body && body.detail === "no_step1") return "no Step 1 outputs";
+  } catch (_) { /* fall through */ }
+  return `HTTP ${res.status}`;
+}
+
 export default function IgvStandalone() {
   const params = new URLSearchParams(window.location.search);
   // Two URL formats supported:
@@ -60,7 +72,10 @@ export default function IgvStandalone() {
       const res = await fetch(
         `${API_BASE}/api/projects/${encodeURIComponent(reqProject)}/step1/files?sample=${encodeURIComponent(sample)}`
       );
-      if (!res.ok) { setStatus(`${sample}: HTTP ${res.status}`); return; }
+      if (!res.ok) {
+        setStatus(`${sample}: ${await describeStep1FilesError(res)}`);
+        return;
+      }
       const data = await res.json();
       if (!data.bam || !data.reference_fasta) { setStatus(`${sample}: missing BAM/FASTA`); return; }
       const candidate = data.reference_fasta.split("/").pop();
@@ -114,7 +129,7 @@ export default function IgvStandalone() {
             `${API_BASE}/api/projects/${encodeURIComponent(tProject)}/step1/files?sample=${encodeURIComponent(sample)}`
           );
           if (!res.ok) {
-            skipped.push(`${tProject}/${sample} (HTTP ${res.status})`);
+            skipped.push(`${tProject}/${sample} (${await describeStep1FilesError(res)})`);
             continue;
           }
           const data = await res.json();

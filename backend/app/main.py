@@ -3118,7 +3118,16 @@ def step1_files(project: str, sample: str = Query(...)):
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
-        raise HTTPException(status_code=404, detail="Sample not found")
+        # Distinguish samples imported as VCFs directly (visible in cascade
+        # tables but never aligned, so no BAM) from genuinely missing samples.
+        # Lets the IGV-launch UI surface a friendly "imported VCF" message
+        # instead of a bare HTTP 404.
+        vcf_source = project_dir / "step2" / "vcf_source"
+        if vcf_source.is_dir():
+            patterns = (f"{sample}_zc.vcf", f"{sample}_zc.vcf.gz", f"{sample}.vcf", f"{sample}.vcf.gz")
+            if any((vcf_source / p).exists() for p in patterns):
+                raise HTTPException(status_code=404, detail="imported_vcf")
+        raise HTTPException(status_code=404, detail="no_step1")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
     bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
@@ -3464,9 +3473,31 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
         )
+    # Build the set of step1 sample names that have a BAM on disk, so the
+    # cascade-table render can grey out "↗ this" links for samples that
+    # exist only as imported VCFs. Cost is one shallow scan of step1/.
+    samples_with_bams: set[str] = set()
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        for d in step1_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if any(d.glob(f"**/{d.name}_nodup.bam")):
+                samples_with_bams.add(d.name)
+            # _resolve_sample_dir accepts a bare sample name even when the
+            # step1 dir carries lane suffixes (e.g. dir `13-1941-6_S4_L001`
+            # resolves from input `13-1941-6`). Mirror that fallback here so
+            # cascade stems match.
+            if "_" in d.name:
+                prefix = d.name.split("_")[0]
+                if prefix and any(d.glob(f"**/{prefix}_nodup.bam")):
+                    samples_with_bams.add(prefix)
+
     from app import xlsx_html
     try:
-        html_page = xlsx_html.xlsx_to_html(target, project=project)
+        html_page = xlsx_html.xlsx_to_html(
+            target, project=project, samples_with_bams=samples_with_bams
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)

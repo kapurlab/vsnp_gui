@@ -120,7 +120,13 @@ def _detect_variant_table(ws) -> dict | None:
     return {"positions": positions, "samples": samples, "all_stems": stems}
 
 
-def _igv_launch_html(project: str, this_stem: str, all_stems: list[str], locus: str) -> str:
+def _igv_launch_html(
+    project: str,
+    this_stem: str,
+    all_stems: list[str],
+    locus: str,
+    this_has_bam: bool = True,
+) -> str:
     """Build the hover-revealed dual-affordance HTML for a variant cell.
 
     Two small text links — "this" and "all" — open the IgvStandalone viewer
@@ -129,17 +135,34 @@ def _igv_launch_html(project: str, this_stem: str, all_stems: list[str], locus: 
     prefix: the preview is served at `/api/projects/{p}/preview-xlsx`, so
     `../../../` climbs back out to the SPA root regardless of the OOD
     rnode prefix in front of it (`/rnode/host/port/api/projects/p/...`).
+
+    When ``this_has_bam`` is False (sample exists in the cascade table but
+    has no Step 1 BAM — typically a directly-imported VCF), the "↗ this"
+    link is rendered as a disabled span instead of a link, since clicking
+    it would land in an empty IGV. "↗ all" remains active — IGV's
+    multi-track loader skips missing samples gracefully and the user gets
+    a clear "imported VCF — no BAM to load" message for each skip.
     """
     enc_proj = quote(project, safe="")
     enc_locus = quote(locus, safe="")
-    this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
     all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
-    this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
     all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
+    if this_has_bam:
+        this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
+        this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
+        this_link = (
+            f'<a target="_blank" rel="noopener" href="{html.escape(this_href, quote=True)}" '
+            f'title="Open this sample in IGV at {html.escape(locus)}">↗ this</a>'
+        )
+    else:
+        this_link = (
+            '<span class="xlsx-igv-launch-disabled" '
+            f'title="No Step 1 BAM for {html.escape(this_stem)} — imported VCF or never aligned. '
+            'Use ↗ all to open the cohort instead.">↗ this</span>'
+        )
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
-        f'<a target="_blank" rel="noopener" href="{html.escape(this_href, quote=True)}" '
-        f'title="Open this sample in IGV at {html.escape(locus)}">↗ this</a>'
+        f'{this_link}'
         f'<a target="_blank" rel="noopener" href="{html.escape(all_href, quote=True)}" '
         f'title="Open all samples in IGV at {html.escape(locus)}">↗ all</a>'
         '</span>'
@@ -421,13 +444,23 @@ def _build_cf_extras(ws, dxfs) -> dict[str, list[str]]:
     return extras
 
 
-def xlsx_to_html(xlsx_path: Path, title: str | None = None, project: str | None = None) -> str:
+def xlsx_to_html(
+    xlsx_path: Path,
+    title: str | None = None,
+    project: str | None = None,
+    samples_with_bams: set[str] | None = None,
+) -> str:
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
     When ``project`` is provided and the sheet looks like a vSNP3 variant-alignment
     table, variant cells (those with a colored fill) get a hover-revealed
     pair of IGV-launch links — "this" sample and "all" samples in the
     cohort — opening the IgvStandalone viewer at the cell's locus.
+
+    ``samples_with_bams`` (optional) is the set of step1 sample names for
+    which a BAM exists on disk. When provided, "↗ this" is rendered as a
+    disabled span for samples not in the set (typically directly-imported
+    VCFs with no alignment) to avoid leading the user into an empty IGV.
     """
     xlsx_path = Path(xlsx_path)
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
@@ -535,11 +568,17 @@ def xlsx_to_html(xlsx_path: Path, title: str | None = None, project: str | None 
                 and cell.column in vtable["positions"]
                 and any("background-color" in p for p in inline_parts)
             ):
+                row_stem = vtable["samples"][cell.row]
+                this_has_bam = (
+                    samples_with_bams is None
+                    or row_stem in samples_with_bams
+                )
                 launch_html = _igv_launch_html(
                     project=project,
-                    this_stem=vtable["samples"][cell.row],
+                    this_stem=row_stem,
                     all_stems=vtable["all_stems"],
                     locus=vtable["positions"][cell.column],
+                    this_has_bam=this_has_bam,
                 )
                 classes.append("xlsx-variant")
                 # Re-emit class attr — `attrs` already had it baked in above
@@ -650,6 +689,14 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     border-radius: 2px;
   }}
   .xlsx-igv-launch a:hover {{ background: rgba(255,255,255,0.25); }}
+  /* Disabled "this" link — sample has no Step 1 BAM. Greyed out, not
+     clickable, but visible so the cohort context is still legible. */
+  .xlsx-igv-launch-disabled {{
+    color: rgba(255, 255, 255, 0.35);
+    padding: 1px 3px;
+    cursor: not-allowed;
+    text-decoration: line-through;
+  }}
 </style>
 </head>
 <body>

@@ -119,6 +119,7 @@ export default function IgvStandalone() {
       const tracks = [];
       let referenceFastaPath = "";
       let referenceFaiPath = "";
+      let referenceGffPath = "";
       let refProject = "";
       let refName = "";
       const skipped = [];
@@ -140,6 +141,7 @@ export default function IgvStandalone() {
           if (!referenceFastaPath) {
             referenceFastaPath = data.reference_fasta;
             referenceFaiPath = `${data.reference_fasta}.fai`;
+            referenceGffPath = data.reference_gff || "";
             refName = data.reference_fasta.split("/").pop();
             refProject = tProject;
           } else {
@@ -160,6 +162,29 @@ export default function IgvStandalone() {
         return;
       }
       setMeta({ reference: refName, trackCount: tracks.length });
+      // Reference GFF annotation track (genes/CDS/ORFs). Lives in the
+      // reference options dir; the serve endpoint allows reference paths.
+      // Placed first so it renders at the top, above the BAM tracks.
+      const annotationTrack = referenceGffPath
+        ? [{
+            type: "annotation",
+            format: referenceGffPath.toLowerCase().endsWith(".gff3") ? "gff3" : "gff",
+            name: "Reference annotation",
+            url: serveUrl(refProject, referenceGffPath),
+            displayMode: "EXPANDED",
+            visibilityWindow: -1,
+          }]
+        : [];
+      const bamTracks = tracks.map((t) => {
+        const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
+        return {
+          type: "alignment",
+          format: "bam",
+          name: displayName,
+          url: serveUrl(t.project, t.bamPath),
+          indexURL: serveUrl(t.project, t.baiPath),
+        };
+      });
       const config = {
         reference: {
           id: refName.replace(/\.(fa|fasta)$/i, "") || "ref",
@@ -167,16 +192,7 @@ export default function IgvStandalone() {
           indexURL: serveUrl(refProject, referenceFaiPath),
         },
         ...(initialLocus ? { locus: initialLocus } : {}),
-        tracks: tracks.map((t) => {
-          const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
-          return {
-            type: "alignment",
-            format: "bam",
-            name: displayName,
-            url: serveUrl(t.project, t.bamPath),
-            indexURL: serveUrl(t.project, t.baiPath),
-          };
-        }),
+        tracks: [...annotationTrack, ...bamTracks],
       };
       try {
         const browser = await igv.createBrowser(containerRef.current, config);

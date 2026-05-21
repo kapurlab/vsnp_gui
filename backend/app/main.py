@@ -36,7 +36,14 @@ from app.projects import (
     SCOPE_PERSONAL,
     SCOPE_SHARED,
 )
-from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
+from app.refs import (
+    list_references,
+    get_reference_paths,
+    add_reference_path,
+    remove_reference_path,
+    reference_roots,
+    find_gff_for_fasta,
+)
 from app.sra import expand_accessions, expand_accessions_with_mapping, build_download_script, SRAExpansionError, write_crosswalk_tsv
 from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
 
@@ -3134,10 +3141,16 @@ def step1_files(project: str, sample: str = Query(...)):
     bam_path = str(bam_files[-1]) if bam_files else ""
     align_dir = str(bam_files[-1].parent) if bam_files else ""
     ref_fasta = ""
+    ref_gff = ""
     if align_dir:
         fasta_files = sorted(Path(align_dir).glob("*.fasta"))
         if fasta_files:
             ref_fasta = str(fasta_files[0])
+            # GFF lives in the reference options dir, not the alignment dir.
+            vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+            gff_path = find_gff_for_fasta(fasta_files[0], vsnp3_path)
+            if gff_path:
+                ref_gff = str(gff_path)
     vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
     source_vcf = vcf_candidates[-1] if vcf_candidates else None
     patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
@@ -3147,6 +3160,7 @@ def step1_files(project: str, sample: str = Query(...)):
         "bam": bam_path,
         "alignment_dir": align_dir,
         "reference_fasta": ref_fasta,
+        "reference_gff": ref_gff,
         "sample_dir": str(sample_dir),
         "source_vcf": str(source_vcf) if source_vcf else "",
         "patched_vcf": str(patched_vcf) if patched_vcf else "",
@@ -3658,12 +3672,24 @@ def _range_response(target: Path, request: Request, media_type: str):
 def serve_project_file(project: str, request: Request, path: str = Query(...)):
     """Serve a file from within the project directory with HTTP byte-range support.
 
-    Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full download.
+    Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full
+    download. Also permits paths under any configured reference options
+    root (so igv.js can fetch the reference GFF annotation track — the
+    GFF lives next to the source fasta in the reference dir, not in the
+    project's alignment dir).
     """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
-    if not str(target).startswith(str(project_dir.resolve())):
+    target_str = str(target)
+    allowed = target_str.startswith(str(project_dir.resolve()))
+    if not allowed:
+        vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+        for root in reference_roots(vsnp3_path):
+            if target_str.startswith(str(root.resolve())):
+                allowed = True
+                break
+    if not allowed:
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")

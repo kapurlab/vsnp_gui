@@ -84,10 +84,23 @@ export default function IgvStandalone() {
         return;
       }
       const displayName = reqProject !== projectRef.current ? `${reqProject}/${sample}` : sample;
+      if (data.annotated_vcf) {
+        try {
+          await browserRef.current.loadTrack({
+            type: "variant",
+            format: "vcf",
+            name: `${displayName} · calls`,
+            url: serveUrl(reqProject, data.annotated_vcf),
+            indexed: false,
+            displayMode: "EXPANDED",
+            height: 30,
+          });
+        } catch (_) { /* non-fatal: drop the calls track, keep the BAM */ }
+      }
       await browserRef.current.loadTrack({
         type: "alignment",
         format: "bam",
-        name: displayName,
+        name: `${displayName} · reads`,
         url: serveUrl(reqProject, data.bam),
         indexURL: serveUrl(reqProject, `${data.bam}.bai`),
       });
@@ -151,7 +164,13 @@ export default function IgvStandalone() {
               continue;
             }
           }
-          tracks.push({ project: tProject, sample, bamPath: data.bam, baiPath: `${data.bam}.bai` });
+          tracks.push({
+            project: tProject,
+            sample,
+            bamPath: data.bam,
+            baiPath: `${data.bam}.bai`,
+            annotatedVcfPath: data.annotated_vcf || "",
+          });
         } catch (e) {
           skipped.push(`${tProject}/${sample} (${e && e.message ? e.message : e})`);
         }
@@ -175,15 +194,33 @@ export default function IgvStandalone() {
             visibilityWindow: -1,
           }]
         : [];
-      const bamTracks = tracks.map((t) => {
+      // For each sample, interleave a "calls" variant track from the
+      // vSNP3-annotated VCF immediately above its BAM track. The annotated
+      // VCF packs per-position annotation (gene, product, codon, AA change,
+      // mutation_type) into the ID column — hovering the variant marker in
+      // igv.js exposes that. The BAM stays for read pile-up + coverage.
+      const sampleTracks = tracks.flatMap((t) => {
         const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
-        return {
+        const out = [];
+        if (t.annotatedVcfPath) {
+          out.push({
+            type: "variant",
+            format: "vcf",
+            name: `${displayName} · calls`,
+            url: serveUrl(t.project, t.annotatedVcfPath),
+            indexed: false,
+            displayMode: "EXPANDED",
+            height: 30,
+          });
+        }
+        out.push({
           type: "alignment",
           format: "bam",
-          name: displayName,
+          name: `${displayName} · reads`,
           url: serveUrl(t.project, t.bamPath),
           indexURL: serveUrl(t.project, t.baiPath),
-        };
+        });
+        return out;
       });
       const config = {
         reference: {
@@ -192,7 +229,7 @@ export default function IgvStandalone() {
           indexURL: serveUrl(refProject, referenceFaiPath),
         },
         ...(initialLocus ? { locus: initialLocus } : {}),
-        tracks: [...annotationTrack, ...bamTracks],
+        tracks: [...annotationTrack, ...sampleTracks],
       };
       try {
         const browser = await igv.createBrowser(containerRef.current, config);

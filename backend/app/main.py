@@ -3142,6 +3142,7 @@ def step1_files(project: str, sample: str = Query(...)):
     align_dir = str(bam_files[-1].parent) if bam_files else ""
     ref_fasta = ""
     ref_gff = ""
+    annotated_vcf = ""
     if align_dir:
         fasta_files = sorted(Path(align_dir).glob("*.fasta"))
         if fasta_files:
@@ -3151,6 +3152,16 @@ def step1_files(project: str, sample: str = Query(...)):
             gff_path = find_gff_for_fasta(fasta_files[0], vsnp3_path)
             if gff_path:
                 ref_gff = str(gff_path)
+        # The *_filtered_hapall_annotated.vcf holds per-variant annotation
+        # in the ID column (gene/product/codon/AA change/mutation_type).
+        # Surface its path so igv.js can render it as a variant track and
+        # show the annotation on hover.
+        ann_candidates = sorted(
+            Path(align_dir).glob(f"{sample}_filtered_hapall_annotated.vcf*"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if ann_candidates:
+            annotated_vcf = str(ann_candidates[-1])
     vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
     source_vcf = vcf_candidates[-1] if vcf_candidates else None
     patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
@@ -3161,6 +3172,7 @@ def step1_files(project: str, sample: str = Query(...)):
         "alignment_dir": align_dir,
         "reference_fasta": ref_fasta,
         "reference_gff": ref_gff,
+        "annotated_vcf": annotated_vcf,
         "sample_dir": str(sample_dir),
         "source_vcf": str(source_vcf) if source_vcf else "",
         "patched_vcf": str(patched_vcf) if patched_vcf else "",

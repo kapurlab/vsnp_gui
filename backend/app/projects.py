@@ -68,18 +68,19 @@ def ensure_project_dirs(project_dir: Path) -> None:
     (project_dir / "download").mkdir(parents=True, exist_ok=True)
     (project_dir / "step1").mkdir(parents=True, exist_ok=True)
     (project_dir / "step2" / "vcf_source").mkdir(parents=True, exist_ok=True)
+    (project_dir / f"{project_dir.name}_VCFs").mkdir(parents=True, exist_ok=True)
 
 
 def project_meta_path(project_dir: Path) -> Path:
     return project_dir / "project.json"
 
 
-def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> Path:
+def create_project(roots: RootsLike, name: str, scope: Optional[str] = None, reference: str = "") -> Path:
     """Create a project under the requested scope. Defaults to the first root
     (personal) when scope is unspecified. The supplied name is normalized via
     `normalize_project_name` (spaces → underscores, other unsafe chars
     rejected) before being used as both the directory name and the project
-    metadata."""
+    metadata. If `reference` is given it is stored in project.json immediately."""
     name = normalize_project_name(name)
     norm = _normalize_roots(roots)
     if not norm:
@@ -98,11 +99,13 @@ def create_project(roots: RootsLike, name: str, scope: Optional[str] = None) -> 
     if project_dir.exists():
         raise ValueError(f"Project already exists: {name}")
     ensure_project_dirs(project_dir)
-    meta = {
+    meta: Dict[str, Any] = {
         "name": name,
         "created_at": _now_iso(),
         "status": "created",
     }
+    if reference:
+        meta["reference"] = reference
     with open(project_meta_path(project_dir), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
     return project_dir
@@ -212,6 +215,7 @@ def _project_counts(project_dir: Path) -> Dict:
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
     step2_dir = project_dir / "step2"
+    vcfs_dir = project_dir / f"{project_dir.name}_VCFs"
     try:
         return {
             "fastq_count": len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.exists() else 0,
@@ -219,16 +223,19 @@ def _project_counts(project_dir: Path) -> Dict:
             "step1_vcfs": len(list(step1_dir.glob("**/*_zc.vcf"))) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
             "step2_vcfs": len(list((step2_dir / "vcf_source").glob("*.vcf"))) if (step2_dir / "vcf_source").exists() else 0,
+            "vcfs_count": (
+                len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
+                if vcfs_dir.exists() else 0
+            ),
         }
     except PermissionError:
-        # Dir exists but the requesting user can't list it (group perm). Just
-        # report zeros so the project still appears in the list.
         return {
             "fastq_count": 0,
             "step1_samples": 0,
             "step1_vcfs": 0,
             "step2_html": 0,
             "step2_vcfs": 0,
+            "vcfs_count": 0,
         }
 
 

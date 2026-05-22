@@ -256,8 +256,10 @@ def capture_vsnp_gui_state(deploy_path: Path) -> dict[str, Any]:
 
 
 def _git(cwd: Path, *args: str) -> str:
+    # -c safe.directory bypasses CVE-2022-24765 ownership check when the
+    # backend process runs as a different user than the repo owner (OOD context).
     result = subprocess.run(
-        ["git", *args],
+        ["git", f"-c", f"safe.directory={cwd.resolve()}", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -1358,10 +1360,14 @@ def dispatch_step2(
     ood_session_id: str | None,
     is_shared: bool,
     resolved_vcf_db_folders: list[dict[str, Any]],
+    step2_run_dir: Path | None = None,
 ) -> tuple[str, str]:
     """Dispatch step2: write pipeline_run record, then step2 run_metadata.json.
 
     Returns (step2_run_id, pipeline_run_id).
+
+    If ``step2_run_dir`` is supplied (timestamped layout), run_metadata.json
+    and _provenance/ are written there instead of project_dir/step2/.
 
     Raises:
         Step2DispatchBlocked: if is_shared=True and step1 samples are still
@@ -1374,7 +1380,7 @@ def dispatch_step2(
     _resolved_vcf_db_folders helper; passed in rather than re-derived.
     """
     step1_dir = project_dir / "step1"
-    step2_dir = project_dir / "step2"
+    step2_dir = step2_run_dir if step2_run_dir is not None else project_dir / "step2"
     step2_dir.mkdir(parents=True, exist_ok=True)
 
     # Walk step1 sample dirs, collect run_ids and detect in-flight samples
@@ -1659,9 +1665,14 @@ def finalize_step2(
     exit_code: int,
     started_at: datetime,
     finished_at: datetime,
+    step2_run_dir: Path | None = None,
 ) -> None:
-    """Rewrite step2 run_metadata.json with terminal status; update pipeline_run."""
-    step2_dir = project_dir / "step2"
+    """Rewrite step2 run_metadata.json with terminal status; update pipeline_run.
+
+    If ``step2_run_dir`` is supplied (timestamped layout), reads/writes
+    run_metadata.json from there instead of project_dir/step2/.
+    """
+    step2_dir = step2_run_dir if step2_run_dir is not None else project_dir / "step2"
     metadata_path = step2_dir / "run_metadata.json"
     if not metadata_path.is_file():
         raise WriterError(f"step2 run_metadata.json missing at finalize: {metadata_path}")

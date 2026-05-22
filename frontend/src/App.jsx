@@ -66,6 +66,7 @@ export default function App() {
   const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
+  const step1JobStatusRef = useRef("");
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -86,6 +87,10 @@ export default function App() {
   const [editVcfCurrent, setEditVcfCurrent] = useState(null);
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
+  const [projectReference, setProjectReference] = useState("");
+  const [newProjectReference, setNewProjectReference] = useState("");
+  const [step2Runs, setStep2Runs] = useState([]);
+  const [step2SelectedRun, setStep2SelectedRun] = useState(null);
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
@@ -128,6 +133,9 @@ export default function App() {
   const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
+  const [vcfSourceSamples, setVcfSourceSamples] = useState([]);
+  const [vcfSourceFilter, setVcfSourceFilter] = useState("");
+  const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
   const [vcfDbDropdownOpen, setVcfDbDropdownOpen] = useState(false);
   const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
@@ -151,6 +159,8 @@ export default function App() {
   const [genomeOutputDir, setGenomeOutputDir] = useState("");
   const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
   const [genomeJobId, setGenomeJobId] = useState("");
+  const [step1JobId, setStep1JobId] = useState("");
+  const [step2JobId, setStep2JobId] = useState("");
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -158,6 +168,23 @@ export default function App() {
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
   const [refEditorPath, setRefEditorPath] = useState("");
+  const [metaRows, setMetaRows] = useState([]);
+  const [metaFilename, setMetaFilename] = useState(null);
+  const [metaExists, setMetaExists] = useState(false);
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [metaSingleOrig, setMetaSingleOrig] = useState("");
+  const [metaSingleDisplay, setMetaSingleDisplay] = useState("");
+  const [metaBulkText, setMetaBulkText] = useState("");
+  const [metaBulkOpen, setMetaBulkOpen] = useState(false);
+  const [metaStatus, setMetaStatus] = useState("");
+  // _VCFs accumulation folder
+  const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
+  const [vcfsFolderPath, setVcfsFolderPath] = useState("");
+  const [vcfsFolderName, setVcfsFolderName] = useState("");
+  const [vcfsFolderSamples, setVcfsFolderSamples] = useState([]);
+  const [vcfsCollectResult, setVcfsCollectResult] = useState(null);
+  const [vcfsForceSet, setVcfsForceSet] = useState(new Set());
+  const [vcfsIncludeFolder, setVcfsIncludeFolder] = useState(true);
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -360,6 +387,40 @@ export default function App() {
     }
   }
 
+  async function loadMetadata(refName) {
+    if (!refName) { setMetaRows([]); setMetaFilename(null); setMetaExists(false); return; }
+    setMetaLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/metadata`);
+      if (res.ok) {
+        const data = await res.json();
+        setMetaRows(data.rows || []);
+        setMetaFilename(data.filename || null);
+        setMetaExists(data.exists || false);
+      }
+    } finally {
+      setMetaLoading(false);
+    }
+  }
+
+  async function addMetadataRows(rows) {
+    if (!refEditorRef || !rows.length) return;
+    setMetaStatus("Saving…");
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/metadata/add-rows`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rows })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setMetaStatus(`Saved — ${data.added} added, ${data.updated} updated (${data.rows_total} total)`);
+      await loadMetadata(refEditorRef);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setMetaStatus(`Error: ${err.detail || res.status}`);
+    }
+  }
+
   // Open the xlsx in a formatted in-browser preview tab. Replaces the old
   // "Edit in Spreadsheet App" POST -> _open_path(xdg-open) flow, which was
   // a desktop-app launcher and silently no-ops in an OOD session (no display
@@ -447,6 +508,36 @@ export default function App() {
     }
   }
 
+  async function loadVcfsFolder(project) {
+    if (!project) {
+      setVcfsFolderCount(0); setVcfsFolderPath(""); setVcfsFolderName(""); setVcfsFolderSamples([]);
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/vcfs`);
+    if (res.ok) {
+      const data = await res.json();
+      setVcfsFolderCount(data.count || 0);
+      setVcfsFolderPath(data.path || "");
+      setVcfsFolderName(data.folder_name || "");
+      setVcfsFolderSamples(data.samples || []);
+    }
+  }
+
+  async function collectVcfs(forceSamples) {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/vcfs/collect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ force_samples: forceSamples || [] })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setVcfsCollectResult(data);
+      await loadVcfsFolder(selectedProject);
+      await refreshProjects(selectedProject);
+    }
+  }
+
   async function loadAll() {
     const [cfg, proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
       fetch(`${API_BASE}/api/config`).then((r) => r.json()),
@@ -502,7 +593,14 @@ export default function App() {
     setReference("");
     setImportReference("");
     setRefLock({ references: [] });
+    setProjectReference("");
+    setVcfsCollectResult(null);
+    setVcfsForceSet(new Set());
+    loadVcfsFolder(selectedProject);
     if (!selectedProject) return () => { cancelled = true; };
+    // Seed projectReference from the already-loaded projects list (fast, no extra fetch)
+    const proj = projects.find((p) => p.name === selectedProject);
+    if (proj?.reference) setProjectReference(proj.reference);
     (async () => {
       try {
         const lockRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/reference_lock`);
@@ -513,6 +611,8 @@ export default function App() {
         if (lock.references && lock.references.length === 1) {
           setReference(lock.references[0]);
           setImportReference(lock.references[0]);
+          // Sync projectReference when inferred from step1 stats
+          if (!projectReference) setProjectReference(lock.references[0]);
         }
       } catch {
         // keep defaults
@@ -536,6 +636,19 @@ export default function App() {
       if (line.startsWith("[job:")) {
         const status = line.replace("[job:", "").replace("]", "");
         setJobStatus(status);
+        // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
+        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
+          loadStep1Status();
+          loadQC();
+          refreshProjects(selectedProject);
+          collectVcfs([]);
+        }
+        // Step 2 job completed: refresh run list (auto-selects newest → triggers
+        // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
+        if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+          loadStep2Runs(true);
+          refreshProjects(selectedProject);
+        }
         // Update SRA status if this was an SRA job
         if (sraJobId && jobId === sraJobId) {
           if (status === "succeeded") {
@@ -571,11 +684,18 @@ export default function App() {
     setExcluded({});
     loadQC();
     loadStep1Status();
+    setStep2Runs([]);
+    setStep2SelectedRun(null);
+    loadStep2Runs(true);
     loadStep2Outputs();
+    loadVcfSourceSamples();
     loadInputs(selectedProject);
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
+    setVcfSourceSamples([]);
+    setVcfSourceFilter("");
+    setVcfSourceOpen(false);
     // Clear the import-sources textarea on project change. Otherwise paths
     // from a previous project's import (a different reference, possibly
     // different shared DBs) survive the switch and get re-injected into
@@ -591,6 +711,14 @@ export default function App() {
       setReference(importReference);
     }
   }, [step2Mode, importReference, reference]);
+
+  // Auto-populate importReference from the project-level reference so VCF
+  // database filtering and import tagging always use the project's reference
+  // without the user having to re-select it in the VCF Databases panel.
+  useEffect(() => {
+    const projectRef = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    if (projectRef) setImportReference(projectRef);
+  }, [projectReference, refLock.references]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -616,22 +744,54 @@ export default function App() {
     setStep1AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step1AutoRefreshPending]);
 
-  // Poll /step1/status while a batch is in flight so the Run button
-  // accurately reflects the backend state (re-enables when the batch
-  // finishes, even on page reloads where the SSE jobId tracking is lost).
+  // Poll /step1/status every 5 s while the batch is running. Reliable
+  // regardless of whether the SSE connection survives the OOD proxy timeout.
   useEffect(() => {
     if (step1JobStatus !== "running") return;
     const t = setInterval(loadStep1Status, 5000);
     return () => clearInterval(t);
   }, [step1JobStatus, selectedProject]);
 
+  // When step1JobStatus transitions from "running" → terminal, trigger the
+  // same refreshes that the SSE handler would have fired. This fires via the
+  // polling interval above, so it works even when SSE drops under the proxy.
   useEffect(() => {
-    if (!selectedProject || !settingsReady) return;
-    if (!step2AutoRefreshPending) return;
-    if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
+    const prev = step1JobStatusRef.current;
+    step1JobStatusRef.current = step1JobStatus;
+    if (prev === "running" && step1JobStatus !== "running" && step1JobStatus !== "") {
+      loadQC();
+      refreshProjects(selectedProject);
+    }
+  }, [step1JobStatus]);
+
+  // Poll the job endpoint directly for step2 completion. SSE connections
+  // drop under the OOD proxy for jobs that run longer than the proxy
+  // read-timeout (~60 s); polling is the reliable fallback.
+  useEffect(() => {
+    if (!step2JobId || !selectedProject) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/jobs/${step2JobId}`);
+        if (!res.ok) return;
+        const job = await res.json();
+        if (job.status === "succeeded" || job.status === "failed") {
+          cancelled = true;
+          clearInterval(t);
+          loadStep2Runs(true);
+          refreshProjects(selectedProject);
+        }
+      } catch {}
+    };
+    const t = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [step2JobId, selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
     loadStep2Outputs();
-    setStep2AutoRefreshPending(false);
-  }, [jobStatus, selectedProject, step2AutoRefreshPending]);
+  }, [step2SelectedRun]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -645,10 +805,12 @@ export default function App() {
 
   async function createProject() {
     if (!newProjectName.trim()) return;
+    const body = { name: newProjectName.trim() };
+    if (newProjectReference) body.reference = newProjectReference;
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newProjectName.trim() })
+      body: JSON.stringify(body)
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
@@ -656,7 +818,19 @@ export default function App() {
       return;
     }
     setNewProjectName("");
+    setNewProjectReference("");
     await loadAll();
+  }
+
+  async function setProjectRef(ref) {
+    if (!selectedProject) return;
+    await fetch(`${API_BASE}/api/projects/${selectedProject}/set_reference`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference: ref })
+    });
+    setProjectReference(ref);
+    setReference(ref);
   }
 
   async function refreshProjects(nextSelected = selectedProject) {
@@ -899,10 +1073,26 @@ export default function App() {
     setQcLoading(false);
   }
 
+  async function loadStep2Runs(autoSelectLatest = false) {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/runs`);
+      if (!res.ok) return;
+      const runs = await res.json();
+      setStep2Runs(runs);
+      if (autoSelectLatest && runs.length > 0) {
+        setStep2SelectedRun(runs[0].run_id);
+      }
+    } catch {
+      // keep existing state on network error
+    }
+  }
+
   async function loadStep2Outputs() {
     if (!selectedProject) return;
     setStep2OutputsError("");
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2_outputs`);
+    const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2_outputs${runParam}`);
     if (!res.ok) {
       const msg = await res.json();
       setStep2OutputsError(msg.detail || "Failed to load Step 2 outputs");
@@ -930,6 +1120,16 @@ export default function App() {
       loadPosthocStatuses(groups);
     } else {
       setPosthocStatus({});
+    }
+  }
+
+  async function loadVcfSourceSamples() {
+    if (!selectedProject) return;
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_source/samples`);
+    if (res.ok) {
+      const samples = await res.json();
+      setVcfSourceSamples(samples);
+      setStep2VcfCount(samples.length);
     }
   }
 
@@ -1359,7 +1559,8 @@ export default function App() {
       .filter((f) => f.enabled && (f.reference || "") === importReference)
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
-    const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
+    const vcfsFolderPaths = vcfsIncludeFolder && vcfsFolderPath ? [vcfsFolderPath] : [];
+    const allPaths = [...new Set([...vcfsFolderPaths, ...enabledPaths, ...manualPaths])];
     // Don't write allPaths back into the textarea. The textarea is
     // reserved for *user-typed* extra paths only; auto-discovered DB
     // selections bleed in here would create a feedback loop where a
@@ -1416,20 +1617,19 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
-    if (typeof data.total_found === "number") {
-      setStep2VcfCount(data.total_found);
-    }
     const parts = [
       `Imported ${data.imported}`,
+      data.already_present ? `Already in set: ${data.already_present}` : null,
       data.renamed ? `Renamed ${data.renamed}` : null,
-      data.skipped ? `Skipped ${data.skipped}` : null,
-      data.mismatched ? `Mismatched ${data.mismatched}` : null,
+      data.dedup_skipped ? `Deduped (older copy): ${data.dedup_skipped}` : null,
+      data.ref_skipped ? `Ref mismatch: ${data.ref_skipped}` : null,
       data.detected_reference ? `Ref: ${data.detected_reference}` : null
     ].filter(Boolean);
     setImportStatus(parts.join(" | "));
     setImportProjectLock(selectedProject);
     setStep2BuiltAt(new Date().toISOString());
     await refreshProjects(selectedProject);
+    await loadVcfSourceSamples();
   }
 
   async function step1Setup() {
@@ -1440,12 +1640,13 @@ export default function App() {
   }
 
   async function step1Run() {
-    if (!selectedProject || !settingsReady || !reference) return;
+    const effectiveRef = reference || projectReference;
+    if (!selectedProject || !settingsReady || !effectiveRef) return;
     if (step1JobStatus === "running") {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
     }
-    const refValue = reference === "__auto__" ? null : reference;
+    const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
     setStep1StatusError("");
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
     setStep2BuiltAt("");
@@ -1474,6 +1675,7 @@ export default function App() {
       return;
     }
     setJobId(data.job_id);
+    setStep1JobId(data.job_id);
     setStep1AutoRefreshPending(true);
     // T-46: surface samples auto-skipped from the dispatch (single-end,
     // junk-sized fastqs) so the user knows what didn't run and why. Without
@@ -1513,6 +1715,9 @@ export default function App() {
       setStep2VcfCount(0);
       setImportStatus("");
       setImportMismatchReport("");
+      setVcfSourceSamples([]);
+      setVcfSourceFilter("");
+      setVcfSourceOpen(false);
       setStep2Outputs([]);
       setStep2Groups([]);
       setStep2OutputsError("");
@@ -1522,11 +1727,12 @@ export default function App() {
 
   async function step2Run() {
     if (!selectedProject || !settingsReady) return;
+    const effectiveRef = reference || projectReference || null;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        reference: reference || null,
+        reference: effectiveRef,
         no_filters: s2NoFilters,
         qual_threshold: s2QualThreshold,
         n_threshold: s2NThreshold,
@@ -1555,6 +1761,7 @@ export default function App() {
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
+    setStep2JobId(data.job_id);
   }
 
   async function loadStep1Status() {
@@ -2218,6 +2425,17 @@ export default function App() {
                 onChange={(e) => setNewProjectName(e.target.value.replace(/\s+/g, "_"))}
                 title="Spaces are auto-converted to underscores. Letters, digits, _ - . are allowed; other characters will be rejected."
               />
+              <select
+                value={newProjectReference}
+                onChange={(e) => setNewProjectReference(e.target.value)}
+                title="Optional: set the reference at project creation"
+                style={{ minWidth: "10rem" }}
+              >
+                <option value="">-- reference (optional) --</option>
+                {references.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name}</option>
+                ))}
+              </select>
               <button onClick={createProject}>Create</button>
             </div>
             <div className="list">
@@ -2251,9 +2469,25 @@ export default function App() {
                           shared
                         </span>
                       ) : null}
+                      {p.reference ? (
+                        <span
+                          title={`Reference: ${p.reference}`}
+                          style={{
+                            fontSize: "0.7em",
+                            padding: "1px 6px",
+                            borderRadius: "10px",
+                            background: "#e8f5e9",
+                            color: "#1b5e20",
+                            fontWeight: 600,
+                            letterSpacing: "0.02em",
+                          }}
+                        >
+                          {p.reference}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="list-meta">
-                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF: {p.step1_vcfs}
+                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
                     </div>
                   </div>
                   <div className="list-actions">
@@ -2279,6 +2513,22 @@ export default function App() {
                 </div>
               ))}
             </div>
+            {selectedProject ? (
+              <div className="row" style={{ marginTop: "0.75rem", alignItems: "center", gap: "0.5rem" }}>
+                <label style={{ fontWeight: 600, whiteSpace: "nowrap" }}>Project reference:</label>
+                <select
+                  value={projectReference}
+                  onChange={(e) => setProjectRef(e.target.value)}
+                  style={{ flex: 1 }}
+                  title="Reference type locked to this project. All Step 1 and Step 2 runs use this reference."
+                >
+                  <option value="">-- not set --</option>
+                  {references.map((r) => (
+                    <option key={r.name} value={r.name}>{r.name}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
           </section>
 
           <section className="panel">
@@ -2640,7 +2890,12 @@ export default function App() {
                   value={refEditorRef}
                   onChange={(e) => {
                     setRefEditorRef(e.target.value);
+                    setMetaStatus("");
+                    setMetaSingleOrig("");
+                    setMetaSingleDisplay("");
+                    setMetaBulkText("");
                     loadRefEditorFiles(e.target.value);
+                    loadMetadata(e.target.value);
                   }}
                 >
                   <option value="">Choose a reference...</option>
@@ -2722,6 +2977,163 @@ export default function App() {
                           )}
                         </div>
 
+                        <div className="ref-editor-card">
+                          <h3>Sample Metadata</h3>
+                          <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.4em"}}>
+                            Maps VCF file-stem names to human-readable labels in vSNP3 trees and tables. Column 1 = original name (VCF stem, e.g. <code>99-0100</code>), Column 2 = display label.
+                          </div>
+                          {metaLoading ? (
+                            <div className="note"><span className="pulse-dot" /> Loading…</div>
+                          ) : metaExists && metaFilename ? (
+                            <>
+                              <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
+                                <span className="ref-editor-filename">{metaFilename}</span>
+                                <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download xlsx</button>
+                              </div>
+                              {metaRows.length > 0 ? (
+                                <div style={{overflowX:"auto", maxHeight:"14em", overflowY:"auto", marginBottom:"0.5em", fontSize:"0.82em"}}>
+                                  <table style={{width:"100%", borderCollapse:"collapse"}}>
+                                    <thead>
+                                      <tr>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)", whiteSpace:"nowrap"}}>Original name</th>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)"}}>Display label</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {metaRows.map((r, i) => (
+                                        <tr key={i} style={{background: i % 2 === 0 ? "transparent" : "var(--row-alt,rgba(0,0,0,0.03))"}}>
+                                          <td style={{padding:"0.1em 0.4em", fontFamily:"monospace"}}>{r.original}</td>
+                                          <td style={{padding:"0.1em 0.4em"}}>{r.display_name}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>File exists but contains no rows yet.</div>
+                              )}
+                            </>
+                          ) : (
+                            <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>No metadata file found — one will be created as <code>{refEditorRef}_metadata.xlsx</code> when you add the first entry.</div>
+                          )}
+
+                          {selectedProject && vcfsFolderSamples.length > 0 ? (() => {
+                            const metaOrigSet = new Set(metaRows.map(r => r.original));
+                            const missing = vcfsFolderSamples.filter(s => !metaOrigSet.has(s.sample));
+                            const covered = vcfsFolderSamples.length - missing.length;
+                            return (
+                              <div style={{marginTop:"0.4em", padding:"0.4em 0.5em", background:"var(--panel-2,rgba(0,0,0,0.03))", borderRadius:"6px", fontSize:"0.82em"}}>
+                                <div style={{fontWeight:600, marginBottom:"0.2em"}}>
+                                  {vcfsFolderName} coverage: {covered} / {vcfsFolderSamples.length} samples have metadata
+                                </div>
+                                {missing.length > 0 ? (
+                                  <details>
+                                    <summary style={{cursor:"pointer", color:"var(--muted,#666)"}}>
+                                      {missing.length} missing — click to pre-fill
+                                    </summary>
+                                    <ul style={{listStyle:"none", padding:0, margin:"0.3em 0"}}>
+                                      {missing.map(s => (
+                                        <li key={s.sample} style={{display:"flex", gap:"0.4em", alignItems:"center", marginBottom:"0.15em"}}>
+                                          <code style={{flex:"0 0 auto"}}>{s.sample}</code>
+                                          <button
+                                            className="ghost action"
+                                            style={{fontSize:"0.8em", padding:"0 0.3em"}}
+                                            onClick={() => { setMetaSingleOrig(s.sample); setMetaSingleDisplay(s.sample); }}
+                                          >
+                                            Fill
+                                          </button>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                ) : <div style={{color:"var(--accent,green)"}}>All samples covered</div>}
+                              </div>
+                            );
+                          })() : null}
+
+                          <div style={{marginTop:"0.5em"}}>
+                            <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add single entry</div>
+                            <div style={{display:"flex", gap:"0.3em", alignItems:"center", flexWrap:"wrap"}}>
+                              <input
+                                placeholder="Original name (VCF stem)"
+                                value={metaSingleOrig}
+                                onChange={(e) => setMetaSingleOrig(e.target.value)}
+                                style={{flex:"1 1 10em", minWidth:"8em"}}
+                              />
+                              <span style={{color:"var(--muted,#888)"}}>→</span>
+                              <input
+                                placeholder="Display label"
+                                value={metaSingleDisplay}
+                                onChange={(e) => setMetaSingleDisplay(e.target.value)}
+                                style={{flex:"1 1 10em", minWidth:"8em"}}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && metaSingleOrig.trim() && metaSingleDisplay.trim()) {
+                                    addMetadataRows([{original: metaSingleOrig.trim(), display_name: metaSingleDisplay.trim()}]);
+                                    setMetaSingleOrig("");
+                                    setMetaSingleDisplay("");
+                                  }
+                                }}
+                              />
+                              <button
+                                disabled={!metaSingleOrig.trim() || !metaSingleDisplay.trim()}
+                                onClick={() => {
+                                  addMetadataRows([{original: metaSingleOrig.trim(), display_name: metaSingleDisplay.trim()}]);
+                                  setMetaSingleOrig("");
+                                  setMetaSingleDisplay("");
+                                }}
+                              >Add</button>
+                            </div>
+                          </div>
+
+                          <div style={{marginTop:"0.5em"}}>
+                            <button
+                              className="ghost action"
+                              style={{fontSize:"0.85em"}}
+                              onClick={() => setMetaBulkOpen(!metaBulkOpen)}
+                            >
+                              {metaBulkOpen ? "Hide bulk paste" : "Bulk paste (tab-delimited)"}
+                            </button>
+                            {metaBulkOpen && (
+                              <div style={{marginTop:"0.3em"}}>
+                                <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.2em"}}>
+                                  Paste two tab-separated columns, one row per line: <code>original_name{"\\t"}display_label</code>. Existing originals will be overwritten.
+                                </div>
+                                <textarea
+                                  rows={6}
+                                  style={{width:"100%", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
+                                  placeholder={"99-0100\tBovine TB isolate A\n2023-0055\tBrucella field strain"}
+                                  value={metaBulkText}
+                                  onChange={(e) => setMetaBulkText(e.target.value)}
+                                />
+                                <button
+                                  style={{marginTop:"0.3em"}}
+                                  disabled={!metaBulkText.trim()}
+                                  onClick={() => {
+                                    const rows = metaBulkText
+                                      .split("\n")
+                                      .map((line) => line.split("\t").map((s) => s.trim()))
+                                      .filter((parts) => parts.length >= 2 && parts[0] && parts[1])
+                                      .map(([original, display_name]) => ({ original, display_name }));
+                                    if (!rows.length) {
+                                      setMetaStatus("No valid rows found — ensure two tab-separated columns.");
+                                      return;
+                                    }
+                                    addMetadataRows(rows);
+                                    setMetaBulkText("");
+                                    setMetaBulkOpen(false);
+                                  }}
+                                >
+                                  Add {metaBulkText.split("\n").filter((l) => l.includes("\t") && l.trim()).length} rows
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          {metaStatus && (
+                            <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{metaStatus}</div>
+                          )}
+                        </div>
+
                         <div className="note" style={{marginTop:"0.8em"}}>
                           <strong>View</strong> opens a formatted, read-only preview in a new tab (cell colors and conditional formatting preserved).
                           <br />
@@ -2732,7 +3144,7 @@ export default function App() {
                         <button
                           className="ghost action"
                           style={{marginTop:"0.4em"}}
-                          onClick={() => loadRefEditorFiles(refEditorRef)}
+                          onClick={() => { loadRefEditorFiles(refEditorRef); loadMetadata(refEditorRef); }}
                         >
                           Refresh file list
                         </button>
@@ -2742,7 +3154,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="block">
-                  <div className="note">Select a reference type on the left to edit its filter and exclusion spreadsheets.</div>
+                  <div className="note">Select a reference type on the left to edit its filter, exclusion, and metadata spreadsheets.</div>
                 </div>
               )}
             </section>
@@ -2762,31 +3174,53 @@ export default function App() {
             <h2>Step 1</h2>
             <div className="block">
               <h3>Reference</h3>
-              <select
-                value={reference}
-                onChange={(e) => setReference(e.target.value)}
-              >
-                <option value="">Select reference</option>
-                <option value="__auto__">Auto-detect (best match)</option>
-                {references.map((r) => (
-                  <option key={r.name} value={r.name}>{r.name}</option>
-                ))}
-              </select>
-              {refLock.references && refLock.references.length > 1 ? (
-                <div className="note error">
-                  Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
-                </div>
-              ) : refLock.references && refLock.references.length === 1 ? (
-                <div className="inline-help">
-                  <span className="muted">Reference detected</span>
+              {projectReference ? (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                   <span
-                    className="help-icon"
-                    data-tooltip={`Detected reference from Step 1: ${refLock.references[0]}. You can override for a new Step 1 run.`}
+                    style={{
+                      padding: "3px 10px",
+                      borderRadius: "10px",
+                      background: "#e8f5e9",
+                      color: "#1b5e20",
+                      fontWeight: 600,
+                      fontSize: "0.9em",
+                    }}
                   >
-                    ?
+                    {projectReference}
+                  </span>
+                  <span className="muted" style={{ fontSize: "0.8em" }}>
+                    (set at project level — change in Projects panel)
                   </span>
                 </div>
-              ) : null}
+              ) : (
+                <>
+                  <select
+                    value={reference}
+                    onChange={(e) => setReference(e.target.value)}
+                  >
+                    <option value="">Select reference</option>
+                    <option value="__auto__">Auto-detect (best match)</option>
+                    {references.map((r) => (
+                      <option key={r.name} value={r.name}>{r.name}</option>
+                    ))}
+                  </select>
+                  {refLock.references && refLock.references.length > 1 ? (
+                    <div className="note error">
+                      Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+                    </div>
+                  ) : refLock.references && refLock.references.length === 1 ? (
+                    <div className="inline-help">
+                      <span className="muted">Reference detected</span>
+                      <span
+                        className="help-icon"
+                        data-tooltip={`Detected reference from Step 1: ${refLock.references[0]}. You can override for a new Step 1 run.`}
+                      >
+                        ?
+                      </span>
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
             <div className="block">
               <label className="checkbox">
@@ -2817,7 +3251,7 @@ export default function App() {
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || !reference || step1JobStatus === "running"}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}
                   title={step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish" : ""}
                 >
                   {step1JobStatus === "running" ? "Running…" : "Run"}
@@ -2846,6 +3280,75 @@ export default function App() {
                 <div className="note">No Step 1 samples yet.</div>
               )}
               {step1Status.length > 6 ? <div className="scroll-note">Scroll for more samples.</div> : null}
+              {step1Status.length > 0 ? (
+                <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
+                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
+                    <span><strong>{vcfsFolderName || `${selectedProject}_VCFs`}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
+                    <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect</button>
+                  </div>
+                  {vcfsCollectResult ? (
+                    <div className="note" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
+                      {[
+                        vcfsCollectResult.auto_added.length ? `+${vcfsCollectResult.auto_added.length} added` : null,
+                        vcfsCollectResult.force_added.length ? `+${vcfsCollectResult.force_added.length} force-added` : null,
+                        vcfsCollectResult.already_present.length ? `${vcfsCollectResult.already_present.length} already present` : null,
+                      ].filter(Boolean).join(" • ") || "Up to date"}
+                    </div>
+                  ) : null}
+                  {(() => {
+                    const notCollected = step1Status.filter(s =>
+                      !s.in_vcfs_folder &&
+                      s.status !== "not_started" &&
+                      s.status !== "running"
+                    );
+                    if (!notCollected.length) return null;
+                    const hasAnyVcf = notCollected.some(s => s.has_zc_vcf);
+                    return (
+                      <details style={{marginTop:"0.3em"}}>
+                        <summary style={{cursor:"pointer", fontSize:"0.82em", color:"var(--muted,#666)"}}>
+                          {notCollected.length} sample{notCollected.length !== 1 ? "s" : ""} not in _VCFs
+                          {hasAnyVcf ? " — check to add" : ""}
+                        </summary>
+                        <ul style={{listStyle:"none", padding:0, margin:"0.3em 0 0.2em 0"}}>
+                          {notCollected.map(s => (
+                            <li key={s.sample} style={{display:"flex", gap:"0.3em", alignItems:"center", fontSize:"0.82em", marginBottom:"0.15em"}}>
+                              <input
+                                type="checkbox"
+                                checked={vcfsForceSet.has(s.sample)}
+                                disabled={!s.has_zc_vcf}
+                                onChange={(e) => {
+                                  setVcfsForceSet(prev => {
+                                    const next = new Set(prev);
+                                    if (e.target.checked) next.add(s.sample);
+                                    else next.delete(s.sample);
+                                    return next;
+                                  });
+                                }}
+                                style={{width:"auto"}}
+                              />
+                              <span className={`badge ${s.status}`} style={{fontSize:"0.75em"}}>{s.status.replace("_"," ")}</span>
+                              <span style={{opacity: s.has_zc_vcf ? 1 : 0.5}}>{s.sample}</span>
+                              {!s.has_zc_vcf ? <span className="muted" style={{fontSize:"0.78em"}}>(no VCF)</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                        {hasAnyVcf ? (
+                          <button
+                            style={{fontSize:"0.82em"}}
+                            disabled={vcfsForceSet.size === 0}
+                            onClick={() => {
+                              collectVcfs(Array.from(vcfsForceSet));
+                              setVcfsForceSet(new Set());
+                            }}
+                          >
+                            Add {vcfsForceSet.size > 0 ? `${vcfsForceSet.size} ` : ""}checked to _VCFs
+                          </button>
+                        ) : null}
+                      </details>
+                    );
+                  })()}
+                </div>
+              ) : null}
               {step1LogSample ? (
                 <div className="log-viewer">
                   <div className="log-title">
@@ -3388,27 +3891,56 @@ export default function App() {
                   VCF Databases (Step 2)
                   <span
                     className="help-icon"
-                    data-tooltip="Select the reference type, then add one or more VCF database folders. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
+                    data-tooltip="VCF database folders for the project's reference. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
                   >
                     ?
                   </span>
                 </h3>
-                <select
-                  value={importReference}
-                  onChange={(e) => setImportReference(e.target.value)}
-                >
-                  <option value="">Select reference</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
-                </select>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "6px" }}>
+                  <span className="muted" style={{ fontSize: "0.85em" }}>Reference:</span>
+                  {importReference ? (
+                    <span
+                      style={{
+                        padding: "2px 8px",
+                        borderRadius: "10px",
+                        background: "#e8f5e9",
+                        color: "#1b5e20",
+                        fontWeight: 600,
+                        fontSize: "0.85em",
+                      }}
+                    >
+                      {importReference}
+                    </span>
+                  ) : (
+                    <span className="muted" style={{ fontSize: "0.85em" }}>
+                      not set — select a reference in the Projects panel
+                    </span>
+                  )}
+                </div>
+                {selectedProject && vcfsFolderPath ? (
+                  <div style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"6px", fontSize:"12px", marginBottom:"6px"}}>
+                    <input
+                      type="checkbox"
+                      checked={vcfsIncludeFolder}
+                      onChange={(e) => setVcfsIncludeFolder(e.target.checked)}
+                      style={{width:"auto"}}
+                    />
+                    <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontWeight:600}} title={vcfsFolderPath}>
+                      {vcfsFolderName}
+                    </span>
+                    <span className="muted" style={{fontSize:"11px", whiteSpace:"nowrap"}}>(n={vcfsFolderCount})</span>
+                    <span style={{fontSize:"10px", padding:"1px 6px", borderRadius:"6px", background:"var(--accent)", color:"#f7faf9", textTransform:"uppercase", letterSpacing:"0.04em"}}>
+                      this project
+                    </span>
+                  </div>
+                ) : null}
                 <div style={{marginTop:"8px"}}>
                   {(() => {
                     const visible = importReference
                       ? vcfDbFolders.filter((f) => (f.reference || "") === importReference)
                       : [];
                     if (!importReference) {
-                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Select a reference above to see matching VCF databases.</div>;
+                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Set the project reference in the Projects panel to see matching VCF databases.</div>;
                     }
                     if (!visible.length) {
                       return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF databases configured for {importReference} yet.</div>;
@@ -3490,7 +4022,7 @@ export default function App() {
                           className="ghost action"
                           style={{fontSize:"12px"}}
                           disabled={!importReference}
-                          title={importReference ? "Browse for a VCF folder" : "Select a reference first"}
+                          title={importReference ? "Browse for a VCF folder" : "Set the project reference first"}
                           onClick={async () => {
                             const picked = await window.vsnp.selectPath({
                               kind: "folder",
@@ -3509,7 +4041,7 @@ export default function App() {
                         value={manualVcfFolderPath}
                         onChange={(e) => setManualVcfFolderPath(e.target.value)}
                         disabled={!importReference}
-                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Select a reference first"}
+                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Set the project reference first"}
                         title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
                         style={{flex:1, fontSize:"12px"}}
                         onKeyDown={(e) => {
@@ -3615,6 +4147,68 @@ export default function App() {
                   </button>
                 ) : null}
                 {importStatus ? <div className="note">{importStatus}</div> : null}
+                {vcfSourceSamples.length > 0 && (
+                  <div style={{marginTop:"6px"}}>
+                    <button
+                      className="ghost action"
+                      onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); }}
+                      style={{fontSize:"0.85em"}}
+                    >
+                      {vcfSourceOpen ? "▲ Hide" : "▼ Browse"} {vcfSourceSamples.length} samples
+                    </button>
+                    {vcfSourceOpen && (
+                      <div style={{marginTop:"6px", border:"1px solid var(--border)", borderRadius:"4px", overflow:"hidden"}}>
+                        <div style={{padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                          <input
+                            type="text"
+                            placeholder="Filter samples…"
+                            value={vcfSourceFilter}
+                            onChange={e => setVcfSourceFilter(e.target.value)}
+                            style={{width:"100%", boxSizing:"border-box", fontSize:"0.85em", padding:"3px 6px"}}
+                            autoFocus
+                          />
+                        </div>
+                        <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
+                          {(() => {
+                            const q = vcfSourceFilter.trim().toLowerCase();
+                            const filtered = q
+                              ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
+                              : vcfSourceSamples;
+                            return (
+                              <>
+                                <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                                  {filtered.length === vcfSourceSamples.length
+                                    ? `${filtered.length} samples`
+                                    : `${filtered.length} of ${vcfSourceSamples.length} samples`}
+                                </div>
+                                {filtered.map(s => (
+                                  <div key={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)"}}>
+                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={s.filename}>{s.sample}</span>
+                                    {s.source_type && (
+                                      <span style={{
+                                        flexShrink:0,
+                                        fontSize:"0.8em",
+                                        padding:"0 4px",
+                                        borderRadius:"3px",
+                                        background: s.source_type === "step1" ? "var(--accent-subtle, #dff0d8)" : "var(--info-subtle, #d9edf7)",
+                                        color: s.source_type === "step1" ? "var(--accent-dark, #3c763d)" : "var(--info-dark, #31708f)",
+                                      }}>
+                                        {s.source_type === "step1" ? "step1" : "ref db"}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                                {filtered.length === 0 && (
+                                  <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>No samples match</div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {importProjectLock && selectedProject !== importProjectLock ? (
                   <div className="note error">
                     VCF set built for {importProjectLock}. Switch back to run Step 2 there.
@@ -3709,12 +4303,32 @@ export default function App() {
               {step2Mode === "step1" ? (
                 <button onClick={step2Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
               ) : null}
+                {(reference || projectReference) ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
+                    <span className="muted" style={{ fontSize: "0.8em" }}>Reference:</span>
+                    <span
+                      style={{
+                        padding: "2px 8px",
+                        borderRadius: "10px",
+                        background: "#e8f5e9",
+                        color: "#1b5e20",
+                        fontWeight: 600,
+                        fontSize: "0.85em",
+                      }}
+                    >
+                      {reference || projectReference}
+                    </span>
+                    {projectReference && !reference ? (
+                      <span className="muted" style={{ fontSize: "0.75em" }}>(from project)</span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <button
                   onClick={step2Run}
                   disabled={
                     !selectedProject ||
                     !settingsReady ||
-                    !reference ||
+                    (!reference && !projectReference) ||
                     (step2Mode === "custom"
                       ? step2VcfCount === 0
                       : selected && selected.step2_vcfs === 0) ||
@@ -3750,6 +4364,24 @@ export default function App() {
                 <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
               </div>
             </div>
+            {step2Runs.length > 0 ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                <label style={{ fontWeight: 600, whiteSpace: "nowrap", fontSize: "0.9em" }}>Comparison:</label>
+                <select
+                  value={step2SelectedRun || ""}
+                  onChange={(e) => setStep2SelectedRun(e.target.value || null)}
+                  style={{ flex: 1 }}
+                >
+                  {step2Runs.map((r) => (
+                    <option key={r.run_id} value={r.run_id}>
+                      {r.run_id === "legacy" ? "Legacy (flat)" : r.run_id.replace(/_/g, " ").replace("T", " ")}
+                      {r.status === "ok" ? " ✓" : r.status === "failed" ? " ✗" : r.status === "running" ? " …" : ""}
+                      {r.group_count > 0 ? ` (${r.group_count} groups)` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
             {step2EditedCount > 0 && settings.projects_root && selectedProject ? (
               <div className="note">
                 Edited samples included in this run.{" "}

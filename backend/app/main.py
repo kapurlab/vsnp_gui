@@ -19,6 +19,7 @@ import logging
 import shlex
 import re
 import hashlib
+import tempfile
 
 from app.config import load_config, save_config
 from app.jobs import JobManager
@@ -100,6 +101,20 @@ def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
         if isinstance(row, dict):
             row["_qc_verdict"] = qc_verdict.compute_verdict(row, thresholds)
     return rows
+
+
+def _project_reference(project_dir: Path) -> str:
+    """Return the project's locked reference, or "" if not yet set.
+    Reads project.json["reference"] only — callers that want the inferred
+    value should call the reference_lock endpoint and let it write it back."""
+    meta_path = project_dir / "project.json"
+    if not meta_path.exists():
+        return ""
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return (meta.get("reference") or "").strip()
 
 
 def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
@@ -655,6 +670,7 @@ class ConfigUpdate(BaseModel):
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     scope: Optional[str] = None  # "personal" (default) or "shared"
+    reference: Optional[str] = None
 
 
 class SraRequest(BaseModel):
@@ -980,7 +996,108 @@ def ref_files(ref_name: str):
         files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "define_filter"})
     for f in remove_from:
         files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "remove_from_analysis"})
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    for f in meta_files:
+        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "metadata"})
     return {"ref_name": ref_name, "ref_path": str(ref_dir), "files": files}
+
+
+def _read_metadata_xlsx(cfg: Dict, meta_path: Path) -> List[Dict[str, str]]:
+    code = (
+        "import pandas as pd, json, sys; "
+        "df = pd.read_excel(sys.argv[1], header=None, usecols=[0,1], names=['original','display_name']); "
+        "df = df.dropna(subset=['original']); "
+        "df['original'] = df['original'].astype(str); "
+        "df['display_name'] = df['display_name'].astype(str); "
+        "print(json.dumps(df.to_dict(orient='records')))"
+    )
+    result = subprocess.run(conda_python_cmd(cfg, code, [str(meta_path)]), text=True, capture_output=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        return []
+
+
+@app.get("/api/references/{ref_name}/metadata")
+def ref_get_metadata(ref_name: str):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    if not meta_files:
+        return {"rows": [], "filename": None, "exists": False}
+    meta_path = meta_files[0]
+    rows = _read_metadata_xlsx(cfg, meta_path)
+    return {"rows": rows, "filename": meta_path.name, "exists": True}
+
+
+class MetadataAddRequest(BaseModel):
+    rows: List[Dict[str, str]]
+
+
+@app.post("/api/references/{ref_name}/metadata/add-rows")
+def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    refs = list_references(vsnp3_path)
+    ref = next((r for r in refs if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    ref_dir = Path(ref["path"])
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No rows provided")
+    for row in payload.rows:
+        if not str(row.get("original", "")).strip():
+            raise HTTPException(status_code=400, detail="Each row requires a non-empty 'original' field")
+        if not str(row.get("display_name", "")).strip():
+            raise HTTPException(status_code=400, detail="Each row requires a non-empty 'display_name' field")
+
+    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
+    meta_path = meta_files[0] if meta_files else ref_dir / f"{ref_name}_metadata.xlsx"
+
+    existing_rows: List[Dict[str, str]] = []
+    if meta_path.exists():
+        existing_rows = _read_metadata_xlsx(cfg, meta_path)
+
+    orig_to_idx = {r["original"]: i for i, r in enumerate(existing_rows)}
+    added, updated = 0, 0
+    for row in payload.rows:
+        orig = str(row["original"]).strip()
+        disp = str(row["display_name"]).strip()
+        if orig in orig_to_idx:
+            existing_rows[orig_to_idx[orig]]["display_name"] = disp
+            updated += 1
+        else:
+            existing_rows.append({"original": orig, "display_name": disp})
+            orig_to_idx[orig] = len(existing_rows) - 1
+            added += 1
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
+        json.dump(existing_rows, tf)
+        tmp_json = tf.name
+    try:
+        code = (
+            "import pandas as pd, json, sys; "
+            "rows = json.load(open(sys.argv[2])); "
+            "df = pd.DataFrame([[r['original'], r['display_name']] for r in rows]); "
+            "df.to_excel(sys.argv[1], index=False, header=False)"
+        )
+        result = subprocess.run(
+            conda_python_cmd(cfg, code, [str(meta_path), tmp_json]),
+            text=True, capture_output=True
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Failed to write metadata: {result.stderr.strip()}")
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+
+    return {"filename": meta_path.name, "rows_total": len(existing_rows), "added": added, "updated": updated}
 
 
 class RefCreateFileRequest(BaseModel):
@@ -1259,13 +1376,14 @@ def projects():
 def project_create(payload: ProjectCreate):
     cfg = load_config()
     scope = getattr(payload, "scope", None) or SCOPE_PERSONAL
+    reference = (payload.reference or "").strip()
     try:
-        project_dir = create_project(_project_roots(cfg), payload.name, scope=scope)
+        project_dir = create_project(_project_roots(cfg), payload.name, scope=scope, reference=reference)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     # Return the actual (normalized) directory name so the frontend can
     # update its state if the name differs from what the user typed.
-    return {"path": str(project_dir), "name": project_dir.name, "scope": scope}
+    return {"path": str(project_dir), "name": project_dir.name, "scope": scope, "reference": reference}
 
 
 @app.post("/api/projects/{project}/archive")
@@ -1290,6 +1408,26 @@ def project_delete(project: str):
     if deleted is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"deleted": project}
+
+
+class SetReferenceRequest(BaseModel):
+    reference: str
+
+
+@app.post("/api/projects/{project}/set_reference")
+def project_set_reference(project: str, payload: SetReferenceRequest):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    reference = (payload.reference or "").strip()
+    meta = update_project_meta(project_dir, {"reference": reference} if reference else {})
+    if not reference:
+        # Explicitly clearing — remove the key
+        meta.pop("reference", None)
+        with open(project_dir / "project.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+    return {"reference": reference, "name": project}
 
 
 @app.post("/api/projects/{project}/link-local")
@@ -1379,7 +1517,9 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     on_conflict = (payload.on_conflict or "skip").lower()
 
     imported = 0
-    skipped = 0
+    already_present = 0  # already in vcf_source, not re-copied (on_conflict=skip)
+    ref_skipped = 0      # excluded: reference mismatch or unknown ref
+    dedup_skipped = 0    # excluded: older duplicate sample name (dedupe=true)
     renamed = 0
     mismatched = []
     seen_samples = {}
@@ -1393,25 +1533,25 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
                 mismatched.append({"path": str(vcf), "reference": vcf_ref})
                 if not payload.allow_mismatch:
-                    skipped += 1
+                    ref_skipped += 1
                     continue
             if not vcf_ref:
                 mismatched.append({"path": str(vcf), "reference": "unknown"})
                 if not payload.allow_mismatch:
-                    skipped += 1
+                    ref_skipped += 1
                     continue
             if payload.dedupe:
                 sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
                 if sample in seen_samples:
                     prev = seen_samples[sample]
                     if vcf.stat().st_mtime <= prev.stat().st_mtime:
-                        skipped += 1
+                        dedup_skipped += 1
                         continue
                 seen_samples[sample] = vcf
             target = vcf_source_dir / vcf.name
             if target.exists():
                 if on_conflict == "skip":
-                    skipped += 1
+                    already_present += 1
                     continue
                 if on_conflict == "rename":
                     if payload.prefix_duplicates:
@@ -1449,7 +1589,10 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     return {
         "imported": imported,
-        "skipped": skipped,
+        "already_present": already_present,
+        "ref_skipped": ref_skipped,
+        "dedup_skipped": dedup_skipped,
+        "skipped": ref_skipped + dedup_skipped,  # backward compat
         "renamed": renamed,
         "detected_reference": detected_ref or payload.reference or "",
         "mismatched": len(mismatched),
@@ -1712,6 +1855,9 @@ def step1_run(project: str, payload: Step1Request):
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
+    # Auto-populate reference from project.json if not supplied in payload
+    if not payload.reference:
+        payload.reference = _project_reference(project_dir)
     ref_arg = f"-t {payload.reference}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
@@ -1880,6 +2026,13 @@ def step1_status(project: str):
     job = job_manager.get_job(job_id) if job_id else None
     job_status = job["status"] if job else "unknown"
 
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    in_vcfs_folder: set = set()
+    if vcfs_dir.exists():
+        for vf in vcfs_dir.glob("*_zc.vcf*"):
+            stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            in_vcfs_folder.add(stem)
+
     statuses = []
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir():
@@ -1893,6 +2046,7 @@ def step1_status(project: str):
         exit_code_path = sample_dir / ".provenance" / "exit_code"
         vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
         nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+        zc_vcf = next(sample_dir.glob("**/*_zc.vcf"), None) or next(sample_dir.glob("**/*_zc.vcf.gz"), None)
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
@@ -1927,6 +2081,8 @@ def step1_status(project: str):
             "log_path": str(log_path),
             "has_log": log_path.exists(),
             "has_outputs": bool(vcf and nodup),
+            "has_zc_vcf": bool(zc_vcf),
+            "in_vcfs_folder": sample in in_vcfs_folder,
         })
     return {"job_status": job_status, "samples": statuses}
 
@@ -1944,6 +2100,97 @@ def step1_log(project: str, sample: str):
     except OSError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"sample": sample, "log": "".join(lines)}
+
+
+@app.get("/api/projects/{project}/vcfs")
+def project_vcfs_list(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir.mkdir(parents=True, exist_ok=True)
+    vcfs = sorted([*vcfs_dir.glob("*_zc.vcf"), *vcfs_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name)
+    samples = []
+    for v in vcfs:
+        stem = v.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        samples.append({"filename": v.name, "sample": stem})
+    return {"count": len(samples), "path": str(vcfs_dir), "folder_name": vcfs_dir.name, "samples": samples}
+
+
+class VcfsCollectRequest(BaseModel):
+    force_samples: List[str] = []
+
+
+@app.post("/api/projects/{project}/vcfs/collect")
+def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
+    """Scan step1/ for passing _zc.vcf files and symlink them into <project>_VCFs/.
+    Samples in force_samples are included even if they did not pass Step 1."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    step1_dir = project_dir / "step1"
+    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir.mkdir(parents=True, exist_ok=True)
+
+    force_set = set(payload.force_samples or [])
+    auto_added: List[str] = []
+    force_added: List[str] = []
+    already_present: List[str] = []
+    no_vcf: List[str] = []
+
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
+            continue
+        sample = sample_dir.name
+
+        # Determine pass/fail from provenance sentinel, fall back to output presence
+        exit_code_path = sample_dir / ".provenance" / "exit_code"
+        passed = False
+        if exit_code_path.exists():
+            try:
+                passed = exit_code_path.read_text(encoding="utf-8").strip() == "0"
+            except OSError:
+                pass
+        else:
+            vcf_out = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
+            nodup_out = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+            passed = bool(vcf_out and nodup_out)
+
+        if not passed and sample not in force_set:
+            continue
+
+        # Find the latest _zc.vcf (prefer uncompressed; fall back to .gz)
+        candidates = sorted(sample_dir.glob("**/*_zc.vcf"), key=lambda p: p.stat().st_mtime)
+        candidates_gz = sorted(sample_dir.glob("**/*_zc.vcf.gz"), key=lambda p: p.stat().st_mtime)
+        all_candidates = candidates + candidates_gz
+        if not all_candidates:
+            if sample in force_set:
+                no_vcf.append(sample)
+            continue
+
+        source_vcf = all_candidates[-1].resolve()
+        target = vcfs_dir / source_vcf.name
+
+        if target.exists():
+            already_present.append(sample)
+            continue
+
+        target.symlink_to(source_vcf)
+        if sample in force_set and not passed:
+            force_added.append(sample)
+        else:
+            auto_added.append(sample)
+
+    total = len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
+    return {
+        "auto_added": auto_added,
+        "force_added": force_added,
+        "already_present": already_present,
+        "no_vcf": no_vcf,
+        "total": total,
+    }
 
 
 @app.post("/api/projects/{project}/step2/setup")
@@ -2028,6 +2275,9 @@ def step2_run(project: str, payload: Step2Request):
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
+    # Auto-populate reference: project.json first, then reference_lock inference
+    if not payload.reference:
+        payload.reference = _project_reference(project_dir)
     refs = reference_lock(project)["references"]
     if len(refs) > 1:
         raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(refs)}")
@@ -2038,19 +2288,40 @@ def step2_run(project: str, payload: Step2Request):
             raise HTTPException(status_code=400, detail="Reference type is required for Step 2")
     if len(refs) == 1 and payload.reference != refs[0]:
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
+    # Store the resolved reference back into project.json
+    update_project_meta(project_dir, {"reference": payload.reference})
+
     step2_dir = project_dir / "step2"
+    step2_dir.mkdir(parents=True, exist_ok=True)
+
+    # Concurrency guard: one step2 run at a time per project
+    job_id_path = step2_dir / ".step2_job_id"
+    if job_id_path.exists():
+        prior_id = job_id_path.read_text(encoding="utf-8").strip()
+        if prior_id:
+            prior_job = job_manager.get_job(prior_id)
+            if prior_job and prior_job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Step 2 is already running for this project (job {prior_id}). "
+                        "Wait for it to finish before starting a new run."
+                    ),
+                )
+
     vcf_source_dir = step2_dir / "vcf_source"
-    starting_files = step2_dir / "vcf_starting_files"
-    if starting_files.exists():
-        shutil.rmtree(starting_files)
-    # Clean previous group output folders (keep vcf_source)
-    for child in step2_dir.iterdir():
-        if child.is_dir() and child.name != "vcf_source":
-            shutil.rmtree(child)
+
+    # Timestamped run directory — each run gets its own subdirectory so
+    # multiple comparisons accumulate without overwriting previous outputs.
+    from datetime import datetime as _dt
+    run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = step2_dir / "runs" / run_ts
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     remove_file = step2_dir / "remove_from_analysis.xlsx"
     remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
-    _write_step2_edit_summary(step2_dir, _edited_samples_in_dir(vcf_source_dir))
-    _write_figtree_groups(step2_dir, vcf_source_dir, cfg, payload.label_style or "short")
+    _write_step2_edit_summary(run_dir, _edited_samples_in_dir(vcf_source_dir))
+    _write_figtree_groups(run_dir, vcf_source_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -2080,7 +2351,7 @@ def step2_run(project: str, payload: Step2Request):
     flags_str = " ".join(step2_flags)
     cmd = f"vsnp3_step2.py -wd {shlex.quote(str(vcf_source_dir))} {flags_str} -t {payload.reference}{remove_arg}"
     label_style = payload.label_style or "short"
-    label_script = _build_tree_label_script(step2_dir, cfg, label_style)
+    label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:
         cmd = f"{cmd} && python {shlex.quote(str(label_script))}"
     step2_env = build_env(cfg)
@@ -2100,6 +2371,7 @@ def step2_run(project: str, payload: Step2Request):
             ood_session_id=_ood_session_id(),
             is_shared=_is_shared_project(cfg, project_dir),
             resolved_vcf_db_folders=_resolved_vcf_db_folders(cfg),
+            step2_run_dir=run_dir,
         )
     except provenance_writer.Step2DispatchBlocked as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -2112,17 +2384,20 @@ def step2_run(project: str, payload: Step2Request):
     def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
         provenance_writer.finalize_step2(
             project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
+            step2_run_dir=run_dir,
         )
-
 
     job_id = job_manager.start_job(
         name="step2",
         command=wrap_cmd(cfg, cmd),
-        cwd=step2_dir,
+        cwd=run_dir,
         env=step2_env,
         finalize_callback=prov_finalize_cb,
     )
-    return {"job_id": job_id}
+    # Record the active job and the current run so the frontend can auto-select it
+    job_id_path.write_text(job_id, encoding="utf-8")
+    (step2_dir / ".current_run").write_text(run_ts, encoding="utf-8")
+    return {"job_id": job_id, "run_id": run_ts}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -2648,6 +2923,106 @@ def step2_vcf_count(project: str):
     }
 
 
+@app.get("/api/projects/{project}/step2/vcf_source/samples")
+def step2_vcf_source_samples(project: str):
+    """Return all sample names in the vcf_source directory, parsed from the manifest."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    if not vcf_source_dir.exists():
+        return []
+    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
+    samples = []
+    if manifest_path.exists():
+        with manifest_path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            seen: set = set()
+            for row in reader:
+                fn = row.get("filename", "").strip()
+                if not fn or fn in seen:
+                    continue
+                seen.add(fn)
+                samples.append({
+                    "filename": fn,
+                    "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+                    "source_type": row.get("source_type", ""),
+                    "source_path": row.get("source_path", ""),
+                })
+    else:
+        for vcf in sorted(vcf_source_dir.glob("*.vcf")) + sorted(vcf_source_dir.glob("*.vcf.gz")):
+            fn = vcf.name
+            samples.append({
+                "filename": fn,
+                "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+                "source_type": "",
+                "source_path": str(vcf),
+            })
+    samples.sort(key=lambda x: x["sample"].lower())
+    return samples
+
+
+@app.get("/api/projects/{project}/step2/runs")
+def step2_runs_list(project: str):
+    """List all timestamped step2 runs newest-first. Falls back to a synthetic
+    'legacy' entry when the flat layout is present but runs/ does not exist."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        return []
+    runs_dir = step2_dir / "runs"
+    results = []
+    if runs_dir.is_dir():
+        for run_entry in sorted(runs_dir.iterdir(), reverse=True):
+            if not run_entry.is_dir():
+                continue
+            meta_path = run_entry / "run_metadata.json"
+            started_at = None
+            status = "unknown"
+            reference = ""
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    started_at = meta.get("started_at")
+                    status = meta.get("status", "running")
+                    reference = (
+                        meta.get("dispatch_state", {})
+                        .get("reference", {})
+                        .get("name", "")
+                    )
+                except (json.JSONDecodeError, OSError):
+                    pass
+            else:
+                # run_metadata.json missing → job is still running or very new
+                status = "running"
+            group_count = sum(1 for d in run_entry.iterdir() if d.is_dir() and not d.name.startswith("_"))
+            results.append({
+                "run_id": run_entry.name,
+                "started_at": started_at,
+                "status": status,
+                "reference": reference,
+                "group_count": group_count,
+            })
+    else:
+        # Legacy flat layout: any group dirs directly under step2/
+        has_groups = any(
+            d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
+            for d in step2_dir.iterdir()
+        )
+        if has_groups:
+            results.append({
+                "run_id": "legacy",
+                "started_at": None,
+                "status": "ok",
+                "reference": "",
+                "group_count": sum(
+                    1 for d in step2_dir.iterdir()
+                    if d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
+                ),
+            })
+    return results
+
+
 @app.post("/api/projects/{project}/qc_exclude")
 def qc_exclude(project: str, payload: ExcludeRequest):
     cfg = load_config()
@@ -2881,13 +3256,47 @@ def step1_edits(project: str):
 
 
 
+def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
+    """Resolve which directory to read step2 outputs from.
+
+    Priority:
+    1. Explicit run_id → step2/runs/{run_id}/
+    2. .current_run sentinel → step2/runs/{value}/
+    3. Latest entry in step2/runs/ by directory name (lexicographic = chronological)
+    4. Legacy flat layout: step2/ itself
+    """
+    runs_dir = step2_dir / "runs"
+    if run_id and run_id != "legacy":
+        candidate = runs_dir / run_id
+        if candidate.is_dir():
+            return candidate
+    if run_id == "legacy":
+        return step2_dir
+    current_file = step2_dir / ".current_run"
+    if current_file.exists():
+        current_ts = current_file.read_text(encoding="utf-8").strip()
+        candidate = runs_dir / current_ts
+        if candidate.is_dir():
+            return candidate
+    if runs_dir.is_dir():
+        entries = sorted(
+            (d for d in runs_dir.iterdir() if d.is_dir()),
+            key=lambda d: d.name,
+            reverse=True,
+        )
+        if entries:
+            return entries[0]
+    return step2_dir  # legacy flat
+
+
 @app.get("/api/projects/{project}/step2_outputs")
-def step2_outputs(project: str):
+def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
 
     def _safe_name(value: str) -> str:
         return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
@@ -2910,7 +3319,7 @@ def step2_outputs(project: str):
         return count
 
     top = []
-    html_files = sorted(step2_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
+    html_files = sorted(output_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
     if html_files:
         latest_html = html_files[-1]
         top.append({
@@ -2919,14 +3328,14 @@ def step2_outputs(project: str):
             "type": "html",
             "download_name": f"{_safe_name(project)}__{latest_html.name}",
         })
-    for f in step2_dir.glob("*.zip"):
+    for f in output_dir.glob("*.zip"):
         top.append({
             "label": f.name,
             "path": str(f),
             "type": "zip",
             "download_name": f"{_safe_name(project)}__{f.name}",
         })
-    mismatch_report = step2_dir / "mismatch_report.csv"
+    mismatch_report = output_dir / "mismatch_report.csv"
     if mismatch_report.exists():
         top.append({
             "label": mismatch_report.name,
@@ -2937,10 +3346,12 @@ def step2_outputs(project: str):
     top.sort(key=lambda x: x["label"])
 
     groups = []
-    for d in sorted(step2_dir.iterdir()):
+    for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name == "vcf_source":
+        if d.name in ("vcf_source", "runs", "_provenance"):
+            continue
+        if d.name.startswith("."):
             continue
         fasta_path = _find_group_fasta(d)
         fasta_count = _count_fasta_sequences(fasta_path)
@@ -2985,20 +3396,23 @@ def step2_outputs(project: str):
                 "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
                 "posthoc_sequence_count": fasta_count,
             })
-    return {"top": top, "groups": groups}
+    return {"top": top, "groups": groups, "run_id": output_dir.name if output_dir != step2_dir else "legacy"}
 
 
 @app.get("/api/projects/{project}/step2/trees")
-def step2_trees(project: str):
+def step2_trees(project: str, run_id: Optional[str] = Query(None)):
     """List the latest .tre file per group under step2/."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         raise HTTPException(status_code=404, detail="Step2 directory not found")
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
     trees = []
-    for d in sorted(step2_dir.iterdir()):
-        if not d.is_dir() or d.name == "vcf_source":
+    for d in sorted(output_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name in ("vcf_source", "runs", "_provenance") or d.name.startswith("."):
             continue
         tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
         if not tre_files:

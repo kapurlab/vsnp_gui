@@ -271,6 +271,10 @@ After Step 1, "Archive" button per sample compresses or deletes intermediates (`
 
 Bundle a project for off-system handoff. Configurable: with/without raw fastq, with/without intermediates. Writes to `/srv/kapurlab/projects/<name>/exports/` so the user can download or rsync elsewhere.
 
+### T-47 Step 2 auto-refresh polling asymmetry — ⏳
+
+Diagnosed during the `tstuber_2026-05-20` branch review (May 20) but never landed: `App.jsx` step2 polling doesn't guard `step2JobId` changes the way the step1 path does. If a new run is started before the previous interval fully tears down, the old terminal-state handler can fire `loadStep2Runs()` against the *new* job before that job has written its metadata — UI shows stale data. Mirror the step1 pattern: cancel the polling interval when `step2JobId` changes mid-flight. Self-flagged by Tod; small fix, defer until next time someone is in `App.jsx`.
+
 ---
 
 ## Milestone D — Later

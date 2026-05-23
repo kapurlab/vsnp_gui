@@ -124,6 +124,45 @@ def _project_reference(project_dir: Path) -> str:
     return (meta.get("reference") or "").strip()
 
 
+def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str, str]:
+    """Resolve a project's reference fasta + GFF paths for IGV consumption.
+
+    Used by step1_files for imported-VCF samples (those that exist only in
+    step2/vcf_source/, never went through Step 1, so have no alignment dir
+    to crib the reference from).
+
+    Strategy 1 — borrow from any step1 sample that DOES have an alignment
+    dir in this project. Cheap when at least one sample was aligned here.
+
+    Strategy 2 — use project.json's "reference" name to look up the dir
+    under the configured reference roots. Needed for pure-import projects.
+
+    Returns ("", "") when neither strategy finds a fasta — caller should
+    surface that as a friendly error rather than a partial IGV view.
+    """
+    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        for d in sorted(step1_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            fastas = sorted(d.glob("alignment_*/*.fasta"))
+            if fastas:
+                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                return str(fastas[0]), (str(gff) if gff else "")
+    ref_name = _project_reference(project_dir)
+    if ref_name:
+        for root in reference_roots(vsnp3_path):
+            ref_dir = root / ref_name
+            if not ref_dir.is_dir():
+                continue
+            fastas = sorted(ref_dir.glob("*.fasta"))
+            if fastas:
+                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                return str(fastas[0]), (str(gff) if gff else "")
+    return "", ""
+
+
 def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
     """Security check for /serve, /download-file, /posthoc/open: target
     must resolve under any configured projects root."""
@@ -3125,15 +3164,37 @@ def step1_files(project: str, sample: str = Query(...)):
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
-        # Distinguish samples imported as VCFs directly (visible in cascade
-        # tables but never aligned, so no BAM) from genuinely missing samples.
-        # Lets the IGV-launch UI surface a friendly "imported VCF" message
-        # instead of a bare HTTP 404.
-        vcf_source = project_dir / "step2" / "vcf_source"
-        if vcf_source.is_dir():
-            patterns = (f"{sample}_zc.vcf", f"{sample}_zc.vcf.gz", f"{sample}.vcf", f"{sample}.vcf.gz")
-            if any((vcf_source / p).exists() for p in patterns):
-                raise HTTPException(status_code=404, detail="imported_vcf")
+        # Imported-VCF case: sample lives only in step2/vcf_source/ (no Step 1
+        # alignment, so no BAM). Still useful in IGV as a calls-only track —
+        # anchor it to the project's reference so the user can compare the
+        # variant positions against the local cohort.
+        vcf_source_dir = project_dir / "step2" / "vcf_source"
+        imported_vcf = None
+        if vcf_source_dir.is_dir():
+            for suffix in ("_zc.vcf", "_zc.vcf.gz", ".vcf", ".vcf.gz"):
+                cand = vcf_source_dir / f"{sample}{suffix}"
+                if cand.exists():
+                    imported_vcf = cand
+                    break
+        if imported_vcf is not None:
+            ref_fasta, ref_gff = _project_reference_fasta_and_gff(project_dir, cfg)
+            if not ref_fasta:
+                # No way to anchor the VCF — surface as a clearly-distinct error.
+                raise HTTPException(status_code=404, detail="imported_vcf_no_reference")
+            return {
+                "stats": "",
+                "bam": "",
+                "alignment_dir": "",
+                "reference_fasta": ref_fasta,
+                "reference_gff": ref_gff,
+                "annotated_vcf": "",  # imports lack the rich ID-column annotation
+                "sample_dir": str(vcf_source_dir),
+                "source_vcf": str(imported_vcf),
+                "patched_vcf": "",
+                "edit_log": "",
+                "edited": False,
+                "kind": "imported_vcf",
+            }
         raise HTTPException(status_code=404, detail="no_step1")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
@@ -3499,10 +3560,14 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
         )
-    # Build the set of step1 sample names that have a BAM on disk, so the
-    # cascade-table render can grey out "↗ this" links for samples that
-    # exist only as imported VCFs. Cost is one shallow scan of step1/.
+    # Build sets of samples loadable in IGV so the cascade-table render
+    # can correctly enable / grey out the "↗ this" affordance per row:
+    #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
+    #   - samples_with_vcfs: have an imported VCF in step2/vcf_source/
+    #     (calls-only IGV, anchored to the project reference)
+    # A sample qualifies for "↗ this" if it's in either set.
     samples_with_bams: set[str] = set()
+    samples_with_vcfs: set[str] = set()
     step1_dir = project_dir / "step1"
     if step1_dir.is_dir():
         for d in step1_dir.iterdir():
@@ -3518,11 +3583,25 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
                 prefix = d.name.split("_")[0]
                 if prefix and any(d.glob(f"**/{prefix}_nodup.bam")):
                     samples_with_bams.add(prefix)
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    if vcf_source_dir.is_dir():
+        for f in vcf_source_dir.iterdir():
+            if not f.is_file():
+                continue
+            name = f.name
+            # Strip the standard vSNP3 suffixes back to the stem.
+            for suffix in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
+                if name.endswith(suffix):
+                    samples_with_vcfs.add(name[: -len(suffix)])
+                    break
 
     from app import xlsx_html
     try:
         html_page = xlsx_html.xlsx_to_html(
-            target, project=project, samples_with_bams=samples_with_bams
+            target,
+            project=project,
+            samples_with_bams=samples_with_bams,
+            samples_with_vcfs=samples_with_vcfs,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")

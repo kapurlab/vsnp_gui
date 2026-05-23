@@ -125,45 +125,58 @@ def _igv_launch_html(
     this_stem: str,
     all_stems: list[str],
     locus: str,
-    this_has_bam: bool = True,
+    this_loadable: bool = True,
+    this_calls_only: bool = False,
 ) -> str:
     """Build the hover-revealed dual-affordance HTML for a variant cell.
 
     Two small text links — "this" and "all" — open the IgvStandalone viewer
-    page in a new tab (`?view=igv&tracks=…&locus=…`). The URL is constructed
-    relative to the current preview path so it survives the OOD proxy
-    prefix: the preview is served at `/api/projects/{p}/preview-xlsx`, so
-    `../../../` climbs back out to the SPA root regardless of the OOD
-    rnode prefix in front of it (`/rnode/host/port/api/projects/p/...`).
+    page (`?view=igv&tracks=…&locus=…`). The anchor uses
+    ``target="vsnp_igv"`` (a named window, not ``_blank``), so the first
+    click opens a new tab and every subsequent click reuses that same tab
+    — variant-after-variant inspection navigates a single IGV window
+    rather than spawning N tabs.
 
-    When ``this_has_bam`` is False (sample exists in the cascade table but
-    has no Step 1 BAM — typically a directly-imported VCF), the "↗ this"
-    link is rendered as a disabled span instead of a link, since clicking
-    it would land in an empty IGV. "↗ all" remains active — IGV's
-    multi-track loader skips missing samples gracefully and the user gets
-    a clear "imported VCF — no BAM to load" message for each skip.
+    The URL is constructed relative to the current preview path so it
+    survives the OOD proxy prefix: the preview is served at
+    ``/api/projects/{p}/preview-xlsx``, so ``../../../`` climbs back out
+    to the SPA root regardless of the OOD rnode prefix in front of it
+    (``/rnode/host/port/api/projects/p/...``).
+
+    ``this_loadable``: false only when the sample has NEITHER a BAM nor an
+    imported VCF — in that case "↗ this" is rendered as a disabled span
+    because clicking would land in an empty IGV. ``this_calls_only``:
+    true when the sample has an imported VCF but no BAM; the link stays
+    active (calls-only IGV anchored to the project reference) and the
+    tooltip notes the limitation.
     """
     enc_proj = quote(project, safe="")
     enc_locus = quote(locus, safe="")
     all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
     all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
-    if this_has_bam:
+    if this_loadable:
         this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
         this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
+        this_title = (
+            f"Open this sample in IGV at {html.escape(locus)} "
+            "(calls only — no Step 1 BAM, anchored to project reference)"
+            if this_calls_only
+            else f"Open this sample in IGV at {html.escape(locus)}"
+        )
         this_link = (
-            f'<a target="_blank" rel="noopener" href="{html.escape(this_href, quote=True)}" '
-            f'title="Open this sample in IGV at {html.escape(locus)}">↗ this</a>'
+            f'<a target="vsnp_igv" rel="noopener" href="{html.escape(this_href, quote=True)}" '
+            f'title="{this_title}">↗ this</a>'
         )
     else:
         this_link = (
             '<span class="xlsx-igv-launch-disabled" '
-            f'title="No Step 1 BAM for {html.escape(this_stem)} — imported VCF or never aligned. '
-            'Use ↗ all to open the cohort instead.">↗ this</span>'
+            f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
+            'nor imported VCF in step2/vcf_source/. Use ↗ all to open the cohort.">↗ this</span>'
         )
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
         f'{this_link}'
-        f'<a target="_blank" rel="noopener" href="{html.escape(all_href, quote=True)}" '
+        f'<a target="vsnp_igv" rel="noopener" href="{html.escape(all_href, quote=True)}" '
         f'title="Open all samples in IGV at {html.escape(locus)}">↗ all</a>'
         '</span>'
     )
@@ -449,6 +462,7 @@ def xlsx_to_html(
     title: str | None = None,
     project: str | None = None,
     samples_with_bams: set[str] | None = None,
+    samples_with_vcfs: set[str] | None = None,
 ) -> str:
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
@@ -458,9 +472,15 @@ def xlsx_to_html(
     cohort — opening the IgvStandalone viewer at the cell's locus.
 
     ``samples_with_bams`` (optional) is the set of step1 sample names for
-    which a BAM exists on disk. When provided, "↗ this" is rendered as a
-    disabled span for samples not in the set (typically directly-imported
-    VCFs with no alignment) to avoid leading the user into an empty IGV.
+    which a BAM exists on disk.
+
+    ``samples_with_vcfs`` (optional) is the set of sample names that have
+    an imported VCF in ``step2/vcf_source/`` (no BAM, calls-only IGV).
+
+    "↗ this" is enabled if the sample is in EITHER set; calls-only mode is
+    indicated in the tooltip when only the VCF is present. It's rendered
+    as a disabled span only when the sample is in neither set (genuinely
+    nothing to load).
     """
     xlsx_path = Path(xlsx_path)
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
@@ -569,16 +589,21 @@ def xlsx_to_html(
                 and any("background-color" in p for p in inline_parts)
             ):
                 row_stem = vtable["samples"][cell.row]
-                this_has_bam = (
-                    samples_with_bams is None
-                    or row_stem in samples_with_bams
-                )
+                has_bam = samples_with_bams is None or row_stem in samples_with_bams
+                has_vcf = samples_with_vcfs is not None and row_stem in samples_with_vcfs
+                # Loadable if either source is present (default-loadable when
+                # caller didn't supply sets).
+                this_loadable = (
+                    samples_with_bams is None and samples_with_vcfs is None
+                ) or has_bam or has_vcf
+                this_calls_only = (not has_bam) and has_vcf
                 launch_html = _igv_launch_html(
                     project=project,
                     this_stem=row_stem,
                     all_stems=vtable["all_stems"],
                     locus=vtable["positions"][cell.column],
-                    this_has_bam=this_has_bam,
+                    this_loadable=this_loadable,
+                    this_calls_only=this_calls_only,
                 )
                 classes.append("xlsx-variant")
                 # Re-emit class attr — `attrs` already had it baked in above

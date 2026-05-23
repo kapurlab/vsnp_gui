@@ -77,27 +77,29 @@ export default function IgvStandalone() {
         return;
       }
       const data = await res.json();
-      if (!data.bam || !data.reference_fasta) { setStatus(`${sample}: missing BAM/FASTA`); return; }
+      if (!data.reference_fasta) { setStatus(`${sample}: no reference`); return; }
+      if (!data.bam && !data.source_vcf) { setStatus(`${sample}: no BAM or VCF`); return; }
       const candidate = data.reference_fasta.split("/").pop();
       if (candidate !== refNameRef.current) {
         setStatus(`${sample}: reference ${candidate} ≠ ${refNameRef.current}`);
         return;
       }
       const displayName = reqProject !== projectRef.current ? `${reqProject}/${sample}` : sample;
-      if (data.annotated_vcf) {
+      const callsVcf = data.annotated_vcf || data.source_vcf || "";
+      if (callsVcf) {
         try {
           await browserRef.current.loadTrack({
             type: "variant",
             format: "vcf",
             name: `${displayName} · calls`,
-            url: serveUrl(reqProject, data.annotated_vcf),
+            url: serveUrl(reqProject, callsVcf),
             indexed: false,
             displayMode: "EXPANDED",
             height: 30,
           });
         } catch (_) { /* non-fatal: drop the calls track, keep the BAM */ }
       }
-      await browserRef.current.loadTrack({
+      if (data.bam) await browserRef.current.loadTrack({
         type: "alignment",
         format: "bam",
         name: `${displayName} · reads`,
@@ -166,8 +168,15 @@ export default function IgvStandalone() {
           continue;
         }
         const data = r.data;
-        if (!data.bam || !data.reference_fasta) {
-          skipped.push(`${tProject}/${sample} (missing BAM/FASTA)`);
+        // Imported-VCF samples (kind === "imported_vcf") arrive with empty
+        // `bam` but a populated `source_vcf` — they're still loadable as a
+        // calls-only track. Require either bam+ref OR source_vcf+ref.
+        if (!data.reference_fasta) {
+          skipped.push(`${tProject}/${sample} (no reference)`);
+          continue;
+        }
+        if (!data.bam && !data.source_vcf) {
+          skipped.push(`${tProject}/${sample} (no BAM or VCF)`);
           continue;
         }
         if (!referenceFastaPath) {
@@ -186,9 +195,14 @@ export default function IgvStandalone() {
         tracks.push({
           project: tProject,
           sample,
-          bamPath: data.bam,
-          baiPath: `${data.bam}.bai`,
+          bamPath: data.bam || "",
+          baiPath: data.bam ? `${data.bam}.bai` : "",
+          // Prefer the rich annotated VCF when it exists (step1-derived,
+          // has gene/product/AA in the ID column). Fall back to the bare
+          // source_vcf for imported samples — fewer fields on hover, but
+          // variant positions and basic INFO still visible.
           annotatedVcfPath: data.annotated_vcf || "",
+          sourceVcfPath: data.source_vcf || "",
         });
       }
       if (cancelled) return;
@@ -210,32 +224,36 @@ export default function IgvStandalone() {
             visibilityWindow: -1,
           }]
         : [];
-      // For each sample, interleave a "calls" variant track from the
-      // vSNP3-annotated VCF immediately above its BAM track. The annotated
-      // VCF packs per-position annotation (gene, product, codon, AA change,
-      // mutation_type) into the ID column — hovering the variant marker in
-      // igv.js exposes that. The BAM stays for read pile-up + coverage.
+      // For each sample, interleave a "calls" variant track immediately
+      // above its BAM track. Prefer the annotated VCF (step1-derived, has
+      // gene/product/AA in the ID column → rich on-hover info) over the
+      // bare source_vcf (imports — variant positions still visible, fewer
+      // fields on hover). The BAM (reads) is skipped for imported-VCF
+      // samples that don't have one.
       const sampleTracks = tracks.flatMap((t) => {
         const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
         const out = [];
-        if (t.annotatedVcfPath) {
+        const callsVcf = t.annotatedVcfPath || t.sourceVcfPath;
+        if (callsVcf) {
           out.push({
             type: "variant",
             format: "vcf",
             name: `${displayName} · calls`,
-            url: serveUrl(t.project, t.annotatedVcfPath),
+            url: serveUrl(t.project, callsVcf),
             indexed: false,
             displayMode: "EXPANDED",
             height: 30,
           });
         }
-        out.push({
-          type: "alignment",
-          format: "bam",
-          name: `${displayName} · reads`,
-          url: serveUrl(t.project, t.bamPath),
-          indexURL: serveUrl(t.project, t.baiPath),
-        });
+        if (t.bamPath) {
+          out.push({
+            type: "alignment",
+            format: "bam",
+            name: `${displayName} · reads`,
+            url: serveUrl(t.project, t.bamPath),
+            indexURL: serveUrl(t.project, t.baiPath),
+          });
+        }
         return out;
       });
       const config = {

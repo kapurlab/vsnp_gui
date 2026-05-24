@@ -154,17 +154,22 @@ def _igv_launch_html(
     enc_locus = quote(locus, safe="")
     all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
     all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
-    # Same-window navigation: Safari (and Firefox in privacy mode) silently
-    # ignore HTML `target="<name>"` for tracking-prevention reasons and treat
-    # named targets as `_blank` — so each click would spawn a new tab. The
-    # `window.open(url, "vsnp_igv")` JS call is honored by every browser
-    # (it's how MDN tells you to do it). Keep the href as accessibility
-    # fallback for no-JS / right-click-open. Modifier-click (cmd/ctrl) is
-    # handled by the conditional below so users can still force-open a
-    # new tab if they want one.
+    # Same-window, additive IGV behavior:
+    #   First click: window.open(url, "vsnp_igv") boots a fresh IGV tab.
+    #     Safari/Firefox ignore HTML target="<name>" for tracking-prevention
+    #     reasons, but window.open(url, name) is honored by every browser.
+    #   Subsequent clicks: post the launch URL to the existing IGV window.
+    #     IgvStandalone parses the tracks/locus from the URL, adds any
+    #     samples not already loaded, and navigates to the locus — additive
+    #     rather than replacing, so clicking variant after variant builds
+    #     up the cohort in one IGV view.
+    # __vsnpLaunchIgv encapsulates that; it's defined once per preview page
+    # in the inline <script> block below the table. Modifier-click (cmd /
+    # ctrl / shift / middle button) bypasses the handler so users can still
+    # force a fresh tab when they want one.
     onclick = (
         "if(event.metaKey||event.ctrlKey||event.shiftKey||event.button===1)return true;"
-        "window.open(this.href,'vsnp_igv');return false;"
+        "window.__vsnpLaunchIgv(this.href);return false;"
     )
     if this_loadable:
         this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
@@ -747,6 +752,27 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-wrap">
 {table}
 </div>
+<script>
+// IGV launcher for cascade-table variant cells. First click opens a new
+// IGV tab; subsequent clicks reuse that tab additively (postMessage tells
+// IgvStandalone to add any new samples + navigate to the new locus).
+// Window reference is kept on `window.__vsnpIgvWin` so it survives
+// across many clicks in the same preview page. If the user closes the
+// IGV tab, .closed flips true and we open a fresh one.
+(function() {{
+  window.__vsnpLaunchIgv = function(url) {{
+    var w = window.__vsnpIgvWin;
+    if (w && !w.closed) {{
+      try {{
+        w.postMessage({{ type: "vsnpIgvLaunch", url: url }}, window.location.origin);
+        w.focus();
+        return;
+      }} catch (e) {{ /* lost the handle (cross-origin or torn-down) — fall through to a fresh open */ }}
+    }}
+    window.__vsnpIgvWin = window.open(url, "vsnp_igv");
+  }};
+}})();
+</script>
 </body>
 </html>
 """

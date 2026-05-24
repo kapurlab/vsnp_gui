@@ -114,12 +114,55 @@ export default function IgvStandalone() {
     }
   }
 
+  // Cascade-table additive launches arrive here as { type: "vsnpIgvLaunch",
+  // url: "<full launcher URL>" }. We parse the same URL params the initial
+  // load uses (tracks, locus), then add any samples not already loaded and
+  // navigate to the locus — so clicking variant after variant in the
+  // cascade table builds up the cohort in this single IGV view.
+  async function handleIgvLaunch(url) {
+    let tracksParam = "";
+    let locusParam = "";
+    try {
+      const u = new URL(url, window.location.origin);
+      tracksParam = u.searchParams.get("tracks") || "";
+      locusParam = (u.searchParams.get("locus") || "").trim();
+    } catch (e) {
+      setStatus(`Bad launch URL: ${e && e.message ? e.message : e}`);
+      return;
+    }
+    const requested = tracksParam
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((t) => {
+        const i = t.indexOf(":");
+        return i > 0 ? { project: t.slice(0, i), sample: t.slice(i + 1) } : null;
+      })
+      .filter(Boolean);
+    for (const t of requested) {
+      const key = `${t.project}:${t.sample}`;
+      if (!loadedRef.current.has(key)) {
+        await addSample(t.project, t.sample);
+      }
+    }
+    if (locusParam && browserRef.current) {
+      try { browserRef.current.search(locusParam); } catch (e) { /* ignore */ }
+    }
+    try { window.focus(); } catch (e) { /* ignore */ }
+  }
+
   useEffect(() => {
     function onMessage(ev) {
       if (ev.origin !== window.location.origin) return;
       const data = ev.data;
-      if (data && data.type === "vsnpAddSample" && data.project && data.sample) {
+      if (!data) return;
+      if (data.type === "vsnpAddSample" && data.project && data.sample) {
         addSample(data.project, data.sample);
+        return;
+      }
+      if (data.type === "vsnpIgvLaunch" && data.url) {
+        handleIgvLaunch(data.url);
+        return;
       }
     }
     window.addEventListener("message", onMessage);

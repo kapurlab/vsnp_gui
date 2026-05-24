@@ -154,6 +154,18 @@ def _igv_launch_html(
     enc_locus = quote(locus, safe="")
     all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
     all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
+    # Same-window navigation: Safari (and Firefox in privacy mode) silently
+    # ignore HTML `target="<name>"` for tracking-prevention reasons and treat
+    # named targets as `_blank` — so each click would spawn a new tab. The
+    # `window.open(url, "vsnp_igv")` JS call is honored by every browser
+    # (it's how MDN tells you to do it). Keep the href as accessibility
+    # fallback for no-JS / right-click-open. Modifier-click (cmd/ctrl) is
+    # handled by the conditional below so users can still force-open a
+    # new tab if they want one.
+    onclick = (
+        "if(event.metaKey||event.ctrlKey||event.shiftKey||event.button===1)return true;"
+        "window.open(this.href,'vsnp_igv');return false;"
+    )
     if this_loadable:
         this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
         this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
@@ -164,7 +176,8 @@ def _igv_launch_html(
             else f"Open this sample in IGV at {html.escape(locus)}"
         )
         this_link = (
-            f'<a target="vsnp_igv" rel="noopener" href="{html.escape(this_href, quote=True)}" '
+            f'<a href="{html.escape(this_href, quote=True)}" '
+            f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
             f'title="{this_title}">↗ this</a>'
         )
     else:
@@ -176,7 +189,8 @@ def _igv_launch_html(
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
         f'{this_link}'
-        f'<a target="vsnp_igv" rel="noopener" href="{html.escape(all_href, quote=True)}" '
+        f'<a href="{html.escape(all_href, quote=True)}" '
+        f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
         f'title="Open all samples in IGV at {html.escape(locus)}">↗ all</a>'
         '</span>'
     )

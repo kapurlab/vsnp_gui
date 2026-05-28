@@ -4,6 +4,15 @@ Pure function: takes a `Path` to an xlsx file, returns an HTML string
 ready to serve as `text/html`. Uses openpyxl (already in the vsnp3 env
 as pandas' xlsx engine) — no new dependencies.
 
+When the optional `project` argument is provided AND the rendered sheet
+looks like a vSNP3 variant-alignment table (row 1 has `contig:pos`
+headers, column 1 has sample names — i.e. `name-All_cascade*` and
+`name-All_sorted_*` outputs, or any future table with the same shape),
+variant cells (those with a colored fill) gain a hover-revealed pair of
+IGV launch links: "this" (single sample) and "all" (every sample in the
+table). The cell itself stays non-clickable to prevent gratuitous IGV
+launches while scanning.
+
 Preserved formatting:
   - cell fill color
   - font: bold, italic, color, size, family
@@ -30,6 +39,7 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 import openpyxl
 from openpyxl.utils import get_column_letter, column_index_from_string
@@ -38,6 +48,165 @@ from openpyxl.worksheet.cell_range import CellRange
 
 _DEFAULT_FONT_SIZE = 11
 _DEFAULT_FONT_COLOR = "FF000000"
+
+_LOCUS_RE = re.compile(r"^[A-Za-z0-9_.\-]+:\d+$")
+_NON_SAMPLE_LABELS = {
+    "root", "mq", "annotation", "position not annotated",
+    "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
+}
+
+
+def _strip_vcf_suffix(s: str) -> str:
+    """Reduce a variant-table sample label to the stem used by Step 1.
+
+    vSNP3 variant-alignment tables put names like
+    `hCoV-19-deer-USA-IA-201788-2020-EPI_zc.vcf` in column 1. Step 1 sample
+    directories are named after the bare stem.
+    """
+    out = s.strip()
+    for suffix in (".vcf.gz", ".vcf", "_zc"):
+        if out.lower().endswith(suffix):
+            out = out[: -len(suffix)]
+    return out
+
+
+def _detect_variant_table(ws) -> dict | None:
+    """Return variant-alignment-table metadata if `ws` matches the shape.
+
+    Matches vSNP3 `name-All_cascade*_table-*.xlsx` and
+    `name-All_sorted_table-*.xlsx` outputs (and any future table with the
+    same shape — detection is pattern-based, not filename-based).
+
+    Heuristic: row 1 has ≥2 cells matching `<contig>:<pos>`, and column 1
+    (rows 2+) has sample-like labels. Returns:
+
+        {
+          "positions": {col_idx: "contig:pos", ...},
+          "samples":   {row_idx: sample_stem, ...},  # in row order
+          "all_stems": ["stem1", "stem2", ...],       # cohort for "open all"
+        }
+
+    or None when the sheet doesn't look like a variant-alignment table — in which
+    case the renderer skips the IGV-link injection entirely.
+    """
+    if ws.max_row < 2 or ws.max_column < 2:
+        return None
+    positions: dict[int, str] = {}
+    for cell in ws[1]:
+        v = cell.value
+        if v is None:
+            continue
+        s = str(v).strip()
+        if _LOCUS_RE.match(s):
+            positions[cell.column] = s
+    if len(positions) < 2:
+        return None
+    samples: dict[int, str] = {}
+    stems: list[str] = []
+    for row_idx in range(2, ws.max_row + 1):
+        v = ws.cell(row=row_idx, column=1).value
+        if v is None:
+            continue
+        raw = str(v).strip()
+        if not raw or raw.lower() in _NON_SAMPLE_LABELS:
+            continue
+        stem = _strip_vcf_suffix(raw)
+        if not stem:
+            continue
+        samples[row_idx] = stem
+        stems.append(stem)
+    if not samples:
+        return None
+    return {"positions": positions, "samples": samples, "all_stems": stems}
+
+
+def _igv_launch_html(
+    project: str,
+    this_stem: str,
+    all_stems: list[str],
+    locus: str,
+    this_loadable: bool = True,
+    this_calls_only: bool = False,
+) -> str:
+    """Build the hover-revealed dual-affordance HTML for a variant cell.
+
+    Two small text links — "this" and "all" — open the IgvStandalone viewer
+    page (`?view=igv&tracks=…&locus=…`). The anchor uses
+    ``target="vsnp_igv"`` (a named window, not ``_blank``), so the first
+    click opens a new tab and every subsequent click reuses that same tab
+    — variant-after-variant inspection navigates a single IGV window
+    rather than spawning N tabs.
+
+    The URL is constructed relative to the current preview path so it
+    survives the OOD proxy prefix: the preview is served at
+    ``/api/projects/{p}/preview-xlsx``, so ``../../../`` climbs back out
+    to the SPA root regardless of the OOD rnode prefix in front of it
+    (``/rnode/host/port/api/projects/p/...``).
+
+    ``this_loadable``: false only when the sample has NEITHER a BAM nor an
+    imported VCF — in that case "↗ this" is rendered as a disabled span
+    because clicking would land in an empty IGV. ``this_calls_only``:
+    true when the sample has an imported VCF but no BAM; the link stays
+    active (calls-only IGV anchored to the project reference) and the
+    tooltip notes the limitation.
+    """
+    enc_proj = quote(project, safe="")
+    enc_locus = quote(locus, safe="")
+    all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
+    all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
+    # Same-window, additive IGV behavior:
+    #   First click: window.open(url, "vsnp_igv") boots a fresh IGV tab.
+    #     Safari/Firefox ignore HTML target="<name>" for tracking-prevention
+    #     reasons, but window.open(url, name) is honored by every browser.
+    #   Subsequent clicks: post the launch URL to the existing IGV window.
+    #     IgvStandalone parses the tracks/locus from the URL, adds any
+    #     samples not already loaded, and navigates to the locus — additive
+    #     rather than replacing, so clicking variant after variant builds
+    #     up the cohort in one IGV view.
+    # __vsnpLaunchIgv encapsulates that; it's defined once per preview page
+    # in the inline <script> block below the table. Modifier-click (cmd /
+    # ctrl / shift / middle button) bypasses the handler so users can still
+    # force a fresh tab when they want one.
+    onclick = (
+        "if(event.metaKey||event.ctrlKey||event.shiftKey||event.button===1)return true;"
+        "window.__vsnpLaunchIgv(this.href);return false;"
+    )
+    if this_loadable:
+        this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
+        this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
+        # Visual distinction: full label for BAM-having samples, dimmed
+        # "calls" label for imported VCFs (no reads track expected). Lets
+        # users see at a glance which clicks will produce a reads pile-up.
+        if this_calls_only:
+            this_label = "↗ calls"
+            this_title = (
+                f"Open this sample in IGV at {html.escape(locus)} "
+                "(calls only — imported VCF, no BAM to load)"
+            )
+            this_class = ' class="xlsx-igv-calls-only"'
+        else:
+            this_label = "↗ this"
+            this_title = f"Open this sample in IGV at {html.escape(locus)}"
+            this_class = ""
+        this_link = (
+            f'<a{this_class} href="{html.escape(this_href, quote=True)}" '
+            f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
+            f'title="{this_title}">{this_label}</a>'
+        )
+    else:
+        this_link = (
+            '<span class="xlsx-igv-launch-disabled" '
+            f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
+            'nor imported VCF in step2/vcf_source/. Use ↗ all to open the cohort.">↗ this</span>'
+        )
+    return (
+        '<span class="xlsx-igv-launch" aria-hidden="false">'
+        f'{this_link}'
+        f'<a href="{html.escape(all_href, quote=True)}" '
+        f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
+        f'title="Open all samples in IGV at {html.escape(locus)}">↗ all</a>'
+        '</span>'
+    )
 
 
 def _rgb_hex(color) -> str | None:
@@ -315,13 +484,37 @@ def _build_cf_extras(ws, dxfs) -> dict[str, list[str]]:
     return extras
 
 
-def xlsx_to_html(xlsx_path: Path, title: str | None = None) -> str:
-    """Render the first (active) sheet of an xlsx file as a self-contained HTML page."""
+def xlsx_to_html(
+    xlsx_path: Path,
+    title: str | None = None,
+    project: str | None = None,
+    samples_with_bams: set[str] | None = None,
+    samples_with_vcfs: set[str] | None = None,
+) -> str:
+    """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
+
+    When ``project`` is provided and the sheet looks like a vSNP3 variant-alignment
+    table, variant cells (those with a colored fill) get a hover-revealed
+    pair of IGV-launch links — "this" sample and "all" samples in the
+    cohort — opening the IgvStandalone viewer at the cell's locus.
+
+    ``samples_with_bams`` (optional) is the set of step1 sample names for
+    which a BAM exists on disk.
+
+    ``samples_with_vcfs`` (optional) is the set of sample names that have
+    an imported VCF in ``step2/vcf_source/`` (no BAM, calls-only IGV).
+
+    "↗ this" is enabled if the sample is in EITHER set; calls-only mode is
+    indicated in the tooltip when only the VCF is present. It's rendered
+    as a disabled span only when the sample is in neither set (genuinely
+    nothing to load).
+    """
     xlsx_path = Path(xlsx_path)
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
     ws = wb.active
     dxfs = list(wb._differential_styles.styles) if hasattr(wb, "_differential_styles") else []
     cf_extras = _build_cf_extras(ws, dxfs)
+    vtable = _detect_variant_table(ws) if project else None
 
     # Pre-compute merged-cell map: anchor coordinate → (rowspan, colspan);
     # all other cells in the merge get skipped.
@@ -410,8 +603,42 @@ def xlsx_to_html(xlsx_path: Path, title: str | None = None) -> str:
             if classes:
                 attrs += f' class="{" ".join(classes)}"'
             value = _format_cell_value(cell)
+            # Cascade-table IGV launch: only on variant cells in a detected
+            # variant-alignment table when a project context is available. A "variant"
+            # here is any cell in the data area with a resolved background
+            # color (direct fill or conditional formatting) — that's the
+            # visible signal vSNP3 uses to mark a call that differs from root.
+            launch_html = ""
+            if (
+                vtable
+                and cell.row in vtable["samples"]
+                and cell.column in vtable["positions"]
+                and any("background-color" in p for p in inline_parts)
+            ):
+                row_stem = vtable["samples"][cell.row]
+                has_bam = samples_with_bams is None or row_stem in samples_with_bams
+                has_vcf = samples_with_vcfs is not None and row_stem in samples_with_vcfs
+                # Loadable if either source is present (default-loadable when
+                # caller didn't supply sets).
+                this_loadable = (
+                    samples_with_bams is None and samples_with_vcfs is None
+                ) or has_bam or has_vcf
+                this_calls_only = (not has_bam) and has_vcf
+                launch_html = _igv_launch_html(
+                    project=project,
+                    this_stem=row_stem,
+                    all_stems=vtable["all_stems"],
+                    locus=vtable["positions"][cell.column],
+                    this_loadable=this_loadable,
+                    this_calls_only=this_calls_only,
+                )
+                classes.append("xlsx-variant")
+                # Re-emit class attr — `attrs` already had it baked in above
+                # for sticky/rotation classes, so replace rather than append.
+                attrs = re.sub(r'\s+class="[^"]*"', "", attrs)
+                attrs += f' class="{" ".join(classes)}"'
             style_attr = f' style="{inline}"' if inline else ""
-            rows_html.append(f"<td{attrs}{style_attr}>{value}</td>")
+            rows_html.append(f"<td{attrs}{style_attr}>{value}{launch_html}</td>")
         rows_html.append("</tr>")
 
     display_title = html.escape(title or xlsx_path.name)
@@ -486,6 +713,49 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-rot-up {{ writing-mode: vertical-rl; transform: rotate(180deg); }}
   .xlsx-rot-down {{ writing-mode: vertical-rl; }}
   .xlsx-rot-stacked {{ writing-mode: vertical-rl; text-orientation: upright; }}
+  /* IGV launch affordance on variant cells: hidden by default, revealed on
+     cell hover. Two text links ("this" / "all") are the actual targets —
+     the cell body stays non-clickable to prevent accidental launches while
+     scanning a table. */
+  td.xlsx-variant {{ position: relative; }}
+  td.xlsx-variant .xlsx-igv-launch {{
+    position: absolute;
+    top: 1px; right: 1px;
+    display: none;
+    gap: 2px;
+    font-size: 9px;
+    line-height: 1;
+    background: rgba(15, 22, 33, 0.85);
+    color: #fff;
+    padding: 2px 3px;
+    border-radius: 3px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    z-index: 5;
+    white-space: nowrap;
+  }}
+  td.xlsx-variant:hover .xlsx-igv-launch {{ display: inline-flex; }}
+  .xlsx-igv-launch a {{
+    color: #fff;
+    text-decoration: none;
+    padding: 1px 3px;
+    border-radius: 2px;
+  }}
+  .xlsx-igv-launch a:hover {{ background: rgba(255,255,255,0.25); }}
+  /* Disabled "this" link — sample has no Step 1 BAM. Greyed out, not
+     clickable, but visible so the cohort context is still legible. */
+  .xlsx-igv-launch-disabled {{
+    color: rgba(255, 255, 255, 0.35);
+    padding: 1px 3px;
+    cursor: not-allowed;
+    text-decoration: line-through;
+  }}
+  /* Calls-only link — sample is loadable into IGV but has only the VCF,
+     no BAM. Dimmed + italic so the user sees at a glance that this click
+     won't produce a reads pile-up. */
+  .xlsx-igv-launch a.xlsx-igv-calls-only {{
+    color: rgba(255, 255, 255, 0.7);
+    font-style: italic;
+  }}
 </style>
 </head>
 <body>
@@ -497,6 +767,27 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-wrap">
 {table}
 </div>
+<script>
+// IGV launcher for cascade-table variant cells. First click opens a new
+// IGV tab; subsequent clicks reuse that tab additively (postMessage tells
+// IgvStandalone to add any new samples + navigate to the new locus).
+// Window reference is kept on `window.__vsnpIgvWin` so it survives
+// across many clicks in the same preview page. If the user closes the
+// IGV tab, .closed flips true and we open a fresh one.
+(function() {{
+  window.__vsnpLaunchIgv = function(url) {{
+    var w = window.__vsnpIgvWin;
+    if (w && !w.closed) {{
+      try {{
+        w.postMessage({{ type: "vsnpIgvLaunch", url: url }}, window.location.origin);
+        w.focus();
+        return;
+      }} catch (e) {{ /* lost the handle (cross-origin or torn-down) — fall through to a fresh open */ }}
+    }}
+    window.__vsnpIgvWin = window.open(url, "vsnp_igv");
+  }};
+}})();
+</script>
 </body>
 </html>
 """

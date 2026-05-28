@@ -36,7 +36,14 @@ from app.projects import (
     SCOPE_PERSONAL,
     SCOPE_SHARED,
 )
-from app.refs import list_references, get_reference_paths, add_reference_path, remove_reference_path
+from app.refs import (
+    list_references,
+    get_reference_paths,
+    add_reference_path,
+    remove_reference_path,
+    reference_roots,
+    find_gff_for_fasta,
+)
 from app.sra import expand_accessions, expand_accessions_with_mapping, build_download_script, SRAExpansionError, write_crosswalk_tsv
 from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
 
@@ -115,6 +122,45 @@ def _project_reference(project_dir: Path) -> str:
     except (json.JSONDecodeError, OSError):
         return ""
     return (meta.get("reference") or "").strip()
+
+
+def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str, str]:
+    """Resolve a project's reference fasta + GFF paths for IGV consumption.
+
+    Used by step1_files for imported-VCF samples (those that exist only in
+    step2/vcf_source/, never went through Step 1, so have no alignment dir
+    to crib the reference from).
+
+    Strategy 1 — borrow from any step1 sample that DOES have an alignment
+    dir in this project. Cheap when at least one sample was aligned here.
+
+    Strategy 2 — use project.json's "reference" name to look up the dir
+    under the configured reference roots. Needed for pure-import projects.
+
+    Returns ("", "") when neither strategy finds a fasta — caller should
+    surface that as a friendly error rather than a partial IGV view.
+    """
+    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        for d in sorted(step1_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            fastas = sorted(d.glob("alignment_*/*.fasta"))
+            if fastas:
+                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                return str(fastas[0]), (str(gff) if gff else "")
+    ref_name = _project_reference(project_dir)
+    if ref_name:
+        for root in reference_roots(vsnp3_path):
+            ref_dir = root / ref_name
+            if not ref_dir.is_dir():
+                continue
+            fastas = sorted(ref_dir.glob("*.fasta"))
+            if fastas:
+                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                return str(fastas[0]), (str(gff) if gff else "")
+    return "", ""
 
 
 def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
@@ -3118,17 +3164,65 @@ def step1_files(project: str, sample: str = Query(...)):
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
-        raise HTTPException(status_code=404, detail="Sample not found")
+        # Imported-VCF case: sample lives only in step2/vcf_source/ (no Step 1
+        # alignment, so no BAM). Still useful in IGV as a calls-only track —
+        # anchor it to the project's reference so the user can compare the
+        # variant positions against the local cohort.
+        vcf_source_dir = project_dir / "step2" / "vcf_source"
+        imported_vcf = None
+        if vcf_source_dir.is_dir():
+            for suffix in ("_zc.vcf", "_zc.vcf.gz", ".vcf", ".vcf.gz"):
+                cand = vcf_source_dir / f"{sample}{suffix}"
+                if cand.exists():
+                    imported_vcf = cand
+                    break
+        if imported_vcf is not None:
+            ref_fasta, ref_gff = _project_reference_fasta_and_gff(project_dir, cfg)
+            if not ref_fasta:
+                # No way to anchor the VCF — surface as a clearly-distinct error.
+                raise HTTPException(status_code=404, detail="imported_vcf_no_reference")
+            return {
+                "stats": "",
+                "bam": "",
+                "alignment_dir": "",
+                "reference_fasta": ref_fasta,
+                "reference_gff": ref_gff,
+                "annotated_vcf": "",  # imports lack the rich ID-column annotation
+                "sample_dir": str(vcf_source_dir),
+                "source_vcf": str(imported_vcf),
+                "patched_vcf": "",
+                "edit_log": "",
+                "edited": False,
+                "kind": "imported_vcf",
+            }
+        raise HTTPException(status_code=404, detail="no_step1")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
     bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
     bam_path = str(bam_files[-1]) if bam_files else ""
     align_dir = str(bam_files[-1].parent) if bam_files else ""
     ref_fasta = ""
+    ref_gff = ""
+    annotated_vcf = ""
     if align_dir:
         fasta_files = sorted(Path(align_dir).glob("*.fasta"))
         if fasta_files:
             ref_fasta = str(fasta_files[0])
+            # GFF lives in the reference options dir, not the alignment dir.
+            vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+            gff_path = find_gff_for_fasta(fasta_files[0], vsnp3_path)
+            if gff_path:
+                ref_gff = str(gff_path)
+        # The *_filtered_hapall_annotated.vcf holds per-variant annotation
+        # in the ID column (gene/product/codon/AA change/mutation_type).
+        # Surface its path so igv.js can render it as a variant track and
+        # show the annotation on hover.
+        ann_candidates = sorted(
+            Path(align_dir).glob(f"{sample}_filtered_hapall_annotated.vcf*"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if ann_candidates:
+            annotated_vcf = str(ann_candidates[-1])
     vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
     source_vcf = vcf_candidates[-1] if vcf_candidates else None
     patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
@@ -3138,6 +3232,8 @@ def step1_files(project: str, sample: str = Query(...)):
         "bam": bam_path,
         "alignment_dir": align_dir,
         "reference_fasta": ref_fasta,
+        "reference_gff": ref_gff,
+        "annotated_vcf": annotated_vcf,
         "sample_dir": str(sample_dir),
         "source_vcf": str(source_vcf) if source_vcf else "",
         "patched_vcf": str(patched_vcf) if patched_vcf else "",
@@ -3464,9 +3560,49 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
         )
+    # Build sets of samples loadable in IGV so the cascade-table render
+    # can correctly enable / grey out the "↗ this" affordance per row:
+    #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
+    #   - samples_with_vcfs: have an imported VCF in step2/vcf_source/
+    #     (calls-only IGV, anchored to the project reference)
+    # A sample qualifies for "↗ this" if it's in either set.
+    samples_with_bams: set[str] = set()
+    samples_with_vcfs: set[str] = set()
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        for d in step1_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if any(d.glob(f"**/{d.name}_nodup.bam")):
+                samples_with_bams.add(d.name)
+            # _resolve_sample_dir accepts a bare sample name even when the
+            # step1 dir carries lane suffixes (e.g. dir `13-1941-6_S4_L001`
+            # resolves from input `13-1941-6`). Mirror that fallback here so
+            # cascade stems match.
+            if "_" in d.name:
+                prefix = d.name.split("_")[0]
+                if prefix and any(d.glob(f"**/{prefix}_nodup.bam")):
+                    samples_with_bams.add(prefix)
+    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    if vcf_source_dir.is_dir():
+        for f in vcf_source_dir.iterdir():
+            if not f.is_file():
+                continue
+            name = f.name
+            # Strip the standard vSNP3 suffixes back to the stem.
+            for suffix in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
+                if name.endswith(suffix):
+                    samples_with_vcfs.add(name[: -len(suffix)])
+                    break
+
     from app import xlsx_html
     try:
-        html_page = xlsx_html.xlsx_to_html(target)
+        html_page = xlsx_html.xlsx_to_html(
+            target,
+            project=project,
+            samples_with_bams=samples_with_bams,
+            samples_with_vcfs=samples_with_vcfs,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)
@@ -3627,12 +3763,24 @@ def _range_response(target: Path, request: Request, media_type: str):
 def serve_project_file(project: str, request: Request, path: str = Query(...)):
     """Serve a file from within the project directory with HTTP byte-range support.
 
-    Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full download.
+    Used by igv.js to stream BAM/BAI/FASTA/FAI without forcing a full
+    download. Also permits paths under any configured reference options
+    root (so igv.js can fetch the reference GFF annotation track — the
+    GFF lives next to the source fasta in the reference dir, not in the
+    project's alignment dir).
     """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
-    if not str(target).startswith(str(project_dir.resolve())):
+    target_str = str(target)
+    allowed = target_str.startswith(str(project_dir.resolve()))
+    if not allowed:
+        vsnp3_path = Path(cfg.get("vsnp3_path", ""))
+        for root in reference_roots(vsnp3_path):
+            if target_str.startswith(str(root.resolve())):
+                allowed = True
+                break
+    if not allowed:
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")

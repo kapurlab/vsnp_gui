@@ -271,6 +271,24 @@ After Step 1, "Archive" button per sample compresses or deletes intermediates (`
 
 Bundle a project for off-system handoff. Configurable: with/without raw fastq, with/without intermediates. Writes to `/srv/kapurlab/projects/<name>/exports/` so the user can download or rsync elsewhere.
 
+### T-48 Project access control: per-project groups, not blanket sharing — ⏳
+
+Cross-user testing on dev surfaced the gap: Tod's session can't see projects under `/home/vxk1/projects/` because they're 750 owner-only. The naive fix (ACL grant kapurlab-members rx) is wrong — some projects carry confidentiality clauses (NDAs, patient/animal IDs, embargoed data) and shouldn't be visible to the whole lab by default.
+
+The right model is already partially in place: `/srv/kapurlab/projects/demo_sars_cov_2/` is owned `vxk1:proj-demo_sars_cov_2` (a per-project Unix group; Tod added via `kapurlab-add-user.sh`). Generalize that:
+
+- Audit current projects: which need to be shareable, which are private, which have confidentiality constraints (the audit is the hard part — should involve the dataset owner for each one).
+- Migration plan: shareable projects move from `/home/<user>/projects/` to `/srv/kapurlab/projects/<name>/` with a `proj-<name>` group. Private projects stay in user home.
+- Tooling: extend the existing `kapurlab-add-user.sh` (or a new `kapurlab-add-to-project.sh`) for the add/remove flow.
+- GUI: project-creation form asks "Visibility: Private / Lab-shared / Team-shared (select members)" up-front. Backend creates the project in the right location with the right group.
+- Backend: nothing changes — the project listing already iterates configured roots and respects filesystem read access. New projects just land in the right place.
+
+No code changes needed for v1 of this; it's mostly process + filesystem migration. Worth scoping before the lab grows beyond 2-3 active users.
+
+### T-47 Step 2 auto-refresh polling asymmetry — ⏳
+
+Diagnosed during the `tstuber_2026-05-20` branch review (May 20) but never landed: `App.jsx` step2 polling doesn't guard `step2JobId` changes the way the step1 path does. If a new run is started before the previous interval fully tears down, the old terminal-state handler can fire `loadStep2Runs()` against the *new* job before that job has written its metadata — UI shows stale data. Mirror the step1 pattern: cancel the polling interval when `step2JobId` changes mid-flight. Self-flagged by Tod; small fix, defer until next time someone is in `App.jsx`.
+
 ---
 
 ## Milestone D — Later

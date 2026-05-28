@@ -174,16 +174,24 @@ def _igv_launch_html(
     if this_loadable:
         this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
         this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
-        this_title = (
-            f"Open this sample in IGV at {html.escape(locus)} "
-            "(calls only — no Step 1 BAM, anchored to project reference)"
-            if this_calls_only
-            else f"Open this sample in IGV at {html.escape(locus)}"
-        )
+        # Visual distinction: full label for BAM-having samples, dimmed
+        # "calls" label for imported VCFs (no reads track expected). Lets
+        # users see at a glance which clicks will produce a reads pile-up.
+        if this_calls_only:
+            this_label = "↗ calls"
+            this_title = (
+                f"Open this sample in IGV at {html.escape(locus)} "
+                "(calls only — imported VCF, no BAM to load)"
+            )
+            this_class = ' class="xlsx-igv-calls-only"'
+        else:
+            this_label = "↗ this"
+            this_title = f"Open this sample in IGV at {html.escape(locus)}"
+            this_class = ""
         this_link = (
-            f'<a href="{html.escape(this_href, quote=True)}" '
+            f'<a{this_class} href="{html.escape(this_href, quote=True)}" '
             f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
-            f'title="{this_title}">↗ this</a>'
+            f'title="{this_title}">{this_label}</a>'
         )
     else:
         this_link = (
@@ -740,6 +748,13 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 1px 3px;
     cursor: not-allowed;
     text-decoration: line-through;
+  }}
+  /* Calls-only link — sample is loadable into IGV but has only the VCF,
+     no BAM. Dimmed + italic so the user sees at a glance that this click
+     won't produce a reads pile-up. */
+  .xlsx-igv-launch a.xlsx-igv-calls-only {{
+    color: rgba(255, 255, 255, 0.7);
+    font-style: italic;
   }}
 </style>
 </head>

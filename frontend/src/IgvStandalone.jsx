@@ -7,6 +7,34 @@ function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
 }
 
+// Normalize a locus string for igv.js. For a single-position locus like
+// `CONTIG:POS`, igv.js's behavior depends on the underlying genome size:
+// on a ~30kb viral genome it auto-zooms to a small flanking window; on a
+// multi-megabase bacterial genome it silently falls back to showing the
+// whole contig. We force consistent behavior by expanding a single-position
+// locus to a small explicit range (`CONTIG:POS-FLANK – POS+FLANK`), so the
+// user always lands centered on the variant with a few bases of context.
+// Already-ranged loci (`CONTIG:START-END`) and contig-only strings pass
+// through unchanged.
+function normalizeLocus(locus, flank = 25) {
+  if (!locus) return "";
+  const s = String(locus).trim();
+  // Already a range — pass through.
+  if (/:\d[\d,]*-\d/.test(s)) return s;
+  // Single position: CONTIG:POS (POS may contain commas like 1,484,567).
+  const m = s.match(/^([^:]+):([\d,]+)$/);
+  if (m) {
+    const contig = m[1];
+    const pos = parseInt(m[2].replace(/,/g, ""), 10);
+    if (Number.isFinite(pos) && pos >= 1) {
+      const start = Math.max(1, pos - flank);
+      const end = pos + flank;
+      return `${contig}:${start}-${end}`;
+    }
+  }
+  return s;
+}
+
 // Translate the backend's structured 404 details for /step1/files into a
 // human-readable label. Matches the contract in main.py:step1_files.
 async function describeStep1FilesError(res) {
@@ -48,7 +76,7 @@ export default function IgvStandalone() {
   })();
 
   const distinctProjects = Array.from(new Set(initialTracks.map((t) => t.project).filter(Boolean)));
-  const initialLocus = (params.get("locus") || "").trim();
+  const initialLocus = normalizeLocus(params.get("locus") || "");
 
   const [status, setStatus] = useState(initialTracks.length ? "Loading…" : "No samples specified.");
   const [meta, setMeta] = useState({ reference: "", trackCount: 0 });
@@ -146,7 +174,7 @@ export default function IgvStandalone() {
       }
     }
     if (locusParam && browserRef.current) {
-      try { browserRef.current.search(locusParam); } catch (e) { /* ignore */ }
+      try { browserRef.current.search(normalizeLocus(locusParam)); } catch (e) { /* ignore */ }
     }
     try { window.focus(); } catch (e) { /* ignore */ }
   }

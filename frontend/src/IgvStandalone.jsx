@@ -348,6 +348,16 @@ export default function IgvStandalone() {
         for (const t of tracks) loadedRef.current.add(`${t.project}:${t.sample}`);
         setMeta({ reference: refName, trackCount: tracks.length });
         setStatus(skipped.length ? `Loaded ${tracks.length}; skipped: ${skipped.join("; ")}` : "");
+        // Explicitly navigate to the locus AFTER the browser is fully built.
+        // config.locus in createBrowser is unreliable — it gets silently
+        // dropped on some genomes (observed on MTBC0 4.4 Mb: page lands at
+        // whole-contig view despite locus being set). browser.search() is
+        // the same API path the user uses to manually paste a position, and
+        // it always navigates correctly. Belt-and-suspenders alongside the
+        // config.locus set above.
+        if (initialLocus) {
+          try { browser.search(initialLocus); } catch (e) { /* ignore */ }
+        }
       } catch (err) {
         setStatus(`IGV failed to load: ${err && err.message ? err.message : err}`);
       }

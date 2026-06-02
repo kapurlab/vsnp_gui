@@ -3325,6 +3325,64 @@ def step1_sample_files(project: str, sample: str):
     }
 
 
+@app.get("/api/projects/{project}/kraken/samples/{sample}/files")
+def kraken_sample_files(project: str, sample: str):
+    """List Kraken ID Parse outputs for a sample (cross-tool visibility).
+
+    Kraken ID Parse GUI writes its per-sample results into
+    ``<project>/kraken/<sample>/`` — the same project directory vSNP uses.
+    Since both tools share /srv/kapurlab/projects, those files already sit
+    on disk next to our step1 output; this endpoint simply surfaces them so
+    a user looking at a sample in vSNP can see (and download, via the
+    existing /download-file route) whatever Kraken produced for it.
+
+    Returns ``present: false`` (not 404) when no Kraken run exists for the
+    sample, so the UI can show a calm "no Kraken run yet" instead of an error.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    kraken_dir = project_dir / "kraken"
+    # Kraken strips _R1/_R2 / _1/_2 read tags, so its sample dirs match our
+    # bare sample name. Fall back to the same prefix match step1 uses for
+    # samples that carry an Illumina lane/index suffix.
+    sample_dir = _resolve_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
+    if not sample_dir:
+        return {
+            "project": project,
+            "sample": sample,
+            "present": False,
+            "sample_dir": "",
+            "files": [],
+        }
+    base = sample_dir.resolve()
+    entries = []
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name.startswith(".~lock"):
+            continue
+        try:
+            rel = path.relative_to(base).as_posix()
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        entries.append({
+            "name": path.name,
+            "relpath": rel,
+            "path": str(path),
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+            "type": path.suffix.lstrip(".").lower() or "file",
+        })
+    return {
+        "project": project,
+        "sample": sample,
+        "present": True,
+        "sample_dir": str(base),
+        "files": entries,
+    }
+
+
 @app.get("/api/projects/{project}/step1/edits")
 def step1_edits(project: str):
     cfg = load_config()

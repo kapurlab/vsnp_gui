@@ -55,7 +55,7 @@ export default function App() {
   const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step1FilesCache, setStep1FilesCache] = useState({});
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
-  const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "" });
+  const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
   const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
   const igvBrowserRef = useRef(null);
@@ -1840,23 +1840,41 @@ export default function App() {
 
   async function openStep1FolderModal(project, sample) {
     if (!project || !sample) return;
-    setFolderModal({ open: true, project, sample, files: [], sampleDir: "", loading: true, error: "" });
+    setFolderModal({ open: true, project, sample, files: [], sampleDir: "", loading: true, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/files`);
+      // Fetch vSNP step1 files and Kraken ID Parse files for the same sample
+      // in parallel. Kraken outputs live in <project>/kraken/<sample>/ — the
+      // same shared project dir — so we can surface them here for cross-tool
+      // visibility. Kraken absence is not an error (present:false).
+      const [res, krakenRes] = await Promise.all([
+        fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/files`),
+        fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples/${encodeURIComponent(sample)}/files`).catch(() => null),
+      ]);
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         setFolderModal((prev) => ({ ...prev, loading: false, error: detail.detail || `Failed to load files (${res.status})` }));
         return;
       }
       const data = await res.json();
-      setFolderModal({ open: true, project, sample, files: data.files || [], sampleDir: data.sample_dir || "", loading: false, error: "" });
+      let kraken = { present: false, files: [], sample_dir: "" };
+      if (krakenRes && krakenRes.ok) {
+        kraken = await krakenRes.json().catch(() => kraken);
+      }
+      setFolderModal({
+        open: true, project, sample,
+        files: data.files || [], sampleDir: data.sample_dir || "",
+        loading: false, error: "",
+        krakenPresent: !!kraken.present,
+        krakenFiles: kraken.files || [],
+        krakenDir: kraken.sample_dir || "",
+      });
     } catch (err) {
       setFolderModal((prev) => ({ ...prev, loading: false, error: String(err) }));
     }
   }
 
   function closeFolderModal() {
-    setFolderModal({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "" });
+    setFolderModal({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   }
 
   function downloadFolderFile(project, path) {
@@ -3797,6 +3815,46 @@ export default function App() {
                   </table>
                 </div>
               )}
+              {!folderModal.loading && !folderModal.error ? (
+                <div className="kraken-cross-tool" style={{ marginTop: 16 }}>
+                  <h4 style={{ marginBottom: 4 }}>Kraken ID results</h4>
+                  {!folderModal.krakenPresent ? (
+                    <div className="muted">No Kraken ID Parse run for this sample yet.</div>
+                  ) : folderModal.krakenFiles.length === 0 ? (
+                    <div className="muted">Kraken folder exists but contains no files.</div>
+                  ) : (
+                    <>
+                      {folderModal.krakenDir ? (
+                        <div className="muted" style={{ wordBreak: "break-all", marginBottom: 4 }}>{folderModal.krakenDir}</div>
+                      ) : null}
+                      <div className="folder-modal-files" style={{ maxHeight: "30vh", overflow: "auto" }}>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>File</th>
+                              <th>Type</th>
+                              <th style={{ textAlign: "right" }}>Size</th>
+                              <th></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {folderModal.krakenFiles.map((f) => (
+                              <tr key={f.relpath}>
+                                <td style={{ wordBreak: "break-all" }}>{f.relpath}</td>
+                                <td>{f.type}</td>
+                                <td style={{ textAlign: "right" }}>{formatBytes(f.size)}</td>
+                                <td>
+                                  <button onClick={() => downloadFolderFile(folderModal.project, f.path)}>Download</button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : null}
               <div className="modal-actions">
                 <button onClick={closeFolderModal}>Close</button>
               </div>

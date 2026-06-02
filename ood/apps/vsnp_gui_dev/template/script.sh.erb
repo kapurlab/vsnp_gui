@@ -33,6 +33,21 @@ fi
 # Make vsnp3 env CLI tools available.
 export PATH="${VSNP3_ENV}/bin:${PATH}"
 
+# Dev: build the frontend from the selected branch's source so UI changes are
+# served. Only runs in the per-session worktree (never the shared install).
+# The worktree's node_modules is gitignored/absent, so reuse the shared
+# install's via a symlink to keep `vite build` fast (~5s). Falls back to any
+# existing dist/ if the build fails (e.g. a branch that changed deps — then a
+# real `npm install` would be needed in the worktree).
+if [ -n "${worktree_dir}" ] && [ "${VSNP_DIR}" = "${worktree_dir}" ] && [ -d "${VSNP_DIR}/frontend" ]; then
+  if [ ! -e "${VSNP_DIR}/frontend/node_modules" ] && [ -d "${SHARED_VSNP_GUI}/frontend/node_modules" ]; then
+    ln -s "${SHARED_VSNP_GUI}/frontend/node_modules" "${VSNP_DIR}/frontend/node_modules"
+  fi
+  echo "Building frontend (vite) from worktree source…"
+  ( cd "${VSNP_DIR}/frontend" && npm run build ) \
+    || echo "WARN: frontend build failed; serving existing dist/ if present."
+fi
+
 cd "${VSNP_DIR}/backend"
 echo "Starting uvicorn on port ${port}"
 echo "  vsnp3 env: ${VSNP3_ENV}"

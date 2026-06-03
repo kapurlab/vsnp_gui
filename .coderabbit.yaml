@@ -1,0 +1,143 @@
+# CodeRabbit configuration for vsnp_gui.
+#
+# Tuned for a small two-contributor lab repo. Reviews are advisory, not
+# gating — CodeRabbit posts inline suggestions and a brief PR summary,
+# but never requests changes that block merge. Path-specific instructions
+# below capture project-specific invariants (OOD proxy relative-URL rule,
+# the filesystem path-allowlist contract, parameterization-for-multi-site)
+# that a generic reviewer wouldn't otherwise know to flag.
+
+language: "en-US"
+early_access: false
+tone_instructions: |
+  Be direct and specific. Skip preamble. Skip emoji. When suggesting a
+  change, show the diff. When flagging a risk, say what would actually
+  break in production rather than abstract concerns.
+
+reviews:
+  # "chill" produces a high-level summary + inline comments on real
+  # concerns. "assertive" piles on style nits — too much noise at the
+  # scale of this repo.
+  profile: "chill"
+  # CodeRabbit's review never blocks merge. Tod and I approve PRs;
+  # CodeRabbit is a fast first pass, not an approval gate.
+  request_changes_workflow: false
+  high_level_summary: true
+  # The "poem" feature writes a short poem about the PR. Cute but noisy.
+  poem: false
+  # The status comment is an extra "I reviewed" comment per push. The
+  # actual review comments already convey that.
+  review_status: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    # Don't review draft PRs — they're work-in-progress by definition.
+    drafts: false
+    # Don't auto-review pushes to PRs that have been labeled "wip".
+    ignore_title_keywords:
+      - "wip"
+      - "draft"
+      - "do not merge"
+  path_filters:
+    # Generated / vendored — never review.
+    - "!frontend/dist/**"
+    - "!frontend/node_modules/**"
+    - "!**/package-lock.json"
+    - "!**/yarn.lock"
+    - "!**/poetry.lock"
+    # Binary docs we won't get useful review on.
+    - "!docs/**/*.docx"
+    - "!docs/**/*.pdf"
+    - "!figures/**/*.svg"
+    # Worktree spill in case it ever sneaks in.
+    - "!/tmp/**"
+
+  path_instructions:
+    - path: "backend/**/*.py"
+      instructions: |
+        FastAPI backend running per-user via OOD. Flag:
+        - Hardcoded `/home/<user>/` or `/srv/kapurlab/` paths. We're
+          parameterizing site-specific paths via per-user config and a
+          deploy-time `site.conf` for the upcoming NIVEDI mirror — new
+          hardcodes are regressions.
+        - New endpoints that read or serve filesystem paths without
+          routing through `_path_under_any_project_root` (or the equivalent
+          allowlist in `serve_project_file`). The threat is escaping the
+          project / refs roots via a crafted `?path=` query param.
+        - Mutations to `project.json`, per-user config, or any shared
+          metadata file without an atomic write pattern (write to temp +
+          os.replace). Mid-write crashes corrupt state otherwise.
+        - Any call to `subprocess.run` / `Popen` that interpolates a
+          user-supplied string into the command without `shlex.quote` or
+          list-form argv. We've been bitten by vsnp3 upstream doing this
+          (T-43) and shouldn't reproduce it.
+        - Long-running endpoints that don't return promptly. OOD's
+          per-user nginx will time out request-response after ~60s; jobs
+          longer than that need to dispatch to a background runner.
+
+    - path: "frontend/src/**/*.{js,jsx,ts,tsx}"
+      instructions: |
+        React + Vite SPA served through OOD's `/rnode/<host>/<port>/`
+        proxy. Flag:
+        - Absolute URLs like `http://localhost:8000` or any path starting
+          with `/rnode/...` or `/api/...` from JS — fetches must be
+          relative (`./api/...`) or origin-relative (`window.location.pathname`
+          + relative path). Absolute URLs bypass the proxy and 404.
+        - `target="_blank"` for IGV / cascade links — Safari ignores
+          named targets, we use a `window.open(...)` onclick handler
+          to make same-window navigation work cross-browser.
+        - Hardcoded sample names, project names, or reference IDs —
+          these should come from props / API responses, not literals.
+        - Re-renders that re-bootstrap igv.js (the IGV browser is
+          expensive to create; addTrack/loadTrack is the right pattern
+          for incremental changes).
+
+    - path: "ood/**/*"
+      instructions: |
+        Open OnDemand app definitions, deployed via `sudo cp` to
+        `/var/www/ood/apps/sys/`. The `.erb` files get ERB substitution
+        from OOD before bash sees them. Flag:
+        - Shell variables (`$var`) where ERB tags (`<%= var %>`) are
+          expected, or vice versa.
+        - `before.sh.erb` writing outside `$worktree_dir` or `/tmp/` —
+          this runs in the OOD parent process and can clobber prod state.
+        - Any path that hardcodes `/srv/kapurlab/` — should be a `site.conf`
+          variable once the NIVEDI install playbook lands.
+
+    - path: "backend/app/xlsx_html.py"
+      instructions: |
+        Pure-function renderer: xlsx → HTML preview page. Critical
+        invariants: `target="vsnp_igv"` (named window for same-tab IGV
+        navigation), `onclick="window.__vsnpLaunchIgv(this.href)..."`
+        (Safari fix), URL prefix `../../../?view=igv&...` (climbs out of
+        `/api/projects/{p}/preview-xlsx` back to the SPA root through the
+        OOD rnode proxy). Don't break these.
+
+    - path: "backend/app/main.py"
+      instructions: |
+        The 3000+ line FastAPI app. Already busy — favor extracting
+        sub-modules (like `refs.py`, `jobs.py`, `projects.py`) over
+        adding more routes here. New endpoints should also live in
+        a focused module unless they're trivially small.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Documentation. Lighter review — focus on accuracy and broken
+        cross-references. Skip prose style nits. Flag if a code snippet
+        in the doc has drifted from the actual code (the architecture
+        doc in particular references real files and helpers; those
+        references should still resolve).
+
+    - path: ".coderabbit.yaml"
+      instructions: |
+        CodeRabbit's own config. Treat as opinionated infra config —
+        flag accidental syntax errors but defer to Vivek on policy.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: "auto"
+  issues:
+    scope: "auto"

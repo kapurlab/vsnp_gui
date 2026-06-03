@@ -4157,16 +4157,31 @@ export default function App() {
                             </tr>
                           </thead>
                           <tbody>
-                            {folderModal.krakenFiles.map((f) => (
+                            {folderModal.krakenFiles.map((f) => {
+                              const isFastq = f.relpath.endsWith(".fastq.gz") || f.name?.endsWith(".fastq.gz");
+                              return (
                               <tr key={f.relpath}>
-                                <td style={{ wordBreak: "break-all" }}>{f.relpath}</td>
+                                <td style={{ wordBreak: "break-all" }}>
+                                  {f.relpath}
+                                  {isFastq ? <span title="Parsed reads — add to the project to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+                                </td>
                                 <td>{f.type}</td>
                                 <td style={{ textAlign: "right" }}>{formatBytes(f.size)}</td>
-                                <td>
+                                <td style={{ whiteSpace: "nowrap" }}>
+                                  {isFastq ? (
+                                    <button
+                                      onClick={() => importFastqToDownload(folderModal.project, f.path)}
+                                      title="Symlink this parsed-read file into the project's download/ so it can be run through Step 1"
+                                      style={{ marginRight: 6 }}
+                                    >
+                                      Add to project
+                                    </button>
+                                  ) : null}
                                   <button onClick={() => downloadFolderFile(folderModal.project, f.path)}>Download</button>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>

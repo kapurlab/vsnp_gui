@@ -1489,11 +1489,19 @@ def project_link_local(project: str, payload: LinkLocalRequest):
         print(f"Link-local failed. Raw path: {raw_path!r} Resolved: {src}")
         raise HTTPException(status_code=400, detail=f"Input path not found: {src}")
     download_dir = project_dir / "download"
+    # Accept either a directory of fastqs, or a single .fastq.gz file (used to
+    # pull a Kraken parsed-read file into download/ so it can be re-run through
+    # Step 1). For a single file, symlink it to its real target so the link
+    # keeps working even if the original is itself a symlink.
+    if src.is_file():
+        candidates = [src] if src.name.endswith(".fastq.gz") else []
+    else:
+        candidates = sorted(src.glob("*.fastq.gz"))
     count = 0
-    for f in src.glob("*.fastq.gz"):
+    for f in candidates:
         target = download_dir / f.name
         if not target.exists():
-            target.symlink_to(f)
+            target.symlink_to(f.resolve())
             count += 1
     return {"linked": count}
 

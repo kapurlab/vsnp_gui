@@ -3402,6 +3402,7 @@ def kraken_sample_files(project: str, sample: str):
             stat = path.stat()
         except (OSError, ValueError):
             continue
+        ext = path.suffix.lower()
         entries.append({
             "name": path.name,
             "relpath": rel,
@@ -3409,7 +3410,20 @@ def kraken_sample_files(project: str, sample: str):
             "size": stat.st_size,
             "mtime": stat.st_mtime,
             "type": path.suffix.lstrip(".").lower() or "file",
+            # Browser-renderable (open in a tab) vs download-only. Krona/report
+            # HTML, coverage PDFs, preview PNGs etc. open inline.
+            "openable": ext in (".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg",
+                                 ".svg", ".txt", ".log", ".csv", ".json"),
         })
+    # Surface the most useful artifacts first: report/krona HTML, then the rest.
+    def _rank(e):
+        n = e["name"].lower()
+        if n.endswith("_krona.html") or n == "report.html":
+            return 0
+        if n.endswith(".html") or n.endswith(".pdf"):
+            return 1
+        return 2
+    entries.sort(key=lambda e: (_rank(e), e["relpath"]))
     return {
         "project": project,
         "sample": sample,
@@ -3417,6 +3431,26 @@ def kraken_sample_files(project: str, sample: str):
         "sample_dir": str(base),
         "files": entries,
     }
+
+
+@app.get("/api/projects/{project}/kraken/samples")
+def kraken_samples(project: str):
+    """List the sample names that have a Kraken output dir under
+    <project>/kraken/. Lets the UI flag which download samples already have
+    Kraken results without a per-sample request each."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    kraken_dir = project_dir / "kraken"
+    names: List[str] = []
+    if kraken_dir.is_dir():
+        try:
+            names = sorted(
+                d.name for d in kraken_dir.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+            )
+        except (OSError, PermissionError):
+            names = []
+    return {"project": project, "samples": names}
 
 
 # ---------------------------------------------------------------------------

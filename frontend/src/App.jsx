@@ -37,6 +37,10 @@ export default function App() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [inputs, setInputs] = useState({ files: [], total_bytes: 0, count: 0 });
   const [inputsLoading, setInputsLoading] = useState(false);
+  // Cross-tool Kraken results surfaced per sample in the download/ browser.
+  const [krakenSampleDirs, setKrakenSampleDirs] = useState([]);     // dir names under <project>/kraken/
+  const [krakenFilesBySample, setKrakenFilesBySample] = useState({}); // sample -> {loading,present,files,sample_dir}
+  const [openKrakenRow, setOpenKrakenRow] = useState({});           // sample -> bool
   const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
   const [qcLoading, setQcLoading] = useState(false);
@@ -704,6 +708,9 @@ export default function App() {
     loadStep2Outputs();
     loadVcfSourceSamples();
     loadInputs(selectedProject);
+    loadKrakenSamples(selectedProject);
+    setKrakenFilesBySample({});
+    setOpenKrakenRow({});
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
@@ -1372,6 +1379,49 @@ export default function App() {
       setInputs({ files: [], total_bytes: 0, count: 0 });
     } finally {
       setInputsLoading(false);
+    }
+  }
+
+  // --- Cross-tool Kraken results in the download/ sample browser ----------
+  // Mirrors the Kraken GUI: each download sample shows whether Kraken ran and,
+  // when expanded, its output files (Krona/report HTML open inline).
+  async function loadKrakenSamples(project) {
+    if (!project) { setKrakenSampleDirs([]); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/kraken/samples`);
+      const data = res.ok ? await res.json() : { samples: [] };
+      setKrakenSampleDirs(data.samples || []);
+    } catch (_) {
+      setKrakenSampleDirs([]);
+    }
+  }
+
+  // Match a download-sample name to a Kraken output dir name in either
+  // direction (Kraken may have stripped more/less of the read-tag suffix).
+  function krakenDirForSample(sample) {
+    if (!sample) return null;
+    if (krakenSampleDirs.includes(sample)) return sample;
+    const longer = krakenSampleDirs.filter((d) => d.startsWith(`${sample}_`)).sort();
+    if (longer.length) return longer[0];
+    const shorter = krakenSampleDirs.filter((d) => sample.startsWith(`${d}_`));
+    if (shorter.length) return shorter.sort((a, b) => b.length - a.length)[0];
+    return null;
+  }
+
+  function toggleKrakenRow(sample) {
+    const willOpen = !openKrakenRow[sample];
+    setOpenKrakenRow((m) => ({ ...m, [sample]: willOpen }));
+    if (willOpen && !krakenFilesBySample[sample]) loadKrakenFiles(sample);
+  }
+
+  async function loadKrakenFiles(sample) {
+    setKrakenFilesBySample((m) => ({ ...m, [sample]: { loading: true, files: [] } }));
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/kraken/samples/${encodeURIComponent(sample)}/files`);
+      const data = await res.json();
+      setKrakenFilesBySample((m) => ({ ...m, [sample]: { loading: false, ...data } }));
+    } catch (_) {
+      setKrakenFilesBySample((m) => ({ ...m, [sample]: { loading: false, present: false, files: [] } }));
     }
   }
 
@@ -2823,11 +2873,14 @@ export default function App() {
                       <div style={{display:"flex", flexDirection:"column", gap:"3px", maxHeight:"260px", overflowY:"auto"}}>
                         {groupPairedFiles(inputs.files).map((g) => {
                           const tip = g.files.map((f) => `${f.name} (${_formatBytes(f.size)})`).join("\n");
+                          const hasKraken = !!krakenDirForSample(g.sample);
+                          const kOpen = !!openKrakenRow[g.sample];
+                          const kRes = krakenFilesBySample[g.sample];
                           return (
                             <div
                               key={g.files.map((f) => f.name).join("|")}
                               style={{
-                                display:"flex", alignItems:"center", gap:"8px",
+                                display:"flex", flexDirection:"column", gap:"4px",
                                 padding:"4px 8px",
                                 background:"var(--panel-2)",
                                 border:"1px solid var(--border)",
@@ -2835,26 +2888,63 @@ export default function App() {
                                 fontSize:"12px",
                               }}
                             >
-                              <span
-                                style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}
-                                title={tip}
-                              >
-                                {g.sample}
-                                {g.isPair ? (
-                                  <span className="muted" style={{marginLeft:"6px", fontSize:"10.5px"}}>
-                                    paired · R1+R2
-                                  </span>
+                              <div style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                                <span
+                                  style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}
+                                  title={tip}
+                                >
+                                  {g.sample}
+                                  {g.isPair ? (
+                                    <span className="muted" style={{marginLeft:"6px", fontSize:"10.5px"}}>
+                                      paired · R1+R2
+                                    </span>
+                                  ) : null}
+                                </span>
+                                {hasKraken ? (
+                                  <button
+                                    type="button"
+                                    className="ghost"
+                                    onClick={() => toggleKrakenRow(g.sample)}
+                                    title="Show Kraken ID Parse results for this sample"
+                                    style={{fontSize:"11px", padding:"2px 8px"}}
+                                  >
+                                    🧬 Kraken {kOpen ? "▾" : "▸"}
+                                  </button>
                                 ) : null}
-                              </span>
-                              <span className="muted" style={{minWidth:"70px", textAlign:"right"}}>{_formatBytes(g.totalSize)}</span>
-                              <button
-                                type="button"
-                                className="chip-remove"
-                                onClick={() => deletePair(g.files)}
-                                title={g.isPair ? `Delete both ${g.files.map((f) => f.name).join(" + ")}` : `Delete ${g.files[0].name}`}
-                              >
-                                ×
-                              </button>
+                                <span className="muted" style={{minWidth:"70px", textAlign:"right"}}>{_formatBytes(g.totalSize)}</span>
+                                <button
+                                  type="button"
+                                  className="chip-remove"
+                                  onClick={() => deletePair(g.files)}
+                                  title={g.isPair ? `Delete both ${g.files.map((f) => f.name).join(" + ")}` : `Delete ${g.files[0].name}`}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                              {hasKraken && kOpen ? (
+                                <div style={{borderTop:"1px solid var(--border)", paddingTop:"4px", display:"flex", flexDirection:"column", gap:"3px"}}>
+                                  {kRes?.loading ? (
+                                    <span className="muted" style={{fontSize:"11px"}}>Loading Kraken results…</span>
+                                  ) : !kRes || !kRes.present || !(kRes.files || []).length ? (
+                                    <span className="muted" style={{fontSize:"11px"}}>No Kraken output files found.</span>
+                                  ) : (
+                                    kRes.files.map((f) => {
+                                      const base = `${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/download-file?path=${encodeURIComponent(f.path)}`;
+                                      return (
+                                        <div key={f.relpath} style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                                          <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={f.relpath}>
+                                            {f.openable ? (
+                                              <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
+                                            ) : f.relpath}
+                                          </span>
+                                          <span className="muted" style={{fontSize:"10.5px"}}>{_formatBytes(f.size)}</span>
+                                          <a href={`${base}&inline=0`} title={`Download ${f.name}`} style={{textDecoration:"none"}}>⬇</a>
+                                        </div>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                              ) : null}
                             </div>
                           );
                         })}

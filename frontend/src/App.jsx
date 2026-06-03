@@ -41,6 +41,9 @@ export default function App() {
   const [krakenSampleDirs, setKrakenSampleDirs] = useState([]);     // dir names under <project>/kraken/
   const [krakenFilesBySample, setKrakenFilesBySample] = useState({}); // sample -> {loading,present,files,sample_dir}
   const [openKrakenRow, setOpenKrakenRow] = useState({});           // sample -> bool
+  // Inline Kraken results in the project list (click a project to expand).
+  const [projKrakenOpen, setProjKrakenOpen] = useState({});         // project -> bool
+  const [projKraken, setProjKraken] = useState({});                 // project -> {loading, samples:[{sample,files}]}
   const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
   const [qcLoading, setQcLoading] = useState(false);
@@ -1408,6 +1411,32 @@ export default function App() {
     return null;
   }
 
+  // Expand a project row to show its Kraken results inline (reads <project>/
+  // kraken/ directly, so it works even if the FASTQs are gone from download/).
+  async function toggleProjectKraken(project) {
+    const willOpen = !projKrakenOpen[project];
+    setProjKrakenOpen((m) => ({ ...m, [project]: willOpen }));
+    if (!willOpen || projKraken[project]) return;
+    setProjKraken((m) => ({ ...m, [project]: { loading: true, samples: [] } }));
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples`);
+      const data = res.ok ? await res.json() : { samples: [] };
+      const dirs = data.samples || [];
+      const samples = await Promise.all(dirs.map(async (s) => {
+        try {
+          const fr = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples/${encodeURIComponent(s)}/files`);
+          const fd = await fr.json();
+          return { sample: s, files: fd.files || [] };
+        } catch (_) {
+          return { sample: s, files: [] };
+        }
+      }));
+      setProjKraken((m) => ({ ...m, [project]: { loading: false, samples } }));
+    } catch (_) {
+      setProjKraken((m) => ({ ...m, [project]: { loading: false, samples: [] } }));
+    }
+  }
+
   function toggleKrakenRow(sample) {
     const willOpen = !openKrakenRow[sample];
     setOpenKrakenRow((m) => ({ ...m, [sample]: willOpen }));
@@ -2602,8 +2631,8 @@ export default function App() {
             </div>
             <div className="list">
               {projects.map((p) => (
+                <div key={p.name} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div
-                  key={p.name}
                   className={`list-item ${p.name === selectedProject ? "active" : ""}`}
                   role="button"
                   tabIndex={0}
@@ -2657,6 +2686,16 @@ export default function App() {
                       className="ghost-btn"
                       onClick={(e) => {
                         e.stopPropagation();
+                        toggleProjectKraken(p.name);
+                      }}
+                      title="Show Kraken ID Parse results for this project's samples"
+                    >
+                      🧬 Kraken {projKrakenOpen[p.name] ? "▾" : "▸"}
+                    </button>
+                    <button
+                      className="ghost-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
                         archiveProject(p.name);
                       }}
                     >
@@ -2672,6 +2711,44 @@ export default function App() {
                       Delete
                     </button>
                   </div>
+                </div>
+                {projKrakenOpen[p.name] ? (
+                  <div className="kraken-inline" style={{ border: "1px solid var(--border)", borderRadius: "10px", padding: "8px 10px", background: "var(--panel-2)" }}>
+                    {projKraken[p.name]?.loading ? (
+                      <div className="muted" style={{ fontSize: "12px" }}>Loading Kraken results…</div>
+                    ) : !projKraken[p.name] || projKraken[p.name].samples.length === 0 ? (
+                      <div className="muted" style={{ fontSize: "12px" }}>
+                        No Kraken ID Parse runs in this project yet. Run it from Step 1 (“🧬 Kraken ID”) or the Kraken ID Parse app.
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {projKraken[p.name].samples.map((s) => (
+                          <div key={s.sample} style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                            <div style={{ fontWeight: 600, fontSize: "12px" }}>{s.sample}</div>
+                            {s.files.length === 0 ? (
+                              <div className="muted" style={{ fontSize: "11px", paddingLeft: "8px" }}>No output files.</div>
+                            ) : (
+                              s.files.map((f) => {
+                                const base = `${API_BASE}/api/projects/${encodeURIComponent(p.name)}/download-file?path=${encodeURIComponent(f.path)}`;
+                                return (
+                                  <div key={f.relpath} style={{ display: "flex", alignItems: "center", gap: "8px", paddingLeft: "8px", fontSize: "12px" }}>
+                                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.relpath}>
+                                      {f.openable ? (
+                                        <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
+                                      ) : f.relpath}
+                                    </span>
+                                    <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
+                                    <a href={`${base}&inline=0`} title={`Download ${f.name}`} style={{ textDecoration: "none" }}>⬇</a>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
                 </div>
               ))}
             </div>

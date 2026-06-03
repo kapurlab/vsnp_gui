@@ -19,6 +19,10 @@ electron/node_modules/
 .DS_Store
 *.log
 
+# Office app lock files (Word / Excel / PowerPoint create these while
+# a document is open; they're not source and shouldn't ever be tracked).
+~$*
+
 # Local icon drafts
 assets/icons/*_draft.*
 assets/icons/*_drafts/*

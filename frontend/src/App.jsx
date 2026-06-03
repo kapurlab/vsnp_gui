@@ -1476,9 +1476,13 @@ export default function App() {
   // _R2[_001].fastq.gz). Anything that doesn't match either stays solo.
   function groupPairedFiles(files) {
     const PAIR_RE = /^(.+?)_R?([12])(?:_\d+)?\.(?:fastq|fq)(?:\.gz)?$/i;
+    const FASTQ_RE = /\.(?:fastq|fq)(?:\.gz)?$/i;
     const groups = [];
     const sampleIdx = new Map();
     for (const f of files) {
+      // Only FASTQ reads are samples. Skip helper/clutter files that also live
+      // in download/ (download_sra.sh, sra_crosswalk.tsv, logs, etc.).
+      if (!FASTQ_RE.test(f.name)) continue;
       const m = f.name.match(PAIR_RE);
       if (m) {
         const sample = m[1];
@@ -2722,6 +2726,15 @@ export default function App() {
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
                     </div>
+                    {p._root ? (
+                      <div
+                        className="list-meta"
+                        style={{ fontSize: "0.72em", opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", textAlign: "left" }}
+                        title={`${p._root}/${p.name}`}
+                      >
+                        {p._root}/{p.name}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="list-actions">
                     <button

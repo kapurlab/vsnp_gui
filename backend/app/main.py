@@ -3584,6 +3584,13 @@ def kraken_run(project: str, payload: KrakenRunRequest):
             detail=f"No FASTQ files found for sample {sample!r} in the project's download/ folder.",
         )
 
+    # Name the output dir EXACTLY as the Kraken ID Parse tool would when run
+    # from its own GUI on these same FASTQs (read-tag stripped from R1). This
+    # keeps <project>/kraken/<dir> identical no matter which GUI launched the
+    # run, so the Kraken GUI — which lists samples by that stripped name —
+    # finds the results instead of showing "No Kraken results yet".
+    kraken_sample = _kraken_strip_read_tag(r1.name)[0]
+
     # Kraken DB: request override → vsnp config (if a user set one) → shared default.
     kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
         or "/srv/kapurlab/databases/kraken2/k2_standard_08gb"
@@ -3592,7 +3599,7 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     if kraken_only and not kraken_db:
         raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
 
-    run_dir = project_dir / "kraken" / sample
+    run_dir = project_dir / "kraken" / kraken_sample
     # Guard against two runs racing on the same output dir (they'd clobber each
     # other's temp/output folders). Track the last job id in a sentinel file,
     # the same pattern step1 uses with .step1_job_id.
@@ -3636,7 +3643,7 @@ def kraken_run(project: str, payload: KrakenRunRequest):
         env=build_env(cfg),
     )
     job_id_file.write_text(job_id, encoding="utf-8")
-    return {"job_id": job_id, "run_dir": str(run_dir), "sample": sample, "mode": "kraken_only" if kraken_only else "full", "label": label}
+    return {"job_id": job_id, "run_dir": str(run_dir), "sample": kraken_sample, "mode": "kraken_only" if kraken_only else "full", "label": label}
 
 
 @app.get("/api/projects/{project}/step1/edits")

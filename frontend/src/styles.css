@@ -882,6 +882,23 @@ button:hover:not(:disabled) {
   color: #4ade80;
 }
 
+/* Per-line classes used by the inline Kraken-run log in the Step 1 modal.
+   Mirrors the Kraken ID Parse app's log styling so the two tools' live logs
+   look identical. */
+.log .log-line { white-space: pre-wrap; word-break: break-word; color: #cbd5e1; }
+.log .log-line.error { color: #f87171; font-weight: 600; }
+.log-placeholder { color: #64748b; font-style: italic; }
+
+/* Taxon preset pills — shared visual language with the Kraken ID Parse app. */
+.taxon-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.preset-btn {
+  padding: 4px 11px; font-size: 11px; border: 1px solid var(--border);
+  border-radius: 999px; cursor: pointer; background: var(--panel-2); color: var(--text);
+  font-weight: 600; box-shadow: none;
+}
+.preset-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.preset-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
 .note {
   margin-top: 10px;
   font-size: 12px;

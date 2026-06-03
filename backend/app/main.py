@@ -3383,6 +3383,184 @@ def kraken_sample_files(project: str, sample: str):
     }
 
 
+# ---------------------------------------------------------------------------
+# Run Kraken ID Parse on a sample (cross-tool invocation).
+#
+# vSNP and Kraken ID Parse share /srv/kapurlab/projects, so we can kick off the
+# Kraken pipeline directly from the vSNP Step 1 view and have it write into the
+# same <project>/kraken/<sample>/ directory the results panel already reads.
+#
+# Crucially this uses the SHARED Kraken install — its own conda env and bin/
+# scripts under /srv/kapurlab/tools/kraken_id_parse_gui — NOT the vSNP env (the
+# vsnp3 env has neither kraken2, krona, nor SPAdes). The Kraken tool itself is
+# lab-shared functionality; only the project data lives per-user/shared.
+# ---------------------------------------------------------------------------
+_KRAKEN_GUI_ROOT = Path("/srv/kapurlab/tools/kraken_id_parse_gui")
+
+# Read-tag stripping identical to Kraken ID Parse's own pairing logic, so the
+# sample name and R1/R2 selection match what that tool would pick on its own.
+_KRAKEN_READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
+
+
+def _kraken_strip_read_tag(filename: str):
+    m = _KRAKEN_READ_TAG_RE.search(filename)
+    if m:
+        return filename[:m.start()], (m.group(1) or m.group(2))
+    return filename[:-len(".fastq.gz")], None
+
+
+def _find_sample_fastqs(download_dir: Path, sample: str):
+    """Return (r1, r2) Paths for a sample from <project>/download/.
+
+    Matches the sample's read files by stripping Illumina/SRA read tags, with
+    the same prefix fallback used elsewhere (sample ``13-1941-6`` matches
+    ``13-1941-6_S4_L001_R1_001.fastq.gz``). r2 is None for single-end.
+    """
+    if not download_dir.is_dir():
+        return None, None
+    try:
+        all_fq = sorted(download_dir.glob("*.fastq.gz"))
+    except OSError:
+        return None, None
+    r1 = r2 = single = None
+    for fq in all_fq:
+        base, tag = _kraken_strip_read_tag(fq.name)
+        if base != sample and not base.startswith(f"{sample}"):
+            continue
+        # Require the bare sample name to match the file's base (exact) or be a
+        # prefix up to a lane/index separator, to avoid matching "S1" to "S10".
+        if base != sample and not base.startswith(f"{sample}_"):
+            continue
+        if tag == "1":
+            r1 = r1 or fq
+        elif tag == "2":
+            r2 = r2 or fq
+        else:
+            single = single or fq
+    if r1:
+        return r1, r2
+    if single:
+        return single, None
+    return None, None
+
+
+def _resolve_kraken_runtime() -> Dict[str, str]:
+    """Locate the shared Kraken install's python + bin. Falls back to a
+    per-user miniforge env only if the shared env is absent (mirrors the OOD
+    launch script's resolution). Returns {python, gui_root, env_bin}."""
+    shared_env = _KRAKEN_GUI_ROOT / "env"
+    personal_env = Path.home() / "miniforge3" / "envs" / "kraken_id_parse"
+    if (shared_env / "bin" / "python").exists():
+        env_dir = shared_env
+    elif (personal_env / "bin" / "python").exists():
+        env_dir = personal_env
+    else:
+        env_dir = None
+    python = str((env_dir / "bin" / "python")) if env_dir else sys.executable
+    return {
+        "python": python,
+        "gui_root": str(_KRAKEN_GUI_ROOT),
+        "env_bin": str(env_dir / "bin") if env_dir else "",
+    }
+
+
+class KrakenRunRequest(BaseModel):
+    sample: str
+    # "full": classify + parse reads + assemble + BLAST identification (needs a
+    # taxon). "kraken_only": Kraken2 + Krona graph only (no taxon needed).
+    mode: str = "full"
+    taxon: Optional[str] = None
+    kraken_db: Optional[str] = None
+    blast_db: Optional[str] = None
+
+
+@app.post("/api/projects/{project}/kraken/run")
+def kraken_run(project: str, payload: KrakenRunRequest):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not _KRAKEN_GUI_ROOT.is_dir():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Kraken ID Parse is not installed at {_KRAKEN_GUI_ROOT}.",
+        )
+    script = _KRAKEN_GUI_ROOT / "bin" / "kraken_id_parse.py"
+    if not script.is_file():
+        raise HTTPException(status_code=503, detail=f"Kraken pipeline script missing: {script}")
+
+    kraken_only = (payload.mode or "full").strip() == "kraken_only"
+    taxon = (payload.taxon or "").strip()
+    if not kraken_only and not taxon:
+        raise HTTPException(status_code=400, detail="A target taxon is required for a full run.")
+
+    sample = (payload.sample or "").strip()
+    if not sample or "/" in sample or sample.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid sample name")
+
+    r1, r2 = _find_sample_fastqs(project_dir / "download", sample)
+    if r1 is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No FASTQ files found for sample {sample!r} in the project's download/ folder.",
+        )
+
+    # Kraken DB: request override → vsnp config (if a user set one) → shared default.
+    kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
+        or "/srv/kapurlab/databases/kraken2/k2_standard_08gb"
+    blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
+        or "/srv/kapurlab/databases/blast/ref_prok_rep_genomes"
+    if kraken_only and not kraken_db:
+        raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
+
+    run_dir = project_dir / "kraken" / sample
+    # Guard against two runs racing on the same output dir (they'd clobber each
+    # other's temp/output folders). Track the last job id in a sentinel file,
+    # the same pattern step1 uses with .step1_job_id.
+    job_id_file = run_dir / ".kraken_job_id"
+    if job_id_file.exists():
+        prior = job_manager.get_job(job_id_file.read_text(encoding="utf-8").strip())
+        if prior and prior.get("status") == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"A Kraken run is already in progress for {sample}.",
+            )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rt = _resolve_kraken_runtime()
+    parts = [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
+    if r2 is not None:
+        parts += ["-r2", shlex.quote(str(r2))]
+    if taxon:
+        parts += ["-t", shlex.quote(taxon)]
+    if kraken_db:
+        parts += ["-k", shlex.quote(kraken_db)]
+    if kraken_only:
+        parts.append("--kraken-only")
+    elif blast_db:
+        parts += ["-b", shlex.quote(blast_db)]
+
+    # Prepend the Kraken env bin so kraken2/krona/spades/seqkit resolve, and set
+    # PYTHONPATH so the bin/ scripts' local imports work — exactly as the Kraken
+    # GUI launches them.
+    path_prefix = f"{rt['env_bin']}:" if rt["env_bin"] else ""
+    command = (
+        f'PYTHONUNBUFFERED=1 PYTHONPATH={shlex.quote(rt["gui_root"] + "/bin")} '
+        f'PATH="{path_prefix}$PATH" {" ".join(parts)}'
+    )
+
+    label = "Kraken-only (Krona)" if kraken_only else (taxon or "identification")
+    job_id = job_manager.start_job(
+        name="kraken",
+        command=command,
+        cwd=run_dir,
+        env=build_env(cfg),
+    )
+    job_id_file.write_text(job_id, encoding="utf-8")
+    return {"job_id": job_id, "run_dir": str(run_dir), "sample": sample, "mode": "kraken_only" if kraken_only else "full", "label": label}
+
+
 @app.get("/api/projects/{project}/step1/edits")
 def step1_edits(project: str):
     cfg = load_config()

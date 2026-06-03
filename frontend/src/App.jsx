@@ -56,6 +56,13 @@ export default function App() {
   const [step1FilesCache, setStep1FilesCache] = useState({});
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
   const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
+  // Run Kraken ID Parse on a single sample, launched from Step 1. mode is
+  // "full" (classify + parse reads + identify) or "kraken_only" (Kraken2 +
+  // Krona graph only). Streams the live pipeline log via /api/jobs/{id}/events.
+  const [krakenModal, setKrakenModal] = useState({
+    open: false, project: "", sample: "", mode: "full", taxon: "",
+    running: false, jobId: null, status: "idle", log: [],
+  });
   const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
   const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
   const igvBrowserRef = useRef(null);
@@ -67,6 +74,8 @@ export default function App() {
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
   const step1JobStatusRef = useRef("");
+  const krakenEsRef = useRef(null);
+  const krakenLogRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -192,6 +201,11 @@ export default function App() {
   // current state at fire time, not the stale closure capture from when the
   // timer was scheduled.
   useEffect(() => { qcRowsRef.current = qcRows; }, [qcRows]);
+  // Keep the Kraken run modal's log scrolled to the latest line.
+  useEffect(() => {
+    const el = krakenLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [krakenModal.log]);
   useEffect(() => { excludedRef.current = excluded; }, [excluded]);
 
   const settingsReady = Boolean(
@@ -1877,6 +1891,86 @@ export default function App() {
     setFolderModal({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   }
 
+  // --- Kraken ID Parse on a single Step 1 sample -------------------------
+  const KRAKEN_TAXON_PRESETS = [
+    "Mycobacterium tuberculosis complex",
+    "Mycobacterium bovis",
+    "Mycobacterium avium subsp. paratuberculosis",
+    "Brucella",
+  ];
+
+  function openKrakenModal(project, sample) {
+    if (!project || !sample) return;
+    if (krakenEsRef.current) { krakenEsRef.current.close(); krakenEsRef.current = null; }
+    setKrakenModal({
+      open: true, project, sample, mode: "full", taxon: "",
+      running: false, jobId: null, status: "idle", log: [],
+    });
+  }
+
+  function closeKrakenModal() {
+    if (krakenEsRef.current) { krakenEsRef.current.close(); krakenEsRef.current = null; }
+    setKrakenModal((m) => ({ ...m, open: false }));
+  }
+
+  async function runKrakenForSample() {
+    const { project, sample, mode, taxon, running } = krakenModal;
+    if (running || !project || !sample) return;
+    if (mode === "full" && !taxon.trim()) return;
+    setKrakenModal((m) => ({ ...m, running: true, status: "running", log: [] }));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sample, mode, taxon: taxon.trim() || null }),
+        }
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setKrakenModal((m) => ({
+          ...m, running: false, status: "failed",
+          log: [...m.log, `ERROR: ${detail.detail || res.status}`],
+        }));
+        return;
+      }
+      const { job_id } = await res.json();
+      setKrakenModal((m) => ({ ...m, jobId: job_id }));
+      streamKrakenLog(job_id);
+    } catch (err) {
+      setKrakenModal((m) => ({
+        ...m, running: false, status: "failed",
+        log: [...m.log, `ERROR: ${err.message}`],
+      }));
+    }
+  }
+
+  function streamKrakenLog(jobId) {
+    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
+    krakenEsRef.current = es;
+    es.onmessage = (evt) => {
+      const data = evt.data;
+      const m = data.match(/^\[job:(succeeded|failed)\]$/);
+      if (m) {
+        es.close();
+        krakenEsRef.current = null;
+        setKrakenModal((mm) => ({ ...mm, running: false, status: m[1] }));
+        // Refresh the sample's cross-tool Kraken files if its folder is open.
+        if (folderModal.open && folderModal.sample) {
+          openStep1FolderModal(folderModal.project, folderModal.sample);
+        }
+        return;
+      }
+      setKrakenModal((mm) => ({ ...mm, log: [...mm.log, data] }));
+    };
+    es.onerror = () => {
+      es.close();
+      krakenEsRef.current = null;
+      setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+    };
+  }
+
   function downloadFolderFile(project, path) {
     if (!project || !path) return;
     const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(path)}`;
@@ -3526,6 +3620,15 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
+                                    {sampleKey(row) ? (
+                                      <button
+                                        className="ghost action"
+                                        title="Run Kraken ID Parse (species ID / contamination screen) on this sample"
+                                        onClick={() => openKrakenModal(selectedProject, sampleKey(row))}
+                                      >
+                                        🧬 Kraken ID
+                                      </button>
+                                    ) : null}
                                   </div>
                                 </details>
                               </td>
@@ -3686,6 +3789,15 @@ export default function App() {
                                     <button onClick={() => viewInline(editLog, row._project)}>Edit Log</button>
                                   ) : null}
                                   {row._project && (row._sample || row.sample) ? <button onClick={() => viewStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
+                                  {row._project && (row._sample || row.sample) ? (
+                                    <button
+                                      className="ghost action"
+                                      title="Run Kraken ID Parse (species ID / contamination screen) on this sample"
+                                      onClick={() => openKrakenModal(row._project, row._sample || row.sample)}
+                                    >
+                                      🧬 Kraken ID
+                                    </button>
+                                  ) : null}
                                 </div>
                               </details>
                             </td>
@@ -3857,6 +3969,90 @@ export default function App() {
               ) : null}
               <div className="modal-actions">
                 <button onClick={closeFolderModal}>Close</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {krakenModal.open ? (
+          <div className="modal-backdrop" onClick={krakenModal.running ? undefined : closeKrakenModal}>
+            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+              <h3>Run Kraken ID Parse</h3>
+              <div className="note">
+                Sample: <strong>{krakenModal.sample}</strong>
+                {krakenModal.project ? <span> (Project: {krakenModal.project})</span> : null}
+                <div className="muted" style={{ marginTop: 4 }}>
+                  Classifies reads against Kraken2 to identify species / screen for contamination.
+                  Output is written next to this sample under <code>kraken/{krakenModal.sample}/</code> and
+                  also appears in the Kraken ID Parse app.
+                </div>
+              </div>
+
+              {/* Mode choice — full identification vs Kraken/Krona only */}
+              <div className="kraken-mode-choice" style={{ display: "flex", flexDirection: "column", gap: 8, margin: "12px 0" }}>
+                <label className={`kraken-mode-card ${krakenModal.mode === "full" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "full" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "full"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "full" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Full identification</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Kraken2 classify → parse target reads → assemble → BLAST. Best for confirming species. Needs a target taxon.</div>
+                  </div>
+                </label>
+                <label className={`kraken-mode-card ${krakenModal.mode === "kraken_only" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "kraken_only" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "kraken_only"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "kraken_only" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Kraken + Krona only</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Quick classification + interactive Krona chart. Skips read parsing, assembly and BLAST. No target taxon needed.</div>
+                  </div>
+                </label>
+              </div>
+
+              {krakenModal.mode === "full" ? (
+                <div style={{ marginBottom: 8 }}>
+                  <label className="label">Target taxon</label>
+                  <input
+                    placeholder='e.g. "Mycobacterium tuberculosis complex"'
+                    value={krakenModal.taxon}
+                    disabled={krakenModal.running}
+                    onChange={(e) => setKrakenModal((m) => ({ ...m, taxon: e.target.value }))}
+                  />
+                  <div className="taxon-presets" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                    {KRAKEN_TAXON_PRESETS.map((p) => (
+                      <button key={p} type="button" className={`preset-btn ${krakenModal.taxon === p ? "active" : ""}`}
+                              disabled={krakenModal.running}
+                              onClick={() => setKrakenModal((m) => ({ ...m, taxon: p }))}>
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {krakenModal.log.length > 0 || krakenModal.running ? (
+                <div className="log" ref={krakenLogRef} style={{ maxHeight: "32vh", overflow: "auto", marginTop: 8 }}>
+                  {krakenModal.log.length === 0 ? (
+                    <span className="log-placeholder">Starting…</span>
+                  ) : (
+                    krakenModal.log.map((line, i) => (
+                      <div key={i} className={line.startsWith("ERROR") ? "log-line error" : "log-line"}>{line}</div>
+                    ))
+                  )}
+                </div>
+              ) : null}
+
+              <div className="modal-actions" style={{ marginTop: 12 }}>
+                {krakenModal.status === "succeeded" ? <span className="muted" style={{ marginRight: "auto", color: "var(--success)" }}>✓ Finished — results are in the sample folder.</span> : null}
+                {krakenModal.status === "failed" ? <span className="muted" style={{ marginRight: "auto", color: "var(--danger)" }}>Run failed — see log above.</span> : null}
+                <button
+                  onClick={runKrakenForSample}
+                  disabled={krakenModal.running || (krakenModal.mode === "full" && !krakenModal.taxon.trim())}
+                >
+                  {krakenModal.running ? "Running…" : krakenModal.status === "succeeded" || krakenModal.status === "failed" ? "Run again" : "▶ Run"}
+                </button>
+                <button className="ghost" onClick={closeKrakenModal} disabled={krakenModal.running}>Close</button>
               </div>
             </div>
           </div>

@@ -3157,6 +3157,41 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
+def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
+    """Resolve a step1 sample name to its Kraken output subdirectory.
+
+    Unlike step1, Kraken's dir name can be either LONGER or SHORTER than the
+    step1 sample name depending on which read-tag/lane suffix each tool
+    stripped (and whether Kraken was run from its own GUI on the raw download
+    fastqs, before step1 existed). So match in both directions:
+
+      1. exact: kraken/<sample>
+      2. kraken dir longer:  <sample>_*           (e.g. sample 13-1941-6
+         matches kraken dir 13-1941-6_S4_L001)
+      3. kraken dir shorter: sample == <dir>_*    (e.g. step1 sample
+         13-1941-6_S4_L001 matches kraken dir 13-1941-6)
+
+    For the shorter case, prefer the longest-matching dir name so we don't
+    match ``S1`` to a sample named ``S10_...``.
+    """
+    exact = kraken_dir / sample
+    if exact.is_dir():
+        return exact
+    try:
+        dirs = [d for d in kraken_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    except (OSError, PermissionError):
+        return None
+    # Kraken dir longer than the sample.
+    longer = sorted(d for d in dirs if d.name.startswith(f"{sample}_"))
+    if longer:
+        return longer[0]
+    # Kraken dir shorter than the sample (run on the bare/raw fastq name).
+    shorter = [d for d in dirs if sample.startswith(f"{d.name}_")]
+    if shorter:
+        return max(shorter, key=lambda d: len(d.name))
+    return None
+
+
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
@@ -3342,10 +3377,11 @@ def kraken_sample_files(project: str, sample: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     kraken_dir = project_dir / "kraken"
-    # Kraken strips _R1/_R2 / _1/_2 read tags, so its sample dirs match our
-    # bare sample name. Fall back to the same prefix match step1 uses for
-    # samples that carry an Illumina lane/index suffix.
-    sample_dir = _resolve_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
+    # Kraken strips _R1/_R2 / _1/_2 read tags, so its sample dir name can be
+    # longer OR shorter than the step1 sample name (especially when Kraken was
+    # run from its own GUI on the raw download fastqs before step1). Match in
+    # both directions so those earlier runs still surface here.
+    sample_dir = _resolve_kraken_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
     if not sample_dir:
         return {
             "project": project,

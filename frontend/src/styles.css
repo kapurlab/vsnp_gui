@@ -397,6 +397,16 @@ textarea {
   resize: vertical;
 }
 
+/* Checkboxes/radios must not inherit width:100% above — it stretches the
+   control to fill its flex row and shoves the adjacent label text aside
+   (seen in the Kraken-run modal's mode picker). */
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  flex: none;
+  padding: 0;
+  margin: 0;
+}
+
 label {
   display: block;
   font-size: 12px;

@@ -299,6 +299,17 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
 _T46_JUNK_FASTQ_BYTES = 1024 * 1024  # 1 MB
 
 
+def _safe_stat_size(p: Path) -> Optional[int]:
+    """File size, or None if the file is missing / a broken symlink. Step1
+    sample dirs are symlinks into download/, which can point at sources that
+    were since removed (e.g. SRA fastqs deleted, or a Kraken parsed-read source
+    cleaned up) — stat() then raises and must not 500 the whole run."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return None
+
+
 def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any]]]:
     """Decide which sample dirs to actually dispatch and which to skip.
 
@@ -351,11 +362,24 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
             skipped.append({
                 "sample": p.name,
                 "reason": "R1 found but no R2 — paired download incomplete or single-end with R1 naming",
-                "size_bytes": r1_matches[0].stat().st_size,
+                "size_bytes": _safe_stat_size(r1_matches[0]) or 0,
             })
             continue
-        r1_size = r1_matches[0].stat().st_size
-        r2_size = r2_matches[0].stat().st_size
+        r1_size = _safe_stat_size(r1_matches[0])
+        r2_size = _safe_stat_size(r2_matches[0])
+        if r1_size is None or r2_size is None:
+            # One or both reads are missing / a broken symlink (the download
+            # source was removed). Skip rather than crash the whole batch.
+            missing = [
+                m.name for m in (r1_matches[0], r2_matches[0])
+                if _safe_stat_size(m) is None
+            ]
+            skipped.append({
+                "sample": p.name,
+                "reason": f"fastq missing or broken link ({', '.join(missing)}); its source was removed — re-import the reads",
+                "size_bytes": 0,
+            })
+            continue
         if r1_size < _T46_JUNK_FASTQ_BYTES or r2_size < _T46_JUNK_FASTQ_BYTES:
             skipped.append({
                 "sample": p.name,
@@ -1923,6 +1947,14 @@ def step1_run(project: str, payload: Step1Request):
         max_parallel = max(1, int(max_parallel))
     except (TypeError, ValueError):
         max_parallel = 1
+
+    # Decide which sample dirs to actually run BEFORE writing the batch script,
+    # so the script iterates only the valid samples. This keeps a stale dir
+    # (e.g. one whose download source was deleted, leaving broken symlinks)
+    # from being run and failing the whole batch — those are surfaced to the
+    # user as `skipped_samples` instead.
+    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
+    samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -2002,7 +2034,8 @@ def step1_run(project: str, payload: Step1Request):
             # head was the slowest sample, capping effective parallelism well
             # below MAX_PARALLEL on heterogeneous inputs.
             "pids=()",
-            "for d in */; do",
+            f"SAMPLES=({samples_bash})",
+            "for d in \"${SAMPLES[@]}\"; do",
             "  run_sample \"$d\" &",
             "  pids+=(\"$!\")",
             "  if [ ${#pids[@]} -ge \"$MAX_PARALLEL\" ]; then",
@@ -2033,7 +2066,6 @@ def step1_run(project: str, payload: Step1Request):
     # sample metadata as terminal once the batch exits. Skip provenance if
     # no reference is set (legacy/unconfigured runs) — the bash still runs.
     prov_finalize_cb = None
-    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
     if payload.reference:
         if samples:
             try:

@@ -851,6 +851,12 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
+        # Track recently-used project roots (MRU, max 10) for quick switching.
+        root = (update.projects_root or "").strip()
+        if root:
+            recent = [r for r in cfg.get("recent_projects_roots", []) if r != root]
+            recent.insert(0, root)
+            cfg["recent_projects_roots"] = recent[:10]
     if update.shared_projects_root is not None:
         cfg["shared_projects_root"] = update.shared_projects_root
     if update.bcftools_path is not None:
@@ -861,6 +867,37 @@ def update_config(update: ConfigUpdate):
         cfg["sra"].update(update.sra)
     save_config(cfg)
     return cfg
+
+
+@app.get("/api/browse-dirs")
+def browse_dirs(path: str = ""):
+    """List sub-directories of `path` for the project-root folder picker.
+
+    Runs as the OOD session user, so the OS filesystem permissions are the only
+    limit on what can be browsed (no artificial base restriction). Defaults to
+    the user's home when no path is given. Returns the resolved path, its parent
+    (null at the filesystem root), and the immediate sub-directories.
+    """
+    try:
+        p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {p}")
+    entries: List[Dict[str, str]] = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith("."):
+                continue
+            try:
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {p}")
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "entries": entries}
 
 
 class VcfDbFolderAction(BaseModel):

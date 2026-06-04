@@ -184,12 +184,25 @@ p {
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
   display: grid;
   gap: 10px;
+  /* Never grow past the viewport — scroll the modal body instead so the
+     action buttons at the bottom stay reachable on short screens / tall
+     content (e.g. the Kraken run modal with its live log). */
+  max-height: 90vh;
+  overflow-y: auto;
 }
 
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  /* Keep the action buttons pinned to the bottom of the (scrolling) modal so
+     they're always visible without scrolling or shrinking the page font. */
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  margin: 0 -16px -16px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
 }
 
 .panel-actions .action {

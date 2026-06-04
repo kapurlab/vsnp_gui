@@ -2877,22 +2877,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-            {selectedProject ? (
-              <div className="row" style={{ marginTop: "0.75rem", alignItems: "center", gap: "0.5rem" }}>
-                <label style={{ fontWeight: 600, whiteSpace: "nowrap" }}>Project reference:</label>
-                <select
-                  value={projectReference}
-                  onChange={(e) => setProjectRef(e.target.value)}
-                  style={{ flex: 1 }}
-                  title="Reference type locked to this project. All Step 1 and Step 2 runs use this reference."
-                >
-                  <option value="">-- not set --</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
           </section>
 
           <section className="panel">
@@ -4327,7 +4311,7 @@ export default function App() {
                     </button>
                   </div>
                   <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                    New taxa are saved to the shared list (kraken config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
+                    New taxa are saved to the shared list (/srv/kapurlab/tools/kraken_id_parse_gui/config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
                   </div>
                 </div>
               ) : null}

@@ -1,298 +1,244 @@
-# Session handover — May 17–18 2026
+# Session handover — June 4 2026
 
 Continuation notes for the next Claude session. Read this first, then
-[`docs/dev/redteam/FINDINGS.md`](redteam/FINDINGS.md),
-[`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md), and
-[`docs/dev/TICKETS.md`](TICKETS.md).
+[`docs/dev/TICKETS.md`](TICKETS.md), [`docs/dev/TOD_QUEUE.md`](TOD_QUEUE.md),
+and [`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md).
 
-Prior handoff (afternoon of May 16 — merge + smoke green) is preserved at
-commit `81944c7` in git history. The session that just ended started with
-the red-team review setup from that handoff and pivoted hard into a long
-stretch of bug fixes triggered by Vivek using the GUI on a real 41-sample
-LSDV India dataset.
+Prior handoff (May 17–18) is preserved at commit `8985763` in git
+history. That session ended with Tod's `tstuber_2026-05-20` branch
+pending merge and two UNRESOLVED red-team decisions blocking T-27. This
+session covered ~3 weeks and pivoted hard into a cascade-table → IGV
+feature that grew into a full T-02 phase 0 land, plus operational
+infra (dev OOD app with branch picker, repo transfer to kapurlab,
+CodeRabbit setup, cross-user git fixes).
 
-## TL;DR — what landed (21 commits since `81944c7`)
+## TL;DR — what landed since `8985763`
 
-**The big one:** [`redteam/`](redteam/) — a self-contained archive of a
-3-round adversarial design review of [`PIPELINES_PACKAGE.md`](PIPELINES_PACKAGE.md)
-before T-27 (`pipelines/common/`) implementation begins. 8 R1 attack
-angles + 6 R2 cross-examinations + 1 R3 synthesis = 54 attack vectors
-binned. Bottom line: **12 confirmed blockers, 9 majors, 5 narrowed,
-10 refuted, 3 tradeoffs, 2 UNRESOLVED.** The two unresolved items are
-called out explicitly below — they need your decision before T-27 starts.
+**Cascade-table → IGV click** (T-02 phase 0, merged 2026-05-28 via
+`e5c2745`, refined through `f57008d` 2026-05-29). Hover any colored
+variant cell in a `name-All_cascade*` or `name-All_sorted_*` xlsx
+preview → small dark `↗ this  ↗ all` pill in the corner → click opens
+IgvStandalone in a named tab with that sample's BAM (reads), the
+sample's `_filtered_hapall_annotated.vcf` (calls, with rich
+gene/product/AA-change annotation in the ID column), and the
+reference GFF (gene-structure annotation). Subsequent clicks add
+samples additively to the *same* IGV tab via postMessage rather than
+opening N new tabs. Same-window navigation worked first try in Chrome,
+took a separate Safari-specific fix (`window.open` via onclick because
+Safari ignores HTML `target="<name>"` for tracking-prevention reasons).
+Single-position loci on large genomes (MTBC0 4.4 Mb) needed an
+explicit `browser.search()` call after `createBrowser` to actually
+zoom in — `config.locus` was silently dropped on big contigs.
 
-**The unglamorous pile:** 18 bug-fix / UX-improvement commits triggered by
-the LSDV India end-to-end run. Class signature: every one of them was an
-"obvious in retrospect" mismatch between what the discovery layer accepts
-and what the dispatch layer can actually process. See "Pattern worth
-documenting" at the bottom.
+**Tod's `tstuber_2026-05-20` branch merged to main** (2026-05-23, commit
+`58c3a28`). Project-level reference, timestamped step2 runs, VCF
+sample browser, sample metadata editor, `<project>_VCFs` accumulation
+folder — all on main now. No conflicts on merge (predictable
+SESSION_HANDOFF.md collision resolved keeping main's version via
+three-way merge).
 
-## Two UNRESOLVED red-team decisions you need to make
+**Dev OOD app** (`vsnp_gui_dev` + `kraken_id_parse_gui_dev`). Branch
+picker on the form, per-session worktree at `/tmp/vsnp_gui_dev_<tag>/`
+or `/tmp/kraken_id_parse_gui_dev_<tag>/`, `vite build` in the
+worktree's frontend at session start (node_modules symlinked from
+prod), `uvicorn --reload` so backend tweaks hot-pickup without a
+session relaunch. Cross-user `safe.directory` fix on both dev cards'
+`before.sh.erb` because the prod checkouts have different Linux
+owners (vsnp_gui→vxk1, kraken→tks5563) — any user not matching the
+checkout owner used to hit `fatal: detected dubious ownership` and
+abort. Source-controlled copies in [`ood/apps/`](../../ood/apps/).
 
-Both have all sides preserved verbatim in
-[`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md). Skim that first.
+**Repo transferred from `vkapur/vsnp_gui` to `kapurlab/vsnp_gui`**
+(2026-05-29). Public visibility (required for free-tier org
+collaborator slots). Old URL redirects automatically. Local + wgs3
+remotes both updated to the kapurlab URL.
 
-1. **`ensure_assembly()` locking posture** — pre-T-27 blocker, or P2
-   annotation? Real 5-way R2 split (REBUT / UNRESOLVED / ESCALATE /
-   ESCALATE-blocker / PARTIAL-REBUT). The question is whether to fix
-   the race now (`fcntl.flock` in the sketch) or annotate-and-defer
-   until concurrent OOD cards actually materialize at Step 6.
+**CodeRabbit installed at the kapurlab org level** with a tuned
+`.coderabbit.yaml` at the repo root. Profile is `chill`, no
+request-changes-workflow, path-specific reviewer instructions encode
+our invariants (OOD relative-URL rule, filesystem path-allowlist,
+hardcoded `/srv/kapurlab/` paths flagged for the NIVEDI
+parameterization story, `target="vsnp_igv"` and the
+`window.__vsnpLaunchIgv` JS shim, etc.). First real PR opened
+during this session — Tod's `feature/cross-tool-file-visibility`
+(PR #1) — got CodeRabbit's first review; merged cleanly via
+`0ecfbeb`.
 
-2. **§6 provenance schema vs T-07** — port `capture_env_snapshot()` into
-   §6 now, or accept the reduction? R2-ops empirically confirmed the
-   regression with file:line evidence (`provenance_writer.py:476-487`
-   captures 6+ env fields where §6 captures one); R2-ux rebutted as
-   "not a UX concern, defer." Coherent positions on both sides.
+**Tickets filed** without implementation (deferred to a future
+session): **T-47** (auto-refresh step2 polling asymmetry — Tod
+self-flagged it, we diagnosed it, small fix, hasn't shipped),
+**T-48** (project access control via per-project groups — design
+doc, no code yet).
 
-Once these are decided, the T-27–T-35 ticket block (filed earlier today
-in `TICKETS.md`) can have its scope frozen and implementation can start.
+**NIVEDI install playbook** (T-49 + T-50) — scoping conversation
+done, no code. NIVEDI: 64 CPUs / 500 GB / 20 TB, local Linux users,
+internal-only, weeks-preferred timeline. Recommended approach is the
+hybrid (OSC's official Ansible playbook for OOD core + our
+`install.sh` for the vSNP layer on top) with a `site.conf`
+parameterization for site-specific paths/names/group prefixes
+(`/srv/kapurlab/` → `/srv/nivedi/`, `kapurlab-admins` →
+`nivedi-admins`, etc.). Tod's reply to `PLATFORM_PROPOSAL-2.md` is
+substantive and not yet integrated into the proposal — six concrete
+edits drafted (controls section, Conda/Apptainer reframe, NAHLN bar
+simplification, handoff package clarification, audit-recursion
+section, multi-institution rephrase). The proposal still lives in
+`/Users/vivekkapur/Downloads/PLATFORM_PROPOSAL-2.md` (not yet
+committed to the repo).
 
-## What shipped (commit graph since `81944c7`)
+## Production state on wgs3
 
-```
-3a5a818 step2_setup: honor remove_from_analysis.xlsx when building VCF source
-4212688 T-46 Phase 1: auto-skip single-end + junk fastqs at Step 1 dispatch
-9417773 SRA crosswalk: surface in GUI (Inputs panel + SRA download section)
-0e86b9a xlsx preview: fix "Download xlsx" link to preserve existing query params
-b5edfa9 SRA download: persist input→runs crosswalk to download dir
-a62f34f xlsx preview: round General-format floats to whole numbers
-ea1a9a5 xlsx preview: round non-integer floats to 2 decimals (superseded)
-9e1d7ea kapurlab-rename-project: rewrite intra-project absolute symlinks
-2f6c0d5 kapurlab-rename-project: update project.json to match new dir name
-4edbc9e Project create: auto-normalize names (spaces → underscores) + T-43
-eb631e3 Reference download: optional display name for dropdown clarity
-c2eccc1 Reference download: auto-fill output dir + load refPaths on mount
-14acf47 docs: T-42 — SRA download progress UI + status-writer bug fix
-d237abd Stats button: open xlsx preview in tab instead of downloading
-ac86e15 docs: T-41 — record T-39/T-40 done, broaden T-01 scope note
-b7554fd T-39: reference-file re-upload route (close offline-edit loop)
-50210a7 Edit Log: render JSONL inline; remove dead xdg-open endpoints (T-40)
-7c7351d Reference Editor sweep follow-up: replace xdg-open helpers w/ in-browser viewers
-3df0383 docs: T-17a — reference-file edit + approval chain
-21a604a docs: red-team adversarial review of PIPELINES_PACKAGE.md
-8d74fe1 Reference Editor: fix broken 'Edit in Spreadsheet App' in OOD context
-```
+- **`/srv/kapurlab/tools/vsnp_gui`** is on `main` at `507f192`.
+  Frontend rebuilt for the merge commit + every subsequent fix; OOD
+  prod card serves the current `dist/`.
+- **`/srv/kapurlab/tools/kraken_id_parse_gui`** is on `main` (Tod's
+  workspace; he owns it). Dev card patched on wgs3 (see TOD_QUEUE.md
+  for the mirror-back-to-source ask).
+- **Dev OOD cards** (`vsnp_gui_dev`, `kraken_id_parse_gui_dev`) both
+  live and tested. Branch picker accepts any branch on origin; per
+  session worktree under `/tmp/<app>_dev_<timestamp>_<pid>/` with
+  daily cleanup.
+- **Active projects on wgs3** for testing:
+  - `/home/vxk1/projects/quick2/` (SARS-CoV-2 deer, 6 samples,
+    cascade + sorted xlsx exist). Vivek's only.
+  - `/home/vxk1/projects/nagalingam_test/` (MTBC, 18 samples Mg+SRR,
+    cascade1 + La3_orygis_cascade1 + La3_orygis_sorted xlsx). Has
+    imported-VCF rows (SRR/ERR/CP) that exercise the no-BAM path.
+    Vivek's only.
+  - `/srv/kapurlab/projects/demo_sars_cov_2/` (shared,
+    `proj-demo_sars_cov_2` group readable by both Vivek and Tod —
+    Tod's accessible test target).
+  - Tod's `/home/tks5563/projects/test{,2,3,4}_tb_sra/` (Tod's
+    own; he runs them with the new Kraken-from-Step1 branch).
 
-## Tickets filed / resolved this session
+## Active feature branches awaiting merge
 
-| Ticket | Status | What |
-|---|---|---|
-| **T-17a** | filed (deferred pending UNRESOLVEDs) | Reference-file edit + approval chain — generalizes T-17 MHC approval pattern to reference xlsx files. Phase 1: upload + rationale + admin queue. Phase 2: schema-aware in-browser editor. Permission model: kapurlab-admins; self-approve allowed but logged. |
-| **T-27–T-35** | filed (blocked on UNRESOLVEDs) | Pipelines-package architectural backbone — filed earlier today in TICKETS.md before the red-team. Currently the load-bearing forward work; should not start until UNRESOLVED-1/2 are decided. |
-| **T-39** | ✅ done (commit `b7554fd`) | Reference-file re-upload route. POST /api/references/{ref}/upload-file with whitelist + atomic write + audit log to `/srv/kapurlab/audit/reference-changes.jsonl`. Forward-compatible with T-17a's schema. |
-| **T-40** | ✅ done (commit `50210a7`) | Retired dead xdg-open endpoints. Three `/open` endpoints + `_open_path()` helper deleted. Frontend already on in-browser viewers across two prior sweeps. |
-| **T-41** | ✅ done (commit `ac86e15`) | Docs cleanup: TICKETS.md T-01 scope note + T-39/T-40 done entries + stale "Branching" prose. |
-| **T-42** | filed | SRA download progress UI (Phase 1: counts + bar, Phase 2: per-accession chips) + prerequisite status-writer bug fix (3 successful runs without `.status_*` sentinel; 5 successful runs falsely reported as `[FAILED]`). |
-| **T-43** | filed | vsnp3 upstream patch for unquoted seqkit subprocess invocation (the bug that broke Step 1 on the `LSDV India` project before the rename). Also audit bwa/samtools/bcftools for the same quoting weakness. |
-| **T-46** | Phase 1 ✅ done (commit `4212688`); Phase 2 filed | Single-end + junk-fastq handling. Phase 1: `_step1_dispatch_plan()` auto-filters single-end and <1 MB fastqs at dispatch time, surfaces skipped list via the response so the GUI alerts the user. Phase 2: real single-end Illumina support (vsnp3 patch). |
+Tod's testing pipeline; he's deliberately holding off on merging
+these until he completes a larger-dataset run.
 
-**Not filed but discussed:**
-- T-44 / T-45 — depth-cap on mapping (post-mapping cap at 300× via vsnp3 `--max-mapped-depth` patch). Vivek deferred ("still not sure"). The use case is real for over-deep samples on small viral genomes (LSDV India had a few 1000×+ samples) but problematic for low-yield mapping (LSDV samples are 2% viral due to host contamination, so pre-mapping caps would discard real viral reads). Right semantic is cap-mapped-not-raw; revisit when there's real per-sample mapping-rate data to decide on.
+| Branch | Repo | Scope | Status |
+|---|---|---|---|
+| `feature/step1-run-kraken` | vsnp_gui | 9 commits, +785 LOC. Kraken launch from Step 1 + per-sample results in vSNP sample view | Backend smoke-tested, paired with kraken_id_parse_gui's feature/create-projects |
+| `feature/create-projects` | kraken_id_parse_gui | 7 commits, ~1100 changes. Project-based UX parity with vSNP + the `mtime` KeyError fix | Backend smoke-tested by Vivek on demo_sars_cov_2 |
+| `feature/cross-tool-file-visibility` | vsnp_gui | (merged via PR #1, `0ecfbeb`) | Done |
+| `feature/posthoc-step1` | vsnp_gui | Tod's WIP | Status unknown |
+| `feature/vcf-edit` | vsnp_gui | Tod's WIP | Status unknown |
 
-## Production state on wgs3 right now
-
-- **`/srv/kapurlab/tools/vsnp_gui` is on `tstuber_2026-05-20` (Tod's branch)**,
-  NOT on `main`. Currently 11 commits ahead of `origin/main`. See
-  "Tod's branch" section below for the review queue.
-- `origin/main` is at `eb36c18` (May 17–18 handoff); local Mac matches.
-- The Tod-branch dist served by wgs3's Apache is freshly built.
-- **uvicorn restart needed for any backend change to be active** — fresh
-  OOD session picks up the current Tod-branch state including timestamped
-  step2 dirs, project-level reference, VCF browser, and metadata editor.
-- Active projects on wgs3:
-  - `/home/vxk1/projects/LSDV_India/` — 73 LSDV samples, Step 1 done
-    against `LSDV_Neethling_2490`; some Step 2 work in flight.
-  - `/srv/kapurlab/projects/demo_sars_cov_2/` — Tod's pre-populated demo
-    project (copy of `Retest`, 6 deer SARS-CoV-2, full step1+step2
-    finished).
-- Reference: `LSDV_Neethling_2490` at
-  `/srv/kapurlab/refs/vsnp3/reference_options/LSDV_Neethling_2490/`
-  (AF325528.1 fasta + gbk + gff + templates + define_filter +
-  remove_from_analysis).
-
-## Pattern worth documenting (and using to design T-27)
-
-Three bugs landed in this session share an underlying shape:
-
-1. **Step 1 setup created sample dirs for single-end fastqs** but T-07
-   provenance dispatch couldn't process them → batch aborts (fixed in
-   T-46 Phase 1).
-2. **Project rename moved the dir** but T-07 provenance dispatch followed
-   absolute symlinks to the old space-path → batch aborts (fixed in
-   `9e1d7ea`).
-3. **Step 2 setup linked every step1 VCF into vcf_source/** but vsnp3
-   honored the exclusion list at run time → file count lied, user
-   confusion (fixed in `3a5a818`).
-
-Common shape: **discovery accepts more samples than dispatch can honor.**
-
-This is exactly what the red-team's BLOCKER-2 (`applicable()` TOCTOU +
-undefined `PrimitiveError`) and NARROWED-2 (`applicable()` expressiveness
-needs `pre_run_check()` for environment validation) are pointing at for
-T-27. The shared design principle to encode in the `AnalysisPrimitive`
-contract: **if discovery says "this is a valid sample," dispatch must
-either run it or surface a non-fatal skip with a clear reason — never
-abort the whole batch.** Worth documenting in `PIPELINES_PACKAGE.md`
-§4 as a design invariant before T-27 starts.
-
-## Tod onboarding — done
-
-Resolved inline at the end of the session:
-
-- **`tks5563` already had a Linux account** (UID 1000, sudo group). Just
-  needed kapurlab-{members,admins} group membership + SSH self-loopback
-  bootstrap. Done via `kapurlab-add-user.sh tks5563 --admin`.
-- **Demo project staged**: `/srv/kapurlab/projects/demo_sars_cov_2/` —
-  copy of `Retest` (6 deer SARS-CoV-2 samples, step1+step2 complete),
-  group-owned `proj-demo_sars_cov_2` (tks5563 + vxk1 members),
-  project.json corrected (`name: demo_sars_cov_2`), 12 intra-project
-  absolute symlinks rewritten to the new path.
-- **PSU VPN access enabled**: OOD `ood_portal.yml` now has
-  `server_aliases: [172.29.62.6, a8-an-vxk1-u5]` so Apache stops
-  301-redirecting non-Tailscale traffic to the Tailscale IP. Apache
-  vhost regenerated and reloaded. PSU campus / PSU VPN + Tailscale all
-  work as access paths. Backup at
-  `/etc/ood/config/ood_portal.yml.pre-server-aliases-bak` for rollback.
-- Welcome note at [`TOD_WELCOME.md`](TOD_WELCOME.md), polished
-  email-ready version delivered inline at session end for Vivek to send.
-
-## Tod's branch: `tstuber_2026-05-20` — review needed
-
-Tod has been working in parallel on his own feature branch and that work
-is now on origin (pushed at session end). **It is not yet merged into
-main**, but wgs3 is currently running it (the deployed checkout is
-`tstuber_2026-05-20`, not main). The next session should review and
-either merge or sequence the integration.
-
-**State**:
-- Branch is 11 commits ahead of `main`, based on `eb36c18` (the May 17-18
-  handoff commit — the last thing we shipped before Tod started)
-- Zero merge conflicts (main hasn't advanced since Tod branched)
-- Touches 4 files: `backend/app/main.py` (+476 lines),
-  `frontend/src/App.jsx` (+748), `backend/app/projects.py` (+17),
-  `backend/app/provenance_writer.py` (+19). Net +1162 / -98 lines.
-- Available on GitHub at
-  https://github.com/vkapur/vsnp_gui/tree/tstuber_2026-05-20
-
-**11 commits (oldest → newest)**:
-
-```
-11e18c9 provenance: fix git safe.directory for OOD cross-user deployment
-29f913a Commit A: project-level reference
-89cad60 Commit B: timestamped step2 runs + concurrency guard
-ee94915 Auto-refresh after step1/step2 complete; fix VCF DB reference display
-a03507f Fix import count labels; polling-based auto-refresh for step1/step2
-24293c7 Separate dedup vs ref-mismatch exclusion counts in import result
-79bfe23 Add searchable VCF sample browser to VCF Databases panel
-93d5cb4 Fix VCF set count to show actual files in set, not total source VCFs
-6539e5e Make VCF set count authoritative from sample manifest
-a430228 Add sample metadata editor to Reference Editor panel
-a815b4b Add <project>_VCFs accumulation folder wired through Step 1, Step 2, and metadata
-```
-
-**Tod's own summary of what's in there** (verbatim from the user's message):
-
-- **Bug fix**: Step 1 provenance dispatch failure caused by missing git
-  state in `/srv/kapurlab/tools/vsnp_gui`. New branch was created and
-  fix applied there. (Likely the `11e18c9` provenance/safe.directory
-  commit — relates to the same provenance dispatch class as our T-46
-  Phase 1 work.)
-- **Step 2 timestamped subdirs**: `step2/2026-05-20_08-52-00/` so
-  multiple comparisons coexist; UI option to switch between past runs.
-- **Reference selection moved to project level**: reference type is now
-  picked at the project level (not repeated per-step). Reference
-  Selection pane relocated alongside Projects pane. (**Overlaps with
-  our `c2eccc1` auto-fill output dir + `eb631e3` display name work** —
-  worth checking the integration is coherent.)
-- **Auto-refresh after step completion** for Steps 1 and 2. Tod flagged
-  "for some reason this still doesn't seem to be working as it should"
-  — known incomplete.
-- **VCF file browser**: searchable browser for VCF sample names in a
-  build, scaled for large sample sets.
-- **Metadata editor (Reference Editor)**: vSNP3 two-column Excel
-  metadata format. Bulk paste of tab-delimited text or single entries.
-  Persists to the reference xlsx file. (**Overlaps with our `b7554fd`
-  T-39 reference-file re-upload + `3df0383` T-17a approval-chain
-  design** — Tod's edits write directly to the reference xlsx, our
-  T-17a design routes through a propose+approve queue. Need to
-  reconcile whether this is the "direct edit for admins, queue for
-  others" pattern from T-17a or a separate primitive.)
-
-**What the next session should do**:
-
-1. **Read Tod's diff** —
-   `git diff main..origin/tstuber_2026-05-20 -- backend/app/main.py frontend/src/App.jsx`
-   — look for code-quality issues, style alignment with the rest of
-   main.py / App.jsx, anything that conflicts with our T-46 dispatch
-   plan or the T-17a approval-chain design.
-2. **Verify the auto-refresh issue Tod flagged** by exercising step1 +
-   step2 in the GUI and watching whether the status panel updates
-   without manual refresh. May just need a poll-interval tweak.
-3. **Decide on merge strategy**: (a) fast-forward merge if review is
-   clean, (b) squash-merge if you want a tidier main history, or
-   (c) cherry-pick selected commits and leave others for follow-up.
-4. **Reconcile metadata editor with T-17a**: Tod's direct-edit-to-xlsx
-   for metadata is different from the proposal-queue flow T-17a
-   specifies for `*_define_filter.xlsx` / `*_remove_from_analysis.xlsx`.
-   The metadata sheet is a *separate* xlsx in the reference dir, so it
-   may legitimately live outside T-17a's scope — but document the
-   distinction before either ships permanently.
-
-## Open follow-ups for next session
+## Open items for the next session
 
 In rough priority order:
 
-1. **Review Tod's `tstuber_2026-05-20` branch** (see section above) —
-   blocks rolling main forward.
-2. **Adjudicate UNRESOLVED-1 and UNRESOLVED-2** from the red-team. Until
-   these are decided, T-27 is blocked.
-3. **Sequence T-27 → T-29** once UNRESOLVEDs settle. The scope-freeze
-   punch list is at the bottom of [`FINDINGS.md`](redteam/FINDINGS.md);
-   work it top-to-bottom.
-4. **Pick up T-42 / T-43 / T-46 Phase 2** opportunistically — each is
-   independently scoped and could ride along with whatever the user is
-   doing.
-5. **Document the "discovery vs dispatch" invariant** in
-   `PIPELINES_PACKAGE.md` §4 before T-27 implementation starts (see
-   "Pattern worth documenting" above).
-6. **PSU networking** — Scott (PSU IT) confirmed inter-VLAN routing
-   between Wartik (172.17.243.0/24) and Ag IoT (172.29.62.0/23) works
-   both directions; sustained throughput ~65–70 MB/s on 1 Gbps links
-   (only ~6% slower over Tailscale, so the perf gap is modest). The
-   GlobalProtect → HTTP/HTTPS path to wgs3 is still pending the network
-   lead's review (SSH works via GP; HTTP doesn't yet). Once HTTP via GP
-   is open, the OOD server_aliases we added (`172.29.62.6` +
-   `a8-an-vxk1-u5`) make PSU VPN access work without further config.
-7. **Real-rsync throughput test** on sequencer → wgs3 once there's a
-   representative fastq batch to move. nc-based test showed 65–70 MB/s
-   lower bound on a 1 Gbps link; rsync with parallelism should do
-   better in practice.
+1. **NIVEDI install playbook** (T-49 + T-50) — start the wgs3 audit,
+   draft `docs/deploy/INSTALL_OOD.md`, draft `deploy/install_ood.sh`
+   with a `site.conf` parameterization. No NIVEDI SSH access yet, so
+   the work is local-only (audit + draft). Vivek has the green light.
+
+2. **PROPOSAL.md integration of Tod's feedback.** Six concrete edits
+   drafted (above). Currently the proposal isn't in the repo — bring
+   it under `docs/proposals/PLATFORM_PROPOSAL.md` first, then apply
+   the edits, then send Tod the updated version. He hasn't replied
+   since the original substantive note.
+
+3. **T-47** (step2 auto-refresh polling asymmetry). Small fix (~10
+   LOC in `App.jsx`), defer-it-but-don't-forget-it level.
+
+4. **CodeRabbit calibration.** First PR landed (Tod's #1), see how its
+   review reads. Tune the `.coderabbit.yaml` if it's noisy or missing
+   things. Probably one or two pass-throughs to settle.
+
+5. **Tom's branches review when he's ready to merge.** He's
+   explicitly holding off; he'll signal. When he opens PRs, CodeRabbit
+   will pre-review; we add the second human pair of eyes.
+
+6. **The two red-team UNRESOLVEDs still blocking T-27** — never
+   adjudicated this session because the cascade-IGV work grew into
+   multi-day work. `ensure_assembly()` locking posture (defer or fix
+   now) and §6 provenance schema vs T-07 (port `capture_env_snapshot`
+   or accept reduction). T-27 still blocked on these.
+
+7. **Mirror Tod's note items.** Two items already in TOD_QUEUE.md for
+   the next time Vivek messages him: the `--kraken-only` "at None"
+   cosmetic, the kraken GUI auto-refresh, and the mirror-back of the
+   kraken_id_parse_gui_dev safe.directory patch to that repo's source.
+
+## Recent commits worth knowing about
+
+```
+507f192 ood-dev: set git safe.directory before fetching prod repo
+02bb234 gitignore: ignore Office lock files (~$*)
+642d322 ci: add .coderabbit.yaml for tuned auto-review
+0ecfbeb Merge pull request #1 from vkapur/feature/cross-tool-file-visibility
+be8e8b4 dev OOD: build frontend from worktree source on session start
+000ecf4 Surface Kraken ID Parse results in vSNP sample view
+f57008d IgvStandalone: call browser.search() after createBrowser
+1e5ba98 IgvStandalone: expand single-position locus to a small range
+e5c2745 Merge t02-cascade-igv-click — cascade IGV click + GFF/VCF tracks + same-window navigation
+a97ede2 xlsx_html: visually distinguish calls-only IGV links (imported VCFs)
+0b257b0 IGV: additive same-window navigation (postMessage, not URL replace)
+cd1e7e8 xlsx_html: window.open onclick handler for same-window IGV (Safari fix)
+51f6f6d docs: T-48 — project access control via per-project groups
+58c3a28 Merge tstuber_2026-05-20 — project-level reference, timestamped step2, VCF browser, metadata editor, _VCFs folder
+```
+
+Full history via `git log --oneline 8985763..` (about 30 commits).
 
 ## Verify when picking up
 
-```bash
-# Local main HEAD (origin)
+```sh
+# Local Mac, main HEAD
 git log --oneline -3 main
-# eb36c18 docs: session handoff (May 17-18) + Tod welcome note
-# 3a5a818 step2_setup: honor remove_from_analysis.xlsx ...
-# 4212688 T-46 Phase 1: auto-skip single-end + junk fastqs ...
+# Expected: 507f192 ood-dev: set git safe.directory ...
 
-# Tod's branch on origin (review-and-merge queue)
-git fetch origin && git log --oneline main..origin/tstuber_2026-05-20 | wc -l
-# 11
+# Remote sanity
+git remote -v
+# Expected: origin https://github.com/kapurlab/vsnp_gui.git
 
-# wgs3 is currently on Tod's branch (deployed state):
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git branch --show-current && git log --oneline -1'
-# tstuber_2026-05-20
-# a815b4b Add <project>_VCFs accumulation folder ...
+# Recent open PRs / CodeRabbit activity
+gh pr list --state open --repo kapurlab/vsnp_gui
+gh pr list --state merged --limit 3 --repo kapurlab/vsnp_gui
 
-# Red-team archive should be intact
-ls docs/dev/redteam/  # FINDINGS.md, DECISIONS.md, R1-*.md, R2-*.md, sources/, etc.
+# Branches Tod's keeping warm
+git fetch origin --prune
+git branch -r | grep feature/
 
-# Confirm LSDV India Step 1 finished cleanly
-ssh wgs3 'ls /home/vxk1/projects/LSDV_India/step1/*/alignment_*/*_filtered_hapall_annotated.vcf 2>/dev/null | wc -l'
-# 73
+# wgs3 prod checkout
+ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -2'
+# Expected: 507f192 ... ; on main
 
-# Confirm Tod's demo project is in place
-ssh wgs3 'ls /srv/kapurlab/projects/demo_sars_cov_2/step1/ | head -5'
+# Dev card sanity (both vsnp_gui_dev and kraken_id_parse_gui_dev should
+# launch cleanly for vxk1 — cross-user safe.directory is now in)
+ssh wgs3 'sudo ls /var/www/ood/apps/sys/ | grep -E "vsnp_gui|kraken"'
+
+# CodeRabbit yaml present
+test -f .coderabbit.yaml && echo "yes" || echo "no"
 ```
+
+## Anchor docs (read these next, in order)
+
+- [`docs/dev/TICKETS.md`](TICKETS.md) — T-IDs, milestones, T-47/T-48
+  status
+- [`docs/dev/TOD_QUEUE.md`](TOD_QUEUE.md) — open items for next Tod
+  conversation (kraken note items, GitHub PR merge gate, sample
+  metadata editor deep-link, etc.)
+- [`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md) — the two
+  UNRESOLVED red-team decisions still blocking T-27
+- [`ood/README.md`](../../ood/README.md) — OOD app deploy convention
+  (sudo cp + restart pattern)
+- `/Users/vivekkapur/Downloads/PLATFORM_PROPOSAL-2.md` — the v1.1
+  platform proposal Tod gave point-by-point feedback on; the
+  proposal needs (a) to move into the repo, (b) the six edits from
+  Tod's reply applied
+
+## Note for next-session Claude
+
+This session was unusually long. The cascade-IGV work alone went
+through ~12 iterations because every browser-quirk (Safari named
+windows, large-genome locus zoom, imported-VCF samples, cross-user
+git ownership) surfaced something the prior fix didn't catch. The
+pattern: each "small" feature exposes ~3 environmental edge cases.
+Budget the same generosity for similar UI-meets-OOD-meets-bioinformatics
+work.
+
+The user is Vivek, working from Mac (`vxk1@kapurlab-wgs3.tailf38ff4.ts.net`
+via Tailscale). Tod (`tks5563`) is the second collaborator, USDA NAHLN
+context. Both have admin sudo on wgs3 via `kapurlab-admins` group.
+Repo is now `kapurlab/vsnp_gui`, public, CodeRabbit reviewing.

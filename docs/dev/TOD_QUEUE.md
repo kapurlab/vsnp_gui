@@ -110,3 +110,30 @@ no BAM to load" in the IGV header.
 Dev session has `uvicorn --reload` so backend tweaks hot-pickup —
 useful if Tod wants to iterate on anything from his laptop. Frontend
 edits still need a `vite build`.
+
+### Two small polish items spotted during Kraken-from-Step1 testing — Open (2026-06-04)
+
+Tested Tod's `feature/step1-run-kraken` end-to-end on demo_sars_cov_2.
+Backend produces results correctly. Two cosmetic items worth flagging
+to him for the next pass:
+
+1. `kraken_id_parse.py --kraken-only` prints `"Krona graph generated at
+   None."` — output-path variable isn't threaded through in that code
+   path. Successful run reads like a failure to anyone tailing the log.
+2. Per-sample results panel in the Kraken GUI doesn't auto-repoll after
+   the background job goes `running → done`. Files are on disk, the API
+   returns them, but the user has to manually refresh (Cmd+R) to see
+   them. Same pattern as the vSNP step2 auto-refresh self-flag (T-47).
+
+Neither is a blocker; both are polish for a future PR.
+
+### `kraken_id_parse_gui_dev` cross-user git fix — needs mirror back to repo (2026-06-04)
+
+Patched `/var/www/ood/apps/sys/kraken_id_parse_gui_dev/template/before.sh.erb`
+on wgs3 to add `git config --global --add safe.directory "${prod_repo}"`
+before the fetch, because the prod checkout is owned by tks5563 and
+non-owners (vxk1) were hitting "dubious ownership" → session aborts.
+Identical patch already merged into `kapurlab/vsnp_gui` at commit
+`507f192`. Tod should mirror the wgs3 patch back into the
+`kraken_id_parse_gui` repo source so the fix survives a sync from
+repo → /var/www.

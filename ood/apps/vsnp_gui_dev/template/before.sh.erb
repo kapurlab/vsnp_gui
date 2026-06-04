@@ -39,6 +39,9 @@ saved_cwd="${PWD}"
 # session still launches against the last known good commit. If neither
 # fetch nor a local ref exists, fail with a clear message.
 cd "${prod_repo}"
+# Cross-user safety: see kraken dev card. The prod checkout may be owned
+# by a different user than the OOD session; safe.directory unblocks git.
+git config --global --add safe.directory "${prod_repo}"
 fetch_exit=0
 git fetch origin "${branch}" 2>&1 || fetch_exit=$?
 if [[ ${fetch_exit} -ne 0 ]]; then

@@ -69,6 +69,16 @@ export default function App() {
     open: false, project: "", sample: "", mode: "full", taxon: "",
     running: false, jobId: null, status: "idle", log: [],
   });
+  // Taxon presets are loaded from the shared kraken config/taxa.yaml via
+  // /api/kraken/taxa; this list is only a fallback if that fetch fails.
+  const [krakenTaxonPresets, setKrakenTaxonPresets] = useState([
+    "Mycobacterium tuberculosis complex",
+    "Mycobacterium bovis",
+    "Mycobacterium avium subsp. paratuberculosis",
+    "Brucella",
+  ]);
+  const [krakenNewTaxon, setKrakenNewTaxon] = useState("");
+  const [krakenAddingTaxon, setKrakenAddingTaxon] = useState(false);
   const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
   const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
   const igvBrowserRef = useRef(null);
@@ -594,6 +604,16 @@ export default function App() {
 
   useEffect(() => {
     document.title = `vSNP GUI ${APP_VERSION}`;
+  }, []);
+
+  // Load the shared taxon search names (kraken repo's config/taxa.yaml).
+  useEffect(() => {
+    fetch(`${API_BASE}/api/kraken/taxa`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && Array.isArray(d.taxa) && d.taxa.length) setKrakenTaxonPresets(d.taxa);
+      })
+      .catch(() => {});
   }, []);
 
   // Auto-fill the "Download New Reference" output directory from the first
@@ -1991,12 +2011,31 @@ export default function App() {
   }
 
   // --- Kraken ID Parse on a single Step 1 sample -------------------------
-  const KRAKEN_TAXON_PRESETS = [
-    "Mycobacterium tuberculosis complex",
-    "Mycobacterium bovis",
-    "Mycobacterium avium subsp. paratuberculosis",
-    "Brucella",
-  ];
+
+  // Persist a new taxon search name to the shared kraken config/taxa.yaml and
+  // select it. Same list the Kraken ID Parse GUI reads/writes.
+  async function addKrakenTaxon() {
+    const name = krakenNewTaxon.trim();
+    if (!name || krakenAddingTaxon) return;
+    setKrakenAddingTaxon(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/kraken/taxa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        if (Array.isArray(d.taxa)) setKrakenTaxonPresets(d.taxa);
+        setKrakenModal((m) => ({ ...m, taxon: name }));
+        setKrakenNewTaxon("");
+      }
+    } catch (_) {
+      /* leave input as-is for retry */
+    } finally {
+      setKrakenAddingTaxon(false);
+    }
+  }
 
   function openKrakenModal(project, sample) {
     if (!project || !sample) return;
@@ -2027,7 +2066,7 @@ export default function App() {
   async function runKrakenForSample() {
     const { project, sample, mode, taxon, running } = krakenModal;
     if (running || !project || !sample) return;
-    if (mode === "full" && !taxon.trim()) return;
+    if ((mode === "full" || mode === "parse_only") && !taxon.trim()) return;
     setKrakenModal((m) => ({ ...m, running: true, status: "running", log: [] }));
     try {
       const res = await fetch(
@@ -2072,6 +2111,12 @@ export default function App() {
           // stale cached file list for it.
           if (mm.project) {
             if (projExpanded[mm.project]) loadProjData(mm.project);
+            // The backend auto-imports the parsed-read fastqs into the project's
+            // inputs (download/) on success; refresh the Inputs pane so they
+            // show up immediately, ready to re-run through vSNP.
+            if (m[1] === "succeeded" && mm.project === selectedProject) {
+              loadInputs(selectedProject);
+            }
             setSampleKrakenFiles((prev) => {
               const next = { ...prev };
               Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
@@ -4233,6 +4278,15 @@ export default function App() {
                     <div className="muted" style={{ fontSize: 12 }}>Kraken2 classify → parse target reads → assemble → BLAST. Best for confirming species. Needs a target taxon.</div>
                   </div>
                 </label>
+                <label className={`kraken-mode-card ${krakenModal.mode === "parse_only" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "parse_only" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "parse_only"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "parse_only" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Parse reads only (skip BLAST)</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Kraken2 classify → extract the target taxon's reads, then stop. Skips assembly and BLAST. The parsed reads are auto-imported into this project's inputs for re-running through vSNP. Needs a target taxon.</div>
+                  </div>
+                </label>
                 <label className={`kraken-mode-card ${krakenModal.mode === "kraken_only" ? "selected" : ""}`}
                        style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "kraken_only" ? "var(--panel-2)" : "transparent" }}>
                   <input type="radio" name="krakenMode" checked={krakenModal.mode === "kraken_only"} disabled={krakenModal.running}
@@ -4244,23 +4298,36 @@ export default function App() {
                 </label>
               </div>
 
-              {krakenModal.mode === "full" ? (
+              {krakenModal.mode === "full" || krakenModal.mode === "parse_only" ? (
                 <div style={{ marginBottom: 8 }}>
                   <label className="label">Target taxon</label>
-                  <input
-                    placeholder='e.g. "Mycobacterium tuberculosis complex"'
+                  <select
                     value={krakenModal.taxon}
                     disabled={krakenModal.running}
                     onChange={(e) => setKrakenModal((m) => ({ ...m, taxon: e.target.value }))}
-                  />
-                  <div className="taxon-presets" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                    {KRAKEN_TAXON_PRESETS.map((p) => (
-                      <button key={p} type="button" className={`preset-btn ${krakenModal.taxon === p ? "active" : ""}`}
-                              disabled={krakenModal.running}
-                              onClick={() => setKrakenModal((m) => ({ ...m, taxon: p }))}>
-                        {p}
-                      </button>
+                  >
+                    <option value="">Select a target taxon…</option>
+                    {krakenTaxonPresets.map((p) => (
+                      <option key={p} value={p}>{p}</option>
                     ))}
+                  </select>
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <input
+                      placeholder="Add a new taxon to the list…"
+                      value={krakenNewTaxon}
+                      disabled={krakenModal.running || krakenAddingTaxon}
+                      onChange={(e) => setKrakenNewTaxon(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKrakenTaxon(); } }}
+                      style={{ flex: 1 }}
+                    />
+                    <button type="button" className="ghost"
+                            onClick={addKrakenTaxon}
+                            disabled={krakenModal.running || krakenAddingTaxon || !krakenNewTaxon.trim()}>
+                      {krakenAddingTaxon ? "Adding…" : "+ Add"}
+                    </button>
+                  </div>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                    New taxa are saved to the shared list (kraken config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
                   </div>
                 </div>
               ) : null}
@@ -4285,8 +4352,11 @@ export default function App() {
               ) : null}
               {krakenModal.status === "succeeded" ? (
                 <div className="note" style={{ marginTop: 8 }}>
-                  Expand this sample in the Projects list to open the Krona graph and, for full runs,
-                  to <strong>Import</strong> the parsed reads back into download/ for Step 1.
+                  {krakenModal.mode === "kraken_only"
+                    ? <>Expand this sample in the Projects list to open the Krona graph.</>
+                    : <>Parsed reads were <strong>auto-imported</strong> into this project's inputs (download/)
+                       under a <code>-</code>-delimited sample name, ready to re-run through vSNP.
+                       Expand this sample in the Projects list to open the Krona graph and other outputs.</>}
                 </div>
               ) : null}
 
@@ -4295,7 +4365,7 @@ export default function App() {
                 {krakenModal.status === "failed" ? <span className="muted" style={{ marginRight: "auto", color: "var(--danger)" }}>Run failed — see log above.</span> : null}
                 <button
                   onClick={runKrakenForSample}
-                  disabled={krakenModal.running || (krakenModal.mode === "full" && !krakenModal.taxon.trim())}
+                  disabled={krakenModal.running || ((krakenModal.mode === "full" || krakenModal.mode === "parse_only") && !krakenModal.taxon.trim())}
                 >
                   {krakenModal.running ? "Running…" : krakenModal.status === "succeeded" || krakenModal.status === "failed" ? "Run again" : "▶ Run"}
                 </button>

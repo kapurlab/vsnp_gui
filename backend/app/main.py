@@ -3507,6 +3507,61 @@ def kraken_samples(project: str):
 # ---------------------------------------------------------------------------
 _KRAKEN_GUI_ROOT = Path("/srv/kapurlab/tools/kraken_id_parse_gui")
 
+# Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
+# read and append to this same file so the preset list stays in sync.
+_KRAKEN_TAXA_YAML = _KRAKEN_GUI_ROOT / "config" / "taxa.yaml"
+
+_KRAKEN_TAXA_HEADER = (
+    "# Kraken ID Parse — taxon search names\n"
+    "#\n"
+    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
+    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
+    "# classification name passed verbatim to the read parser (-t) and must match\n"
+    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
+    "# via the \"Add search name\" control in either GUI.\n"
+)
+
+
+def _read_kraken_taxa() -> List[str]:
+    """Read the shared taxon list. Dependency-free flat-YAML-sequence parser
+    (``- name`` per line) so it works whether or not PyYAML is installed."""
+    taxa: List[str] = []
+    try:
+        text = _KRAKEN_TAXA_YAML.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return taxa
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        elif line == "-":
+            continue
+        if line and line[0] not in "\"'" and " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
+            line = line[1:-1]
+        if line:
+            taxa.append(line)
+    return taxa
+
+
+def _write_kraken_taxa(taxa: List[str]) -> None:
+    """Rewrite the shared taxa.yaml as a flat YAML sequence, preserving header."""
+    _KRAKEN_TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_KRAKEN_TAXA_HEADER]
+    for name in taxa:
+        name = name.strip()
+        if not name:
+            continue
+        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+            esc = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'- "{esc}"')
+        else:
+            lines.append(f"- {name}")
+    _KRAKEN_TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 # Read-tag stripping identical to Kraken ID Parse's own pairing logic, so the
 # sample name and R1/R2 selection match what that tool would pick on its own.
 _KRAKEN_READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
@@ -3554,6 +3609,80 @@ def _find_sample_fastqs(download_dir: Path, sample: str):
     return None, None
 
 
+def _dash_delimited_import_name(filename: str) -> str:
+    """Rename a parsed read file so vSNP treats it as a NEW, distinct sample.
+
+    vSNP keys a sample on the text left of the first underscore, so
+    ``<sample>_<taxon>_R1.fastq.gz`` would collapse back to ``<sample>`` and
+    overwrite the original run. Replacing every underscore in the
+    sample-identifying stem with a dash (keeping only the ``_R1``/``_R2``
+    read-tag underscore) yields a unique name like
+    ``<sample>-<taxon-words>_R1.fastq.gz``.
+    """
+    m = _KRAKEN_READ_TAG_RE.search(filename)
+    if not m:
+        if filename.endswith(".fastq.gz"):
+            stem = filename[: -len(".fastq.gz")]
+            return stem.replace("_", "-") + ".fastq.gz"
+        return filename.replace("_", "-")
+    stem = filename[: m.start()]
+    tag = filename[m.start():]  # keep the read tag (e.g. "_R1.fastq.gz") verbatim
+    return stem.replace("_", "-") + tag
+
+
+def _import_parsed_reads(run_dir: Path, download_dir: Path, output_prefix: str) -> List[str]:
+    """Copy a Kraken run's taxon-parsed reads into the project's inputs.
+
+    parse_reads.py writes ``<token>_<taxon>_R1.fastq.gz`` / ``_R2`` into
+    ``run_dir``. Each is copied into ``<project>/download/`` under a
+    dash-delimited name (see _dash_delimited_import_name) so vSNP sees a brand
+    new sample and a re-run does not overwrite the original sample's results.
+    Returns the destination filenames created."""
+    imported: List[str] = []
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return imported
+    pattern = f"*_{output_prefix}_R*.fastq.gz"
+    for src in sorted(run_dir.glob(pattern)):
+        if not src.is_file():
+            continue
+        dest = download_dir / _dash_delimited_import_name(src.name)
+        try:
+            shutil.copy2(src, dest)
+            imported.append(dest.name)
+        except OSError:
+            continue
+    return imported
+
+
+@app.get("/api/kraken/taxa")
+def kraken_taxa():
+    """Return the shared taxon search names (kraken repo's config/taxa.yaml)."""
+    return {"taxa": _read_kraken_taxa()}
+
+
+class KrakenTaxonPayload(BaseModel):
+    name: str
+
+
+@app.post("/api/kraken/taxa")
+def kraken_taxa_add(payload: KrakenTaxonPayload):
+    """Append a new taxon search name to the shared taxa.yaml (no duplicates)."""
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A taxon name is required.")
+    taxa = _read_kraken_taxa()
+    if any(name.lower() == t.lower() for t in taxa):
+        return {"taxa": taxa, "added": False}
+    taxa.append(name)
+    try:
+        _write_kraken_taxa(taxa)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save taxon list: {exc}")
+    return {"taxa": taxa, "added": True}
+
+
 def _resolve_kraken_runtime() -> Dict[str, str]:
     """Locate the shared Kraken install's python + bin. Falls back to a
     per-user miniforge env only if the shared env is absent (mirrors the OOD
@@ -3577,7 +3706,9 @@ def _resolve_kraken_runtime() -> Dict[str, str]:
 class KrakenRunRequest(BaseModel):
     sample: str
     # "full": classify + parse reads + assemble + BLAST identification (needs a
-    # taxon). "kraken_only": Kraken2 + Krona graph only (no taxon needed).
+    # taxon). "parse_only": classify + parse target reads, then stop — skips
+    # assembly/BLAST/coverage (needs a taxon). "kraken_only": Kraken2 + Krona
+    # graph only (no taxon needed).
     mode: str = "full"
     taxon: Optional[str] = None
     kraken_db: Optional[str] = None
@@ -3600,10 +3731,12 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     if not script.is_file():
         raise HTTPException(status_code=503, detail=f"Kraken pipeline script missing: {script}")
 
-    kraken_only = (payload.mode or "full").strip() == "kraken_only"
+    mode = (payload.mode or "full").strip()
+    kraken_only = mode == "kraken_only"
+    parse_only = mode == "parse_only"
     taxon = (payload.taxon or "").strip()
     if not kraken_only and not taxon:
-        raise HTTPException(status_code=400, detail="A target taxon is required for a full run.")
+        raise HTTPException(status_code=400, detail="A target taxon is required for this run mode.")
 
     sample = (payload.sample or "").strip()
     if not sample or "/" in sample or sample.startswith("."):
@@ -3630,6 +3763,8 @@ def kraken_run(project: str, payload: KrakenRunRequest):
         or "/srv/kapurlab/databases/blast/ref_prok_rep_genomes"
     if kraken_only and not kraken_db:
         raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
+    if parse_only and not kraken_db:
+        raise HTTPException(status_code=400, detail="Parse-only (skip BLAST) mode requires a Kraken DB path.")
 
     run_dir = project_dir / "kraken" / kraken_sample
     # Guard against two runs racing on the same output dir (they'd clobber each
@@ -3655,6 +3790,8 @@ def kraken_run(project: str, payload: KrakenRunRequest):
         parts += ["-k", shlex.quote(kraken_db)]
     if kraken_only:
         parts.append("--kraken-only")
+    elif parse_only:
+        parts.append("--no-blast")
     elif blast_db:
         parts += ["-b", shlex.quote(blast_db)]
 
@@ -3667,15 +3804,41 @@ def kraken_run(project: str, payload: KrakenRunRequest):
         f'PATH="{path_prefix}$PATH" {" ".join(parts)}'
     )
 
-    label = "Kraken-only (Krona)" if kraken_only else (taxon or "identification")
+    if kraken_only:
+        label = "Kraken-only (Krona)"
+    elif parse_only:
+        label = f"{taxon} (parse only)"
+    else:
+        label = taxon or "identification"
+
+    # When the run extracts target reads (full or parse-only — anything with a
+    # taxon), auto-import them into the project's inputs so the user can re-run
+    # them through vSNP without manual copying. Renamed to a dash-delimited
+    # sample so vSNP treats them as a distinct sample (see _import_parsed_reads).
+    download_dir = project_dir / "download"
+    output_prefix = taxon.replace(" ", "_") if taxon else ""
+
+    def _on_kraken_done(jid, exit_code, started, finished,
+                        _run_dir=run_dir, _dl=download_dir,
+                        _prefix=output_prefix, _kraken_only=kraken_only):
+        if exit_code != 0 or _kraken_only or not _prefix:
+            return
+        imported = _import_parsed_reads(_run_dir, _dl, _prefix)
+        if imported:
+            logger.info(
+                "kraken auto-import: copied %d parsed read file(s) into %s: %s",
+                len(imported), _dl, ", ".join(imported),
+            )
+
     job_id = job_manager.start_job(
         name="kraken",
         command=command,
         cwd=run_dir,
         env=build_env(cfg),
+        finalize_callback=_on_kraken_done,
     )
     job_id_file.write_text(job_id, encoding="utf-8")
-    return {"job_id": job_id, "run_dir": str(run_dir), "sample": kraken_sample, "mode": "kraken_only" if kraken_only else "full", "label": label}
+    return {"job_id": job_id, "run_dir": str(run_dir), "sample": kraken_sample, "mode": mode if mode in ("kraken_only", "parse_only", "full") else "full", "label": label}
 
 
 @app.get("/api/projects/{project}/step1/edits")

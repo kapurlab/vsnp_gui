@@ -3510,6 +3510,31 @@ def kraken_sample_files(project: str, sample: str):
     }
 
 
+@app.get("/api/projects/{project}/kraken/samples/{sample}/krona")
+def kraken_sample_krona(project: str, sample: str):
+    """Open the interactive Krona chart for a sample's Kraken run.
+
+    Resolves the sample's Kraken output dir (same matching rules as
+    ``kraken_sample_files``) and serves its ``*_krona.html`` inline so it
+    renders in a browser tab. The Krona graph is produced in every Kraken
+    mode, so any sample with a Kraken dir has one. Returns 404 when no run
+    exists or the run produced no Krona file (e.g. an interrupted run).
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    kraken_dir = project_dir / "kraken"
+    sample_dir = _resolve_kraken_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
+    if not sample_dir:
+        raise HTTPException(status_code=404, detail="No Kraken run for this sample")
+    krona = next(
+        (p for p in sorted(sample_dir.rglob("*_krona.html")) if p.is_file()),
+        None,
+    )
+    if krona is None:
+        raise HTTPException(status_code=404, detail="No Krona graph found for this sample")
+    return FileResponse(krona, media_type="text/html")
+
+
 @app.get("/api/projects/{project}/kraken/samples")
 def kraken_samples(project: str):
     """List the sample names that have a Kraken output dir under

@@ -47,6 +47,10 @@ export default function App() {
   const [copiedPath, setCopiedPath] = useState("");               // last path copied (for transient "Copied" hint)
   const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
+  // project name -> [kraken output dir names]. Lets the Step 1 results table
+  // tell which samples already have a Kraken run (and so a Krona graph to open)
+  // without a per-row request. Populated by loadProjectKrakenDirs().
+  const [krakenDirsByProject, setKrakenDirsByProject] = useState({});
   const [qcLoading, setQcLoading] = useState(false);
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
@@ -263,6 +267,17 @@ export default function App() {
     const refNorm = normalizeReferenceName(reference);
     return posthocRows.filter((r) => normalizeReferenceName(r.Reference) === refNorm);
   }, [posthocRows, reference]);
+
+  // The post-hoc table can mix samples from several projects; make sure each
+  // referenced project's Kraken dir list is cached so its rows can show a
+  // Krona button. Only fetches projects we haven't loaded yet.
+  useEffect(() => {
+    const projs = new Set(posthocFilteredRows.map((r) => r._project).filter(Boolean));
+    projs.forEach((p) => {
+      if (!(p in krakenDirsByProject)) loadProjectKrakenDirs(p);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posthocFilteredRows]);
 
   async function pickPath(kind, title, currentValue, onPick) {
     if (!window?.vsnp?.selectPath) return;
@@ -1072,6 +1087,9 @@ export default function App() {
     }
     const data = await res.json();
     setQcRows(data);
+    // Surface which of these samples already have a Kraken run, so the table
+    // can offer a "Krona" button alongside the "Kraken ID" (run) button.
+    loadProjectKrakenDirs(selectedProject);
     // Hydrate the exclusion checkboxes from the persisted xlsx so re-opening
     // a project shows what's actually saved on disk (no more silent drift
     // between the GUI's checkbox state and what Step 2 will honor).
@@ -1458,6 +1476,35 @@ export default function App() {
     const shorter = krakenDirs.filter((d) => sample.startsWith(`${d}_`));
     if (shorter.length) return shorter.sort((a, b) => b.length - a.length)[0];
     return null;
+  }
+
+  // Fetch the list of Kraken output dirs for a project and cache it by name.
+  // Used by the Step 1 results table to show a "Krona" button only on samples
+  // that already have a Kraken run. Cheap (one request per project) and safe
+  // to call repeatedly — it just refreshes the cached list.
+  async function loadProjectKrakenDirs(project) {
+    if (!project) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setKrakenDirsByProject((m) => ({ ...m, [project]: data.samples || [] }));
+    } catch (_) {
+      // Non-fatal — without the list, rows simply won't show a Krona button.
+    }
+  }
+
+  // True when a Step 1 sample has a Kraken run (and therefore a Krona graph).
+  function hasKrakenRun(project, sample) {
+    return !!krakenDirForSample(krakenDirsByProject[project], sample);
+  }
+
+  // Inline-open URL for a sample's Krona chart. The kraken dir name (not the
+  // step1 sample name) is what the backend resolves against, so pass the
+  // matched dir when we have it; the backend matches either direction anyway.
+  function kronaHref(project, sample) {
+    const dir = krakenDirForSample(krakenDirsByProject[project], sample) || sample;
+    return `${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples/${encodeURIComponent(dir)}/krona`;
   }
 
   // Copy a server path to the clipboard (parsed-read fastqs → paste into the
@@ -2131,6 +2178,9 @@ export default function App() {
           // stale cached file list for it.
           if (mm.project) {
             if (projExpanded[mm.project]) loadProjData(mm.project);
+            // A successful run produced a new Kraken dir → refresh the cached
+            // list so the Step 1 row's "Krona" button appears right away.
+            if (m[1] === "succeeded") loadProjectKrakenDirs(mm.project);
             // The backend auto-imports the parsed-read fastqs into the project's
             // inputs (download/) on success; refresh the Inputs pane so they
             // show up immediately, ready to re-run through vSNP.
@@ -3891,6 +3941,17 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
+                                    {sampleKey(row) && hasKrakenRun(selectedProject, sampleKey(row)) ? (
+                                      <a
+                                        className="ghost action"
+                                        href={kronaHref(selectedProject, sampleKey(row))}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Open the interactive Krona chart from this sample's Kraken run"
+                                      >
+                                        📊 Krona
+                                      </a>
+                                    ) : null}
                                     {sampleKey(row) ? (
                                       <button
                                         className="ghost action"
@@ -4060,6 +4121,17 @@ export default function App() {
                                     <button onClick={() => viewInline(editLog, row._project)}>Edit Log</button>
                                   ) : null}
                                   {row._project && (row._sample || row.sample) ? <button onClick={() => viewStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
+                                  {row._project && (row._sample || row.sample) && hasKrakenRun(row._project, row._sample || row.sample) ? (
+                                    <a
+                                      className="ghost action"
+                                      href={kronaHref(row._project, row._sample || row.sample)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title="Open the interactive Krona chart from this sample's Kraken run"
+                                    >
+                                      📊 Krona
+                                    </a>
+                                  ) : null}
                                   {row._project && (row._sample || row.sample) ? (
                                     <button
                                       className="ghost action"

@@ -3671,6 +3671,27 @@ def _find_sample_fastqs(download_dir: Path, sample: str):
     return None, None
 
 
+def _resolve_step1_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
+    """Find a sample's step1 output dir, for sourcing its FASTQs.
+
+    The normal GUI flow keeps the inputs in ``<project>/download/`` and step1
+    only holds symlinks back to them. But data run *outside* the GUI (vsnp3 on
+    the command line, then dropped into a project) lands as step1 output with
+    the real FASTQs inside ``step1/<sample>/`` and an empty ``download/``. This
+    locates that folder so Kraken can still find the reads. Dir name usually
+    equals the sample; fall back to the same prefix matching used elsewhere.
+    """
+    if not step1_dir.is_dir():
+        return None
+    exact = step1_dir / sample
+    if exact.is_dir():
+        return exact
+    for name in _step1_sample_names(step1_dir):
+        if name == sample or name.startswith(f"{sample}_") or sample.startswith(f"{name}_"):
+            return step1_dir / name
+    return None
+
+
 def _dash_delimited_import_name(filename: str) -> str:
     """Rename a parsed read file so vSNP treats it as a NEW, distinct sample.
 
@@ -3806,9 +3827,16 @@ def kraken_run(project: str, payload: KrakenRunRequest):
 
     r1, r2 = _find_sample_fastqs(project_dir / "download", sample)
     if r1 is None:
+        # Data run outside the GUI (command-line vsnp3, then placed in a
+        # project) has an empty download/ and keeps its FASTQs inside
+        # step1/<sample>/. Fall back to that so Kraken can still run on it.
+        step1_sample_dir = _resolve_step1_sample_dir(project_dir / "step1", sample)
+        if step1_sample_dir:
+            r1, r2 = _find_sample_fastqs(step1_sample_dir, sample)
+    if r1 is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No FASTQ files found for sample {sample!r} in the project's download/ folder.",
+            detail=f"No FASTQ files found for sample {sample!r} in the project's download/ or step1/{sample}/ folder.",
         )
 
     # Name the output dir EXACTLY as the Kraken ID Parse tool would when run

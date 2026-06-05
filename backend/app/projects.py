@@ -64,10 +64,27 @@ def _normalize_roots(roots: RootsLike) -> List[Root]:
     return out
 
 
+def vcf_db_dir(step2_dir: Path) -> Path:
+    """Return the step2 VCF database directory.
+
+    The current name is ``vcf_database``; projects created before the rename
+    used ``vcf_source``. Prefer the new name, fall back to the legacy one when
+    it's the only one present, and default to the new name for creation so new
+    projects always get ``vcf_database``.
+    """
+    new = step2_dir / "vcf_database"
+    if new.exists():
+        return new
+    legacy = step2_dir / "vcf_source"
+    if legacy.exists():
+        return legacy
+    return new
+
+
 def ensure_project_dirs(project_dir: Path) -> None:
     (project_dir / "download").mkdir(parents=True, exist_ok=True)
     (project_dir / "step1").mkdir(parents=True, exist_ok=True)
-    (project_dir / "step2" / "vcf_source").mkdir(parents=True, exist_ok=True)
+    vcf_db_dir(project_dir / "step2").mkdir(parents=True, exist_ok=True)
     (project_dir / f"{project_dir.name}_VCFs").mkdir(parents=True, exist_ok=True)
 
 
@@ -222,7 +239,7 @@ def _project_counts(project_dir: Path) -> Dict:
             "step1_samples": len([d for d in step1_dir.iterdir() if d.is_dir()]) if step1_dir.exists() else 0,
             "step1_vcfs": len(list(step1_dir.glob("**/*_zc.vcf"))) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
-            "step2_vcfs": len(list((step2_dir / "vcf_source").glob("*.vcf"))) if (step2_dir / "vcf_source").exists() else 0,
+            "step2_vcfs": len(list(vcf_db_dir(step2_dir).glob("*.vcf"))) if vcf_db_dir(step2_dir).exists() else 0,
             "vcfs_count": (
                 len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
                 if vcfs_dir.exists() else 0

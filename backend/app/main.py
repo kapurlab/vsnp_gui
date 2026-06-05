@@ -33,6 +33,7 @@ from app.projects import (
     delete_project,
     update_project_meta,
     resolve_project_dir,
+    vcf_db_dir,
     SCOPE_PERSONAL,
     SCOPE_SHARED,
 )
@@ -128,7 +129,7 @@ def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str,
     """Resolve a project's reference fasta + GFF paths for IGV consumption.
 
     Used by step1_files for imported-VCF samples (those that exist only in
-    step2/vcf_source/, never went through Step 1, so have no alignment dir
+    step2/vcf_database/, never went through Step 1, so have no alignment dir
     to crib the reference from).
 
     Strategy 1 — borrow from any step1 sample that DOES have an alignment
@@ -459,6 +460,35 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
     return out
 
 
+# Step 2 run directories are timestamp-named (vsnp3 step2 run stamp), created
+# directly under step2/ (e.g. step2/2026-06-05_13-11-21). Older projects nested
+# them under step2/runs/<ts>; those are still recognized for reads.
+_STEP2_RUN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+
+# Dirs under step2/ that are NOT analysis-group output dirs (the VCF database,
+# the legacy runs/ wrapper, and the provenance store).
+_STEP2_NON_GROUP_DIRS = ("vcf_database", "vcf_source", "runs", "_provenance")
+
+
+def _step2_run_dirs(step2_dir: Path) -> Dict[str, Path]:
+    """Map run_id -> run directory for a project's step2 area.
+
+    Runs now live directly under ``step2/`` as timestamp-named dirs. Projects
+    created before the change kept them under ``step2/runs/<ts>``; those are
+    still picked up (the new location wins on a name clash)."""
+    runs: Dict[str, Path] = {}
+    if step2_dir.is_dir():
+        for d in step2_dir.iterdir():
+            if d.is_dir() and _STEP2_RUN_RE.match(d.name):
+                runs[d.name] = d
+    legacy = step2_dir / "runs"
+    if legacy.is_dir():
+        for d in legacy.iterdir():
+            if d.is_dir() and d.name not in runs:
+                runs[d.name] = d
+    return runs
+
+
 def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
     if not vcf_source_dir.exists():
         return
@@ -664,7 +694,10 @@ if not mapping:
 
 def load_color_map(step2_dir: Path):
     # Map accession -> color based on source type (sample vs reference)
-    manifest = step2_dir / "vcf_source" / ".vcf_source_manifest.csv"
+    db_dir = step2_dir / "vcf_database"
+    if not db_dir.exists():
+        db_dir = step2_dir / "vcf_source"
+    manifest = db_dir / ".vcf_source_manifest.csv"
     out = {}
     if not manifest.exists():
         return out
@@ -1626,7 +1659,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     else:
         detected_ref = payload.reference
 
-    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    vcf_source_dir = vcf_db_dir(project_dir / "step2")
     vcf_source_dir.mkdir(parents=True, exist_ok=True)
     action = (payload.action or "copy").lower()
     on_conflict = (payload.on_conflict or "skip").lower()
@@ -2323,7 +2356,7 @@ def step2_setup(project: str):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
-    step2_dir = project_dir / "step2" / "vcf_source"
+    step2_dir = vcf_db_dir(project_dir / "step2")
     step2_dir.mkdir(parents=True, exist_ok=True)
     # Clean existing VCFs so the source matches the selected workflow
     for existing in step2_dir.glob("*.vcf*"):
@@ -2432,13 +2465,14 @@ def step2_run(project: str, payload: Step2Request):
                     ),
                 )
 
-    vcf_source_dir = step2_dir / "vcf_source"
+    vcf_source_dir = vcf_db_dir(step2_dir)
 
-    # Timestamped run directory — each run gets its own subdirectory so
-    # multiple comparisons accumulate without overwriting previous outputs.
+    # Timestamped run directory — each run gets its own subdirectory directly
+    # under step2/ (e.g. step2/2026-06-05_13-11-21) so multiple comparisons
+    # accumulate without overwriting previous outputs.
     from datetime import datetime as _dt
     run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = step2_dir / "runs" / run_ts
+    run_dir = step2_dir / run_ts
     run_dir.mkdir(parents=True, exist_ok=True)
 
     remove_file = step2_dir / "remove_from_analysis.xlsx"
@@ -3031,7 +3065,7 @@ class ExcludeRequest(BaseModel):
 def step2_vcf_count(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
-    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if not vcf_source_dir.exists():
         return {"count": 0}
     vcfs = list(vcf_source_dir.glob("*.vcf")) + list(vcf_source_dir.glob("*.vcf.gz"))
@@ -3046,12 +3080,12 @@ def step2_vcf_count(project: str):
     }
 
 
-@app.get("/api/projects/{project}/step2/vcf_source/samples")
-def step2_vcf_source_samples(project: str):
-    """Return all sample names in the vcf_source directory, parsed from the manifest."""
+@app.get("/api/projects/{project}/step2/vcf_database/samples")
+def step2_vcf_database_samples(project: str):
+    """Return all sample names in the VCF database directory, parsed from the manifest."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
-    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if not vcf_source_dir.exists():
         return []
     manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
@@ -3087,18 +3121,17 @@ def step2_vcf_source_samples(project: str):
 @app.get("/api/projects/{project}/step2/runs")
 def step2_runs_list(project: str):
     """List all timestamped step2 runs newest-first. Falls back to a synthetic
-    'legacy' entry when the flat layout is present but runs/ does not exist."""
+    'legacy' entry when group dirs sit directly under step2/ with no runs."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     if not step2_dir.exists():
         return []
-    runs_dir = step2_dir / "runs"
+    run_dirs = _step2_run_dirs(step2_dir)
     results = []
-    if runs_dir.is_dir():
-        for run_entry in sorted(runs_dir.iterdir(), reverse=True):
-            if not run_entry.is_dir():
-                continue
+    if run_dirs:
+        for run_id in sorted(run_dirs.keys(), reverse=True):
+            run_entry = run_dirs[run_id]
             meta_path = run_entry / "run_metadata.json"
             started_at = None
             status = "unknown"
@@ -3120,28 +3153,24 @@ def step2_runs_list(project: str):
                 status = "running"
             group_count = sum(1 for d in run_entry.iterdir() if d.is_dir() and not d.name.startswith("_"))
             results.append({
-                "run_id": run_entry.name,
+                "run_id": run_id,
                 "started_at": started_at,
                 "status": status,
                 "reference": reference,
                 "group_count": group_count,
             })
     else:
-        # Legacy flat layout: any group dirs directly under step2/
-        has_groups = any(
-            d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
-            for d in step2_dir.iterdir()
-        )
-        if has_groups:
+        # Legacy flat layout: group dirs directly under step2/ (no run dirs).
+        def _is_group(d):
+            return d.is_dir() and d.name not in _STEP2_NON_GROUP_DIRS and not d.name.startswith(".")
+        groups = [d for d in step2_dir.iterdir() if _is_group(d)]
+        if groups:
             results.append({
                 "run_id": "legacy",
                 "started_at": None,
                 "status": "ok",
                 "reference": "",
-                "group_count": sum(
-                    1 for d in step2_dir.iterdir()
-                    if d.is_dir() and d.name not in ("vcf_source",) and not d.name.startswith(".")
-                ),
+                "group_count": len(groups),
             })
     return results
 
@@ -3207,7 +3236,7 @@ def step2_clear(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
-    vcf_source_dir = step2_dir / "vcf_source"
+    vcf_source_dir = vcf_db_dir(step2_dir)
     if vcf_source_dir.exists():
         shutil.rmtree(vcf_source_dir)
     vcf_source_dir.mkdir(parents=True, exist_ok=True)
@@ -3276,11 +3305,11 @@ def step1_files(project: str, sample: str = Query(...)):
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
-        # Imported-VCF case: sample lives only in step2/vcf_source/ (no Step 1
+        # Imported-VCF case: sample lives only in step2/vcf_database/ (no Step 1
         # alignment, so no BAM). Still useful in IGV as a calls-only track —
         # anchor it to the project's reference so the user can compare the
         # variant positions against the local cohort.
-        vcf_source_dir = project_dir / "step2" / "vcf_source"
+        vcf_source_dir = vcf_db_dir(project_dir / "step2")
         imported_vcf = None
         if vcf_source_dir.is_dir():
             for suffix in ("_zc.vcf", "_zc.vcf.gz", ".vcf", ".vcf.gz"):
@@ -3962,32 +3991,25 @@ def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
     """Resolve which directory to read step2 outputs from.
 
     Priority:
-    1. Explicit run_id → step2/runs/{run_id}/
-    2. .current_run sentinel → step2/runs/{value}/
-    3. Latest entry in step2/runs/ by directory name (lexicographic = chronological)
+    1. Explicit run_id → step2/{run_id}/ (or legacy step2/runs/{run_id}/)
+    2. .current_run sentinel → that run's dir
+    3. Latest run by directory name (lexicographic = chronological)
     4. Legacy flat layout: step2/ itself
     """
-    runs_dir = step2_dir / "runs"
+    run_dirs = _step2_run_dirs(step2_dir)
     if run_id and run_id != "legacy":
-        candidate = runs_dir / run_id
-        if candidate.is_dir():
-            return candidate
+        if run_id in run_dirs:
+            return run_dirs[run_id]
     if run_id == "legacy":
         return step2_dir
     current_file = step2_dir / ".current_run"
     if current_file.exists():
         current_ts = current_file.read_text(encoding="utf-8").strip()
-        candidate = runs_dir / current_ts
-        if candidate.is_dir():
-            return candidate
-    if runs_dir.is_dir():
-        entries = sorted(
-            (d for d in runs_dir.iterdir() if d.is_dir()),
-            key=lambda d: d.name,
-            reverse=True,
-        )
-        if entries:
-            return entries[0]
+        if current_ts in run_dirs:
+            return run_dirs[current_ts]
+    if run_dirs:
+        latest = sorted(run_dirs.keys(), reverse=True)[0]
+        return run_dirs[latest]
     return step2_dir  # legacy flat
 
 
@@ -4051,7 +4073,7 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
     for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name in ("vcf_source", "runs", "_provenance"):
+        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_RUN_RE.match(d.name):
             continue
         if d.name.startswith("."):
             continue
@@ -4114,7 +4136,7 @@ def step2_trees(project: str, run_id: Optional[str] = Query(None)):
     for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name in ("vcf_source", "runs", "_provenance") or d.name.startswith("."):
+        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_RUN_RE.match(d.name) or d.name.startswith("."):
             continue
         tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
         if not tre_files:
@@ -4169,7 +4191,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     # Build sets of samples loadable in IGV so the cascade-table render
     # can correctly enable / grey out the "↗ this" affordance per row:
     #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
-    #   - samples_with_vcfs: have an imported VCF in step2/vcf_source/
+    #   - samples_with_vcfs: have an imported VCF in step2/vcf_database/
     #     (calls-only IGV, anchored to the project reference)
     # A sample qualifies for "↗ this" if it's in either set.
     samples_with_bams: set[str] = set()
@@ -4189,7 +4211,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
                 prefix = d.name.split("_")[0]
                 if prefix and any(d.glob(f"**/{prefix}_nodup.bam")):
                     samples_with_bams.add(prefix)
-    vcf_source_dir = project_dir / "step2" / "vcf_source"
+    vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if vcf_source_dir.is_dir():
         for f in vcf_source_dir.iterdir():
             if not f.is_file():

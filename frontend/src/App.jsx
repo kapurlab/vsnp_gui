@@ -1203,7 +1203,7 @@ export default function App() {
 
   async function loadVcfSourceSamples() {
     if (!selectedProject) return;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_source/samples`);
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_database/samples`);
     if (res.ok) {
       const samples = await res.json();
       setVcfSourceSamples(samples);
@@ -4791,11 +4791,11 @@ export default function App() {
                   <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady}>Clear VCF set</button>
                   <button
                     className="ghost action"
-                    onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_source`, "vcf_source path")}
+                    onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_database`, "vcf_database path")}
                     disabled={!selectedProject}
                     title="Copy the absolute server path to clipboard — paste into the OOD Files app or scp"
                   >
-                    Copy vcf_source path
+                    Copy vcf_database path
                   </button>
                 </div>
                 <div className="note">

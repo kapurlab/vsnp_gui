@@ -102,7 +102,10 @@ def normalize_header(header: str) -> str:
 
 
 def load_step1_allowlist(step2_dir: Path) -> set:
-    manifest = step2_dir / "vcf_source" / ".vcf_source_manifest.csv"
+    db_dir = step2_dir / "vcf_database"
+    if not db_dir.exists():
+        db_dir = step2_dir / "vcf_source"
+    manifest = db_dir / ".vcf_source_manifest.csv"
     if not manifest.exists():
         return set()
     allowed = set()

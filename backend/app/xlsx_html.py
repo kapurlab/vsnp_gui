@@ -197,7 +197,7 @@ def _igv_launch_html(
         this_link = (
             '<span class="xlsx-igv-launch-disabled" '
             f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
-            'nor imported VCF in step2/vcf_source/. Use ↗ all to open the cohort.">↗ this</span>'
+            'nor imported VCF in step2/vcf_database/. Use ↗ all to open the cohort.">↗ this</span>'
         )
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
@@ -502,7 +502,7 @@ def xlsx_to_html(
     which a BAM exists on disk.
 
     ``samples_with_vcfs`` (optional) is the set of sample names that have
-    an imported VCF in ``step2/vcf_source/`` (no BAM, calls-only IGV).
+    an imported VCF in ``step2/vcf_database/`` (no BAM, calls-only IGV).
 
     "↗ this" is enabled if the sample is in EITHER set; calls-only mode is
     indicated in the tooltip when only the VCF is present. It's rendered

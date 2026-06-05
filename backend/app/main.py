@@ -299,6 +299,17 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
 _T46_JUNK_FASTQ_BYTES = 1024 * 1024  # 1 MB
 
 
+def _safe_stat_size(p: Path) -> Optional[int]:
+    """File size, or None if the file is missing / a broken symlink. Step1
+    sample dirs are symlinks into download/, which can point at sources that
+    were since removed (e.g. SRA fastqs deleted, or a Kraken parsed-read source
+    cleaned up) — stat() then raises and must not 500 the whole run."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return None
+
+
 def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any]]]:
     """Decide which sample dirs to actually dispatch and which to skip.
 
@@ -351,11 +362,24 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
             skipped.append({
                 "sample": p.name,
                 "reason": "R1 found but no R2 — paired download incomplete or single-end with R1 naming",
-                "size_bytes": r1_matches[0].stat().st_size,
+                "size_bytes": _safe_stat_size(r1_matches[0]) or 0,
             })
             continue
-        r1_size = r1_matches[0].stat().st_size
-        r2_size = r2_matches[0].stat().st_size
+        r1_size = _safe_stat_size(r1_matches[0])
+        r2_size = _safe_stat_size(r2_matches[0])
+        if r1_size is None or r2_size is None:
+            # One or both reads are missing / a broken symlink (the download
+            # source was removed). Skip rather than crash the whole batch.
+            missing = [
+                m.name for m in (r1_matches[0], r2_matches[0])
+                if _safe_stat_size(m) is None
+            ]
+            skipped.append({
+                "sample": p.name,
+                "reason": f"fastq missing or broken link ({', '.join(missing)}); its source was removed — re-import the reads",
+                "size_bytes": 0,
+            })
+            continue
         if r1_size < _T46_JUNK_FASTQ_BYTES or r2_size < _T46_JUNK_FASTQ_BYTES:
             skipped.append({
                 "sample": p.name,
@@ -827,6 +851,12 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
+        # Track recently-used project roots (MRU, max 10) for quick switching.
+        root = (update.projects_root or "").strip()
+        if root:
+            recent = [r for r in cfg.get("recent_projects_roots", []) if r != root]
+            recent.insert(0, root)
+            cfg["recent_projects_roots"] = recent[:10]
     if update.shared_projects_root is not None:
         cfg["shared_projects_root"] = update.shared_projects_root
     if update.bcftools_path is not None:
@@ -837,6 +867,37 @@ def update_config(update: ConfigUpdate):
         cfg["sra"].update(update.sra)
     save_config(cfg)
     return cfg
+
+
+@app.get("/api/browse-dirs")
+def browse_dirs(path: str = ""):
+    """List sub-directories of `path` for the project-root folder picker.
+
+    Runs as the OOD session user, so the OS filesystem permissions are the only
+    limit on what can be browsed (no artificial base restriction). Defaults to
+    the user's home when no path is given. Returns the resolved path, its parent
+    (null at the filesystem root), and the immediate sub-directories.
+    """
+    try:
+        p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {p}")
+    entries: List[Dict[str, str]] = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith("."):
+                continue
+            try:
+                if child.is_dir():
+                    entries.append({"name": child.name, "path": str(child)})
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {p}")
+    parent = str(p.parent) if p.parent != p else None
+    return {"path": str(p), "parent": parent, "entries": entries}
 
 
 class VcfDbFolderAction(BaseModel):
@@ -1489,11 +1550,19 @@ def project_link_local(project: str, payload: LinkLocalRequest):
         print(f"Link-local failed. Raw path: {raw_path!r} Resolved: {src}")
         raise HTTPException(status_code=400, detail=f"Input path not found: {src}")
     download_dir = project_dir / "download"
+    # Accept either a directory of fastqs, or a single .fastq.gz file (used to
+    # pull a Kraken parsed-read file into download/ so it can be re-run through
+    # Step 1). For a single file, symlink it to its real target so the link
+    # keeps working even if the original is itself a symlink.
+    if src.is_file():
+        candidates = [src] if src.name.endswith(".fastq.gz") else []
+    else:
+        candidates = sorted(src.glob("*.fastq.gz"))
     count = 0
-    for f in src.glob("*.fastq.gz"):
+    for f in candidates:
         target = download_dir / f.name
         if not target.exists():
-            target.symlink_to(f)
+            target.symlink_to(f.resolve())
             count += 1
     return {"linked": count}
 
@@ -1915,6 +1984,14 @@ def step1_run(project: str, payload: Step1Request):
         max_parallel = max(1, int(max_parallel))
     except (TypeError, ValueError):
         max_parallel = 1
+
+    # Decide which sample dirs to actually run BEFORE writing the batch script,
+    # so the script iterates only the valid samples. This keeps a stale dir
+    # (e.g. one whose download source was deleted, leaving broken symlinks)
+    # from being run and failing the whole batch — those are surfaced to the
+    # user as `skipped_samples` instead.
+    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
+    samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -1994,7 +2071,8 @@ def step1_run(project: str, payload: Step1Request):
             # head was the slowest sample, capping effective parallelism well
             # below MAX_PARALLEL on heterogeneous inputs.
             "pids=()",
-            "for d in */; do",
+            f"SAMPLES=({samples_bash})",
+            "for d in \"${SAMPLES[@]}\"; do",
             "  run_sample \"$d\" &",
             "  pids+=(\"$!\")",
             "  if [ ${#pids[@]} -ge \"$MAX_PARALLEL\" ]; then",
@@ -2025,7 +2103,6 @@ def step1_run(project: str, payload: Step1Request):
     # sample metadata as terminal once the batch exits. Skip provenance if
     # no reference is set (legacy/unconfigured runs) — the bash still runs.
     prov_finalize_cb = None
-    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
     if payload.reference:
         if samples:
             try:
@@ -3157,6 +3234,41 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
+def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
+    """Resolve a step1 sample name to its Kraken output subdirectory.
+
+    Unlike step1, Kraken's dir name can be either LONGER or SHORTER than the
+    step1 sample name depending on which read-tag/lane suffix each tool
+    stripped (and whether Kraken was run from its own GUI on the raw download
+    fastqs, before step1 existed). So match in both directions:
+
+      1. exact: kraken/<sample>
+      2. kraken dir longer:  <sample>_*           (e.g. sample 13-1941-6
+         matches kraken dir 13-1941-6_S4_L001)
+      3. kraken dir shorter: sample == <dir>_*    (e.g. step1 sample
+         13-1941-6_S4_L001 matches kraken dir 13-1941-6)
+
+    For the shorter case, prefer the longest-matching dir name so we don't
+    match ``S1`` to a sample named ``S10_...``.
+    """
+    exact = kraken_dir / sample
+    if exact.is_dir():
+        return exact
+    try:
+        dirs = [d for d in kraken_dir.iterdir() if d.is_dir() and not d.name.startswith(".")]
+    except (OSError, PermissionError):
+        return None
+    # Kraken dir longer than the sample.
+    longer = sorted(d for d in dirs if d.name.startswith(f"{sample}_"))
+    if longer:
+        return longer[0]
+    # Kraken dir shorter than the sample (run on the bare/raw fastq name).
+    shorter = [d for d in dirs if sample.startswith(f"{d.name}_")]
+    if shorter:
+        return max(shorter, key=lambda d: len(d.name))
+    return None
+
+
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
@@ -3342,10 +3454,11 @@ def kraken_sample_files(project: str, sample: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     kraken_dir = project_dir / "kraken"
-    # Kraken strips _R1/_R2 / _1/_2 read tags, so its sample dirs match our
-    # bare sample name. Fall back to the same prefix match step1 uses for
-    # samples that carry an Illumina lane/index suffix.
-    sample_dir = _resolve_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
+    # Kraken strips _R1/_R2 / _1/_2 read tags, so its sample dir name can be
+    # longer OR shorter than the step1 sample name (especially when Kraken was
+    # run from its own GUI on the raw download fastqs before step1). Match in
+    # both directions so those earlier runs still surface here.
+    sample_dir = _resolve_kraken_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
     if not sample_dir:
         return {
             "project": project,
@@ -3366,6 +3479,7 @@ def kraken_sample_files(project: str, sample: str):
             stat = path.stat()
         except (OSError, ValueError):
             continue
+        ext = path.suffix.lower()
         entries.append({
             "name": path.name,
             "relpath": rel,
@@ -3373,7 +3487,20 @@ def kraken_sample_files(project: str, sample: str):
             "size": stat.st_size,
             "mtime": stat.st_mtime,
             "type": path.suffix.lstrip(".").lower() or "file",
+            # Browser-renderable (open in a tab) vs download-only. Krona/report
+            # HTML, coverage PDFs, preview PNGs etc. open inline.
+            "openable": ext in (".html", ".htm", ".pdf", ".png", ".jpg", ".jpeg",
+                                 ".svg", ".txt", ".log", ".csv", ".json"),
         })
+    # Surface the most useful artifacts first: report/krona HTML, then the rest.
+    def _rank(e):
+        n = e["name"].lower()
+        if n.endswith("_krona.html") or n == "report.html":
+            return 0
+        if n.endswith(".html") or n.endswith(".pdf"):
+            return 1
+        return 2
+    entries.sort(key=lambda e: (_rank(e), e["relpath"]))
     return {
         "project": project,
         "sample": sample,
@@ -3381,6 +3508,399 @@ def kraken_sample_files(project: str, sample: str):
         "sample_dir": str(base),
         "files": entries,
     }
+
+
+@app.get("/api/projects/{project}/kraken/samples/{sample}/krona")
+def kraken_sample_krona(project: str, sample: str):
+    """Open the interactive Krona chart for a sample's Kraken run.
+
+    Resolves the sample's Kraken output dir (same matching rules as
+    ``kraken_sample_files``) and serves its ``*_krona.html`` inline so it
+    renders in a browser tab. The Krona graph is produced in every Kraken
+    mode, so any sample with a Kraken dir has one. Returns 404 when no run
+    exists or the run produced no Krona file (e.g. an interrupted run).
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    kraken_dir = project_dir / "kraken"
+    sample_dir = _resolve_kraken_sample_dir(kraken_dir, sample) if kraken_dir.is_dir() else None
+    if not sample_dir:
+        raise HTTPException(status_code=404, detail="No Kraken run for this sample")
+    krona = next(
+        (p for p in sorted(sample_dir.rglob("*_krona.html")) if p.is_file()),
+        None,
+    )
+    if krona is None:
+        raise HTTPException(status_code=404, detail="No Krona graph found for this sample")
+    return FileResponse(krona, media_type="text/html")
+
+
+@app.get("/api/projects/{project}/kraken/samples")
+def kraken_samples(project: str):
+    """List the sample names that have a Kraken output dir under
+    <project>/kraken/. Lets the UI flag which download samples already have
+    Kraken results without a per-sample request each."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    kraken_dir = project_dir / "kraken"
+    names: List[str] = []
+    if kraken_dir.is_dir():
+        try:
+            names = sorted(
+                d.name for d in kraken_dir.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+            )
+        except (OSError, PermissionError):
+            names = []
+    return {"project": project, "samples": names}
+
+
+# ---------------------------------------------------------------------------
+# Run Kraken ID Parse on a sample (cross-tool invocation).
+#
+# vSNP and Kraken ID Parse share /srv/kapurlab/projects, so we can kick off the
+# Kraken pipeline directly from the vSNP Step 1 view and have it write into the
+# same <project>/kraken/<sample>/ directory the results panel already reads.
+#
+# Crucially this uses the SHARED Kraken install — its own conda env and bin/
+# scripts under /srv/kapurlab/tools/kraken_id_parse_gui — NOT the vSNP env (the
+# vsnp3 env has neither kraken2, krona, nor SPAdes). The Kraken tool itself is
+# lab-shared functionality; only the project data lives per-user/shared.
+# ---------------------------------------------------------------------------
+_KRAKEN_GUI_ROOT = Path("/srv/kapurlab/tools/kraken_id_parse_gui")
+
+# Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
+# read and append to this same file so the preset list stays in sync.
+_KRAKEN_TAXA_YAML = _KRAKEN_GUI_ROOT / "config" / "taxa.yaml"
+
+_KRAKEN_TAXA_HEADER = (
+    "# Kraken ID Parse — taxon search names\n"
+    "#\n"
+    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
+    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
+    "# classification name passed verbatim to the read parser (-t) and must match\n"
+    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
+    "# via the \"Add search name\" control in either GUI.\n"
+)
+
+
+def _read_kraken_taxa() -> List[str]:
+    """Read the shared taxon list. Dependency-free flat-YAML-sequence parser
+    (``- name`` per line) so it works whether or not PyYAML is installed."""
+    taxa: List[str] = []
+    try:
+        text = _KRAKEN_TAXA_YAML.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return taxa
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        elif line == "-":
+            continue
+        if line and line[0] not in "\"'" and " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
+            line = line[1:-1]
+        if line:
+            taxa.append(line)
+    return taxa
+
+
+def _write_kraken_taxa(taxa: List[str]) -> None:
+    """Rewrite the shared taxa.yaml as a flat YAML sequence, preserving header."""
+    _KRAKEN_TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
+    lines = [_KRAKEN_TAXA_HEADER]
+    for name in taxa:
+        name = name.strip()
+        if not name:
+            continue
+        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+            esc = name.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'- "{esc}"')
+        else:
+            lines.append(f"- {name}")
+    _KRAKEN_TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+# Read-tag stripping identical to Kraken ID Parse's own pairing logic, so the
+# sample name and R1/R2 selection match what that tool would pick on its own.
+_KRAKEN_READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
+
+
+def _kraken_strip_read_tag(filename: str):
+    m = _KRAKEN_READ_TAG_RE.search(filename)
+    if m:
+        return filename[:m.start()], (m.group(1) or m.group(2))
+    return filename[:-len(".fastq.gz")], None
+
+
+def _find_sample_fastqs(download_dir: Path, sample: str):
+    """Return (r1, r2) Paths for a sample from <project>/download/.
+
+    Matches the sample's read files by stripping Illumina/SRA read tags, with
+    the same prefix fallback used elsewhere (sample ``13-1941-6`` matches
+    ``13-1941-6_S4_L001_R1_001.fastq.gz``). r2 is None for single-end.
+    """
+    if not download_dir.is_dir():
+        return None, None
+    try:
+        all_fq = sorted(download_dir.glob("*.fastq.gz"))
+    except OSError:
+        return None, None
+    r1 = r2 = single = None
+    for fq in all_fq:
+        base, tag = _kraken_strip_read_tag(fq.name)
+        if base != sample and not base.startswith(f"{sample}"):
+            continue
+        # Require the bare sample name to match the file's base (exact) or be a
+        # prefix up to a lane/index separator, to avoid matching "S1" to "S10".
+        if base != sample and not base.startswith(f"{sample}_"):
+            continue
+        if tag == "1":
+            r1 = r1 or fq
+        elif tag == "2":
+            r2 = r2 or fq
+        else:
+            single = single or fq
+    if r1:
+        return r1, r2
+    if single:
+        return single, None
+    return None, None
+
+
+def _dash_delimited_import_name(filename: str) -> str:
+    """Rename a parsed read file so vSNP treats it as a NEW, distinct sample.
+
+    vSNP keys a sample on the text left of the first underscore, so
+    ``<sample>_<taxon>_R1.fastq.gz`` would collapse back to ``<sample>`` and
+    overwrite the original run. Replacing every underscore in the
+    sample-identifying stem with a dash (keeping only the ``_R1``/``_R2``
+    read-tag underscore) yields a unique name like
+    ``<sample>-<taxon-words>_R1.fastq.gz``.
+    """
+    m = _KRAKEN_READ_TAG_RE.search(filename)
+    if not m:
+        if filename.endswith(".fastq.gz"):
+            stem = filename[: -len(".fastq.gz")]
+            return stem.replace("_", "-") + ".fastq.gz"
+        return filename.replace("_", "-")
+    stem = filename[: m.start()]
+    tag = filename[m.start():]  # keep the read tag (e.g. "_R1.fastq.gz") verbatim
+    return stem.replace("_", "-") + tag
+
+
+def _import_parsed_reads(run_dir: Path, download_dir: Path, output_prefix: str) -> List[str]:
+    """Copy a Kraken run's taxon-parsed reads into the project's inputs.
+
+    parse_reads.py writes ``<token>_<taxon>_R1.fastq.gz`` / ``_R2`` into
+    ``run_dir``. Each is copied into ``<project>/download/`` under a
+    dash-delimited name (see _dash_delimited_import_name) so vSNP sees a brand
+    new sample and a re-run does not overwrite the original sample's results.
+    Returns the destination filenames created."""
+    imported: List[str] = []
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return imported
+    pattern = f"*_{output_prefix}_R*.fastq.gz"
+    for src in sorted(run_dir.glob(pattern)):
+        if not src.is_file():
+            continue
+        dest = download_dir / _dash_delimited_import_name(src.name)
+        try:
+            shutil.copy2(src, dest)
+            imported.append(dest.name)
+        except OSError:
+            continue
+    return imported
+
+
+@app.get("/api/kraken/taxa")
+def kraken_taxa():
+    """Return the shared taxon search names (kraken repo's config/taxa.yaml)."""
+    return {"taxa": _read_kraken_taxa()}
+
+
+class KrakenTaxonPayload(BaseModel):
+    name: str
+
+
+@app.post("/api/kraken/taxa")
+def kraken_taxa_add(payload: KrakenTaxonPayload):
+    """Append a new taxon search name to the shared taxa.yaml (no duplicates)."""
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A taxon name is required.")
+    taxa = _read_kraken_taxa()
+    if any(name.lower() == t.lower() for t in taxa):
+        return {"taxa": taxa, "added": False}
+    taxa.append(name)
+    try:
+        _write_kraken_taxa(taxa)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save taxon list: {exc}")
+    return {"taxa": taxa, "added": True}
+
+
+def _resolve_kraken_runtime() -> Dict[str, str]:
+    """Locate the shared Kraken install's python + bin. Falls back to a
+    per-user miniforge env only if the shared env is absent (mirrors the OOD
+    launch script's resolution). Returns {python, gui_root, env_bin}."""
+    shared_env = _KRAKEN_GUI_ROOT / "env"
+    personal_env = Path.home() / "miniforge3" / "envs" / "kraken_id_parse"
+    if (shared_env / "bin" / "python").exists():
+        env_dir = shared_env
+    elif (personal_env / "bin" / "python").exists():
+        env_dir = personal_env
+    else:
+        env_dir = None
+    python = str((env_dir / "bin" / "python")) if env_dir else sys.executable
+    return {
+        "python": python,
+        "gui_root": str(_KRAKEN_GUI_ROOT),
+        "env_bin": str(env_dir / "bin") if env_dir else "",
+    }
+
+
+class KrakenRunRequest(BaseModel):
+    sample: str
+    # "full": classify + parse reads + assemble + BLAST identification (needs a
+    # taxon). "parse_only": classify + parse target reads, then stop — skips
+    # assembly/BLAST/coverage (needs a taxon). "kraken_only": Kraken2 + Krona
+    # graph only (no taxon needed).
+    mode: str = "full"
+    taxon: Optional[str] = None
+    kraken_db: Optional[str] = None
+    blast_db: Optional[str] = None
+
+
+@app.post("/api/projects/{project}/kraken/run")
+def kraken_run(project: str, payload: KrakenRunRequest):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not _KRAKEN_GUI_ROOT.is_dir():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Kraken ID Parse is not installed at {_KRAKEN_GUI_ROOT}.",
+        )
+    script = _KRAKEN_GUI_ROOT / "bin" / "kraken_id_parse.py"
+    if not script.is_file():
+        raise HTTPException(status_code=503, detail=f"Kraken pipeline script missing: {script}")
+
+    mode = (payload.mode or "full").strip()
+    kraken_only = mode == "kraken_only"
+    parse_only = mode == "parse_only"
+    taxon = (payload.taxon or "").strip()
+    if not kraken_only and not taxon:
+        raise HTTPException(status_code=400, detail="A target taxon is required for this run mode.")
+
+    sample = (payload.sample or "").strip()
+    if not sample or "/" in sample or sample.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid sample name")
+
+    r1, r2 = _find_sample_fastqs(project_dir / "download", sample)
+    if r1 is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No FASTQ files found for sample {sample!r} in the project's download/ folder.",
+        )
+
+    # Name the output dir EXACTLY as the Kraken ID Parse tool would when run
+    # from its own GUI on these same FASTQs (read-tag stripped from R1). This
+    # keeps <project>/kraken/<dir> identical no matter which GUI launched the
+    # run, so the Kraken GUI — which lists samples by that stripped name —
+    # finds the results instead of showing "No Kraken results yet".
+    kraken_sample = _kraken_strip_read_tag(r1.name)[0]
+
+    # Kraken DB: request override → vsnp config (if a user set one) → shared default.
+    kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
+        or "/srv/kapurlab/databases/kraken2/k2_standard_08gb"
+    blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
+        or "/srv/kapurlab/databases/blast/ref_prok_rep_genomes"
+    if kraken_only and not kraken_db:
+        raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
+    if parse_only and not kraken_db:
+        raise HTTPException(status_code=400, detail="Parse-only (skip BLAST) mode requires a Kraken DB path.")
+
+    run_dir = project_dir / "kraken" / kraken_sample
+    # Guard against two runs racing on the same output dir (they'd clobber each
+    # other's temp/output folders). Track the last job id in a sentinel file,
+    # the same pattern step1 uses with .step1_job_id.
+    job_id_file = run_dir / ".kraken_job_id"
+    if job_id_file.exists():
+        prior = job_manager.get_job(job_id_file.read_text(encoding="utf-8").strip())
+        if prior and prior.get("status") == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"A Kraken run is already in progress for {sample}.",
+            )
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    rt = _resolve_kraken_runtime()
+    parts = [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
+    if r2 is not None:
+        parts += ["-r2", shlex.quote(str(r2))]
+    if taxon:
+        parts += ["-t", shlex.quote(taxon)]
+    if kraken_db:
+        parts += ["-k", shlex.quote(kraken_db)]
+    if kraken_only:
+        parts.append("--kraken-only")
+    elif parse_only:
+        parts.append("--no-blast")
+    elif blast_db:
+        parts += ["-b", shlex.quote(blast_db)]
+
+    # Prepend the Kraken env bin so kraken2/krona/spades/seqkit resolve, and set
+    # PYTHONPATH so the bin/ scripts' local imports work — exactly as the Kraken
+    # GUI launches them.
+    path_prefix = f"{rt['env_bin']}:" if rt["env_bin"] else ""
+    command = (
+        f'PYTHONUNBUFFERED=1 PYTHONPATH={shlex.quote(rt["gui_root"] + "/bin")} '
+        f'PATH="{path_prefix}$PATH" {" ".join(parts)}'
+    )
+
+    if kraken_only:
+        label = "Kraken-only (Krona)"
+    elif parse_only:
+        label = f"{taxon} (parse only)"
+    else:
+        label = taxon or "identification"
+
+    # When the run extracts target reads (full or parse-only — anything with a
+    # taxon), auto-import them into the project's inputs so the user can re-run
+    # them through vSNP without manual copying. Renamed to a dash-delimited
+    # sample so vSNP treats them as a distinct sample (see _import_parsed_reads).
+    download_dir = project_dir / "download"
+    output_prefix = taxon.replace(" ", "_") if taxon else ""
+
+    def _on_kraken_done(jid, exit_code, started, finished,
+                        _run_dir=run_dir, _dl=download_dir,
+                        _prefix=output_prefix, _kraken_only=kraken_only):
+        if exit_code != 0 or _kraken_only or not _prefix:
+            return
+        imported = _import_parsed_reads(_run_dir, _dl, _prefix)
+        if imported:
+            logger.info(
+                "kraken auto-import: copied %d parsed read file(s) into %s: %s",
+                len(imported), _dl, ", ".join(imported),
+            )
+
+    job_id = job_manager.start_job(
+        name="kraken",
+        command=command,
+        cwd=run_dir,
+        env=build_env(cfg),
+        finalize_callback=_on_kraken_done,
+    )
+    job_id_file.write_text(job_id, encoding="utf-8")
+    return {"job_id": job_id, "run_dir": str(run_dir), "sample": kraken_sample, "mode": mode if mode in ("kraken_only", "parse_only", "full") else "full", "label": label}
 
 
 @app.get("/api/projects/{project}/step1/edits")

@@ -24,6 +24,8 @@ export default function App() {
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
   });
+  // Server-side folder browser for picking the projects root.
+  const [folderBrowser, setFolderBrowser] = useState({ open: false, path: "", parent: null, entries: [], loading: false, error: "" });
   const [sraText, setSraText] = useState("");
   const [sraFolder, setSraFolder] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -37,8 +39,18 @@ export default function App() {
   const [uploadStatus, setUploadStatus] = useState("");
   const [inputs, setInputs] = useState({ files: [], total_bytes: 0, count: 0 });
   const [inputsLoading, setInputsLoading] = useState(false);
+  // Project list expands inline to show its samples (Kraken-GUI-style layout).
+  const [projExpanded, setProjExpanded] = useState({});   // project -> bool
+  const [projData, setProjData] = useState({});           // project -> {loading, samples:[grouped], krakenDirs:[]}
+  const [sampleKrakenOpen, setSampleKrakenOpen] = useState({});   // "proj::sample" -> bool
+  const [sampleKrakenFiles, setSampleKrakenFiles] = useState({}); // "proj::sample" -> {loading,present,files}
+  const [copiedPath, setCopiedPath] = useState("");               // last path copied (for transient "Copied" hint)
   const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
+  // project name -> [kraken output dir names]. Lets the Step 1 results table
+  // tell which samples already have a Kraken run (and so a Krona graph to open)
+  // without a per-row request. Populated by loadProjectKrakenDirs().
+  const [krakenDirsByProject, setKrakenDirsByProject] = useState({});
   const [qcLoading, setQcLoading] = useState(false);
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
@@ -56,6 +68,23 @@ export default function App() {
   const [step1FilesCache, setStep1FilesCache] = useState({});
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
   const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
+  // Run Kraken ID Parse on a single sample, launched from Step 1. mode is
+  // "full" (classify + parse reads + identify) or "kraken_only" (Kraken2 +
+  // Krona graph only). Streams the live pipeline log via /api/jobs/{id}/events.
+  const [krakenModal, setKrakenModal] = useState({
+    open: false, project: "", sample: "", mode: "full", taxon: "",
+    running: false, jobId: null, status: "idle", log: [],
+  });
+  // Taxon presets are loaded from the shared kraken config/taxa.yaml via
+  // /api/kraken/taxa; this list is only a fallback if that fetch fails.
+  const [krakenTaxonPresets, setKrakenTaxonPresets] = useState([
+    "Mycobacterium tuberculosis complex",
+    "Mycobacterium bovis",
+    "Mycobacterium avium subsp. paratuberculosis",
+    "Brucella",
+  ]);
+  const [krakenNewTaxon, setKrakenNewTaxon] = useState("");
+  const [krakenAddingTaxon, setKrakenAddingTaxon] = useState(false);
   const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
   const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
   const igvBrowserRef = useRef(null);
@@ -67,6 +96,8 @@ export default function App() {
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
   const step1JobStatusRef = useRef("");
+  const krakenEsRef = useRef(null);
+  const krakenLogRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -192,6 +223,11 @@ export default function App() {
   // current state at fire time, not the stale closure capture from when the
   // timer was scheduled.
   useEffect(() => { qcRowsRef.current = qcRows; }, [qcRows]);
+  // Keep the Kraken run modal's log scrolled to the latest line.
+  useEffect(() => {
+    const el = krakenLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [krakenModal.log]);
   useEffect(() => { excludedRef.current = excluded; }, [excluded]);
 
   const settingsReady = Boolean(
@@ -231,6 +267,17 @@ export default function App() {
     const refNorm = normalizeReferenceName(reference);
     return posthocRows.filter((r) => normalizeReferenceName(r.Reference) === refNorm);
   }, [posthocRows, reference]);
+
+  // The post-hoc table can mix samples from several projects; make sure each
+  // referenced project's Kraken dir list is cached so its rows can show a
+  // Krona button. Only fetches projects we haven't loaded yet.
+  useEffect(() => {
+    const projs = new Set(posthocFilteredRows.map((r) => r._project).filter(Boolean));
+    projs.forEach((p) => {
+      if (!(p in krakenDirsByProject)) loadProjectKrakenDirs(p);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [posthocFilteredRows]);
 
   async function pickPath(kind, title, currentValue, onPick) {
     if (!window?.vsnp?.selectPath) return;
@@ -558,7 +605,8 @@ export default function App() {
       projects_root: cfg.projects_root || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
-      sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https)
+      sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https),
+      recent_projects_roots: Array.isArray(cfg.recent_projects_roots) ? cfg.recent_projects_roots : []
     });
     if (cfg._validation) {
       setPathValidation(cfg._validation);
@@ -574,6 +622,16 @@ export default function App() {
 
   useEffect(() => {
     document.title = `vSNP GUI ${APP_VERSION}`;
+  }, []);
+
+  // Load the shared taxon search names (kraken repo's config/taxa.yaml).
+  useEffect(() => {
+    fetch(`${API_BASE}/api/kraken/taxa`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && Array.isArray(d.taxa) && d.taxa.length) setKrakenTaxonPresets(d.taxa);
+      })
+      .catch(() => {});
   }, []);
 
   // Auto-fill the "Download New Reference" output directory from the first
@@ -854,6 +912,23 @@ export default function App() {
     await refreshProjects(selectedProject === name ? "" : selectedProject);
   }
 
+  // --- Project-root folder browser ---------------------------------------
+  function browseDirs(path) {
+    setFolderBrowser((s) => ({ ...s, loading: true, error: "" }));
+    fetch(`${API_BASE}/api/browse-dirs?path=${encodeURIComponent(path || "")}`)
+      .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Cannot open folder"); })))
+      .then((d) => setFolderBrowser((s) => ({ ...s, path: d.path, parent: d.parent, entries: d.entries, loading: false })))
+      .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message })));
+  }
+  function openFolderBrowser() {
+    setFolderBrowser({ open: true, path: "", parent: null, entries: [], loading: true, error: "" });
+    browseDirs(settings.projects_root || "");
+  }
+  function chooseFolder() {
+    setSettings((s) => ({ ...s, projects_root: folderBrowser.path }));
+    setFolderBrowser((s) => ({ ...s, open: false }));
+  }
+
   async function saveSettings() {
     await fetch(`${API_BASE}/api/config`, {
       method: "POST",
@@ -1012,6 +1087,9 @@ export default function App() {
     }
     const data = await res.json();
     setQcRows(data);
+    // Surface which of these samples already have a Kraken run, so the table
+    // can offer a "Krona" button alongside the "Kraken ID" (run) button.
+    loadProjectKrakenDirs(selectedProject);
     // Hydrate the exclusion checkboxes from the persisted xlsx so re-opening
     // a project shows what's actually saved on disk (no more silent drift
     // between the GUI's checkbox state and what Step 2 will honor).
@@ -1361,15 +1439,137 @@ export default function App() {
     }
   }
 
+  // --- Project list inline sample browser (Kraken-GUI-style layout) -------
+  // Clicking a project expands it to list its samples beneath the name; each
+  // sample expands to its Kraken results (Krona/report HTML open inline).
+  async function loadProjData(project) {
+    setProjData((m) => ({ ...m, [project]: { loading: true, samples: (m[project]?.samples || []), krakenDirs: (m[project]?.krakenDirs || []) } }));
+    try {
+      const [inRes, kRes] = await Promise.all([
+        fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/inputs`),
+        fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples`).catch(() => null),
+      ]);
+      const inData = inRes.ok ? await inRes.json() : { files: [] };
+      const samples = groupPairedFiles(inData.files || []);
+      let krakenDirs = [];
+      if (kRes && kRes.ok) krakenDirs = (await kRes.json()).samples || [];
+      setProjData((m) => ({ ...m, [project]: { loading: false, samples, krakenDirs } }));
+    } catch (_) {
+      setProjData((m) => ({ ...m, [project]: { loading: false, samples: [], krakenDirs: [] } }));
+    }
+  }
+
+  async function toggleProjectExpand(project) {
+    const willOpen = !projExpanded[project];
+    setProjExpanded((m) => ({ ...m, [project]: willOpen }));
+    setSelectedProject(project);
+    if (willOpen && !projData[project]) loadProjData(project);
+  }
+
+  // Match a sample name to a Kraken output dir in either direction (Kraken may
+  // have stripped more/less of the read-tag suffix than the download name).
+  function krakenDirForSample(krakenDirs, sample) {
+    if (!sample || !krakenDirs?.length) return null;
+    if (krakenDirs.includes(sample)) return sample;
+    const longer = krakenDirs.filter((d) => d.startsWith(`${sample}_`)).sort();
+    if (longer.length) return longer[0];
+    const shorter = krakenDirs.filter((d) => sample.startsWith(`${d}_`));
+    if (shorter.length) return shorter.sort((a, b) => b.length - a.length)[0];
+    return null;
+  }
+
+  // Fetch the list of Kraken output dirs for a project and cache it by name.
+  // Used by the Step 1 results table to show a "Krona" button only on samples
+  // that already have a Kraken run. Cheap (one request per project) and safe
+  // to call repeatedly — it just refreshes the cached list.
+  async function loadProjectKrakenDirs(project) {
+    if (!project) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setKrakenDirsByProject((m) => ({ ...m, [project]: data.samples || [] }));
+    } catch (_) {
+      // Non-fatal — without the list, rows simply won't show a Krona button.
+    }
+  }
+
+  // True when a Step 1 sample has a Kraken run (and therefore a Krona graph).
+  function hasKrakenRun(project, sample) {
+    return !!krakenDirForSample(krakenDirsByProject[project], sample);
+  }
+
+  // Inline-open URL for a sample's Krona chart. The kraken dir name (not the
+  // step1 sample name) is what the backend resolves against, so pass the
+  // matched dir when we have it; the backend matches either direction anyway.
+  function kronaHref(project, sample) {
+    const dir = krakenDirForSample(krakenDirsByProject[project], sample) || sample;
+    return `${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples/${encodeURIComponent(dir)}/krona`;
+  }
+
+  // Copy a server path to the clipboard (parsed-read fastqs → paste into the
+  // Inputs "server path" field, or just keep a record of where they are).
+  async function copyPath(path) {
+    try {
+      await navigator.clipboard.writeText(path);
+      setCopiedPath(path);
+      setTimeout(() => setCopiedPath((c) => (c === path ? "" : c)), 1500);
+    } catch (_) {
+      window.prompt("Copy this path:", path);
+    }
+  }
+
+  // Import a single parsed-read fastq into this project's download/ (symlink),
+  // so it shows up as a sample and can be re-run through Step 1.
+  async function importFastqToDownload(project, path) {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/link-local`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { window.alert(`Import failed: ${data.detail || res.status}`); return; }
+      if (project === selectedProject) await loadInputs(selectedProject);
+      await loadProjData(project);
+      window.alert(data.linked ? `Imported ${data.linked} file into download/. It's now available in the Inputs panel and for Step 1.` : "Already in download/.");
+    } catch (e) {
+      window.alert(`Import failed: ${e.message}`);
+    }
+  }
+
+  function toggleSampleKraken(project, sample) {
+    const key = `${project}::${sample}`;
+    const willOpen = !sampleKrakenOpen[key];
+    setSampleKrakenOpen((m) => ({ ...m, [key]: willOpen }));
+    if (willOpen && !sampleKrakenFiles[key]) loadSampleKraken(project, sample);
+  }
+
+  async function loadSampleKraken(project, sample) {
+    const key = `${project}::${sample}`;
+    setSampleKrakenFiles((m) => ({ ...m, [key]: { loading: true, files: [] } }));
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples/${encodeURIComponent(sample)}/files`);
+      const data = await res.json();
+      setSampleKrakenFiles((m) => ({ ...m, [key]: { loading: false, ...data } }));
+    } catch (_) {
+      setSampleKrakenFiles((m) => ({ ...m, [key]: { loading: false, present: false, files: [] } }));
+    }
+  }
+
   // Group paired-end fastq files into a single sample row in the
   // "Files in download/" list. Matches SRA convention (SRR<n>_1.fastq.gz +
   // _2.fastq.gz) and Illumina convention (Sample_R1[_001].fastq.gz +
   // _R2[_001].fastq.gz). Anything that doesn't match either stays solo.
   function groupPairedFiles(files) {
     const PAIR_RE = /^(.+?)_R?([12])(?:_\d+)?\.(?:fastq|fq)(?:\.gz)?$/i;
+    const FASTQ_RE = /\.(?:fastq|fq)(?:\.gz)?$/i;
     const groups = [];
     const sampleIdx = new Map();
     for (const f of files) {
+      // Only FASTQ reads are samples. Skip helper/clutter files that also live
+      // in download/ (download_sra.sh, sra_crosswalk.tsv, logs, etc.).
+      if (!FASTQ_RE.test(f.name)) continue;
       const m = f.name.match(PAIR_RE);
       if (m) {
         const sample = m[1];
@@ -1877,6 +2077,139 @@ export default function App() {
     setFolderModal({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   }
 
+  // --- Kraken ID Parse on a single Step 1 sample -------------------------
+
+  // Persist a new taxon search name to the shared kraken config/taxa.yaml and
+  // select it. Same list the Kraken ID Parse GUI reads/writes.
+  async function addKrakenTaxon() {
+    const name = krakenNewTaxon.trim();
+    if (!name || krakenAddingTaxon) return;
+    setKrakenAddingTaxon(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/kraken/taxa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        if (Array.isArray(d.taxa)) setKrakenTaxonPresets(d.taxa);
+        setKrakenModal((m) => ({ ...m, taxon: name }));
+        setKrakenNewTaxon("");
+      }
+    } catch (_) {
+      /* leave input as-is for retry */
+    } finally {
+      setKrakenAddingTaxon(false);
+    }
+  }
+
+  function openKrakenModal(project, sample) {
+    if (!project || !sample) return;
+    setKrakenModal((m) => {
+      // Re-attach to an in-flight run for the same sample instead of resetting,
+      // so reopening from the background chip shows live progress.
+      if (m.running && m.project === project && m.sample === sample) {
+        return { ...m, open: true };
+      }
+      if (krakenEsRef.current && !m.running) { krakenEsRef.current.close(); krakenEsRef.current = null; }
+      return {
+        open: true, project, sample, mode: "full", taxon: "",
+        running: false, jobId: null, status: "idle", log: [],
+      };
+    });
+  }
+
+  // Closing while a run is in progress just hides the modal — the job keeps
+  // running in the background (server-side) and the EventSource keeps updating
+  // state, so reopening via the background chip resumes the live view.
+  function closeKrakenModal() {
+    setKrakenModal((m) => {
+      if (!m.running && krakenEsRef.current) { krakenEsRef.current.close(); krakenEsRef.current = null; }
+      return { ...m, open: false };
+    });
+  }
+
+  async function runKrakenForSample() {
+    const { project, sample, mode, taxon, running } = krakenModal;
+    if (running || !project || !sample) return;
+    if ((mode === "full" || mode === "parse_only") && !taxon.trim()) return;
+    setKrakenModal((m) => ({ ...m, running: true, status: "running", log: [] }));
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/run`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sample, mode, taxon: taxon.trim() || null }),
+        }
+      );
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setKrakenModal((m) => ({
+          ...m, running: false, status: "failed",
+          log: [...m.log, `ERROR: ${detail.detail || res.status}`],
+        }));
+        return;
+      }
+      const { job_id } = await res.json();
+      setKrakenModal((m) => ({ ...m, jobId: job_id }));
+      streamKrakenLog(job_id);
+    } catch (err) {
+      setKrakenModal((m) => ({
+        ...m, running: false, status: "failed",
+        log: [...m.log, `ERROR: ${err.message}`],
+      }));
+    }
+  }
+
+  function streamKrakenLog(jobId) {
+    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
+    krakenEsRef.current = es;
+    es.onmessage = (evt) => {
+      const data = evt.data;
+      const m = data.match(/^\[job:(succeeded|failed)\]$/);
+      if (m) {
+        es.close();
+        krakenEsRef.current = null;
+        setKrakenModal((mm) => {
+          // Refresh the project's sample browser so the new Kraken outputs
+          // (incl. parsed-read fastqs) appear under the sample, and drop any
+          // stale cached file list for it.
+          if (mm.project) {
+            if (projExpanded[mm.project]) loadProjData(mm.project);
+            // A successful run produced a new Kraken dir → refresh the cached
+            // list so the Step 1 row's "Krona" button appears right away.
+            if (m[1] === "succeeded") loadProjectKrakenDirs(mm.project);
+            // The backend auto-imports the parsed-read fastqs into the project's
+            // inputs (download/) on success; refresh the Inputs pane so they
+            // show up immediately, ready to re-run through vSNP.
+            if (m[1] === "succeeded" && mm.project === selectedProject) {
+              loadInputs(selectedProject);
+            }
+            setSampleKrakenFiles((prev) => {
+              const next = { ...prev };
+              Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
+              return next;
+            });
+          }
+          return { ...mm, running: false, status: m[1] };
+        });
+        // Refresh the sample's cross-tool Kraken files if its folder is open.
+        if (folderModal.open && folderModal.sample) {
+          openStep1FolderModal(folderModal.project, folderModal.sample);
+        }
+        return;
+      }
+      setKrakenModal((mm) => ({ ...mm, log: [...mm.log, data] }));
+    };
+    es.onerror = () => {
+      es.close();
+      krakenEsRef.current = null;
+      setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+    };
+  }
+
   function downloadFolderFile(project, path) {
     if (!project || !path) return;
     const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(path)}`;
@@ -2340,6 +2673,7 @@ export default function App() {
                     onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
                   />
                   <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
+                    <button className="ghost action" onClick={openFolderBrowser}>Browse…</button>
                     {canPickPath ? (
                       <button
                         className="ghost action"
@@ -2362,6 +2696,20 @@ export default function App() {
                     )}
                   </span>
                 </div>
+                {Array.isArray(settings.recent_projects_roots) && settings.recent_projects_roots.length > 0 && (
+                  <div className="settings-row">
+                    <label className="label">Recent roots</label>
+                    <select
+                      value=""
+                      onChange={(e) => { if (e.target.value) setSettings({ ...settings, projects_root: e.target.value }); }}
+                    >
+                      <option value="">↻ Switch to a recent root…</option>
+                      {settings.recent_projects_roots.map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -2458,18 +2806,19 @@ export default function App() {
             </div>
             <div className="list">
               {projects.map((p) => (
+                <div key={p.name} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div
-                  key={p.name}
                   className={`list-item ${p.name === selectedProject ? "active" : ""}`}
                   role="button"
                   tabIndex={0}
-                  onClick={() => setSelectedProject(p.name)}
+                  onClick={() => toggleProjectExpand(p.name)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") setSelectedProject(p.name);
+                    if (e.key === "Enter") toggleProjectExpand(p.name);
                   }}
                 >
                   <div className="list-details">
                     <div className="list-title" style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <span className="expand-icon" style={{ fontSize: "0.7em", color: "var(--muted)" }}>{projExpanded[p.name] ? "▾" : "▸"}</span>
                       <span>{p.display_name || p.name}</span>
                       {p.scope === "shared" ? (
                         <span
@@ -2507,6 +2856,15 @@ export default function App() {
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
                     </div>
+                    {p._root ? (
+                      <div
+                        className="list-meta"
+                        style={{ fontSize: "0.72em", opacity: 0.8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", textAlign: "left" }}
+                        title={`${p._root}/${p.name}`}
+                      >
+                        {p._root}/{p.name}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="list-actions">
                     <button
@@ -2529,24 +2887,81 @@ export default function App() {
                     </button>
                   </div>
                 </div>
+                {/* Samples listed beneath the project name (Kraken-GUI layout).
+                    Each sample expands to its Kraken results. */}
+                {projExpanded[p.name] ? (
+                  <div style={{ marginLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "4px" }}>
+                    {projData[p.name]?.loading ? (
+                      <div className="muted" style={{ fontSize: "12px" }}>Loading samples…</div>
+                    ) : !projData[p.name] || projData[p.name].samples.length === 0 ? (
+                      <div className="muted" style={{ fontSize: "12px" }}>
+                        No samples in download/ yet. Add FASTQs in the Inputs panel.
+                      </div>
+                    ) : (
+                      projData[p.name].samples.map((g) => {
+                        const krakenDir = krakenDirForSample(projData[p.name].krakenDirs, g.sample);
+                        const key = `${p.name}::${g.sample}`;
+                        const open = !!sampleKrakenOpen[key];
+                        const kRes = sampleKrakenFiles[key];
+                        return (
+                          <div key={g.sample} className="sample-row" style={{ border: "1px solid var(--border)", borderRadius: "8px", background: "var(--panel-2)" }}>
+                            <div
+                              style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 10px", cursor: krakenDir ? "pointer" : "default", fontSize: "12px" }}
+                              onClick={() => krakenDir && toggleSampleKraken(p.name, krakenDir)}
+                              title={krakenDir ? "Show Kraken results for this sample" : "No Kraken run for this sample yet"}
+                            >
+                              {krakenDir ? <span className="expand-icon" style={{ fontSize: "0.7em", color: "var(--muted)" }}>{open ? "▾" : "▸"}</span> : <span style={{ width: "0.7em" }} />}
+                              <span style={{ flex: 1, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.sample}</span>
+                              {g.isPair ? <span className="muted" style={{ fontSize: "10.5px" }}>R1+R2</span> : null}
+                              {krakenDir ? (
+                                <span title="Kraken ID Parse results available" style={{ fontSize: "10px", padding: "1px 6px", borderRadius: "10px", background: "#ede9fe", color: "#5b21b6", fontWeight: 600 }}>🧬 Kraken</span>
+                              ) : null}
+                            </div>
+                            {krakenDir && open ? (
+                              <div style={{ borderTop: "1px solid var(--border)", padding: "4px 10px 6px 24px", display: "flex", flexDirection: "column", gap: "3px" }}>
+                                {kRes?.loading ? (
+                                  <span className="muted" style={{ fontSize: "11px" }}>Loading Kraken results…</span>
+                                ) : !kRes || !(kRes.files || []).length ? (
+                                  <span className="muted" style={{ fontSize: "11px" }}>No Kraken output files.</span>
+                                ) : (
+                                  kRes.files.map((f) => {
+                                    const base = `${API_BASE}/api/projects/${encodeURIComponent(p.name)}/download-file?path=${encodeURIComponent(f.path)}`;
+                                    const isFastq = f.name.endsWith(".fastq.gz");
+                                    return (
+                                      <div key={f.relpath} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
+                                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
+                                          {f.openable ? (
+                                            <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
+                                          ) : f.relpath}
+                                          {isFastq ? <span title="Parsed reads — import to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+                                        </span>
+                                        <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
+                                        {isFastq ? (
+                                          <>
+                                            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Copy this file's server path (paste into Inputs → server path)" onClick={() => copyPath(f.path)}>
+                                              {copiedPath === f.path ? "Copied!" : "Copy path"}
+                                            </button>
+                                            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Symlink into this project's download/ so it can be re-run through Step 1" onClick={() => importFastqToDownload(p.name, f.path)}>
+                                              Import → Step 1
+                                            </button>
+                                          </>
+                                        ) : null}
+                                        <a href={`${base}&inline=0`} title={`Download ${f.name}`} style={{ textDecoration: "none" }}>⬇</a>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                ) : null}
+                </div>
               ))}
             </div>
-            {selectedProject ? (
-              <div className="row" style={{ marginTop: "0.75rem", alignItems: "center", gap: "0.5rem" }}>
-                <label style={{ fontWeight: 600, whiteSpace: "nowrap" }}>Project reference:</label>
-                <select
-                  value={projectReference}
-                  onChange={(e) => setProjectRef(e.target.value)}
-                  style={{ flex: 1 }}
-                  title="Reference type locked to this project. All Step 1 and Step 2 runs use this reference."
-                >
-                  <option value="">-- not set --</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
-                </select>
-              </div>
-            ) : null}
           </section>
 
           <section className="panel">
@@ -3526,6 +3941,26 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
+                                    {sampleKey(row) && hasKrakenRun(selectedProject, sampleKey(row)) ? (
+                                      <a
+                                        className="ghost action"
+                                        href={kronaHref(selectedProject, sampleKey(row))}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="Open the interactive Krona chart from this sample's Kraken run"
+                                      >
+                                        📊 Krona
+                                      </a>
+                                    ) : null}
+                                    {sampleKey(row) ? (
+                                      <button
+                                        className="ghost action"
+                                        title="Run Kraken ID Parse (species ID / contamination screen) on this sample"
+                                        onClick={() => openKrakenModal(selectedProject, sampleKey(row))}
+                                      >
+                                        🧬 Kraken ID
+                                      </button>
+                                    ) : null}
                                   </div>
                                 </details>
                               </td>
@@ -3686,6 +4121,26 @@ export default function App() {
                                     <button onClick={() => viewInline(editLog, row._project)}>Edit Log</button>
                                   ) : null}
                                   {row._project && (row._sample || row.sample) ? <button onClick={() => viewStep1Stats(row._project, row._sample || row.sample)}>Stats</button> : null}
+                                  {row._project && (row._sample || row.sample) && hasKrakenRun(row._project, row._sample || row.sample) ? (
+                                    <a
+                                      className="ghost action"
+                                      href={kronaHref(row._project, row._sample || row.sample)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title="Open the interactive Krona chart from this sample's Kraken run"
+                                    >
+                                      📊 Krona
+                                    </a>
+                                  ) : null}
+                                  {row._project && (row._sample || row.sample) ? (
+                                    <button
+                                      className="ghost action"
+                                      title="Run Kraken ID Parse (species ID / contamination screen) on this sample"
+                                      onClick={() => openKrakenModal(row._project, row._sample || row.sample)}
+                                    >
+                                      🧬 Kraken ID
+                                    </button>
+                                  ) : null}
                                 </div>
                               </details>
                             </td>
@@ -3838,16 +4293,31 @@ export default function App() {
                             </tr>
                           </thead>
                           <tbody>
-                            {folderModal.krakenFiles.map((f) => (
+                            {folderModal.krakenFiles.map((f) => {
+                              const isFastq = f.relpath.endsWith(".fastq.gz") || f.name?.endsWith(".fastq.gz");
+                              return (
                               <tr key={f.relpath}>
-                                <td style={{ wordBreak: "break-all" }}>{f.relpath}</td>
+                                <td style={{ wordBreak: "break-all" }}>
+                                  {f.relpath}
+                                  {isFastq ? <span title="Parsed reads — add to the project to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+                                </td>
                                 <td>{f.type}</td>
                                 <td style={{ textAlign: "right" }}>{formatBytes(f.size)}</td>
-                                <td>
+                                <td style={{ whiteSpace: "nowrap" }}>
+                                  {isFastq ? (
+                                    <button
+                                      onClick={() => importFastqToDownload(folderModal.project, f.path)}
+                                      title="Symlink this parsed-read file into the project's download/ so it can be run through Step 1"
+                                      style={{ marginRight: 6 }}
+                                    >
+                                      Add to project
+                                    </button>
+                                  ) : null}
                                   <button onClick={() => downloadFolderFile(folderModal.project, f.path)}>Download</button>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -3857,6 +4327,142 @@ export default function App() {
               ) : null}
               <div className="modal-actions">
                 <button onClick={closeFolderModal}>Close</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {/* Floating chip to reopen a backgrounded Kraken run. */}
+        {krakenModal.running && !krakenModal.open ? (
+          <button
+            className="ghost action"
+            onClick={() => setKrakenModal((m) => ({ ...m, open: true }))}
+            title="A Kraken run is in progress — click to view its log"
+            style={{ position: "fixed", right: 18, bottom: 18, zIndex: 50, boxShadow: "0 6px 20px rgba(0,0,0,0.25)" }}
+          >
+            <span className="pulse-dot" /> 🧬 Kraken: {krakenModal.sample} — running… (view)
+          </button>
+        ) : null}
+
+        {krakenModal.open ? (
+          <div className="modal-backdrop" onClick={closeKrakenModal}>
+            <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+              <h3>Run Kraken ID Parse</h3>
+              <div className="note">
+                Sample: <strong>{krakenModal.sample}</strong>
+                {krakenModal.project ? <span> (Project: {krakenModal.project})</span> : null}
+                <div className="muted" style={{ marginTop: 4 }}>
+                  Classifies reads against Kraken2 to identify species / screen for contamination.
+                  Output is written next to this sample under <code>kraken/{krakenModal.sample}/</code> and
+                  also appears in the Kraken ID Parse app.
+                </div>
+              </div>
+
+              {/* Mode choice — full identification vs Kraken/Krona only */}
+              <div className="kraken-mode-choice" style={{ display: "flex", flexDirection: "column", gap: 8, margin: "12px 0" }}>
+                <label className={`kraken-mode-card ${krakenModal.mode === "full" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "full" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "full"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "full" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Full identification</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Kraken2 classify → parse target reads → assemble → BLAST. Best for confirming species. Needs a target taxon.</div>
+                  </div>
+                </label>
+                <label className={`kraken-mode-card ${krakenModal.mode === "parse_only" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "parse_only" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "parse_only"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "parse_only" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Parse reads only (skip BLAST)</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Kraken2 classify → extract the target taxon's reads, then stop. Skips assembly and BLAST. The parsed reads are auto-imported into this project's inputs for re-running through vSNP. Needs a target taxon.</div>
+                  </div>
+                </label>
+                <label className={`kraken-mode-card ${krakenModal.mode === "kraken_only" ? "selected" : ""}`}
+                       style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, cursor: krakenModal.running ? "not-allowed" : "pointer", background: krakenModal.mode === "kraken_only" ? "var(--panel-2)" : "transparent" }}>
+                  <input type="radio" name="krakenMode" checked={krakenModal.mode === "kraken_only"} disabled={krakenModal.running}
+                         onChange={() => setKrakenModal((m) => ({ ...m, mode: "kraken_only" }))} style={{ marginTop: 3 }} />
+                  <div>
+                    <div style={{ fontWeight: 700 }}>Kraken + Krona only</div>
+                    <div className="muted" style={{ fontSize: 12 }}>Quick classification + interactive Krona chart. Skips read parsing, assembly and BLAST. No target taxon needed.</div>
+                  </div>
+                </label>
+              </div>
+
+              {krakenModal.mode === "full" || krakenModal.mode === "parse_only" ? (
+                <div style={{ marginBottom: 8 }}>
+                  <label className="label">Target taxon</label>
+                  <select
+                    value={krakenModal.taxon}
+                    disabled={krakenModal.running}
+                    onChange={(e) => setKrakenModal((m) => ({ ...m, taxon: e.target.value }))}
+                  >
+                    <option value="">Select a target taxon…</option>
+                    {krakenTaxonPresets.map((p) => (
+                      <option key={p} value={p}>{p}</option>
+                    ))}
+                  </select>
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <input
+                      placeholder="Add a new taxon to the list…"
+                      value={krakenNewTaxon}
+                      disabled={krakenModal.running || krakenAddingTaxon}
+                      onChange={(e) => setKrakenNewTaxon(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKrakenTaxon(); } }}
+                      style={{ flex: 1 }}
+                    />
+                    <button type="button" className="ghost"
+                            onClick={addKrakenTaxon}
+                            disabled={krakenModal.running || krakenAddingTaxon || !krakenNewTaxon.trim()}>
+                      {krakenAddingTaxon ? "Adding…" : "+ Add"}
+                    </button>
+                  </div>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                    New taxa are saved to the shared list (/srv/kapurlab/tools/kraken_id_parse_gui/config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
+                  </div>
+                </div>
+              ) : null}
+
+              {krakenModal.log.length > 0 || krakenModal.running ? (
+                <div className="log" ref={krakenLogRef} style={{ maxHeight: "32vh", overflow: "auto", marginTop: 8 }}>
+                  {krakenModal.log.length === 0 ? (
+                    <span className="log-placeholder">Starting…</span>
+                  ) : (
+                    krakenModal.log.map((line, i) => (
+                      <div key={i} className={line.startsWith("ERROR") ? "log-line error" : "log-line"}>{line}</div>
+                    ))
+                  )}
+                </div>
+              ) : null}
+
+              {krakenModal.running ? (
+                <div className="note" style={{ marginTop: 8 }}>
+                  This runs in the background — you can close this window and keep working.
+                  Results (incl. parsed-read FASTQs) appear under the sample in the Projects list when done.
+                </div>
+              ) : null}
+              {krakenModal.status === "succeeded" ? (
+                <div className="note" style={{ marginTop: 8 }}>
+                  {krakenModal.mode === "kraken_only"
+                    ? <>Expand this sample in the Projects list to open the Krona graph.</>
+                    : <>Parsed reads were <strong>auto-imported</strong> into this project's inputs (download/)
+                       under a <code>-</code>-delimited sample name, ready to re-run through vSNP.
+                       Expand this sample in the Projects list to open the Krona graph and other outputs.</>}
+                </div>
+              ) : null}
+
+              <div className="modal-actions" style={{ marginTop: 12 }}>
+                {krakenModal.status === "succeeded" ? <span className="muted" style={{ marginRight: "auto", color: "var(--success)" }}>✓ Finished</span> : null}
+                {krakenModal.status === "failed" ? <span className="muted" style={{ marginRight: "auto", color: "var(--danger)" }}>Run failed — see log above.</span> : null}
+                <button
+                  onClick={runKrakenForSample}
+                  disabled={krakenModal.running || ((krakenModal.mode === "full" || krakenModal.mode === "parse_only") && !krakenModal.taxon.trim())}
+                >
+                  {krakenModal.running ? "Running…" : krakenModal.status === "succeeded" || krakenModal.status === "failed" ? "Run again" : "▶ Run"}
+                </button>
+                <button className="ghost" onClick={closeKrakenModal}>
+                  {krakenModal.running ? "Run in background" : "Close"}
+                </button>
               </div>
             </div>
           </div>
@@ -4656,6 +5262,57 @@ export default function App() {
           </section>
         ) : null}
       </main>
+
+      {folderBrowser.open && (
+        <div
+          onClick={() => setFolderBrowser((s) => ({ ...s, open: false }))}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
+          >
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700 }}>
+              Select a projects root
+            </div>
+            <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
+              <button type="button" className="ghost" disabled={!folderBrowser.parent || folderBrowser.loading} onClick={() => browseDirs(folderBrowser.parent)}>↑ Up</button>
+              <input
+                style={{ flex: 1 }}
+                value={folderBrowser.path}
+                onChange={(e) => setFolderBrowser((s) => ({ ...s, path: e.target.value }))}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); browseDirs(folderBrowser.path); } }}
+              />
+              <button type="button" className="ghost" onClick={() => browseDirs(folderBrowser.path)}>Go</button>
+            </div>
+            <div style={{ flex: 1, overflow: "auto", padding: "0 16px", minHeight: 160 }}>
+              {folderBrowser.loading ? (
+                <div className="muted" style={{ padding: 12 }}>Loading…</div>
+              ) : folderBrowser.error ? (
+                <div className="muted" style={{ padding: 12, color: "var(--danger, #c00)" }}>{folderBrowser.error}</div>
+              ) : folderBrowser.entries.length === 0 ? (
+                <div className="muted" style={{ padding: 12 }}>No sub-folders here.</div>
+              ) : (
+                folderBrowser.entries.map((e) => (
+                  <div
+                    key={e.path}
+                    onClick={() => browseDirs(e.path)}
+                    style={{ padding: "7px 8px", cursor: "pointer", borderRadius: 6, display: "flex", gap: 8, alignItems: "center" }}
+                    onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--panel-2, #f0f0f0)")}
+                    onMouseLeave={(ev) => (ev.currentTarget.style.background = "transparent")}
+                  >
+                    <span>📁</span><span>{e.name}</span>
+                  </div>
+                ))
+              )}
+            </div>
+            <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border, #ddd)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" className="ghost" onClick={() => setFolderBrowser((s) => ({ ...s, open: false }))}>Cancel</button>
+              <button type="button" onClick={chooseFolder} disabled={folderBrowser.loading || !folderBrowser.path}>Select this folder</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

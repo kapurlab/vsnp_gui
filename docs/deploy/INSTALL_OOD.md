@@ -215,6 +215,37 @@ memberships only apply to **new** sessions — users log out/in after being adde
 
 ---
 
+## 6b. Optional — the Kraken ID Parse app (`install_kraken.sh`)
+
+A second OOD app (taxonomic classification / contamination screening) that
+shares the same `site.conf`, OOD core, groups, and project tree. It's what the
+"Run Kraken" buttons inside vSNP call — install it if you want those to work.
+
+Fill in the `KRAKEN_*` block in `site.conf`, then:
+
+```bash
+sudo ./install_kraken.sh --site-conf site.conf --dry-run
+sudo ./install_kraken.sh --site-conf site.conf
+```
+
+Phases: `app` (clone the repo, build its conda env — kraken2/krona/tectonic,
+~5 GB — and frontend) · `card` (install the Kraken OOD card, substituted) ·
+`db` (provision the kraken2 database) · `verify`.
+
+**The kraken2 DB** (~8 GB) — two ways, set one in `site.conf`:
+- `KRAKEN_DB_URL` — download a **pinned, versioned** index from the
+  [Langmead/AWS index](https://benlangmead.github.io/aws-indexes/k2). Preferred
+  for a new site: reproducible, no dependency on another box.
+- `KRAKEN_DB_RSYNC_SOURCE` — mirror an existing install's exact DB. Use this when
+  you need **classifications identical to that site** (DBs are dated builds, so a
+  newer download can call taxa differently).
+
+The blast DB (secondary screen) is optional — Kraken has a `skipblast` mode.
+
+Launch from the dashboard → Bioinformatics → **Kraken ID Parse**.
+
+---
+
 ## 7. Acceptance test (proves all four layers)
 
 1. Browse to `http://<SERVERNAME>/`, log in as `<login>`.

@@ -26,6 +26,19 @@ sudo ./install_bundle.sh --site-conf ../site.conf --user <admin>
 Then run the acceptance test in
 [`../docs/deploy/INSTALL_OOD.md` §7](../docs/deploy/INSTALL_OOD.md).
 
+### Optional: the Kraken ID Parse app (second OOD card)
+
+```bash
+# fill in the KRAKEN_* block in site.conf first (repo source + DB source)
+sudo ./install_kraken.sh --site-conf site.conf --dry-run
+sudo ./install_kraken.sh --site-conf site.conf
+```
+
+Stands up Kraken (contamination screening) alongside vSNP: its repo + conda env
+(kraken2/krona/…), its OOD card, and the kraken2 DB (download a pinned index, or
+mirror an existing install). Same `site.conf`. Needed for the "Run Kraken"
+buttons inside vSNP to work.
+
 ## What's here
 
 | Path | Role |

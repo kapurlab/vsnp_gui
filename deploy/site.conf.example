@@ -119,6 +119,23 @@ APPTAINER_VERSION=1.5.0
 #   OOD_SIF_SOURCE=vxk1@kapurlab-wgs3.tailf38ff4.ts.net:/opt/ood/ondemand/ood_default.sif
 OOD_SIF_SOURCE=
 
+# ---- Kraken ID Parse — optional second app (install_kraken.sh) -------------
+# Stand up the Kraken contamination-screening app alongside vSNP. Skip this
+# whole block if you don't want Kraken.
+
+# The app repo (private on GitHub). The installer clones it if you have access;
+# otherwise set KRAKEN_RSYNC_SOURCE to mirror it from an existing install.
+KRAKEN_REPO_URL=https://github.com/kapurlab/kraken_id_parse_gui.git
+KRAKEN_RSYNC_SOURCE=        # e.g. vxk1@kapurlab-wgs3...:/srv/kapurlab/tools/kraken_id_parse_gui
+
+# kraken2 database. PREFERRED: download a *versioned* standard index from the
+# Langmead/AWS index — https://benlangmead.github.io/aws-indexes/k2 — and pin
+# the dated URL for reproducibility. ALTERNATIVELY set KRAKEN_DB_RSYNC_SOURCE to
+# mirror an existing install's exact DB (identical classifications to that site).
+KRAKEN_DB_NAME=k2_standard_08gb
+KRAKEN_DB_URL=https://genome-idx.s3.amazonaws.com/kraken/k2_standard_08gb_20250714.tar.gz
+KRAKEN_DB_RSYNC_SOURCE=     # e.g. vxk1@kapurlab-wgs3...:/srv/kapurlab/databases/kraken2/k2_standard_08gb
+
 # ---- Reference data --------------------------------------------------------
 
 # Source to rsync the 27 reference sets + VCF DBs from. The installer does

@@ -104,31 +104,47 @@ phase_app() {
   fi
   run chgrp -R "${ADMINS_GROUP}" "${KRAKEN_DIR}" 2>/dev/null || true
 
-  # 2. conda env from the repo's spec (kraken2/krona/tectonic/... ~5 GB)
+  # 1b. Parameterize the kraken app's OWN hardcoded /srv/kapurlab paths to this
+  #     site — its backend config.py (kraken_db / blast_db / shared-projects
+  #     defaults) and the frontend placeholders. Same class as install_ood's
+  #     config.py fix; must run BEFORE the frontend build below.
+  for rel in backend/app/config.py backend/app/main.py frontend/src/App.jsx; do
+    if [[ -f "${KRAKEN_DIR}/${rel}" ]]; then
+      run sed -i "s|/srv/kapurlab|${SITE_ROOT}|g" "${KRAKEN_DIR}/${rel}"
+    fi
+  done
+  ok "parameterized kraken app paths -> ${SITE_ROOT}"
+
+  # 2. conda env (kraken2/krona/seqkit/spades/bracken/... — full bioinfo set).
+  #    Build from the COMPLETE export captured from the working reference env
+  #    (deploy/kraken/environment-full.yml). The kraken repo's own
+  #    conda_setup/environment.yml under-specifies the runtime — the reference
+  #    env had ~40 more packages (seqkit/bracken/spades/bwa/freebayes/picard/…)
+  #    added AFTER create — so building from it alone yields a broken pipeline.
+  #    Fall back to the repo spec + pip extras only if the full export is absent.
   local conda="${CONDA_BASE}/bin/conda"; [[ -x "${conda}" ]] || conda="$(command -v conda 2>/dev/null || true)"
+  local envfile="${DEPLOY_DIR}/kraken/environment-full.yml"
+  [[ -f "${envfile}" ]] || envfile="${KRAKEN_DIR}/conda_setup/environment.yml"
   if [[ -x "${KRAKEN_ENV}/bin/python" ]]; then
     ok "kraken env exists at ${KRAKEN_ENV}"
   elif [[ -z "${conda}" ]]; then
     warn "no conda; skipping env build"
-  elif [[ -f "${KRAKEN_DIR}/conda_setup/environment.yml" ]]; then
-    run "${conda}" env create -p "${KRAKEN_ENV}" -f "${KRAKEN_DIR}/conda_setup/environment.yml"
-    ok "built kraken conda env (kraken2, krona, …)"
+  elif [[ -f "${envfile}" ]]; then
+    run "${conda}" env create -p "${KRAKEN_ENV}" -f "${envfile}"
+    ok "built kraken conda env from ${envfile##*/}"
   else
-    warn "no conda_setup/environment.yml in the repo"
+    warn "no env spec (neither deploy/kraken/environment-full.yml nor repo conda_setup/environment.yml)"
   fi
 
-  # The repo's environment.yml under-specifies the runtime env — the working
-  # reference env (wgs3) has ~15 more packages added after create. Install the
-  # backend requirements + the known runtime extras so the pipeline actually
-  # runs (else it dies on `ModuleNotFoundError: humanize`, then cairosvg, …).
-  # TODO(kraken repo): fold these into conda_setup/environment.yml upstream.
-  if [[ -x "${KRAKEN_ENV}/bin/pip" ]]; then
+  # Safety net for the repo-spec fallback path: the repo's environment.yml omits
+  # several runtime Python deps. No-op when the full export already supplied them.
+  if [[ "${envfile}" != *environment-full.yml && -x "${KRAKEN_ENV}/bin/pip" ]]; then
     [[ -f "${KRAKEN_DIR}/backend/requirements.txt" ]] && \
       run "${KRAKEN_ENV}/bin/pip" install -q -r "${KRAKEN_DIR}/backend/requirements.txt"
     run "${KRAKEN_ENV}/bin/pip" install -q \
       humanize cairosvg cairocffi cssselect2 defusedxml svgwrite tinycss2 \
       webencodings pysam PySocks
-    ok "installed backend reqs + runtime extras (env-spec gap)"
+    ok "installed backend reqs + runtime extras (repo-spec fallback)"
   fi
 
   # 3. frontend

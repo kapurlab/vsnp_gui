@@ -117,6 +117,20 @@ phase_app() {
     warn "no conda_setup/environment.yml in the repo"
   fi
 
+  # The repo's environment.yml under-specifies the runtime env — the working
+  # reference env (wgs3) has ~15 more packages added after create. Install the
+  # backend requirements + the known runtime extras so the pipeline actually
+  # runs (else it dies on `ModuleNotFoundError: humanize`, then cairosvg, …).
+  # TODO(kraken repo): fold these into conda_setup/environment.yml upstream.
+  if [[ -x "${KRAKEN_ENV}/bin/pip" ]]; then
+    [[ -f "${KRAKEN_DIR}/backend/requirements.txt" ]] && \
+      run "${KRAKEN_ENV}/bin/pip" install -q -r "${KRAKEN_DIR}/backend/requirements.txt"
+    run "${KRAKEN_ENV}/bin/pip" install -q \
+      humanize cairosvg cairocffi cssselect2 defusedxml svgwrite tinycss2 \
+      webencodings pysam PySocks
+    ok "installed backend reqs + runtime extras (env-spec gap)"
+  fi
+
   # 3. frontend
   if [[ -f "${KRAKEN_DIR}/frontend/package.json" && -x "${NPM_BIN}" ]]; then
     run bash -c "cd '${KRAKEN_DIR}/frontend' && '${NPM_BIN}' ci && '${NPM_BIN}' run build"

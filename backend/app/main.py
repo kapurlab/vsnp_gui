@@ -21,7 +21,7 @@ import re
 import hashlib
 import tempfile
 
-from app.config import load_config, save_config
+from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
 from app import qc_verdict
 from app import provenance_writer
@@ -1362,7 +1362,7 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
 #     top when shipped.
 _T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis)\.xlsx$")
 _T39_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-_T39_SHARED_AUDIT_PATH = Path("/srv/kapurlab/audit/reference-changes.jsonl")
+_T39_SHARED_AUDIT_PATH = SITE_ROOT / "audit" / "reference-changes.jsonl"
 
 
 def _sha256_of_path(path: Path) -> str:
@@ -3596,7 +3596,7 @@ def kraken_samples(project: str):
 # vsnp3 env has neither kraken2, krona, nor SPAdes). The Kraken tool itself is
 # lab-shared functionality; only the project data lives per-user/shared.
 # ---------------------------------------------------------------------------
-_KRAKEN_GUI_ROOT = Path("/srv/kapurlab/tools/kraken_id_parse_gui")
+_KRAKEN_GUI_ROOT = SITE_ROOT / "tools" / "kraken_id_parse_gui"
 
 # Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
 # read and append to this same file so the preset list stays in sync.
@@ -3877,9 +3877,9 @@ def kraken_run(project: str, payload: KrakenRunRequest):
 
     # Kraken DB: request override → vsnp config (if a user set one) → shared default.
     kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
-        or "/srv/kapurlab/databases/kraken2/k2_standard_08gb"
+        or str(SITE_ROOT / "databases" / "kraken2" / "k2_standard_08gb")
     blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
-        or "/srv/kapurlab/databases/blast/ref_prok_rep_genomes"
+        or str(SITE_ROOT / "databases" / "blast" / "ref_prok_rep_genomes")
     if kraken_only and not kraken_db:
         raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
     if parse_only and not kraken_db:

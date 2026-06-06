@@ -238,10 +238,25 @@ def capture_vsnp_gui_state(deploy_path: Path) -> dict[str, Any]:
             git_branch = _git(deploy_path, "rev-parse", "--abbrev-ref", "HEAD")
             git_status = _git(deploy_path, "status", "--porcelain")
             git_dirty = bool(git_status.strip())
-        except subprocess.CalledProcessError as e:
-            raise DispatchFailed(
-                f"failed to read git state from {deploy_path}: {e}"
-            ) from e
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            # The deploy dir isn't a git checkout (a tarball / rsync install
+            # rather than a `git clone`), or git is absent. Degrade gracefully
+            # instead of hard-failing the run: record the absence honestly (and
+            # a shipped VERSION file if present) so the provenance trail still
+            # says what it knows. For FULL git provenance, deploy via
+            # `git clone` — see docs/deploy/INSTALL_OOD.md.
+            version_file = deploy_path / "VERSION"
+            git_sha = (
+                version_file.read_text(encoding="utf-8").strip()
+                if version_file.is_file() else "unknown"
+            )
+            git_branch = "unknown"
+            git_dirty = False
+            logging.getLogger(__name__).warning(
+                "provenance: %s is not a git checkout (%s); recording "
+                "git_sha=%r. Deploy via `git clone` for full provenance.",
+                deploy_path, e, git_sha,
+            )
 
         state = {
             "git_sha": git_sha,
@@ -344,7 +359,8 @@ def _read_applied_patches(install_path: Path) -> list[dict[str, Any]]:
     # Walk up from install to find deploy/vsnp3-patches/
     candidates = [
         install_path.parent / "vsnp_gui" / "deploy" / "vsnp3-patches",
-        Path("/srv/kapurlab/tools/vsnp_gui/deploy/vsnp3-patches"),
+        Path(os.environ.get("VSNP_GUI_SITE_ROOT", "/srv/kapurlab"))
+        / "tools" / "vsnp_gui" / "deploy" / "vsnp3-patches",
     ]
     patches: list[dict[str, Any]] = []
     for d in candidates:

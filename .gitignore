@@ -36,3 +36,11 @@ Gemini_Generated_Image_*.png
 # App data
 backend/data/
 backend/projects/
+
+# Deploy: real site configs (keep site.conf.example tracked) and staged
+# sample-bundle artifacts. The .example and the scripts ARE tracked.
+deploy/site.conf
+deploy/site.conf.*
+!deploy/site.conf.example
+deploy/sample_data/bundle/
+deploy/sample_data/*.tar.gz

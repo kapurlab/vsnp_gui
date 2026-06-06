@@ -3003,7 +3003,7 @@ export default function App() {
                       }}
                       style={{fontSize:"13px"}}
                     >
-                      <option value="">Pick a folder on wgs3…</option>
+                      <option value="">Pick a folder on the server…</option>
                       {projects
                         .filter((p) => p.name !== selectedProject && p._root)
                         .map((p) => {

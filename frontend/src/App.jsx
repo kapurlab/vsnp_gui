@@ -91,6 +91,10 @@ export default function App() {
   const igvContainerRef = useRef(null);
   const igvPopoutRef = useRef(null);
   const uploadInputRef = useRef(null);
+  // Synchronous re-entry guard for Step 1 dispatch. step1JobStatus only flips
+  // to "running" after the request resolves, so a same-tick double-click would
+  // otherwise fire two dispatches; this ref blocks the second instantly.
+  const step1DispatchingRef = useRef(false);
   const excludeSaveTimerRef = useRef(null);
   const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
@@ -1846,6 +1850,8 @@ export default function App() {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
     }
+    if (step1DispatchingRef.current) return;  // block a same-tick double-click
+    step1DispatchingRef.current = true;
     const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
     setStep1StatusError("");
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
@@ -1863,6 +1869,7 @@ export default function App() {
         body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
       });
     } catch (e) {
+      step1DispatchingRef.current = false;
       window.alert(`Step 1 run failed: ${e.message || "network error"}`);
       return;
     }
@@ -1870,7 +1877,9 @@ export default function App() {
     try { data = await res.json(); } catch (_) { /* non-JSON body */ }
     if (!res.ok) {
       // Backend raises HTTPException with a `detail` for things like provenance
-      // dispatch failures. Surface that instead of silently swallowing.
+      // dispatch failures (and the 409 when a run is already active). Surface
+      // that instead of silently swallowing.
+      step1DispatchingRef.current = false;
       window.alert(`Step 1 run failed: ${data.detail || `HTTP ${res.status}`}`);
       return;
     }
@@ -1890,6 +1899,9 @@ export default function App() {
         `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run. Single-end Illumina support is a separate ticket (T-46 Phase 2).`
       );
     }
+    // Clear the re-entry guard now that the job is recorded; step1JobStatus is
+    // about to read "running" (loadStep1Status), which keeps the button disabled.
+    step1DispatchingRef.current = false;
     await loadStep1Status();
   }
 

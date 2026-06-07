@@ -20,6 +20,14 @@ import shlex
 import re
 import hashlib
 import tempfile
+import threading
+
+# Serializes Step 1 dispatch so a fast double-click can't start two batches
+# that race over the same per-sample dirs. The check ("is a job already
+# running?") and the claim (write .step1_job_id) span ~200 lines; without this
+# lock both requests pass the check before either claims. uvicorn runs
+# single-process here, so a threading.Lock is sufficient.
+_STEP1_DISPATCH_LOCK = threading.Lock()
 
 from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
@@ -1957,6 +1965,17 @@ def step1_run(project: str, payload: Step1Request):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
+    # Hold the dispatch lock across the whole check→claim so a simultaneous
+    # double-click serializes: the first request claims .step1_job_id and starts
+    # the job; the second then sees it "running" and gets a 409 (below).
+    with _STEP1_DISPATCH_LOCK:
+        return _step1_dispatch(project, payload, cfg, project_dir, step1_dir)
+
+
+def _step1_dispatch(
+    project: str, payload: Step1Request, cfg: Dict[str, Any],
+    project_dir: Path, step1_dir: Path,
+):
     # Refuse to spawn a second batch while a prior step1 job is still
     # running — concurrent batches share the same per-sample dirs and race
     # over the SAM / log / .provenance/exit_code files, producing the

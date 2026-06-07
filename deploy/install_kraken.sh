@@ -136,15 +136,21 @@ phase_app() {
     warn "no env spec (neither deploy/kraken/environment-full.yml nor repo conda_setup/environment.yml)"
   fi
 
-  # Safety net for the repo-spec fallback path: the repo's environment.yml omits
-  # several runtime Python deps. No-op when the full export already supplied them.
+  # Web layer: ALWAYS install the backend requirements. The FastAPI stack the
+  # OOD session's uvicorn imports (notably aiofiles) is pip-installed and is NOT
+  # reliably captured by `conda env export`, so even the full export can miss
+  # it — and the session then dies with `ModuleNotFoundError: aiofiles`.
+  if [[ -x "${KRAKEN_ENV}/bin/pip" && -f "${KRAKEN_DIR}/backend/requirements.txt" ]]; then
+    run "${KRAKEN_ENV}/bin/pip" install -q -r "${KRAKEN_DIR}/backend/requirements.txt"
+    ok "installed kraken backend web requirements"
+  fi
+  # Runtime extras only needed on the repo-spec FALLBACK path; the full export
+  # already carries humanize/cairosvg/pysam/... as conda packages.
   if [[ "${envfile}" != *environment-full.yml && -x "${KRAKEN_ENV}/bin/pip" ]]; then
-    [[ -f "${KRAKEN_DIR}/backend/requirements.txt" ]] && \
-      run "${KRAKEN_ENV}/bin/pip" install -q -r "${KRAKEN_DIR}/backend/requirements.txt"
     run "${KRAKEN_ENV}/bin/pip" install -q \
       humanize cairosvg cairocffi cssselect2 defusedxml svgwrite tinycss2 \
       webencodings pysam PySocks
-    ok "installed backend reqs + runtime extras (repo-spec fallback)"
+    ok "installed runtime extras (repo-spec fallback)"
   fi
 
   # 3. frontend

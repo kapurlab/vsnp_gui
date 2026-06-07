@@ -295,9 +295,13 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
 # that vsnp3 can't actually process (single-end, or suspiciously small
 # fastqs that are usually SRA submission errors). Without this, one bad
 # sample takes down the whole batch because T-07 provenance dispatch
-# requires every sample's inputs hash cleanly. 1 MB is a deliberately
-# generous floor — real WGS fastqs are usually multi-MB minimum.
-_T46_JUNK_FASTQ_BYTES = 1024 * 1024  # 1 MB
+# requires every sample's inputs hash cleanly.
+#
+# The floor is config-driven (config.DEFAULTS["step1_min_fastq_bytes"]); this
+# constant is the fallback default. 50 KB catches the ~43-47 KB junk seen in
+# the LSDV batch while PASSING legitimately small viral/amplicon reads — a
+# 1 MB floor (the original) wrongly flagged SARS-CoV-2 amplicon (~200 KB).
+_T46_JUNK_FASTQ_BYTES = 50 * 1024  # 50 KB (fallback; see step1_min_fastq_bytes)
 
 
 def _safe_stat_size(p: Path) -> Optional[int]:
@@ -311,7 +315,9 @@ def _safe_stat_size(p: Path) -> Optional[int]:
         return None
 
 
-def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any]]]:
+def _step1_dispatch_plan(
+    step1_dir: Path, min_bytes: int = _T46_JUNK_FASTQ_BYTES
+) -> tuple[List[str], List[Dict[str, Any]]]:
     """Decide which sample dirs to actually dispatch and which to skip.
 
     Returns (samples_to_run, skipped) where `skipped` is a list of
@@ -325,9 +331,10 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
          Illumina support via a vsnp3 patch.
       2. R1 found but no R2 → incomplete download or single-end with R1
          naming. Skip with a distinct message.
-      3. R1 < 1 MB OR R2 < 1 MB → suspiciously small. Real WGS fastqs are
-         multi-MB minimum; sub-MB are almost always SRA submission errors
-         (we've seen 43-47 KB ones in the LSDV batch).
+      3. R1 < min_bytes OR R2 < min_bytes → suspiciously small. Default floor
+         is 50 KB (config: step1_min_fastq_bytes), which catches the 43-47 KB
+         SRA submission errors seen in the LSDV batch while passing legitimately
+         small viral/amplicon reads (SARS-CoV-2 amplicon is ~200 KB).
     """
     samples: List[str] = []
     skipped: List[Dict[str, Any]] = []
@@ -346,7 +353,7 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
                 })
             else:
                 total = sum(f.stat().st_size for f in all_fq if f.is_file())
-                if total < _T46_JUNK_FASTQ_BYTES:
+                if total < min_bytes:
                     skipped.append({
                         "sample": p.name,
                         "reason": f"single-end and suspiciously small ({total} bytes); likely SRA submission error",
@@ -381,7 +388,7 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
                 "size_bytes": 0,
             })
             continue
-        if r1_size < _T46_JUNK_FASTQ_BYTES or r2_size < _T46_JUNK_FASTQ_BYTES:
+        if r1_size < min_bytes or r2_size < min_bytes:
             skipped.append({
                 "sample": p.name,
                 "reason": f"suspiciously small paired fastqs (R1={r1_size}, R2={r2_size} bytes); likely junk",
@@ -2023,7 +2030,9 @@ def step1_run(project: str, payload: Step1Request):
     # (e.g. one whose download source was deleted, leaving broken symlinks)
     # from being run and failing the whole batch — those are surfaced to the
     # user as `skipped_samples` instead.
-    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
+    samples, skipped_samples = _step1_dispatch_plan(
+        step1_dir, min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES)
+    )
     samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(
         "\n".join([

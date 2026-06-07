@@ -67,6 +67,12 @@ DEFAULTS: Dict[str, Any] = {
     },
     "vcf_db_folders": [],
     "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
+    # T-46 dispatch junk-floor: paired fastqs where either read is smaller than
+    # this are auto-skipped as likely junk/incomplete. Default 50 KB catches the
+    # ~43-47 KB SRA-submission-error files we've seen while still passing
+    # legitimately small viral/amplicon reads (e.g. SARS-CoV-2 ~200 KB). Raise
+    # it for bacterial-WGS-only sites if you want a stricter floor.
+    "step1_min_fastq_bytes": 50 * 1024,
     # Shared-tree paths the provenance writer (T-07) reads. Derived from
     # SITE_ROOT so they're correct at any site; were previously hard-coded to
     # /srv/kapurlab inside provenance_writer.py, which 500'd Step 1 elsewhere.

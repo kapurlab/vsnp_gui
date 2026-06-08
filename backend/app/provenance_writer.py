@@ -359,9 +359,16 @@ def _read_applied_patches(install_path: Path) -> list[dict[str, Any]]:
     # Walk up from install to find deploy/vsnp3-patches/
     candidates = [
         install_path.parent / "vsnp_gui" / "deploy" / "vsnp3-patches",
-        Path(os.environ.get("VSNP_GUI_SITE_ROOT", "/srv/kapurlab"))
-        / "tools" / "vsnp_gui" / "deploy" / "vsnp3-patches",
     ]
+    # Only probe the site-root layout when VSNP_GUI_SITE_ROOT is set (the OOD
+    # launcher exports it). No hardcoded fallback — a stale default like
+    # /srv/kapurlab would point patch discovery at the wrong tree on a
+    # mirrored site.
+    site_root = os.environ.get("VSNP_GUI_SITE_ROOT")
+    if site_root:
+        candidates.append(
+            Path(site_root) / "tools" / "vsnp_gui" / "deploy" / "vsnp3-patches"
+        )
     patches: list[dict[str, Any]] = []
     for d in candidates:
         if not d.is_dir():

@@ -370,7 +370,8 @@ phase_app() {
   need_root app
   log "app — OOD card at ${OOD_APP_DIR}"
   if [[ -d "${OOD_APP_DIR}" && ${DRY_RUN} -eq 0 ]]; then
-    local bak="/var/backups/ood/vsnp_gui/$(date +%Y%m%d_%H%M%S)"
+    local bak
+    bak="/var/backups/ood/vsnp_gui/$(date +%Y%m%d_%H%M%S)"
     run mkdir -p "${bak}"; run cp -a "${OOD_APP_DIR}/." "${bak}/"; ok "backed up existing card -> ${bak}"
   fi
   install_subst "${REPO_DIR}/deploy/ood/manifest.yml"           "${OOD_APP_DIR}/manifest.yml"            0644

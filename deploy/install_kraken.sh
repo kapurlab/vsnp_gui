@@ -84,6 +84,16 @@ clone_repo(){
     rm -rf "${tmpc}"
     die "git clone failed as ${u} — private repo without access? Check ${u}'s GitHub creds (~/.ssh, 'gh auth status', or ~/.git-credentials), or set KRAKEN_RSYNC_SOURCE to mirror instead."
   fi
+  # Clean replace, not a merge copy: a partial or older dest (e.g. an
+  # interrupted prior clone that left a tree without backend/, so phase_app's
+  # presence check didn't short-circuit) would otherwise retain files dropped
+  # in newer revisions -> stale backend/frontend and hard-to-debug breakage.
+  # Guard hard before rm -rf, since this runs as root.
+  case "${dest}" in
+    ""|/|/root|/home|/srv|/usr|/etc|/var|/opt|/bin|/sbin) die "refusing unsafe clone destination: ${dest}" ;;
+  esac
+  [[ "${dest}" == /*/*/* && "${dest}" != *".."* ]] || die "refusing unsafe clone destination: ${dest}"
+  rm -rf "${dest}"
   mkdir -p "${dest}"
   cp -a --no-preserve=ownership "${tmpc}/repo/." "${dest}/"   # root-owned; group fixed below
   rm -rf "${tmpc}" "${dest}/.git"                             # drop .git for parity with the rsync path

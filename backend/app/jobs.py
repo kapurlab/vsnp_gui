@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
+from app.config import SITE_ROOT
+
 logger = logging.getLogger(__name__)
 
 # Where finalize-callback failures get logged. Per the locked T-07 policy:
@@ -17,7 +19,7 @@ logger = logging.getLogger(__name__)
 # completes, metadata gap is logged here, janitor catches stuck records via
 # the 48h timeout in vsnp_provenance.index.gc_running). This is a forensic
 # trail, not a tamper-evident ledger — no chattr +a in V1.
-_METADATA_FAILURE_LOG = Path("/srv/kapurlab/audit/metadata_failures.jsonl")
+_METADATA_FAILURE_LOG = SITE_ROOT / "audit" / "metadata_failures.jsonl"
 
 # Callback signature: (job_id, exit_code, started_at, finished_at) -> None
 FinalizeCallback = Callable[[str, int, datetime, datetime], None]

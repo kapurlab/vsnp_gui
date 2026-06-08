@@ -32,12 +32,13 @@ pipelines:
 
   - id: kraken
     icon: k
-    title: Kraken
+    title: Kraken ID Parse
     description: >-
       Read-level taxonomic classification against custom databases. For
       contamination screening and metagenomic profiling.
-    status: coming
-    runtime: "in development"
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/kraken_id_parse_gui/session_contexts/new
 
   - id: mhc
     icon: m

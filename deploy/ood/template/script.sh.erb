@@ -29,6 +29,10 @@ fi
 # Make the vsnp3 env CLI tools (vsnp3_step1.py, raxml, samtools, …) available.
 export PATH="${VSNP3_ENV}/bin:${PATH}"
 
+# Tell the backend which shared root to use for tools/refs/projects defaults.
+# The install-time substitution rewrites /srv/kapurlab to this site's root.
+export VSNP_GUI_SITE_ROOT=/srv/kapurlab
+
 cd "${VSNP_DIR}/backend"
 echo "Starting uvicorn on port ${port}"
 echo "  vsnp3 env: ${VSNP3_ENV}"

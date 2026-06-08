@@ -1,244 +1,252 @@
-# Session handover — June 4 2026
+# Session handover — June 7–8 2026
 
-Continuation notes for the next Claude session. Read this first, then
-[`docs/dev/TICKETS.md`](TICKETS.md), [`docs/dev/TOD_QUEUE.md`](TOD_QUEUE.md),
-and [`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md).
+> **NEXT-SESSION CLAUDE:** Read this, then **ask Vivek what to prioritize and
+> confirm before making changes.** Don't start a big thread autonomously. The
+> June 6–7 handover (below) remains valid for the deeper backlog.
 
-Prior handoff (May 17–18) is preserved at commit `8985763` in git
-history. That session ended with Tod's `tstuber_2026-05-20` branch
-pending merge and two UNRESOLVED red-team decisions blocking T-27. This
-session covered ~3 weeks and pivoted hard into a cascade-table → IGV
-feature that grew into a full T-02 phase 0 land, plus operational
-infra (dev OOD app with branch picker, repo transfer to kapurlab,
-CodeRabbit setup, cross-user git fixes).
+This session did three things, all validated live with Vivek:
 
-## TL;DR — what landed since `8985763`
+## 1. wgs1 test-artifact cleanup — DONE
+The three owed cleanups (see June 6–7 section) are cleared: blanket `vkapur-temp`
+NOPASSWD:ALL removed, PAM password rotated, wgs3 stray transfer key stripped.
+New **non-standing scoped sudo** workflow: `deploy/admin/claude-sudo-grant.sh`
+(re-grant on demand; needs Vivek's password now) + `claude-sudo-revoke.sh`.
+wgs1 ends in a **clean steady state — no standing passwordless sudo**.
 
-**Cascade-table → IGV click** (T-02 phase 0, merged 2026-05-28 via
-`e5c2745`, refined through `f57008d` 2026-05-29). Hover any colored
-variant cell in a `name-All_cascade*` or `name-All_sorted_*` xlsx
-preview → small dark `↗ this  ↗ all` pill in the corner → click opens
-IgvStandalone in a named tab with that sample's BAM (reads), the
-sample's `_filtered_hapall_annotated.vcf` (calls, with rich
-gene/product/AA-change annotation in the ID column), and the
-reference GFF (gene-structure annotation). Subsequent clicks add
-samples additively to the *same* IGV tab via postMessage rather than
-opening N new tabs. Same-window navigation worked first try in Chrome,
-took a separate Safari-specific fix (`window.open` via onclick because
-Safari ignores HTML `target="<name>"` for tracking-prevention reasons).
-Single-position loci on large genomes (MTBC0 4.4 Mb) needed an
-explicit `browser.search()` call after `createBrowser` to actually
-zoom in — `config.locus` was silently dropped on big contigs.
+## 2. Teardown + tarball reinstall — VALIDATED end-to-end
+- New `deploy/teardown_ood.sh` (phase-based, `--dry-run`/`--yes`, `--keep-conda`,
+  `--include-core`, self-relocating) and `deploy/build_dist.sh` (the §8 tarball:
+  git archive + injected demo bundle + `INSTALL.md`).
+- Full bare-tree teardown of `/srv/nivedi`, then reinstall **from the tarball
+  alone** → vSNP GUI + Kraken both rebuilt, backend serves the SPA + discovers
+  the reference, Kraken env + 8 GB DB in place. wgs1 is a fresh, working NIVEDI
+  install right now.
+- **5 findings** (`docs/deploy/WGS1_TEST_RESULTS.md` Round 2): #7 exit-1-on-success
+  in `install_ood.sh`/`bootstrap_ood_core.sh`/`teardown_ood.sh` (**fixed**); #8
+  tarball not one-command → `install_ood.sh` **self-populate added** (fixed); #9
+  `install_kraken.sh` can't clone a private repo under sudo (**NOT fixed** — clone
+  as `$SUDO_USER`; workaround = `KRAKEN_RSYNC_SOURCE`); #10 stale Kraken DB URL in
+  `site.conf.example` (**fixed** → 20250402).
 
-**Tod's `tstuber_2026-05-20` branch merged to main** (2026-05-23, commit
-`58c3a28`). Project-level reference, timestamped step2 runs, VCF
-sample browser, sample metadata editor, `<project>_VCFs` accumulation
-folder — all on main now. No conflicts on merge (predictable
-SESSION_HANDOFF.md collision resolved keeping main's version via
-three-way merge).
+## 3. vSNP GUI file-listing bug — FIXED
+The inline project→sample expansion only showed Kraken outputs and only for
+Kraken'd samples. `frontend/src/App.jsx`: every sample is now expandable and
+shows a **vSNP outputs** section (Step 1/2 files) + a **Kraken outputs** section.
+Rebuilt + deployed to wgs1; Vivek confirmed it works.
 
-**Dev OOD app** (`vsnp_gui_dev` + `kraken_id_parse_gui_dev`). Branch
-picker on the form, per-session worktree at `/tmp/vsnp_gui_dev_<tag>/`
-or `/tmp/kraken_id_parse_gui_dev_<tag>/`, `vite build` in the
-worktree's frontend at session start (node_modules symlinked from
-prod), `uvicorn --reload` so backend tweaks hot-pickup without a
-session relaunch. Cross-user `safe.directory` fix on both dev cards'
-`before.sh.erb` because the prod checkouts have different Linux
-owners (vsnp_gui→vxk1, kraken→tks5563) — any user not matching the
-checkout owner used to hit `fatal: detected dubious ownership` and
-abort. Source-controlled copies in [`ood/apps/`](../../ood/apps/).
+## wgs1 access (corrects the June 6–7 note)
+- SSH: **`ssh -i ~/.ssh/gb10_key vkapur@100.78.29.2`** (the old handoff named the
+  wrong key — `gb10_key`, not `kapur_wgs_key`).
+- OOD: `http://100.78.29.2/`, login `vkapur` + the password Vivek set this session
+  (NOT in git). vkapur is now a `nivedi-admins` member; loopback SSH verified.
+- Re-grant sudo for deploy work: `sudo ~vkapur/claude-sudo-grant.sh` (kept in
+  vkapur's home, plus `claude-sudo-revoke.sh`, `teardown_ood.sh`, `site.conf.wgs1-test`).
 
-**Repo transferred from `vkapur/vsnp_gui` to `kapurlab/vsnp_gui`**
-(2026-05-29). Public visibility (required for free-tier org
-collaborator slots). Old URL redirects automatically. Local + wgs3
-remotes both updated to the kapurlab URL.
+## Open for next session
+- **Commit/PR:** this session's work — `deploy/teardown_ood.sh`, `deploy/build_dist.sh`,
+  `deploy/admin/claude-sudo-{grant,revoke}.sh`, fixes in `deploy/install_ood.sh` /
+  `deploy/bootstrap_ood_core.sh` / `deploy/site.conf.example`, `frontend/src/App.jsx`,
+  and the doc updates. (Check whether it landed in git or is still uncommitted.)
+- **Finding #9** (kraken clone-as-`$SUDO_USER`) — needs a fix + its own test cycle.
+- **Roar import** — the next big thread (vSNP3 `_zc.vcf` import without re-running;
+  Phase-0 inventory scan first). Access to Roar still to be sorted.
+- Plus the June 6–7 backlog below (packaging tarball→release, PR #2 merge, branding,
+  dead-code review, T-27, PLATFORM_PROPOSAL).
 
-**CodeRabbit installed at the kapurlab org level** with a tuned
-`.coderabbit.yaml` at the repo root. Profile is `chill`, no
-request-changes-workflow, path-specific reviewer instructions encode
-our invariants (OOD relative-URL rule, filesystem path-allowlist,
-hardcoded `/srv/kapurlab/` paths flagged for the NIVEDI
-parameterization story, `target="vsnp_igv"` and the
-`window.__vsnpLaunchIgv` JS shim, etc.). First real PR opened
-during this session — Tod's `feature/cross-tool-file-visibility`
-(PR #1) — got CodeRabbit's first review; merged cleanly via
-`0ecfbeb`.
+---
 
-**Tickets filed** without implementation (deferred to a future
-session): **T-47** (auto-refresh step2 polling asymmetry — Tod
-self-flagged it, we diagnosed it, small fix, hasn't shipped),
-**T-48** (project access control via per-project groups — design
-doc, no code yet).
+# Session handover — June 6–7 2026
 
-**NIVEDI install playbook** (T-49 + T-50) — scoping conversation
-done, no code. NIVEDI: 64 CPUs / 500 GB / 20 TB, local Linux users,
-internal-only, weeks-preferred timeline. Recommended approach is the
-hybrid (OSC's official Ansible playbook for OOD core + our
-`install.sh` for the vSNP layer on top) with a `site.conf`
-parameterization for site-specific paths/names/group prefixes
-(`/srv/kapurlab/` → `/srv/nivedi/`, `kapurlab-admins` →
-`nivedi-admins`, etc.). Tod's reply to `PLATFORM_PROPOSAL-2.md` is
-substantive and not yet integrated into the proposal — six concrete
-edits drafted (controls section, Conda/Apptainer reframe, NAHLN bar
-simplification, handoff package clarification, audit-recursion
-section, multi-institution rephrase). The proposal still lives in
-`/Users/vivekkapur/Downloads/PLATFORM_PROPOSAL-2.md` (not yet
-committed to the repo).
+Continuation notes. Read this first, then [`TICKETS.md`](TICKETS.md),
+[`TOD_QUEUE.md`](TOD_QUEUE.md), and the new
+[`../deploy/INSTALL_OOD.md`](../deploy/INSTALL_OOD.md).
 
-## Production state on wgs3
+Prior handoff (June 4) is preserved at commit `54cc2cd` in git history. This
+session was very long and did one big thing: built and **bare-metal-validated**
+a site-parameterized OOD install playbook so the whole platform (OOD core +
+vSNP GUI + Kraken) can be stood up at a new site (NIVEDI) from a bare box — and
+fixed ~16 real bugs that the hands-on testing surfaced along the way.
 
-- **`/srv/kapurlab/tools/vsnp_gui`** is on `main` at `507f192`.
-  Frontend rebuilt for the merge commit + every subsequent fix; OOD
-  prod card serves the current `dist/`.
-- **`/srv/kapurlab/tools/kraken_id_parse_gui`** is on `main` (Tod's
-  workspace; he owns it). Dev card patched on wgs3 (see TOD_QUEUE.md
-  for the mirror-back-to-source ask).
-- **Dev OOD cards** (`vsnp_gui_dev`, `kraken_id_parse_gui_dev`) both
-  live and tested. Branch picker accepts any branch on origin; per
-  session worktree under `/tmp/<app>_dev_<timestamp>_<pid>/` with
-  daily cleanup.
-- **Active projects on wgs3** for testing:
-  - `/home/vxk1/projects/quick2/` (SARS-CoV-2 deer, 6 samples,
-    cascade + sorted xlsx exist). Vivek's only.
-  - `/home/vxk1/projects/nagalingam_test/` (MTBC, 18 samples Mg+SRR,
-    cascade1 + La3_orygis_cascade1 + La3_orygis_sorted xlsx). Has
-    imported-VCF rows (SRR/ERR/CP) that exercise the no-BAM path.
-    Vivek's only.
-  - `/srv/kapurlab/projects/demo_sars_cov_2/` (shared,
-    `proj-demo_sars_cov_2` group readable by both Vivek and Tod —
-    Tod's accessible test target).
-  - Tod's `/home/tks5563/projects/test{,2,3,4}_tb_sra/` (Tod's
-    own; he runs them with the new Kraken-from-Step1 branch).
+---
 
-## Active feature branches awaiting merge
+## TL;DR — what landed
 
-Tod's testing pipeline; he's deliberately holding off on merging
-these until he completes a larger-dataset run.
+Everything is on branch **`feature/ood-install-playbook`** → **PR #2**
+(`kapurlab/vsnp_gui`), HEAD **`cfb865b`**. **Not merged.** CodeRabbit will
+review. The branch was rebased onto current `origin/main` (folded in the 17
+dev-server commits that prod was behind: Kraken-in-vSNP, Step 2 `vcf_database`
+rename, server-side folder browser, the fastq-symlink-500 fix).
 
-| Branch | Repo | Scope | Status |
-|---|---|---|---|
-| `feature/step1-run-kraken` | vsnp_gui | 9 commits, +785 LOC. Kraken launch from Step 1 + per-sample results in vSNP sample view | Backend smoke-tested, paired with kraken_id_parse_gui's feature/create-projects |
-| `feature/create-projects` | kraken_id_parse_gui | 7 commits, ~1100 changes. Project-based UX parity with vSNP + the `mtime` KeyError fix | Backend smoke-tested by Vivek on demo_sars_cov_2 |
-| `feature/cross-tool-file-visibility` | vsnp_gui | (merged via PR #1, `0ecfbeb`) | Done |
-| `feature/posthoc-step1` | vsnp_gui | Tod's WIP | Status unknown |
-| `feature/vcf-edit` | vsnp_gui | Tod's WIP | Status unknown |
+**The install playbook** (`deploy/`):
+- `bootstrap_ood_core.sh` — OOD core on a bare Ubuntu noble box (OSC apt repo,
+  Apache + PAM basic-auth, Apptainer, portal). Layers 1–2.
+- `install_ood.sh` — vSNP toolchain + OOD app layer, parameterized via
+  `site.conf` token substitution. Idempotent, `--dry-run`, phase-based. Layers 3–4.
+- `install_kraken.sh` — the Kraken ID Parse app as a second OOD card (T-30).
+- `site.conf.example` — every site-specific knob (neutral template).
+- `sample_data/` — `build_bundle.sh` + `install_bundle.sh` + the runnable
+  SARS-CoV-2 demo (1 reference + 6 fastqs).
+- `kraken/environment-full.yml` — the COMPLETE kraken conda env captured from
+  wgs3 (the repo's own `conda_setup/environment.yml` is incomplete).
 
-## Open items for the next session
+**Docs** (`docs/deploy/`): `INSTALL_OOD.md` (the runbook), `WGS3_AUDIT.md` (the
+reference-install audit + literal→variable map), `WGS1_TEST_RESULTS.md`.
 
-In rough priority order:
+**Validated end-to-end on a bare wgs1** (Ubuntu 24.04, no OOD, empty `/srv`)
+as `SITE_NAME=nivedi` / `/srv/nivedi` — TWICE:
+1. A first install (hand-patched mid-stream — the _source_ of the fixes).
+2. A full **bare-metal teardown + hands-off reinstall** from the committed
+   branch — OOD core + vSNP + Kraken, both apps launching and running.
 
-1. **NIVEDI install playbook** (T-49 + T-50) — start the wgs3 audit,
-   draft `docs/deploy/INSTALL_OOD.md`, draft `deploy/install_ood.sh`
-   with a `site.conf` parameterization. No NIVEDI SSH access yet, so
-   the work is local-only (audit + draft). Vivek has the green light.
+---
 
-2. **PROPOSAL.md integration of Tod's feedback.** Six concrete edits
-   drafted (above). Currently the proposal isn't in the repo — bring
-   it under `docs/proposals/PLATFORM_PROPOSAL.md` first, then apply
-   the edits, then send Tod the updated version. He hasn't replied
-   since the original substantive note.
+## The ~16 bugs found & fixed (the real value of the test)
 
-3. **T-47** (step2 auto-refresh polling asymmetry). Small fix (~10
-   LOC in `App.jsx`), defer-it-but-don't-forget-it level.
+All are in the branch. The deeper write-up is in `docs/deploy/WGS1_TEST_RESULTS.md`.
 
-4. **CodeRabbit calibration.** First PR landed (Tod's #1), see how its
-   review reads. Tune the `.coderabbit.yaml` if it's noisy or missing
-   things. Probably one or two pass-throughs to settle.
+**Install phase:** bootstrap portal-verify now follows redirects (301→401);
+toolchain pip-installs only the web layer so conda owns the scientific stack
+(was building numpy from source on py3.14); `install_bundle` chowns the user's
+projects root; `config.py` derives the shared root from `$VSNP_GUI_SITE_ROOT`
+(default `/srv/kapurlab`, so wgs3 is unchanged); the OOD launcher exports it;
+`100.68.171.59`→`SERVERNAME` added to the substitution map.
 
-5. **Tom's branches review when he's ready to merge.** He's
-   explicitly holding off; he'll signal. When he opens PRs, CodeRabbit
-   will pre-review; we add the second human pair of eyes.
+**Runtime (found by actually using the GUI):**
+- **PAM login** — `www-data` added to the `shadow` group (else _every_
+  basic-auth login fails on a fresh box).
+- **Session showed "Completed", no Connect button** — the linux_host adapter's
+  `parse_hostname` only accepts dotted FQDNs; `render_cluster_yml` now emits
+  FQDNs **last** in `ssh_hosts` (a bare short hostname parsed to an empty job
+  host → OOD polled nothing).
+- `snp-dists` installed into the vsnp3 env (Step 2 needs it; not a vsnp3 dep).
+- Frontend "Pick a folder on wgs3" → "...on the server".
+- **Backend `/srv/kapurlab` defaults** in `provenance_writer.py` / `jobs.py` /
+  `main.py` (Step 1 500'd) now derive from `config.SITE_ROOT`.
+- Provenance degrades gracefully on a non-git (tarball) deploy instead of
+  hard-failing Step 1.
+- **Kraken app's own `/srv/kapurlab`** paths (its `config.py` DB defaults etc.)
+  parameterized at install time.
+- **Kraken env completeness** — build from the full export, not the repo's
+  incomplete spec; plus always pip-install the kraken backend web deps
+  (`aiofiles` wasn't captured by `conda env export`).
+- **T-46 junk-fastq floor 1 MB → 50 KB, configurable** (`step1_min_fastq_bytes`)
+  — the 1 MB floor wrongly auto-skipped legitimate ~200 KB viral/amplicon reads,
+  blocking Step 1 on the demo (and on any small-genome data).
+- **Step 1 double-dispatch race** — a fast double-click started two batches
+  racing in the same dirs (corrupt BAM, missing temp files). Fixed with an
+  atomic dispatch lock (backend) + a `useRef` re-entry guard (frontend).
 
-6. **The two red-team UNRESOLVEDs still blocking T-27** — never
-   adjudicated this session because the cascade-IGV work grew into
-   multi-day work. `ensure_assembly()` locking posture (defer or fix
-   now) and §6 provenance schema vs T-07 (port `capture_env_snapshot`
-   or accept reduction). T-27 still blocked on these.
+---
 
-7. **Mirror Tod's note items.** Two items already in TOD_QUEUE.md for
-   the next time Vivek messages him: the `--kraken-only` "at None"
-   cosmetic, the kraken GUI auto-refresh, and the mirror-back of the
-   kraken_id_parse_gui_dev safe.directory patch to that repo's source.
+## wgs1 state RIGHT NOW (a standing NIVEDI-parameterized install)
 
-## Recent commits worth knowing about
+wgs1 currently runs a full working install. Decide next session whether to keep
+it as a reference or tear it down.
+
+- OOD 3.1.16 + Apache/PAM on `http://100.78.29.2/`; Apptainer 1.5.0.
+- `/srv/nivedi/tools/{vsnp3,vsnp_gui,kraken_id_parse_gui}`,
+  `/srv/nivedi/databases/kraken2/k2_standard_08gb` (8 GB), `/srv/nivedi/refs`,
+  `/srv/nivedi/projects`, groups `nivedi-{members,admins}`.
+- Both OOD cards live: **vSNP GUI** + **Kraken ID Parse**. Demo project
+  `demo_sars_cov_2` under `/home/vkapur/projects`.
+- vsnp3 env = Python 3.14; kraken env = Python 3.10 (separate by necessity —
+  incompatible interpreters; they share the conda pkg cache so identical-version
+  tools are hardlinked, not duplicated).
+
+### ✅ Cleanup DONE (June 6 late session)
+All three temporary test artifacts cleared:
+- `/etc/sudoers.d/vkapur-temp` (blanket `vkapur ALL=(ALL) NOPASSWD:ALL`) **removed**
+  on wgs1, replaced by a non-standing, scoped grant managed by
+  `deploy/admin/claude-sudo-grant.sh` / `claude-sudo-revoke.sh`. The scoped grant
+  (`/etc/sudoers.d/claude-deploy`) permits NOPASSWD only on the vetted deploy
+  scripts (`bootstrap_ood_core.sh`, `install_ood.sh`, `install_kraken.sh`,
+  `teardown_ood.sh`) + `apt-get` + `systemctl reload apache2`. Those scripts are
+  `root:root 0755` in a `root:nivedi-admins drwxr-sr-x` dir (vkapur can't edit or
+  swap them), so the scoping is real least-privilege. Re-grant on demand:
+  `sudo ~/claude-sudo-grant.sh` (needs vkapur's password now that blanket is gone).
+- vkapur's PAM password **rotated** off the old browser-test value (which was
+  committed here — do not reuse it). The new value is shared only in the session
+  transcript, NOT recorded in git; store it in a password manager.
+- wgs1→wgs3 transfer key **removed** from wgs3 `~vxk1/.ssh/authorized_keys`
+  (line was `vkapur@a8-an-vxk1-u3`, mislabeled "OOD localhost loopback"). Backup
+  at `~vxk1/.ssh/authorized_keys.bak-20260606-235615`; 3 legit keys remain.
+
+---
+
+## Open items for the next session (in rough priority — CONFIRM with Vivek first)
+
+1. ~~**Cleanup** the three test artifacts above.~~ ✅ DONE (see above).
+2. **Packaging** — the original ask was a "tarball + roadmap" a sysadmin can
+   install out-of-the-box. The scripts + docs + sample bundle exist; what's NOT
+   done is bundling them into an actual distributable artifact (a `make dist` /
+   release tarball with the repo + sample data + `INSTALL.md` at the top). The
+   `git archive` recipe is sketched in `INSTALL_OOD.md §8` but not built.
+3. **Review + merge PR #2.** It's large; CodeRabbit will pre-review. Decide the
+   merge gate (it touches main backend files — config.py, main.py, etc.).
+4. **Decide wgs1's fate** — keep the nivedi install as a demo/reference, or tear
+   it down (the bare-metal procedure is proven).
+5. **Branding** — `wgs_pipelines.yml` + dashboard `index.html.erb` still carry
+   KapurLab/Penn State prose; `install_ood`'s portal phase flags them for manual
+   review. NIVEDI will want their own copy.
+6. **NIVEDI actual deployment** — still no NIVEDI SSH. Everything is a dry-run
+   against wgs1; first NIVEDI contact should `--dry-run` and expect a few
+   environment edge cases.
+7. **The two T-27 red-team UNRESOLVEDs** (`redteam/DECISIONS.md`) — untouched
+   again this session; still blocking T-27.
+8. **PLATFORM_PROPOSAL** — Tod's six drafted edits still not applied / doc still
+   not in the repo (carried over from the June 4 handoff).
+
+### For Tod (add to TOD_QUEUE.md when you message him)
+- `kraken_id_parse_gui` `conda_setup/environment.yml` is **incomplete** — the
+  working env has ~40 more conda packages + the FastAPI web deps (aiofiles) that
+  were added after `env create`. A fresh env-create from it yields a broken
+  pipeline. He should reconcile it upstream (our installer works around it by
+  shipping `deploy/kraken/environment-full.yml`).
+- `tectonic` is **stale** in the kraken pipeline's `REQUIRED_TOOLS` — wgs3
+  doesn't have it and the reports are HTML/PDF (`render_pdf_report`), so it just
+  prints a spurious "missing" warning. Drop it or make it a soft warning.
+- The `--kraken-only` "Krona graph generated at None" cosmetic (output-path var
+  not threaded) — still open from June 4.
+
+---
+
+## Commits on the branch (newest first)
 
 ```
-507f192 ood-dev: set git safe.directory before fetching prod repo
-02bb234 gitignore: ignore Office lock files (~$*)
-642d322 ci: add .coderabbit.yaml for tuned auto-review
-0ecfbeb Merge pull request #1 from vkapur/feature/cross-tool-file-visibility
-be8e8b4 dev OOD: build frontend from worktree source on session start
-000ecf4 Surface Kraken ID Parse results in vSNP sample view
-f57008d IgvStandalone: call browser.search() after createBrowser
-1e5ba98 IgvStandalone: expand single-position locus to a small range
-e5c2745 Merge t02-cascade-igv-click — cascade IGV click + GFF/VCF tracks + same-window navigation
-a97ede2 xlsx_html: visually distinguish calls-only IGV links (imported VCFs)
-0b257b0 IGV: additive same-window navigation (postMessage, not URL replace)
-cd1e7e8 xlsx_html: window.open onclick handler for same-window IGV (Safari fix)
-51f6f6d docs: T-48 — project access control via per-project groups
-58c3a28 Merge tstuber_2026-05-20 — project-level reference, timestamped step2, VCF browser, metadata editor, _VCFs folder
+cfb865b step1: make dispatch atomic (lock) + frontend re-entry guard
+63bb2ff step1: lower the T-46 junk-fastq floor 1MB->50KB, make it configurable
+aa1455c deploy: kraken installer always installs backend web requirements
+ad61ac5 deploy: kraken installer builds from complete env export + parameterizes app
+8d95492 deploy: kraken runtime extras + dashboard tile available
+0dab9b9 deploy: add Kraken ID Parse app installer (T-30)
+cd57544 deploy: site-parameterized OOD install playbook (T-49/T-50)
 ```
 
-Full history via `git log --oneline 8985763..` (about 30 commits).
+(`cd57544` was rebased onto current `origin/main` mid-session — it carries the
+vSNP backend parameterization + the playbook; the later commits add Kraken and
+the runtime fixes.)
 
 ## Verify when picking up
 
 ```sh
-# Local Mac, main HEAD
-git log --oneline -3 main
-# Expected: 507f192 ood-dev: set git safe.directory ...
-
-# Remote sanity
-git remote -v
-# Expected: origin https://github.com/kapurlab/vsnp_gui.git
-
-# Recent open PRs / CodeRabbit activity
-gh pr list --state open --repo kapurlab/vsnp_gui
-gh pr list --state merged --limit 3 --repo kapurlab/vsnp_gui
-
-# Branches Tod's keeping warm
 git fetch origin --prune
-git branch -r | grep feature/
+gh pr view 2 --repo kapurlab/vsnp_gui            # PR #2, the playbook
+git log --oneline origin/main..origin/feature/ood-install-playbook
 
-# wgs3 prod checkout
-ssh wgs3 'cd /srv/kapurlab/tools/vsnp_gui && git log --oneline -2'
-# Expected: 507f192 ... ; on main
-
-# Dev card sanity (both vsnp_gui_dev and kraken_id_parse_gui_dev should
-# launch cleanly for vxk1 — cross-user safe.directory is now in)
-ssh wgs3 'sudo ls /var/www/ood/apps/sys/ | grep -E "vsnp_gui|kraken"'
-
-# CodeRabbit yaml present
-test -f .coderabbit.yaml && echo "yes" || echo "no"
+# wgs1 standing install (read-only checks)
+ssh wgs1 'curl -s -o /dev/null -w "%{http_code}\n" http://100.78.29.2/pun/sys/dashboard/'  # 302/200 chain
+ssh wgs1 'sudo ls /var/www/ood/apps/sys/ | grep -E "vsnp_gui|kraken_id_parse_gui"'
+ssh wgs1 'ls /etc/sudoers.d/vkapur-temp'         # the grant to remove
 ```
 
-## Anchor docs (read these next, in order)
+> wgs1 SSH from Vivek's Mac is `ssh wgs1` (alias in `~/.ssh/config`, key
+> `~/.ssh/kapur_wgs_key`, user vkapur). vkapur has passwordless sudo there *only*
+> because of the temp grant above — removing it reverts to password sudo.
 
-- [`docs/dev/TICKETS.md`](TICKETS.md) — T-IDs, milestones, T-47/T-48
-  status
-- [`docs/dev/TOD_QUEUE.md`](TOD_QUEUE.md) — open items for next Tod
-  conversation (kraken note items, GitHub PR merge gate, sample
-  metadata editor deep-link, etc.)
-- [`docs/dev/redteam/DECISIONS.md`](redteam/DECISIONS.md) — the two
-  UNRESOLVED red-team decisions still blocking T-27
-- [`ood/README.md`](../../ood/README.md) — OOD app deploy convention
-  (sudo cp + restart pattern)
-- `/Users/vivekkapur/Downloads/PLATFORM_PROPOSAL-2.md` — the v1.1
-  platform proposal Tod gave point-by-point feedback on; the
-  proposal needs (a) to move into the repo, (b) the six edits from
-  Tod's reply applied
-
-## Note for next-session Claude
-
-This session was unusually long. The cascade-IGV work alone went
-through ~12 iterations because every browser-quirk (Safari named
-windows, large-genome locus zoom, imported-VCF samples, cross-user
-git ownership) surfaced something the prior fix didn't catch. The
-pattern: each "small" feature exposes ~3 environmental edge cases.
-Budget the same generosity for similar UI-meets-OOD-meets-bioinformatics
-work.
-
-The user is Vivek, working from Mac (`vxk1@kapurlab-wgs3.tailf38ff4.ts.net`
-via Tailscale). Tod (`tks5563`) is the second collaborator, USDA NAHLN
-context. Both have admin sudo on wgs3 via `kapurlab-admins` group.
-Repo is now `kapurlab/vsnp_gui`, public, CodeRabbit reviewing.
+## Anchor docs (read next, in order)
+- [`../deploy/INSTALL_OOD.md`](../deploy/INSTALL_OOD.md) — the install runbook.
+- [`../deploy/WGS3_AUDIT.md`](../deploy/WGS3_AUDIT.md) — reference-install audit +
+  the literal→`site.conf` parameterization map.
+- [`../deploy/WGS1_TEST_RESULTS.md`](../deploy/WGS1_TEST_RESULTS.md) — the bug log.
+- [`TICKETS.md`](TICKETS.md), [`TOD_QUEUE.md`](TOD_QUEUE.md),
+  [`redteam/DECISIONS.md`](redteam/DECISIONS.md).

@@ -20,8 +20,16 @@ import shlex
 import re
 import hashlib
 import tempfile
+import threading
 
-from app.config import load_config, save_config
+# Serializes Step 1 dispatch so a fast double-click can't start two batches
+# that race over the same per-sample dirs. The check ("is a job already
+# running?") and the claim (write .step1_job_id) span ~200 lines; without this
+# lock both requests pass the check before either claims. uvicorn runs
+# single-process here, so a threading.Lock is sufficient.
+_STEP1_DISPATCH_LOCK = threading.Lock()
+
+from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
 from app import qc_verdict
 from app import provenance_writer
@@ -295,9 +303,13 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
 # that vsnp3 can't actually process (single-end, or suspiciously small
 # fastqs that are usually SRA submission errors). Without this, one bad
 # sample takes down the whole batch because T-07 provenance dispatch
-# requires every sample's inputs hash cleanly. 1 MB is a deliberately
-# generous floor — real WGS fastqs are usually multi-MB minimum.
-_T46_JUNK_FASTQ_BYTES = 1024 * 1024  # 1 MB
+# requires every sample's inputs hash cleanly.
+#
+# The floor is config-driven (config.DEFAULTS["step1_min_fastq_bytes"]); this
+# constant is the fallback default. 50 KB catches the ~43-47 KB junk seen in
+# the LSDV batch while PASSING legitimately small viral/amplicon reads — a
+# 1 MB floor (the original) wrongly flagged SARS-CoV-2 amplicon (~200 KB).
+_T46_JUNK_FASTQ_BYTES = 50 * 1024  # 50 KB (fallback; see step1_min_fastq_bytes)
 
 
 def _safe_stat_size(p: Path) -> Optional[int]:
@@ -311,7 +323,9 @@ def _safe_stat_size(p: Path) -> Optional[int]:
         return None
 
 
-def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any]]]:
+def _step1_dispatch_plan(
+    step1_dir: Path, min_bytes: int = _T46_JUNK_FASTQ_BYTES
+) -> tuple[List[str], List[Dict[str, Any]]]:
     """Decide which sample dirs to actually dispatch and which to skip.
 
     Returns (samples_to_run, skipped) where `skipped` is a list of
@@ -325,9 +339,10 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
          Illumina support via a vsnp3 patch.
       2. R1 found but no R2 → incomplete download or single-end with R1
          naming. Skip with a distinct message.
-      3. R1 < 1 MB OR R2 < 1 MB → suspiciously small. Real WGS fastqs are
-         multi-MB minimum; sub-MB are almost always SRA submission errors
-         (we've seen 43-47 KB ones in the LSDV batch).
+      3. R1 < min_bytes OR R2 < min_bytes → suspiciously small. Default floor
+         is 50 KB (config: step1_min_fastq_bytes), which catches the 43-47 KB
+         SRA submission errors seen in the LSDV batch while passing legitimately
+         small viral/amplicon reads (SARS-CoV-2 amplicon is ~200 KB).
     """
     samples: List[str] = []
     skipped: List[Dict[str, Any]] = []
@@ -346,7 +361,7 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
                 })
             else:
                 total = sum(f.stat().st_size for f in all_fq if f.is_file())
-                if total < _T46_JUNK_FASTQ_BYTES:
+                if total < min_bytes:
                     skipped.append({
                         "sample": p.name,
                         "reason": f"single-end and suspiciously small ({total} bytes); likely SRA submission error",
@@ -381,7 +396,7 @@ def _step1_dispatch_plan(step1_dir: Path) -> tuple[List[str], List[Dict[str, Any
                 "size_bytes": 0,
             })
             continue
-        if r1_size < _T46_JUNK_FASTQ_BYTES or r2_size < _T46_JUNK_FASTQ_BYTES:
+        if r1_size < min_bytes or r2_size < min_bytes:
             skipped.append({
                 "sample": p.name,
                 "reason": f"suspiciously small paired fastqs (R1={r1_size}, R2={r2_size} bytes); likely junk",
@@ -1362,7 +1377,7 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
 #     top when shipped.
 _T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis)\.xlsx$")
 _T39_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-_T39_SHARED_AUDIT_PATH = Path("/srv/kapurlab/audit/reference-changes.jsonl")
+_T39_SHARED_AUDIT_PATH = SITE_ROOT / "audit" / "reference-changes.jsonl"
 
 
 def _sha256_of_path(path: Path) -> str:
@@ -1950,6 +1965,17 @@ def step1_run(project: str, payload: Step1Request):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
+    # Hold the dispatch lock across the whole check→claim so a simultaneous
+    # double-click serializes: the first request claims .step1_job_id and starts
+    # the job; the second then sees it "running" and gets a 409 (below).
+    with _STEP1_DISPATCH_LOCK:
+        return _step1_dispatch(project, payload, cfg, project_dir, step1_dir)
+
+
+def _step1_dispatch(
+    project: str, payload: Step1Request, cfg: Dict[str, Any],
+    project_dir: Path, step1_dir: Path,
+):
     # Refuse to spawn a second batch while a prior step1 job is still
     # running — concurrent batches share the same per-sample dirs and race
     # over the SAM / log / .provenance/exit_code files, producing the
@@ -2023,7 +2049,9 @@ def step1_run(project: str, payload: Step1Request):
     # (e.g. one whose download source was deleted, leaving broken symlinks)
     # from being run and failing the whole batch — those are surfaced to the
     # user as `skipped_samples` instead.
-    samples, skipped_samples = _step1_dispatch_plan(step1_dir)
+    samples, skipped_samples = _step1_dispatch_plan(
+        step1_dir, min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES)
+    )
     samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(
         "\n".join([
@@ -3596,7 +3624,7 @@ def kraken_samples(project: str):
 # vsnp3 env has neither kraken2, krona, nor SPAdes). The Kraken tool itself is
 # lab-shared functionality; only the project data lives per-user/shared.
 # ---------------------------------------------------------------------------
-_KRAKEN_GUI_ROOT = Path("/srv/kapurlab/tools/kraken_id_parse_gui")
+_KRAKEN_GUI_ROOT = SITE_ROOT / "tools" / "kraken_id_parse_gui"
 
 # Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
 # read and append to this same file so the preset list stays in sync.
@@ -3877,9 +3905,9 @@ def kraken_run(project: str, payload: KrakenRunRequest):
 
     # Kraken DB: request override → vsnp config (if a user set one) → shared default.
     kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
-        or "/srv/kapurlab/databases/kraken2/k2_standard_08gb"
+        or str(SITE_ROOT / "databases" / "kraken2" / "k2_standard_08gb")
     blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
-        or "/srv/kapurlab/databases/blast/ref_prok_rep_genomes"
+        or str(SITE_ROOT / "databases" / "blast" / "ref_prok_rep_genomes")
     if kraken_only and not kraken_db:
         raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
     if parse_only and not kraken_db:

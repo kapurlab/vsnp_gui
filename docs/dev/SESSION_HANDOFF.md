@@ -1,10 +1,61 @@
-# Session handover — June 6–7 2026
+# Session handover — June 7–8 2026
 
-> **NEXT-SESSION CLAUDE: do _not_ start coding.** Read this, then **ask Vivek
-> what to prioritize and confirm the plan before making any change.** This
-> session ended on a deliberate "wrap up + hand off" note; the next move is a
-> conversation about cleanup + packaging, not autonomous work. No code, installs,
-> teardowns, or commits without an explicit go-ahead.
+> **NEXT-SESSION CLAUDE:** Read this, then **ask Vivek what to prioritize and
+> confirm before making changes.** Don't start a big thread autonomously. The
+> June 6–7 handover (below) remains valid for the deeper backlog.
+
+This session did three things, all validated live with Vivek:
+
+## 1. wgs1 test-artifact cleanup — DONE
+The three owed cleanups (see June 6–7 section) are cleared: blanket `vkapur-temp`
+NOPASSWD:ALL removed, PAM password rotated, wgs3 stray transfer key stripped.
+New **non-standing scoped sudo** workflow: `deploy/admin/claude-sudo-grant.sh`
+(re-grant on demand; needs Vivek's password now) + `claude-sudo-revoke.sh`.
+wgs1 ends in a **clean steady state — no standing passwordless sudo**.
+
+## 2. Teardown + tarball reinstall — VALIDATED end-to-end
+- New `deploy/teardown_ood.sh` (phase-based, `--dry-run`/`--yes`, `--keep-conda`,
+  `--include-core`, self-relocating) and `deploy/build_dist.sh` (the §8 tarball:
+  git archive + injected demo bundle + `INSTALL.md`).
+- Full bare-tree teardown of `/srv/nivedi`, then reinstall **from the tarball
+  alone** → vSNP GUI + Kraken both rebuilt, backend serves the SPA + discovers
+  the reference, Kraken env + 8 GB DB in place. wgs1 is a fresh, working NIVEDI
+  install right now.
+- **5 findings** (`docs/deploy/WGS1_TEST_RESULTS.md` Round 2): #7 exit-1-on-success
+  in `install_ood.sh`/`bootstrap_ood_core.sh`/`teardown_ood.sh` (**fixed**); #8
+  tarball not one-command → `install_ood.sh` **self-populate added** (fixed); #9
+  `install_kraken.sh` can't clone a private repo under sudo (**NOT fixed** — clone
+  as `$SUDO_USER`; workaround = `KRAKEN_RSYNC_SOURCE`); #10 stale Kraken DB URL in
+  `site.conf.example` (**fixed** → 20250402).
+
+## 3. vSNP GUI file-listing bug — FIXED
+The inline project→sample expansion only showed Kraken outputs and only for
+Kraken'd samples. `frontend/src/App.jsx`: every sample is now expandable and
+shows a **vSNP outputs** section (Step 1/2 files) + a **Kraken outputs** section.
+Rebuilt + deployed to wgs1; Vivek confirmed it works.
+
+## wgs1 access (corrects the June 6–7 note)
+- SSH: **`ssh -i ~/.ssh/gb10_key vkapur@100.78.29.2`** (the old handoff named the
+  wrong key — `gb10_key`, not `kapur_wgs_key`).
+- OOD: `http://100.78.29.2/`, login `vkapur` + the password Vivek set this session
+  (NOT in git). vkapur is now a `nivedi-admins` member; loopback SSH verified.
+- Re-grant sudo for deploy work: `sudo ~vkapur/claude-sudo-grant.sh` (kept in
+  vkapur's home, plus `claude-sudo-revoke.sh`, `teardown_ood.sh`, `site.conf.wgs1-test`).
+
+## Open for next session
+- **Commit/PR:** this session's work — `deploy/teardown_ood.sh`, `deploy/build_dist.sh`,
+  `deploy/admin/claude-sudo-{grant,revoke}.sh`, fixes in `deploy/install_ood.sh` /
+  `deploy/bootstrap_ood_core.sh` / `deploy/site.conf.example`, `frontend/src/App.jsx`,
+  and the doc updates. (Check whether it landed in git or is still uncommitted.)
+- **Finding #9** (kraken clone-as-`$SUDO_USER`) — needs a fix + its own test cycle.
+- **Roar import** — the next big thread (vSNP3 `_zc.vcf` import without re-running;
+  Phase-0 inventory scan first). Access to Roar still to be sorted.
+- Plus the June 6–7 backlog below (packaging tarball→release, PR #2 merge, branding,
+  dead-code review, T-27, PLATFORM_PROPOSAL).
+
+---
+
+# Session handover — June 6–7 2026
 
 Continuation notes. Read this first, then [`TICKETS.md`](TICKETS.md),
 [`TOD_QUEUE.md`](TOD_QUEUE.md), and the new
@@ -102,19 +153,29 @@ it as a reference or tear it down.
   incompatible interpreters; they share the conda pkg cache so identical-version
   tools are hardlinked, not duplicated).
 
-### ⚠️ Cleanup owed (temporary test artifacts — remove these)
-- `/etc/sudoers.d/vkapur-temp` on wgs1 — passwordless `sudo` for vkapur (I added
-  it so I could drive the install). **Remove it.**
-- vkapur's PAM password was set to **`VsnpDemo2026`** for the browser test.
-  **Rotate it** (`sudo passwd vkapur`).
-- wgs1→wgs3 transfer key: vkapur's pubkey was appended to wgs3
-  `~vxk1/.ssh/authorized_keys` (to pull the 8 GB DB direct). **Remove that line.**
+### ✅ Cleanup DONE (June 6 late session)
+All three temporary test artifacts cleared:
+- `/etc/sudoers.d/vkapur-temp` (blanket `vkapur ALL=(ALL) NOPASSWD:ALL`) **removed**
+  on wgs1, replaced by a non-standing, scoped grant managed by
+  `deploy/admin/claude-sudo-grant.sh` / `claude-sudo-revoke.sh`. The scoped grant
+  (`/etc/sudoers.d/claude-deploy`) permits NOPASSWD only on the vetted deploy
+  scripts (`bootstrap_ood_core.sh`, `install_ood.sh`, `install_kraken.sh`,
+  `teardown_ood.sh`) + `apt-get` + `systemctl reload apache2`. Those scripts are
+  `root:root 0755` in a `root:nivedi-admins drwxr-sr-x` dir (vkapur can't edit or
+  swap them), so the scoping is real least-privilege. Re-grant on demand:
+  `sudo ~/claude-sudo-grant.sh` (needs vkapur's password now that blanket is gone).
+- vkapur's PAM password **rotated** off the old browser-test value (which was
+  committed here — do not reuse it). The new value is shared only in the session
+  transcript, NOT recorded in git; store it in a password manager.
+- wgs1→wgs3 transfer key **removed** from wgs3 `~vxk1/.ssh/authorized_keys`
+  (line was `vkapur@a8-an-vxk1-u3`, mislabeled "OOD localhost loopback"). Backup
+  at `~vxk1/.ssh/authorized_keys.bak-20260606-235615`; 3 legit keys remain.
 
 ---
 
 ## Open items for the next session (in rough priority — CONFIRM with Vivek first)
 
-1. **Cleanup** the three test artifacts above.
+1. ~~**Cleanup** the three test artifacts above.~~ ✅ DONE (see above).
 2. **Packaging** — the original ask was a "tarball + roadmap" a sysadmin can
    install out-of-the-box. The scripts + docs + sample bundle exist; what's NOT
    done is bundling them into an actual distributable artifact (a `make dist` /

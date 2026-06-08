@@ -119,3 +119,52 @@ All six were caught only by running on a clean box — none showed up in dry-run
 - `/srv/nivedi/tools/vsnp3` (vsnp3 3.16, fastapi 0.136 / uvicorn 0.49)
 - demo project at `/home/vkapur/projects/demo_sars_cov_2`
 - temp passwordless sudo at `/etc/sudoers.d/vkapur-temp` — **remove when done**
+
+---
+
+# Round 2 — full bare-tree teardown + tarball reinstall (June 7 2026)
+
+Validated the **distributable tarball** end-to-end: built `vsnp_gui-platform-<ver>.tar.gz`
+with `deploy/build_dist.sh`, fully tore down the wgs1 install with the new
+`deploy/teardown_ood.sh`, then reinstalled the vSNP GUI + Kraken **from the
+unpacked tarball alone**. conda base lives in `/home/vkapur/miniforge3` (outside
+`/srv/nivedi`), so the tree wipe left the pkg cache intact and both env rebuilds
+hardlinked (fast).
+
+## Result: PASS
+- vSNP GUI: one-command `install_ood.sh` from the unpacked tarball → all phases
+  green; backend smoke test served the SPA (`GET /` 200) and discovered the
+  bundle reference (`GET /api/references` → `NC_045512_wuhan-hu-1`).
+- Kraken: `install_kraken.sh app card verify` → env built (kraken2 2.17.1),
+  card installed. 8 GB DB deferred (not a code path under test).
+- OOD core survived teardown (portal 401, dashboard 301); both cards re-registered.
+
+## Bugs found & fixed this round
+- **#7 exit-1-on-success.** `install_ood.sh`, `bootstrap_ood_core.sh`, and the new
+  `teardown_ood.sh` all ended on `[[ ${DRY_RUN} -eq 1 ]] && echo ...`, which
+  returns 1 when NOT a dry run — so a successful real install exited 1. Latent in
+  every prior install. Fixed (explicit `if` + `exit 0`). A CI/wrapper checking the
+  exit code would have read success as failure.
+- **#8 tarball not one-command installable.** `install_ood.sh` expected the repo to
+  already be at `VSNP_GUI_DIR` and only *warned* if absent → unpack-and-run gave a
+  half-install (no frontend/backend at the install location). Added **self-populate**:
+  when run from an unpacked distributable (`REPO_DIR != VSNP_GUI_DIR`) and the
+  target isn't a checkout/copy yet, it rsyncs the source into place. Validated.
+
+## Gaps found, NOT yet fixed (documented for a follow-up)
+- **#9 private-repo clone under sudo fails.** `install_kraken.sh` clones
+  `KRAKEN_REPO_URL` as root; a private GitHub repo's creds live in the invoking
+  user's credential helper, not root's → `fatal: could not read Username for
+  https://github.com`. Workaround used: clone as the user, then point
+  `KRAKEN_RSYNC_SOURCE` at the local copy (the installer's rsync path works as
+  root). Proper fix: clone as `${SUDO_USER}` into a tempdir, then place as root.
+  Needs its own test cycle, so left as a finding rather than shipped untested.
+
+## New deploy tooling added this round
+- `deploy/teardown_ood.sh` — reverse the install (phase-based, `--dry-run`,
+  `--yes` gate, `--keep-conda`, `--include-core`, self-relocates so it can't
+  delete the running script). Default leaves OOD core intact.
+- `deploy/build_dist.sh` — produce `vsnp_gui-platform-<ver>.tar.gz` (git archive +
+  injected sample bundle + optional `.sif` + top-level `INSTALL.md`).
+- `deploy/admin/claude-sudo-grant.sh` / `claude-sudo-revoke.sh` — non-standing,
+  scoped deploy-sudo grant (replaced the old `vkapur-temp` blanket NOPASSWD:ALL).

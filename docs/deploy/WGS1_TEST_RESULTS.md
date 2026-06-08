@@ -151,14 +151,25 @@ hardlinked (fast).
   when run from an unpacked distributable (`REPO_DIR != VSNP_GUI_DIR`) and the
   target isn't a checkout/copy yet, it rsyncs the source into place. Validated.
 
-## Gaps found, NOT yet fixed (documented for a follow-up)
-- **#9 private-repo clone under sudo fails.** `install_kraken.sh` clones
-  `KRAKEN_REPO_URL` as root; a private GitHub repo's creds live in the invoking
-  user's credential helper, not root's → `fatal: could not read Username for
-  https://github.com`. Workaround used: clone as the user, then point
-  `KRAKEN_RSYNC_SOURCE` at the local copy (the installer's rsync path works as
-  root). Proper fix: clone as `${SUDO_USER}` into a tempdir, then place as root.
-  Needs its own test cycle, so left as a finding rather than shipped untested.
+## Gaps found
+- **#9 private-repo clone under sudo fails — FIXED (branch
+  `fix/kraken-clone-as-sudo-user`, validated 2026-06-08).** `install_kraken.sh`
+  cloned `KRAKEN_REPO_URL` as root; a private GitHub repo's creds live in the
+  invoking user's credential helper, not root's → `fatal: could not read
+  Username for https://github.com`. Fix: a `clone_repo()` helper clones as the
+  invoking user (`$SUDO_USER`) via `runuser -u "$u" -- env HOME=<their home> git
+  clone` — so their creds resolve (on wgs1, vkapur's gh credential helper
+  `!~/miniforge3/bin/gh auth git-credential`) — into a tempdir, then relocates
+  the tree into the root-owned `KRAKEN_DIR` (`cp -a --no-preserve=ownership`,
+  `.git` stripped for parity with the rsync path; the existing `chgrp` sets the
+  group). Falls back to a direct clone when not under sudo; emits an actionable
+  error (check creds / use `KRAKEN_RSYNC_SOURCE`) on failure.
+  - **Validated non-destructively on wgs1**: `install_kraken.sh app` against a
+    throwaway `/tmp` site root (bogus `CONDA_BASE`/`NPM_BIN` so only the clone
+    runs) → cloned the private repo *as vkapur* while the script ran as root,
+    placed `root:nivedi-admins`, `.git` absent, temp dir cleaned. The live
+    `/srv/nivedi` install was untouched. Full teardown→reinstall of the kraken
+    app still available as a follow-up if end-to-end coverage is wanted.
 
 ## New deploy tooling added this round
 - `deploy/teardown_ood.sh` — reverse the install (phase-based, `--dry-run`,

@@ -123,8 +123,10 @@ OOD_SIF_SOURCE=
 # Stand up the Kraken contamination-screening app alongside vSNP. Skip this
 # whole block if you don't want Kraken.
 
-# The app repo (private on GitHub). The installer clones it if you have access;
-# otherwise set KRAKEN_RSYNC_SOURCE to mirror it from an existing install.
+# The app repo (private on GitHub). Run under sudo, the installer clones it as
+# the invoking user ($SUDO_USER) so YOUR GitHub creds are used (root has none) —
+# ~/.ssh keys, `gh auth`, or ~/.git-credentials all work. No access? Set
+# KRAKEN_RSYNC_SOURCE instead to mirror it from an existing install.
 KRAKEN_REPO_URL=https://github.com/kapurlab/kraken_id_parse_gui.git
 KRAKEN_RSYNC_SOURCE=        # e.g. vxk1@kapurlab-wgs3...:/srv/kapurlab/tools/kraken_id_parse_gui
 

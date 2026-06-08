@@ -58,6 +58,38 @@ die(){ echo "${c_red}error:${c_rst} $*" >&2; exit 1; }
 run(){ if [[ ${DRY_RUN} -eq 1 ]]; then echo "    ${c_dim}[dry-run] $*${c_rst}"; else "$@"; fi; }
 need_root(){ [[ ${DRY_RUN} -eq 1 || "$(id -u)" -eq 0 ]] || die "phase mutates the system; run under sudo"; }
 
+# clone_repo URL DEST — clone a (possibly PRIVATE) repo into DEST.
+# Under sudo the script runs as root, which has no GitHub credentials, so a
+# direct `git clone` of a private repo fails. Instead clone as the invoking
+# user ($SUDO_USER) — using THEIR creds (~/.ssh keys, gh auth, or
+# ~/.git-credentials, found via their $HOME) — into a temp dir, then relocate
+# into the root-owned DEST. When not run via sudo, clone directly. (Finding #9)
+clone_repo(){
+  local url="$1" dest="$2" u="${SUDO_USER:-}"
+  if [[ "$(id -u)" -ne 0 || -z "${u}" || "${u}" == "root" ]]; then
+    run git clone "${url}" "${dest}"
+    ok "cloned ${url} -> ${dest}"
+    return
+  fi
+  local uhome; uhome="$(getent passwd "${u}" | cut -d: -f6)"
+  [[ -n "${uhome}" ]] || die "cannot resolve home dir for ${u}"
+  if [[ ${DRY_RUN} -eq 1 ]]; then
+    echo "    ${c_dim}[dry-run] clone ${url} as ${u} (HOME=${uhome}) -> temp -> ${dest}${c_rst}"
+    return
+  fi
+  local tmpc
+  tmpc="$(runuser -u "${u}" -- mktemp -d "${TMPDIR:-/tmp}/kraken-clone.XXXXXX")" \
+    || die "could not create temp clone dir as ${u}"
+  if ! runuser -u "${u}" -- env HOME="${uhome}" git clone --depth 1 "${url}" "${tmpc}/repo"; then
+    rm -rf "${tmpc}"
+    die "git clone failed as ${u} — private repo without access? Check ${u}'s GitHub creds (~/.ssh, 'gh auth status', or ~/.git-credentials), or set KRAKEN_RSYNC_SOURCE to mirror instead."
+  fi
+  mkdir -p "${dest}"
+  cp -a --no-preserve=ownership "${tmpc}/repo/." "${dest}/"   # root-owned; group fixed below
+  rm -rf "${tmpc}" "${dest}/.git"                             # drop .git for parity with the rsync path
+  ok "cloned ${url} as ${u} -> ${dest}"
+}
+
 # Same site-token substitution as install_ood.sh (FQDN-last + IP handled by the
 # OOD card's own logic; the kraken card only needs the path/cluster/site tokens).
 subst() {
@@ -97,8 +129,7 @@ phase_app() {
         "${KRAKEN_RSYNC_SOURCE%/}/" "${KRAKEN_DIR}/"
     ok "mirrored kraken repo from ${KRAKEN_RSYNC_SOURCE}"
   elif [[ -n "${KRAKEN_REPO_URL:-}" ]]; then
-    run git clone "${KRAKEN_REPO_URL}" "${KRAKEN_DIR}"
-    ok "cloned ${KRAKEN_REPO_URL}"
+    clone_repo "${KRAKEN_REPO_URL}" "${KRAKEN_DIR}"
   else
     die "kraken repo absent and neither KRAKEN_RSYNC_SOURCE nor KRAKEN_REPO_URL set"
   fi

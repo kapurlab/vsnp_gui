@@ -70,6 +70,30 @@ def _strip_vcf_suffix(s: str) -> str:
     return out
 
 
+def _canonical_stem(label: str, *stem_sets) -> str:
+    """Map a variant-table label back to the bare sample stem used on disk.
+
+    vSNP3 step2 relabels samples with descriptive metadata
+    (`ERR930304_Sterne_A_Br_75_..._Denmark`), while step1 dirs and
+    `vcf_database/` files are named after the bare id (`ERR930304`). Imported
+    projects therefore show long labels in the cascade table that never match
+    the on-disk stems — blanking "this" and tripping a false "no Step 1
+    outputs". Resolve the label to the longest known stem ``S`` such that
+    ``label == S`` or ``label`` starts with ``S + "_"``; fall back to the label
+    unchanged when nothing matches (or when no stem sets were supplied)."""
+    known: set[str] = set()
+    for s in stem_sets:
+        if s:
+            known |= s
+    if not known or label in known:
+        return label
+    best: str | None = None
+    for s in known:
+        if label.startswith(s + "_") and (best is None or len(s) > len(best)):
+            best = s
+    return best if best is not None else label
+
+
 def _detect_variant_table(ws) -> dict | None:
     """Return variant-alignment-table metadata if `ws` matches the shape.
 
@@ -515,6 +539,18 @@ def xlsx_to_html(
     dxfs = list(wb._differential_styles.styles) if hasattr(wb, "_differential_styles") else []
     cf_extras = _build_cf_extras(ws, dxfs)
     vtable = _detect_variant_table(ws) if project else None
+    if vtable:
+        # Canonicalize the "open all" cohort to bare on-disk stems (dedup,
+        # order-preserving) so "↗ all" loads real tracks for imported,
+        # step2-renamed samples instead of unmatched descriptive labels.
+        seen: set[str] = set()
+        canon_all: list[str] = []
+        for s in vtable["all_stems"]:
+            cs = _canonical_stem(s, samples_with_bams, samples_with_vcfs)
+            if cs not in seen:
+                seen.add(cs)
+                canon_all.append(cs)
+        vtable["all_stems"] = canon_all
 
     # Pre-compute merged-cell map: anchor coordinate → (rowspan, colspan);
     # all other cells in the merge get skipped.
@@ -615,7 +651,12 @@ def xlsx_to_html(
                 and cell.column in vtable["positions"]
                 and any("background-color" in p for p in inline_parts)
             ):
-                row_stem = vtable["samples"][cell.row]
+                # Resolve the (possibly metadata-decorated) cascade label back
+                # to the bare on-disk stem so loadability + the IGV track id
+                # match the BAM/VCF filenames (imported step2-renamed samples).
+                row_stem = _canonical_stem(
+                    vtable["samples"][cell.row], samples_with_bams, samples_with_vcfs
+                )
                 has_bam = samples_with_bams is None or row_stem in samples_with_bams
                 has_vcf = samples_with_vcfs is not None and row_stem in samples_with_vcfs
                 # Loadable if either source is present (default-loadable when

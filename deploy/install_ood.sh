@@ -304,11 +304,27 @@ phase_toolchain() {
     fi
   fi
 
-  # 5. ensure this repo is at VSNP_GUI_DIR (clone if absent)
+  # 5. ensure this repo is materialized at VSNP_GUI_DIR. The OOD card's
+  #    before.sh/script.sh, the cron, and the frontend build (step 6) all read
+  #    from VSNP_GUI_DIR — so when install_ood.sh is run from an unpacked
+  #    distributable (REPO_DIR != VSNP_GUI_DIR) and the target isn't populated,
+  #    copy the source there. A git checkout at VSNP_GUI_DIR is the other
+  #    supported layout; we never clobber an existing checkout or copy.
   if [[ -d "${VSNP_GUI_DIR}/.git" ]]; then
     ok "vsnp_gui checkout present at ${VSNP_GUI_DIR}"
+  elif [[ -f "${VSNP_GUI_DIR}/frontend/package.json" ]]; then
+    ok "vsnp_gui source present at ${VSNP_GUI_DIR}"
+  elif [[ "${REPO_DIR}" != "${VSNP_GUI_DIR}" ]]; then
+    run mkdir -p "${VSNP_GUI_DIR}"
+    run rsync -a \
+        --exclude '.git' --exclude 'node_modules' --exclude 'frontend/dist' \
+        --exclude '.venv' --exclude '.iconenv' --exclude '__pycache__' \
+        --exclude '*.pyc' --exclude 'dist/' \
+        "${REPO_DIR}/" "${VSNP_GUI_DIR}/"
+    run chgrp -R "${ADMINS_GROUP}" "${VSNP_GUI_DIR}" 2>/dev/null || true
+    ok "materialized vsnp_gui source -> ${VSNP_GUI_DIR} (from ${REPO_DIR})"
   else
-    warn "vsnp_gui not checked out at ${VSNP_GUI_DIR}."
+    warn "vsnp_gui not present at ${VSNP_GUI_DIR} and no separate source to copy."
     info "  git clone https://github.com/kapurlab/vsnp_gui.git ${VSNP_GUI_DIR}"
   fi
 
@@ -498,4 +514,5 @@ for ph in "${PHASES[@]}"; do
 done
 
 log "done."
-[[ ${DRY_RUN} -eq 1 ]] && echo "Re-run without --dry-run as root to apply."
+if [[ ${DRY_RUN} -eq 1 ]]; then echo "Re-run without --dry-run as root to apply."; fi
+exit 0

@@ -253,4 +253,5 @@ for s in "${STEPS[@]}"; do
 done
 
 log "OOD core bootstrap done."
-[[ ${DRY_RUN} -eq 1 ]] && echo "Re-run without --dry-run as root to apply, then run install_ood.sh."
+if [[ ${DRY_RUN} -eq 1 ]]; then echo "Re-run without --dry-run as root to apply, then run install_ood.sh."; fi
+exit 0

@@ -42,8 +42,9 @@ export default function App() {
   // Project list expands inline to show its samples (Kraken-GUI-style layout).
   const [projExpanded, setProjExpanded] = useState({});   // project -> bool
   const [projData, setProjData] = useState({});           // project -> {loading, samples:[grouped], krakenDirs:[]}
-  const [sampleKrakenOpen, setSampleKrakenOpen] = useState({});   // "proj::sample" -> bool
+  const [sampleKrakenOpen, setSampleKrakenOpen] = useState({});   // "proj::sample" -> bool (row expanded)
   const [sampleKrakenFiles, setSampleKrakenFiles] = useState({}); // "proj::sample" -> {loading,present,files}
+  const [sampleStep1Files, setSampleStep1Files] = useState({});   // "proj::sample" -> {loading,files} (vSNP Step 1/2 outputs)
   const [copiedPath, setCopiedPath] = useState("");               // last path copied (for transient "Copied" hint)
   const [folderPickerMode, setFolderPickerMode] = useState("dropdown"); // "dropdown" | "custom"
   const [qcRows, setQcRows] = useState([]);
@@ -1542,11 +1543,61 @@ export default function App() {
     }
   }
 
-  function toggleSampleKraken(project, sample) {
+  // Expand a sample row to show ITS files: the vSNP Step 1/2 outputs (always)
+  // plus any Kraken ID Parse outputs (when a kraken run exists). `sample` is the
+  // step1 sample name; `krakenDir` is the (possibly differently-named) kraken
+  // output dir for it, or null.
+  function toggleSample(project, sample, krakenDir) {
     const key = `${project}::${sample}`;
     const willOpen = !sampleKrakenOpen[key];
     setSampleKrakenOpen((m) => ({ ...m, [key]: willOpen }));
-    if (willOpen && !sampleKrakenFiles[key]) loadSampleKraken(project, sample);
+    if (willOpen) {
+      if (!sampleStep1Files[key]) loadSampleStep1(project, sample);
+      if (krakenDir && !sampleKrakenFiles[key]) loadSampleKraken(project, krakenDir);
+    }
+  }
+
+  async function loadSampleStep1(project, sample) {
+    const key = `${project}::${sample}`;
+    setSampleStep1Files((m) => ({ ...m, [key]: { loading: true, files: [] } }));
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples/${encodeURIComponent(sample)}/files`);
+      if (!res.ok) { setSampleStep1Files((m) => ({ ...m, [key]: { loading: false, files: [] } })); return; }
+      const data = await res.json();
+      setSampleStep1Files((m) => ({ ...m, [key]: { loading: false, ...data } }));
+    } catch (_) {
+      setSampleStep1Files((m) => ({ ...m, [key]: { loading: false, files: [] } }));
+    }
+  }
+
+  // One file row in a sample's expanded output list (shared by the vSNP and
+  // Kraken sections). Inline-openable files link; fastq.gz get import helpers;
+  // everything has a download arrow.
+  function sampleFileRow(project, f) {
+    const base = `${API_BASE}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(f.path)}`;
+    const isFastq = f.name.endsWith(".fastq.gz");
+    return (
+      <div key={f.path} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
+          {f.openable ? (
+            <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
+          ) : f.relpath}
+          {isFastq ? <span title="Parsed reads — import to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+        </span>
+        <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
+        {isFastq ? (
+          <>
+            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Copy this file's server path (paste into Inputs → server path)" onClick={() => copyPath(f.path)}>
+              {copiedPath === f.path ? "Copied!" : "Copy path"}
+            </button>
+            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Symlink into this project's download/ so it can be re-run through Step 1" onClick={() => importFastqToDownload(project, f.path)}>
+              Import → Step 1
+            </button>
+          </>
+        ) : null}
+        <a href={`${base}&inline=0`} title={`Download ${f.name}`} style={{ textDecoration: "none" }}>⬇</a>
+      </div>
+    );
   }
 
   async function loadSampleKraken(project, sample) {
@@ -2918,51 +2969,40 @@ export default function App() {
                         return (
                           <div key={g.sample} className="sample-row" style={{ border: "1px solid var(--border)", borderRadius: "8px", background: "var(--panel-2)" }}>
                             <div
-                              style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 10px", cursor: krakenDir ? "pointer" : "default", fontSize: "12px" }}
-                              onClick={() => krakenDir && toggleSampleKraken(p.name, krakenDir)}
-                              title={krakenDir ? "Show Kraken results for this sample" : "No Kraken run for this sample yet"}
+                              style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 10px", cursor: "pointer", fontSize: "12px" }}
+                              onClick={() => toggleSample(p.name, g.sample, krakenDir)}
+                              title="Show this sample's output files"
                             >
-                              {krakenDir ? <span className="expand-icon" style={{ fontSize: "0.7em", color: "var(--muted)" }}>{open ? "▾" : "▸"}</span> : <span style={{ width: "0.7em" }} />}
+                              <span className="expand-icon" style={{ fontSize: "0.7em", color: "var(--muted)" }}>{open ? "▾" : "▸"}</span>
                               <span style={{ flex: 1, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.sample}</span>
                               {g.isPair ? <span className="muted" style={{ fontSize: "10.5px" }}>R1+R2</span> : null}
                               {krakenDir ? (
                                 <span title="Kraken ID Parse results available" style={{ fontSize: "10px", padding: "1px 6px", borderRadius: "10px", background: "#ede9fe", color: "#5b21b6", fontWeight: 600 }}>🧬 Kraken</span>
                               ) : null}
                             </div>
-                            {krakenDir && open ? (
-                              <div style={{ borderTop: "1px solid var(--border)", padding: "4px 10px 6px 24px", display: "flex", flexDirection: "column", gap: "3px" }}>
-                                {kRes?.loading ? (
-                                  <span className="muted" style={{ fontSize: "11px" }}>Loading Kraken results…</span>
-                                ) : !kRes || !(kRes.files || []).length ? (
-                                  <span className="muted" style={{ fontSize: "11px" }}>No Kraken output files.</span>
-                                ) : (
-                                  kRes.files.map((f) => {
-                                    const base = `${API_BASE}/api/projects/${encodeURIComponent(p.name)}/download-file?path=${encodeURIComponent(f.path)}`;
-                                    const isFastq = f.name.endsWith(".fastq.gz");
-                                    return (
-                                      <div key={f.relpath} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
-                                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
-                                          {f.openable ? (
-                                            <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
-                                          ) : f.relpath}
-                                          {isFastq ? <span title="Parsed reads — import to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
-                                        </span>
-                                        <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
-                                        {isFastq ? (
-                                          <>
-                                            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Copy this file's server path (paste into Inputs → server path)" onClick={() => copyPath(f.path)}>
-                                              {copiedPath === f.path ? "Copied!" : "Copy path"}
-                                            </button>
-                                            <button className="ghost-btn" style={{ fontSize: "10.5px", padding: "1px 6px" }} title="Symlink into this project's download/ so it can be re-run through Step 1" onClick={() => importFastqToDownload(p.name, f.path)}>
-                                              Import → Step 1
-                                            </button>
-                                          </>
-                                        ) : null}
-                                        <a href={`${base}&inline=0`} title={`Download ${f.name}`} style={{ textDecoration: "none" }}>⬇</a>
-                                      </div>
-                                    );
-                                  })
-                                )}
+                            {open ? (
+                              <div style={{ borderTop: "1px solid var(--border)", padding: "4px 10px 6px 24px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                                <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                                  <span className="muted" style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>vSNP outputs</span>
+                                  {(() => {
+                                    const s1 = sampleStep1Files[key];
+                                    if (!s1 || s1.loading) return <span className="muted" style={{ fontSize: "11px" }}>Loading…</span>;
+                                    if (!(s1.files || []).length) return <span className="muted" style={{ fontSize: "11px" }}>No Step 1 outputs yet — run Step 1 for this sample.</span>;
+                                    return s1.files.map((f) => sampleFileRow(p.name, f));
+                                  })()}
+                                </div>
+                                {krakenDir ? (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                                    <span className="muted" style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>🧬 Kraken outputs</span>
+                                    {kRes?.loading ? (
+                                      <span className="muted" style={{ fontSize: "11px" }}>Loading Kraken results…</span>
+                                    ) : !kRes || !(kRes.files || []).length ? (
+                                      <span className="muted" style={{ fontSize: "11px" }}>No Kraken output files.</span>
+                                    ) : (
+                                      kRes.files.map((f) => sampleFileRow(p.name, f))
+                                    )}
+                                  </div>
+                                ) : null}
                               </div>
                             ) : null}
                           </div>

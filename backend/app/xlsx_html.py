@@ -107,7 +107,6 @@ def _detect_variant_table(ws) -> dict | None:
         {
           "positions": {col_idx: "contig:pos", ...},
           "samples":   {row_idx: sample_stem, ...},  # in row order
-          "all_stems": ["stem1", "stem2", ...],       # cohort for "open all"
         }
 
     or None when the sheet doesn't look like a variant-alignment table — in which
@@ -126,7 +125,6 @@ def _detect_variant_table(ws) -> dict | None:
     if len(positions) < 2:
         return None
     samples: dict[int, str] = {}
-    stems: list[str] = []
     for row_idx in range(2, ws.max_row + 1):
         v = ws.cell(row=row_idx, column=1).value
         if v is None:
@@ -138,28 +136,26 @@ def _detect_variant_table(ws) -> dict | None:
         if not stem:
             continue
         samples[row_idx] = stem
-        stems.append(stem)
     if not samples:
         return None
-    return {"positions": positions, "samples": samples, "all_stems": stems}
+    return {"positions": positions, "samples": samples}
 
 
 def _igv_launch_html(
     project: str,
     this_stem: str,
-    all_stems: list[str],
     locus: str,
     this_loadable: bool = True,
     this_calls_only: bool = False,
 ) -> str:
-    """Build the hover-revealed dual-affordance HTML for a variant cell.
+    """Build the hover-revealed IGV-launch affordance for a variant cell.
 
-    Two small text links — "this" and "all" — open the IgvStandalone viewer
-    page (`?view=igv&tracks=…&locus=…`). The anchor uses
+    A single small text link — "↗ this" — opens the IgvStandalone viewer
+    page (`?view=igv&tracks=…&locus=…`) for this row's sample. The anchor uses
     ``target="vsnp_igv"`` (a named window, not ``_blank``), so the first
     click opens a new tab and every subsequent click reuses that same tab
     — variant-after-variant inspection navigates a single IGV window
-    rather than spawning N tabs.
+    rather than spawning N tabs, building the cohort up additively.
 
     The URL is constructed relative to the current preview path so it
     survives the OOD proxy prefix: the preview is served at
@@ -176,8 +172,6 @@ def _igv_launch_html(
     """
     enc_proj = quote(project, safe="")
     enc_locus = quote(locus, safe="")
-    all_tracks = ",".join(f"{enc_proj}:{quote(s, safe='')}" for s in all_stems)
-    all_href = f"../../../?view=igv&tracks={all_tracks}&locus={enc_locus}"
     # Same-window, additive IGV behavior:
     #   First click: window.open(url, "vsnp_igv") boots a fresh IGV tab.
     #     Safari/Firefox ignore HTML target="<name>" for tracking-prevention
@@ -221,14 +215,11 @@ def _igv_launch_html(
         this_link = (
             '<span class="xlsx-igv-launch-disabled" '
             f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
-            'nor imported VCF in step2/vcf_database/. Use ↗ all to open the cohort.">↗ this</span>'
+            'nor imported VCF in step2/vcf_database/.">↗ this</span>'
         )
     return (
         '<span class="xlsx-igv-launch" aria-hidden="false">'
         f'{this_link}'
-        f'<a href="{html.escape(all_href, quote=True)}" '
-        f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
-        f'title="Open all samples in IGV at {html.escape(locus)}">↗ all</a>'
         '</span>'
     )
 
@@ -519,8 +510,8 @@ def xlsx_to_html(
 
     When ``project`` is provided and the sheet looks like a vSNP3 variant-alignment
     table, variant cells (those with a colored fill) get a hover-revealed
-    pair of IGV-launch links — "this" sample and "all" samples in the
-    cohort — opening the IgvStandalone viewer at the cell's locus.
+    IGV-launch link — "↗ this" — that opens the row's sample in the
+    IgvStandalone viewer at the cell's locus (additive across clicks).
 
     ``samples_with_bams`` (optional) is the set of step1 sample names for
     which a BAM exists on disk.
@@ -539,18 +530,6 @@ def xlsx_to_html(
     dxfs = list(wb._differential_styles.styles) if hasattr(wb, "_differential_styles") else []
     cf_extras = _build_cf_extras(ws, dxfs)
     vtable = _detect_variant_table(ws) if project else None
-    if vtable:
-        # Canonicalize the "open all" cohort to bare on-disk stems (dedup,
-        # order-preserving) so "↗ all" loads real tracks for imported,
-        # step2-renamed samples instead of unmatched descriptive labels.
-        seen: set[str] = set()
-        canon_all: list[str] = []
-        for s in vtable["all_stems"]:
-            cs = _canonical_stem(s, samples_with_bams, samples_with_vcfs)
-            if cs not in seen:
-                seen.add(cs)
-                canon_all.append(cs)
-        vtable["all_stems"] = canon_all
 
     # Pre-compute merged-cell map: anchor coordinate → (rowspan, colspan);
     # all other cells in the merge get skipped.
@@ -668,7 +647,6 @@ def xlsx_to_html(
                 launch_html = _igv_launch_html(
                     project=project,
                     this_stem=row_stem,
-                    all_stems=vtable["all_stems"],
                     locus=vtable["positions"][cell.column],
                     this_loadable=this_loadable,
                     this_calls_only=this_calls_only,
@@ -755,9 +733,9 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-rot-down {{ writing-mode: vertical-rl; }}
   .xlsx-rot-stacked {{ writing-mode: vertical-rl; text-orientation: upright; }}
   /* IGV launch affordance on variant cells: hidden by default, revealed on
-     cell hover. Two text links ("this" / "all") are the actual targets —
-     the cell body stays non-clickable to prevent accidental launches while
-     scanning a table. */
+     cell hover. The "↗ this" text link is the actual target — the cell body
+     stays non-clickable to prevent accidental launches while scanning a
+     table. */
   td.xlsx-variant {{ position: relative; }}
   td.xlsx-variant .xlsx-igv-launch {{
     position: absolute;

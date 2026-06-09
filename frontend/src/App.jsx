@@ -55,6 +55,8 @@ export default function App() {
   const [qcLoading, setQcLoading] = useState(false);
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
+  const [qcFilter, setQcFilter] = useState("");                   // as-you-type sample filter for Step 1 Results
+  const [projSampleFilter, setProjSampleFilter] = useState("");   // as-you-type sample filter for the Projects list
   const [excluded, setExcluded] = useState({});
   const [step1Status, setStep1Status] = useState([]);
   // Batch-level status from /step1/status (returned alongside per-sample
@@ -495,7 +497,7 @@ export default function App() {
   // hidden file picker, prompts for a rationale, posts multipart to the
   // upload endpoint. The backend enforces filename whitelist, size cap,
   // atomic write, and archives the old file under <ref>/.history/.
-  function replaceRefFile(refName, expectedFilename) {
+  function replaceRefFile(refName, expectedFilename, onReplaced) {
     if (!refName || !expectedFilename) return;
     const input = document.createElement("input");
     input.type = "file";
@@ -539,6 +541,8 @@ export default function App() {
         );
         // Reload the reference editor's file list so the row reflects the new file.
         await loadRefEditorFiles(refName);
+        // Slots with a separate preview loader (e.g. metadata) pass a refresh hook.
+        if (typeof onReplaced === "function") await onReplaced();
       } finally {
         input.remove();
       }
@@ -2867,6 +2871,19 @@ export default function App() {
               </select>
               <button onClick={createProject}>Create</button>
             </div>
+            <div className="row" style={{ marginTop: "4px" }}>
+              <input
+                type="search"
+                placeholder="Filter samples in expanded projects…"
+                value={projSampleFilter}
+                onChange={(e) => setProjSampleFilter(e.target.value)}
+                title="Case-insensitive. Expand a project, then type to show only matching samples."
+                style={{ flex: 1 }}
+              />
+              {projSampleFilter ? (
+                <button className="ghost-btn" onClick={() => setProjSampleFilter("")} title="Clear filter">Clear</button>
+              ) : null}
+            </div>
             <div className="list">
               {projects.map((p) => (
                 <div key={p.name} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -2960,8 +2977,15 @@ export default function App() {
                       <div className="muted" style={{ fontSize: "12px" }}>
                         No samples in download/ yet. Add FASTQs in the Inputs panel.
                       </div>
-                    ) : (
-                      projData[p.name].samples.map((g) => {
+                    ) : (() => {
+                      const q = projSampleFilter.trim().toLowerCase();
+                      const shown = q
+                        ? projData[p.name].samples.filter((g) => g.sample.toLowerCase().includes(q))
+                        : projData[p.name].samples;
+                      if (q && shown.length === 0) {
+                        return <div className="muted" style={{ fontSize: "12px" }}>No samples match “{projSampleFilter}”.</div>;
+                      }
+                      return shown.map((g) => {
                         const krakenDir = krakenDirForSample(projData[p.name].krakenDirs, g.sample);
                         const key = `${p.name}::${g.sample}`;
                         const open = !!sampleKrakenOpen[key];
@@ -3007,8 +3031,8 @@ export default function App() {
                             ) : null}
                           </div>
                         );
-                      })
-                    )}
+                      });
+                    })()}
                   </div>
                 ) : null}
                 </div>
@@ -3473,7 +3497,9 @@ export default function App() {
                             <>
                               <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
                                 <span className="ref-editor-filename">{metaFilename}</span>
+                                <button onClick={() => viewRefFile(refEditorRef, metaFilename)}>View</button>
                                 <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download xlsx</button>
+                                <button className="ghost" onClick={() => replaceRefFile(refEditorRef, metaFilename, () => loadMetadata(refEditorRef))}>Replace</button>
                               </div>
                               {metaRows.length > 0 ? (
                                 <div style={{overflowX:"auto", maxHeight:"14em", overflowY:"auto", marginBottom:"0.5em", fontSize:"0.82em"}}>
@@ -3901,14 +3927,24 @@ export default function App() {
                 <div className="note">
                   {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
                 </div>
-                <label className="checkbox">
+                <div className="row" style={{ alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={showFlaggedOnly}
+                      onChange={(e) => setShowFlaggedOnly(e.target.checked)}
+                    />
+                    Show only flagged samples
+                  </label>
                   <input
-                    type="checkbox"
-                    checked={showFlaggedOnly}
-                    onChange={(e) => setShowFlaggedOnly(e.target.checked)}
+                    type="search"
+                    placeholder="Filter samples…"
+                    value={qcFilter}
+                    onChange={(e) => setQcFilter(e.target.value)}
+                    title="Case-insensitive: show only samples whose name matches as you type."
+                    style={{ flex: 1, minWidth: "10rem" }}
                   />
-                  Show only flagged samples
-                </label>
+                </div>
                 {qcError ? <div className="note error">{qcError}</div> : null}
                 <QcCriteriaWidget />
                 <div className="qc-table scrollable">
@@ -3933,6 +3969,11 @@ export default function App() {
                     <tbody>
                       {qcRows
                         .filter((r) => !showFlaggedOnly || isFlagged(r))
+                        .filter((r) => {
+                          const q = qcFilter.trim().toLowerCase();
+                          if (!q) return true;
+                          return String(r._sample || r.sample || "").toLowerCase().includes(q);
+                        })
                         .map((row) => {
                           const key = sampleKey(row);
                           const editInfo = step1Edits[key];

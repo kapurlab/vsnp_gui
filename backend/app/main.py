@@ -1364,9 +1364,9 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
 # T-39: re-upload reference xlsx to replace in place. Closes the offline-edit
 # loop (download → edit locally in Excel/Numbers/LibreOffice → re-upload).
 # Intentionally narrow:
-#   - Only the two known reference xlsx filenames are accepted (defining filter
-#     and remove_from_analysis). Other reference files (.fasta, .gbk, .gff,
-#     best_reference.txt) are read-only via this endpoint.
+#   - Only the three known reference xlsx filenames are accepted (defining
+#     filter, remove_from_analysis, and metadata). Other reference files
+#     (.fasta, .gbk, .gff, best_reference.txt) are read-only via this endpoint.
 #   - 10 MB hard cap; these files are typically < 100 KB.
 #   - Old file moved aside to <ref>/.history/ with a timestamp prefix —
 #     recoverable without `git`.
@@ -1375,7 +1375,7 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
 #     audit dir isn't writable).
 #   - No approval queue. T-17a will layer the proposal+admin-review flow on
 #     top when shipped.
-_T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis)\.xlsx$")
+_T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis|metadata)\.xlsx$")
 _T39_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _T39_SHARED_AUDIT_PATH = SITE_ROOT / "audit" / "reference-changes.jsonl"
 
@@ -1424,7 +1424,7 @@ async def ref_upload_file(
     if not upload_name or not _T39_ALLOWED_REF_FILENAMES.match(upload_name):
         raise HTTPException(
             status_code=400,
-            detail="Only *_define_filter.xlsx or *_remove_from_analysis.xlsx may be replaced via this endpoint",
+            detail="Only *_define_filter.xlsx, *_remove_from_analysis.xlsx, or *_metadata.xlsx may be replaced via this endpoint",
         )
 
     target = (ref_dir / upload_name).resolve()
@@ -3770,22 +3770,28 @@ def _dash_delimited_import_name(filename: str) -> str:
     return stem.replace("_", "-") + tag
 
 
-def _import_parsed_reads(run_dir: Path, download_dir: Path, output_prefix: str) -> List[str]:
+def _import_parsed_reads(run_dir: Path, download_dir: Path) -> List[str]:
     """Copy a Kraken run's taxon-parsed reads into the project's inputs.
 
-    parse_reads.py writes ``<token>_<taxon>_R1.fastq.gz`` / ``_R2`` into
-    ``run_dir``. Each is copied into ``<project>/download/`` under a
+    parse_reads.py writes ``<token>_<taxon>_R1.fastq.gz`` / ``_R2`` at the top
+    level of ``run_dir``. Each is copied into ``<project>/download/`` under a
     dash-delimited name (see _dash_delimited_import_name) so vSNP sees a brand
     new sample and a re-run does not overwrite the original sample's results.
-    Returns the destination filenames created."""
+    Returns the destination filenames created.
+
+    Match on the read-tag suffix rather than the taxon string: the canonical
+    taxon the tool stamps into the filename can differ from the user-entered
+    search taxon (e.g. "Mycobacterium tuberculosis" → "..._complex"), so a
+    taxon-prefixed glob silently imports nothing. Every ``*_R1``/``*_R2`` (or
+    ``_1``/``_2``) ``.fastq.gz`` at the top level is a parsed output — the
+    ``kraken/`` subdir holds reports, not reads, and the glob is non-recursive."""
     imported: List[str] = []
     try:
         download_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
         return imported
-    pattern = f"*_{output_prefix}_R*.fastq.gz"
-    for src in sorted(run_dir.glob(pattern)):
-        if not src.is_file():
+    for src in sorted(run_dir.glob("*.fastq.gz")):
+        if not src.is_file() or not _KRAKEN_READ_TAG_RE.search(src.name):
             continue
         dest = download_dir / _dash_delimited_import_name(src.name)
         try:
@@ -3970,7 +3976,7 @@ def kraken_run(project: str, payload: KrakenRunRequest):
                         _prefix=output_prefix, _kraken_only=kraken_only):
         if exit_code != 0 or _kraken_only or not _prefix:
             return
-        imported = _import_parsed_reads(_run_dir, _dl, _prefix)
+        imported = _import_parsed_reads(_run_dir, _dl)
         if imported:
             logger.info(
                 "kraken auto-import: copied %d parsed read file(s) into %s: %s",

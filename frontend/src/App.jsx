@@ -99,6 +99,7 @@ export default function App() {
   // otherwise fire two dispatches; this ref blocks the second instantly.
   const step1DispatchingRef = useRef(false);
   const excludeSaveTimerRef = useRef(null);
+  const step2BuildExcludeTimerRef = useRef(null);
   const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
   const excludedRef = useRef({});
@@ -174,6 +175,15 @@ export default function App() {
   const [vcfSourceSamples, setVcfSourceSamples] = useState([]);
   const [vcfSourceFilter, setVcfSourceFilter] = useState("");
   const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
+  // Step 2 build-list exclusions (separate from Step 1 QC exclusions): a map
+  // of {sampleName: true} for samples checked "Exclude" in the Build VCF set
+  // list, plus a sample->display-label map for showing reference metadata.
+  const [step2BuildExcluded, setStep2BuildExcluded] = useState({});
+  const [step2BuildMeta, setStep2BuildMeta] = useState({});
+  // Step 2 Results group search: {groupName: [sample names]} parsed from the
+  // run summary HTML, and the live (case-insensitive) search text.
+  const [step2Groupings, setStep2Groupings] = useState({});
+  const [step2GroupSearch, setStep2GroupSearch] = useState("");
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
   const [vcfDbDropdownOpen, setVcfDbDropdownOpen] = useState(false);
   const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
@@ -215,6 +225,12 @@ export default function App() {
   const [metaBulkText, setMetaBulkText] = useState("");
   const [metaBulkOpen, setMetaBulkOpen] = useState(false);
   const [metaStatus, setMetaStatus] = useState("");
+  // Reference editor: add a defining-SNP group / add a remove-from-analysis sample
+  const [dfGroupName, setDfGroupName] = useState("");
+  const [dfPositions, setDfPositions] = useState("");
+  const [dfStatus, setDfStatus] = useState("");
+  const [rmSampleText, setRmSampleText] = useState("");
+  const [rmStatus, setRmStatus] = useState("");
   // _VCFs accumulation folder
   const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
   const [vcfsFolderPath, setVcfsFolderPath] = useState("");
@@ -472,6 +488,72 @@ export default function App() {
     } else {
       const err = await res.json().catch(() => ({}));
       setMetaStatus(`Error: ${err.detail || res.status}`);
+    }
+  }
+
+  // Add a defining-SNP group (group name + one or more chrom:pos positions)
+  // permanently to the reference's *_define_filter.xlsx. Prompts for a
+  // rationale (audited + the prior file archived, like Replace).
+  async function addDefineFilterGroup() {
+    if (!refEditorRef) return;
+    const group = dfGroupName.trim();
+    const positions = dfPositions
+      .split(/[\s,;]+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (!group) { setDfStatus("Enter a group name."); return; }
+    if (!positions.length) { setDfStatus("Enter at least one position (chrom:position)."); return; }
+    const rationale = window.prompt(
+      `Rationale for adding group "${group}" (${positions.length} position(s)) to the define_filter file? Required.`
+    );
+    if (!rationale || !rationale.trim()) { setDfStatus("Cancelled — rationale is required."); return; }
+    setDfStatus("Saving…");
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-group`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group, positions, rationale: rationale.trim() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setDfStatus(`Added group "${data.group}" with ${data.added} position(s): ${(data.positions || []).join(", ")}`);
+      setDfGroupName("");
+      setDfPositions("");
+      await loadRefEditorFiles(refEditorRef);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setDfStatus(`Error: ${err.detail || res.status}`);
+    }
+  }
+
+  // Add sample name(s) to the reference's *_remove_from_analysis.xlsx
+  // (one per line / comma-separated). Audited + archived like Replace.
+  async function addRemoveSample() {
+    if (!refEditorRef) return;
+    const samples = rmSampleText
+      .split(/[\n,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!samples.length) { setRmStatus("Enter at least one sample name."); return; }
+    const rationale = window.prompt(
+      `Rationale for adding ${samples.length} sample name(s) to the remove_from_analysis file? Required.`
+    );
+    if (!rationale || !rationale.trim()) { setRmStatus("Cancelled — rationale is required."); return; }
+    setRmStatus("Saving…");
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/add-sample`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ samples, rationale: rationale.trim() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const addedTxt = (data.added || []).length ? `added ${(data.added || []).join(", ")}` : "nothing added";
+      const skipTxt = (data.skipped || []).length ? `; skipped (already present): ${(data.skipped || []).join(", ")}` : "";
+      setRmStatus(`${addedTxt}${skipTxt}`);
+      setRmSampleText("");
+      await loadRefEditorFiles(refEditorRef);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setRmStatus(`Error: ${err.detail || res.status}`);
     }
   }
 
@@ -1195,6 +1277,7 @@ export default function App() {
       groups = data.groups || [];
       setStep2Groups(groups);
     }
+    loadStep2Groupings();
     const countRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_count`);
     if (countRes.ok) {
       const countData = await countRes.json();
@@ -1217,6 +1300,74 @@ export default function App() {
       const samples = await res.json();
       setVcfSourceSamples(samples);
       setStep2VcfCount(samples.length);
+    }
+    loadStep2BuildExclusions();
+    loadStep2BuildMeta();
+  }
+
+  // Step 2 build-list exclusions: a separate, Step-2-only removal set. Hydrate
+  // from the backend so checkboxes survive reloads.
+  async function loadStep2BuildExclusions() {
+    if (!selectedProject) { setStep2BuildExcluded({}); return; }
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/build-exclusions`);
+    if (res.ok) {
+      const data = await res.json();
+      const map = {};
+      (data.samples || []).forEach((s) => { map[s] = true; });
+      setStep2BuildExcluded(map);
+    }
+  }
+
+  async function _persistStep2BuildExclusions(map) {
+    if (!selectedProject) return;
+    const samples = Object.keys(map).filter((k) => map[k]);
+    try {
+      await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/build-exclusions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ samples }),
+      });
+    } catch (e) { /* best-effort; debounced retry on next toggle */ }
+  }
+
+  function toggleStep2BuildExcluded(sample, checked) {
+    setStep2BuildExcluded((prev) => {
+      const next = { ...prev, [sample]: checked };
+      if (step2BuildExcludeTimerRef.current) clearTimeout(step2BuildExcludeTimerRef.current);
+      step2BuildExcludeTimerRef.current = setTimeout(() => {
+        step2BuildExcludeTimerRef.current = null;
+        _persistStep2BuildExclusions(next);
+      }, 400);
+      return next;
+    });
+  }
+
+  // Load the project reference's metadata as a {VCF-stem: display-label} map so
+  // the build list can show metadata next to each sample.
+  async function loadStep2BuildMeta() {
+    const ref = projectReference || reference;
+    if (!ref) { setStep2BuildMeta({}); return; }
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(ref)}/metadata`);
+    if (res.ok) {
+      const data = await res.json();
+      const map = {};
+      (data.rows || []).forEach((r) => { if (r.original) map[r.original] = r.display_name; });
+      setStep2BuildMeta(map);
+    }
+  }
+
+  // Parse the run's vSNP3 summary into {groupName: [sample names]} so the
+  // Step 2 Results search can filter groups by sample (incl. metadata in the
+  // name). Loaded alongside Step 2 outputs.
+  async function loadStep2Groupings() {
+    if (!selectedProject) { setStep2Groupings({}); return; }
+    const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/groupings${runParam}`);
+    if (res.ok) {
+      const data = await res.json();
+      setStep2Groupings(data.groups || {});
+    } else {
+      setStep2Groupings({});
     }
   }
 
@@ -3456,6 +3607,35 @@ export default function App() {
                               </button>
                             </div>
                           )}
+                          {hasDefine && defineFile ? (
+                            <div style={{marginTop:"0.5em"}}>
+                              <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add defining SNP group</div>
+                              <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.3em"}}>
+                                A group name and its absolute position(s) as <code>chrom:position</code> (e.g. <code>NC_000962:12345</code>). Separate multiple positions with spaces, commas, or new lines. A bare number is auto-prefixed with the reference's contig. This permanently adds to <code>{defineFile.name}</code>.
+                              </div>
+                              <input
+                                placeholder="Group name (e.g. Lineage-04X)"
+                                value={dfGroupName}
+                                onChange={(e) => setDfGroupName(e.target.value)}
+                                style={{width:"100%", boxSizing:"border-box", marginBottom:"0.3em"}}
+                              />
+                              <textarea
+                                rows={2}
+                                placeholder={"chrom:position\nor: 12345, 67890"}
+                                value={dfPositions}
+                                onChange={(e) => setDfPositions(e.target.value)}
+                                style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
+                              />
+                              <button
+                                style={{marginTop:"0.3em"}}
+                                disabled={!dfGroupName.trim() || !dfPositions.trim()}
+                                onClick={addDefineFilterGroup}
+                              >
+                                Add group
+                              </button>
+                              {dfStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{dfStatus}</div>}
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="ref-editor-card">
@@ -3484,6 +3664,29 @@ export default function App() {
                               </button>
                             </div>
                           )}
+                          {hasRemove && removeFile ? (
+                            <div style={{marginTop:"0.5em"}}>
+                              <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add sample to remove</div>
+                              <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.3em"}}>
+                                Sample name(s) to permanently exclude from analysis for this reference (matches the VCF stem, no extension). One per line or comma-separated. Adds to <code>{removeFile.name}</code>.
+                              </div>
+                              <textarea
+                                rows={2}
+                                placeholder={"sample_name\nanother_sample"}
+                                value={rmSampleText}
+                                onChange={(e) => setRmSampleText(e.target.value)}
+                                style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
+                              />
+                              <button
+                                style={{marginTop:"0.3em"}}
+                                disabled={!rmSampleText.trim()}
+                                onClick={addRemoveSample}
+                              >
+                                Add sample
+                              </button>
+                              {rmStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{rmStatus}</div>}
+                            </div>
+                          ) : null}
                         </div>
 
                         <div className="ref-editor-card">
@@ -3498,7 +3701,7 @@ export default function App() {
                               <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
                                 <span className="ref-editor-filename">{metaFilename}</span>
                                 <button onClick={() => viewRefFile(refEditorRef, metaFilename)}>View</button>
-                                <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download xlsx</button>
+                                <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download</button>
                                 <button className="ghost" onClick={() => replaceRefFile(refEditorRef, metaFilename, () => loadMetadata(refEditorRef))}>Replace</button>
                               </div>
                               {metaRows.length > 0 ? (
@@ -4931,16 +5134,35 @@ export default function App() {
                             const filtered = q
                               ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
+                            const excludedCount = Object.keys(step2BuildExcluded).filter(k => step2BuildExcluded[k]).length;
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
                                   {filtered.length === vcfSourceSamples.length
                                     ? `${filtered.length} samples`
                                     : `${filtered.length} of ${vcfSourceSamples.length} samples`}
+                                  {excludedCount > 0 && (
+                                    <span style={{color:"var(--danger, #a94442)"}}> · {excludedCount} excluded from Step 2</span>
+                                  )}
                                 </div>
-                                {filtered.map(s => (
-                                  <div key={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)"}}>
-                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}} title={s.filename}>{s.sample}</span>
+                                {filtered.map(s => {
+                                  const isExcluded = !!step2BuildExcluded[s.sample];
+                                  const metaLabel = step2BuildMeta[s.sample];
+                                  return (
+                                  <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: isExcluded ? 0.55 : 1}}>
+                                    <input
+                                      type="checkbox"
+                                      checked={isExcluded}
+                                      onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
+                                      title={isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"}
+                                      style={{flexShrink:0, cursor:"pointer"}}
+                                    />
+                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: isExcluded ? "line-through" : "none"}}>
+                                      {s.sample}
+                                      {metaLabel && metaLabel !== s.sample && (
+                                        <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
+                                      )}
+                                    </span>
                                     {s.source_type && (
                                       <span style={{
                                         flexShrink:0,
@@ -4954,7 +5176,8 @@ export default function App() {
                                       </span>
                                     )}
                                   </div>
-                                ))}
+                                  );
+                                })}
                                 {filtered.length === 0 && (
                                   <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>No samples match</div>
                                 )}
@@ -5195,6 +5418,17 @@ export default function App() {
                 }
                 return (a.name || "").localeCompare(b.name || "");
               });
+              // Step 2 group search: greedy, case-insensitive match against the
+              // sample names listed for each group in the run summary HTML
+              // (names usually carry metadata, e.g. a state code), so typing
+              // "tx" surfaces every group containing a TX sample.
+              const groupSearchAvailable = Object.keys(step2Groupings).length > 0;
+              const groupQuery = step2GroupSearch.trim().toLowerCase();
+              const searchedStep2Groups = (groupQuery && groupSearchAvailable)
+                ? sortedStep2Groups.filter((g) =>
+                    (step2Groupings[g.name] || []).some((m) => m.toLowerCase().includes(groupQuery))
+                  )
+                : sortedStep2Groups;
               return (
                 <>
                   {snpToolMissing ? (
@@ -5226,9 +5460,31 @@ export default function App() {
                   </div>
                 ))
               ) : null}
+              {sortedStep2Groups.length && groupSearchAvailable ? (
+                <div style={{display:"flex", alignItems:"center", gap:"0.5rem", margin:"0.4rem 0"}}>
+                  <input
+                    type="text"
+                    placeholder="Search groups by sample (e.g. TX)…"
+                    value={step2GroupSearch}
+                    onChange={(e) => setStep2GroupSearch(e.target.value)}
+                    style={{flex:1, fontSize:"0.9em", padding:"3px 6px", boxSizing:"border-box"}}
+                  />
+                  {groupQuery ? (
+                    <span style={{fontSize:"0.85em", color:"var(--muted)", whiteSpace:"nowrap"}}>
+                      {searchedStep2Groups.length} of {sortedStep2Groups.length}
+                    </span>
+                  ) : null}
+                  {step2GroupSearch ? (
+                    <button className="ghost action" style={{fontSize:"0.85em"}} onClick={() => setStep2GroupSearch("")}>Clear</button>
+                  ) : null}
+                </div>
+              ) : null}
               {sortedStep2Groups.length ? (
                 <div className="results-groups">
-                  {sortedStep2Groups.map((group) => (
+                  {groupQuery && groupSearchAvailable && searchedStep2Groups.length === 0 ? (
+                    <div className="note" style={{margin:"0.3rem 0"}}>No groups contain a sample matching “{step2GroupSearch.trim()}”.</div>
+                  ) : null}
+                  {searchedStep2Groups.map((group) => (
                     <details key={group.name} className="results-group">
                       <summary>
                         <div className="group-summary">

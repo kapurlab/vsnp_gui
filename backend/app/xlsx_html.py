@@ -141,21 +141,29 @@ def _detect_variant_table(ws) -> dict | None:
     return {"positions": positions, "samples": samples}
 
 
-def _igv_launch_html(
+def _igv_cell_html(
+    value: str,
     project: str,
     this_stem: str,
     locus: str,
     this_loadable: bool = True,
     this_calls_only: bool = False,
 ) -> str:
-    """Build the hover-revealed IGV-launch affordance for a variant cell.
+    """Wrap a variant cell's value in a full-cell IGV-launch anchor.
 
-    A single small text link — "↗ this" — opens the IgvStandalone viewer
-    page (`?view=igv&tracks=…&locus=…`) for this row's sample. The anchor uses
-    ``target="vsnp_igv"`` (a named window, not ``_blank``), so the first
-    click opens a new tab and every subsequent click reuses that same tab
-    — variant-after-variant inspection navigates a single IGV window
-    rather than spawning N tabs, building the cohort up additively.
+    The whole cell is clickable — clicking anywhere in a colored variant
+    cell opens the row's sample in IGV at this locus. (Previously a small
+    "↗ this" text link in the corner was the only target; selecting the
+    SNP cell itself is more direct.) The anchor fills the cell via
+    ``display:block`` and inherits the cell's color/alignment so the
+    nucleotide letter still reads normally.
+
+    Same additive single-window behavior as before: the anchor uses
+    ``target="vsnp_igv"`` (a named window) and an onclick that posts to the
+    existing IGV tab when one is open, so variant-after-variant clicks build
+    up the cohort in one IGV view rather than spawning N tabs. Modifier-click
+    (cmd / ctrl / shift / middle button) bypasses the handler so users can
+    still force a fresh tab.
 
     The URL is constructed relative to the current preview path so it
     survives the OOD proxy prefix: the preview is served at
@@ -164,63 +172,39 @@ def _igv_launch_html(
     (``/rnode/host/port/api/projects/p/...``).
 
     ``this_loadable``: false only when the sample has NEITHER a BAM nor an
-    imported VCF — in that case "↗ this" is rendered as a disabled span
-    because clicking would land in an empty IGV. ``this_calls_only``:
-    true when the sample has an imported VCF but no BAM; the link stays
-    active (calls-only IGV anchored to the project reference) and the
-    tooltip notes the limitation.
+    imported VCF — the cell renders plain (not clickable) with an
+    explanatory tooltip, since clicking would land in an empty IGV.
+    ``this_calls_only``: true when the sample has an imported VCF but no
+    BAM; the cell stays clickable (calls-only IGV anchored to the project
+    reference) and is italicized with a tooltip noting the limitation.
     """
+    if not this_loadable:
+        return (
+            '<span class="xlsx-igv-disabled" '
+            f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
+            f'nor imported VCF in step2/vcf_database/.">{value}</span>'
+        )
     enc_proj = quote(project, safe="")
     enc_locus = quote(locus, safe="")
-    # Same-window, additive IGV behavior:
-    #   First click: window.open(url, "vsnp_igv") boots a fresh IGV tab.
-    #     Safari/Firefox ignore HTML target="<name>" for tracking-prevention
-    #     reasons, but window.open(url, name) is honored by every browser.
-    #   Subsequent clicks: post the launch URL to the existing IGV window.
-    #     IgvStandalone parses the tracks/locus from the URL, adds any
-    #     samples not already loaded, and navigates to the locus — additive
-    #     rather than replacing, so clicking variant after variant builds
-    #     up the cohort in one IGV view.
-    # __vsnpLaunchIgv encapsulates that; it's defined once per preview page
-    # in the inline <script> block below the table. Modifier-click (cmd /
-    # ctrl / shift / middle button) bypasses the handler so users can still
-    # force a fresh tab when they want one.
     onclick = (
         "if(event.metaKey||event.ctrlKey||event.shiftKey||event.button===1)return true;"
         "window.__vsnpLaunchIgv(this.href);return false;"
     )
-    if this_loadable:
-        this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
-        this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
-        # Visual distinction: full label for BAM-having samples, dimmed
-        # "calls" label for imported VCFs (no reads track expected). Lets
-        # users see at a glance which clicks will produce a reads pile-up.
-        if this_calls_only:
-            this_label = "↗ calls"
-            this_title = (
-                f"Open this sample in IGV at {html.escape(locus)} "
-                "(calls only — imported VCF, no BAM to load)"
-            )
-            this_class = ' class="xlsx-igv-calls-only"'
-        else:
-            this_label = "↗ this"
-            this_title = f"Open this sample in IGV at {html.escape(locus)}"
-            this_class = ""
-        this_link = (
-            f'<a{this_class} href="{html.escape(this_href, quote=True)}" '
-            f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
-            f'title="{this_title}">{this_label}</a>'
+    this_track = f"{enc_proj}:{quote(this_stem, safe='')}"
+    this_href = f"../../../?view=igv&tracks={this_track}&locus={enc_locus}"
+    if this_calls_only:
+        cls = "xlsx-igv-cell xlsx-igv-calls-only"
+        title = (
+            f"Open {html.escape(this_stem)} in IGV at {html.escape(locus)} "
+            "(calls only — imported VCF, no BAM to load)"
         )
     else:
-        this_link = (
-            '<span class="xlsx-igv-launch-disabled" '
-            f'title="No data for {html.escape(this_stem)} — neither Step 1 BAM '
-            'nor imported VCF in step2/vcf_database/.">↗ this</span>'
-        )
+        cls = "xlsx-igv-cell"
+        title = f"Open {html.escape(this_stem)} in IGV at {html.escape(locus)}"
     return (
-        '<span class="xlsx-igv-launch" aria-hidden="false">'
-        f'{this_link}'
-        '</span>'
+        f'<a class="{cls}" href="{html.escape(this_href, quote=True)}" '
+        f'target="vsnp_igv" rel="noopener" onclick="{onclick}" '
+        f'title="{title}">{value}</a>'
     )
 
 
@@ -509,9 +493,10 @@ def xlsx_to_html(
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
     When ``project`` is provided and the sheet looks like a vSNP3 variant-alignment
-    table, variant cells (those with a colored fill) get a hover-revealed
-    IGV-launch link — "↗ this" — that opens the row's sample in the
-    IgvStandalone viewer at the cell's locus (additive across clicks).
+    table, variant cells (those with a colored fill) become clickable
+    IGV-launch targets — clicking anywhere in the cell opens the row's
+    sample in the IgvStandalone viewer at the cell's locus (additive
+    across clicks).
 
     ``samples_with_bams`` (optional) is the set of step1 sample names for
     which a BAM exists on disk.
@@ -519,10 +504,10 @@ def xlsx_to_html(
     ``samples_with_vcfs`` (optional) is the set of sample names that have
     an imported VCF in ``step2/vcf_database/`` (no BAM, calls-only IGV).
 
-    "↗ this" is enabled if the sample is in EITHER set; calls-only mode is
-    indicated in the tooltip when only the VCF is present. It's rendered
-    as a disabled span only when the sample is in neither set (genuinely
-    nothing to load).
+    A cell is clickable if the sample is in EITHER set; calls-only mode is
+    indicated in the tooltip (and italics) when only the VCF is present.
+    The cell renders plain/non-clickable only when the sample is in
+    neither set (genuinely nothing to load).
     """
     xlsx_path = Path(xlsx_path)
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
@@ -623,7 +608,10 @@ def xlsx_to_html(
             # here is any cell in the data area with a resolved background
             # color (direct fill or conditional formatting) — that's the
             # visible signal vSNP3 uses to mark a call that differs from root.
-            launch_html = ""
+            # The whole variant cell becomes a clickable IGV-launch target
+            # (cell_inner wraps the value in an anchor); other cells render
+            # their value bare.
+            cell_inner = value
             if (
                 vtable
                 and cell.row in vtable["samples"]
@@ -644,7 +632,8 @@ def xlsx_to_html(
                     samples_with_bams is None and samples_with_vcfs is None
                 ) or has_bam or has_vcf
                 this_calls_only = (not has_bam) and has_vcf
-                launch_html = _igv_launch_html(
+                cell_inner = _igv_cell_html(
+                    value,
                     project=project,
                     this_stem=row_stem,
                     locus=vtable["positions"][cell.column],
@@ -657,7 +646,7 @@ def xlsx_to_html(
                 attrs = re.sub(r'\s+class="[^"]*"', "", attrs)
                 attrs += f' class="{" ".join(classes)}"'
             style_attr = f' style="{inline}"' if inline else ""
-            rows_html.append(f"<td{attrs}{style_attr}>{value}{launch_html}</td>")
+            rows_html.append(f"<td{attrs}{style_attr}>{cell_inner}</td>")
         rows_html.append("</tr>")
 
     display_title = html.escape(title or xlsx_path.name)
@@ -732,48 +721,36 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-rot-up {{ writing-mode: vertical-rl; transform: rotate(180deg); }}
   .xlsx-rot-down {{ writing-mode: vertical-rl; }}
   .xlsx-rot-stacked {{ writing-mode: vertical-rl; text-orientation: upright; }}
-  /* IGV launch affordance on variant cells: hidden by default, revealed on
-     cell hover. The "↗ this" text link is the actual target — the cell body
-     stays non-clickable to prevent accidental launches while scanning a
-     table. */
-  td.xlsx-variant {{ position: relative; }}
-  td.xlsx-variant .xlsx-igv-launch {{
-    position: absolute;
-    top: 1px; right: 1px;
-    display: none;
-    gap: 2px;
-    font-size: 9px;
-    line-height: 1;
-    background: rgba(15, 22, 33, 0.85);
-    color: #fff;
-    padding: 2px 3px;
-    border-radius: 3px;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
-    z-index: 5;
-    white-space: nowrap;
-  }}
-  td.xlsx-variant:hover .xlsx-igv-launch {{ display: inline-flex; }}
-  .xlsx-igv-launch a {{
-    color: #fff;
+  /* IGV launch on variant cells: the whole colored cell is clickable.
+     The anchor fills the cell and inherits color/alignment so the
+     nucleotide letter reads normally; a hover outline signals the cell
+     is a launch target. */
+  td.xlsx-variant {{ position: relative; padding: 0; }}
+  td.xlsx-variant a.xlsx-igv-cell {{
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 2px 4px;
+    box-sizing: border-box;
+    color: inherit;
+    text-align: inherit;
     text-decoration: none;
-    padding: 1px 3px;
-    border-radius: 2px;
+    cursor: pointer;
+    min-height: 1em;
   }}
-  .xlsx-igv-launch a:hover {{ background: rgba(255,255,255,0.25); }}
-  /* Disabled "this" link — sample has no Step 1 BAM. Greyed out, not
-     clickable, but visible so the cohort context is still legible. */
-  .xlsx-igv-launch-disabled {{
-    color: rgba(255, 255, 255, 0.35);
-    padding: 1px 3px;
-    cursor: not-allowed;
-    text-decoration: line-through;
+  td.xlsx-variant a.xlsx-igv-cell:hover {{
+    outline: 2px solid rgba(15, 22, 33, 0.6);
+    outline-offset: -2px;
   }}
-  /* Calls-only link — sample is loadable into IGV but has only the VCF,
-     no BAM. Dimmed + italic so the user sees at a glance that this click
-     won't produce a reads pile-up. */
-  .xlsx-igv-launch a.xlsx-igv-calls-only {{
-    color: rgba(255, 255, 255, 0.7);
-    font-style: italic;
+  /* Calls-only — sample is loadable but has only the VCF, no BAM; italic
+     hints that this click won't produce a reads pile-up. */
+  td.xlsx-variant a.xlsx-igv-cell.xlsx-igv-calls-only {{ font-style: italic; }}
+  /* Disabled — sample has neither BAM nor imported VCF; render the value
+     plain (not clickable). Tooltip explains why. */
+  td.xlsx-variant span.xlsx-igv-disabled {{
+    display: block;
+    padding: 2px 4px;
+    cursor: default;
   }}
 </style>
 </head>

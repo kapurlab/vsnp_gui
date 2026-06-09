@@ -228,6 +228,33 @@ def _resolve_project_dir(projects_root: Path, name: str) -> Path:
     return projects_root / name
 
 
+def _count_project_reads(download_dir: Path, step1_dir: Path) -> int:
+    """Count a project's input read files (``*.fastq.gz``).
+
+    Native projects keep reads in ``download/``; Roar-imported projects keep
+    them in ``step1/<sample>/`` (and may also symlink them into ``download/``).
+    Count the union of both, deduped by resolved path so a ``download/`` symlink
+    pointing at a ``step1`` read isn't double-counted. Skip ``*_unmapped_*``
+    (the unmapped-read subset vSNP3 emits alongside the real reads — not an
+    input read set). ``step1`` is globbed one level deep (reads live directly
+    under each sample dir) to avoid walking the per-sample alignment subtrees."""
+    seen: set = set()
+    candidates = []
+    if download_dir.is_dir():
+        candidates += download_dir.rglob("*.fastq.gz")
+    if step1_dir.is_dir():
+        candidates += step1_dir.glob("*/*.fastq.gz")
+    for f in candidates:
+        if "_unmapped_" in f.name:
+            continue
+        try:
+            key = f.resolve()
+        except OSError:
+            key = f
+        seen.add(key)
+    return len(seen)
+
+
 def _project_counts(project_dir: Path) -> Dict:
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
@@ -235,7 +262,7 @@ def _project_counts(project_dir: Path) -> Dict:
     vcfs_dir = project_dir / f"{project_dir.name}_VCFs"
     try:
         return {
-            "fastq_count": len(list(download_dir.rglob("*.fastq.gz"))) if download_dir.exists() else 0,
+            "fastq_count": _count_project_reads(download_dir, step1_dir),
             "step1_samples": len([d for d in step1_dir.iterdir() if d.is_dir()]) if step1_dir.exists() else 0,
             "step1_vcfs": len(list(step1_dir.glob("**/*_zc.vcf"))) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,

@@ -1255,6 +1255,295 @@ def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
     return {"filename": meta_path.name, "rows_total": len(existing_rows), "added": added, "updated": updated}
 
 
+def _backup_ref_file(ref_dir: Path, target: Path) -> tuple[str, str]:
+    """Copy an existing reference file aside under .history/ before mutating it.
+
+    Returns (old_sha256, archived_path) — both empty strings if the target
+    doesn't exist yet. Mirrors the archiving the Replace (upload-file) flow
+    does, so add-group / add-sample edits are equally recoverable.
+    """
+    if not target.exists():
+        return "", ""
+    old_sha = _sha256_of_path(target)
+    history_dir = ref_dir / ".history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    archived = history_dir / f"{ts}_{old_sha[:8]}_{target.name}"
+    shutil.copy2(target, archived)
+    return old_sha, str(archived)
+
+
+def _current_os_user() -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return os.environ.get("USER", "")
+
+
+def _ref_dir_or_404(ref_name: str) -> Path:
+    cfg = load_config()
+    vsnp3_path = Path(cfg["vsnp3_path"])
+    ref = next((r for r in list_references(vsnp3_path) if r["name"] == ref_name), None)
+    if not ref:
+        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
+    return Path(ref["path"]).resolve()
+
+
+class DefineFilterAddGroupRequest(BaseModel):
+    group: str
+    positions: List[str]
+    rationale: str
+
+
+# openpyxl mutator for the defining-SNP filter: appends one column per
+# position (header = chrom:pos, row 2 = group name), preserving the rest of
+# the sheet's formatting. Detects the contig prefix from existing column
+# headers so the user may type a bare position. Rejects malformed or
+# duplicate positions. Emits a JSON summary on stdout, "ERR:<code>" on stderr.
+_DEFINE_FILTER_ADD_CODE = r"""
+import openpyxl, json, sys, re
+target = sys.argv[1]
+payload = json.load(open(sys.argv[2]))
+group = str(payload['group']).strip()
+positions = payload['positions']
+wb = openpyxl.load_workbook(target)
+ws = wb.worksheets[0]
+chrom = None
+for c in range(2, ws.max_column + 1):
+    v = ws.cell(row=1, column=c).value
+    if v is not None and ':' in str(v):
+        chrom = str(v).split(':', 1)[0].lstrip('#').strip()
+        break
+existing = set()
+for c in range(1, ws.max_column + 1):
+    v = ws.cell(row=1, column=c).value
+    if v is not None and str(v).strip():
+        existing.add(str(v).strip().lstrip('#'))
+norm = []
+for p in positions:
+    p = str(p).strip()
+    if not p:
+        continue
+    if ':' not in p:
+        if not chrom:
+            sys.stderr.write('ERR:no_chrom'); sys.exit(2)
+        p = '{}:{}'.format(chrom, p)
+    if not re.fullmatch(r'\S+:\d+', p):
+        sys.stderr.write('ERR:bad_position:' + p); sys.exit(3)
+    if p in existing or p in norm:
+        sys.stderr.write('ERR:dup_position:' + p); sys.exit(4)
+    norm.append(p)
+if not norm:
+    sys.stderr.write('ERR:no_positions'); sys.exit(5)
+col = ws.max_column
+for p in norm:
+    col += 1
+    ws.cell(row=1, column=col, value=p)
+    ws.cell(row=2, column=col, value=group)
+wb.save(target)
+print(json.dumps({'chrom': chrom, 'positions': norm, 'group': group}))
+"""
+
+
+@app.post("/api/references/{ref_name}/define-filter/add-group")
+def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequest):
+    """Add a defining-SNP group to a reference's *_define_filter.xlsx.
+
+    A group is one or more absolute positions (chrom:pos) that map to a
+    single group name. Each position becomes its own column (header = the
+    position, row 2 = the group name) — the format vSNP3 reads. This is a
+    permanent edit to a shared reference file, so it follows the same
+    backup + audit-log flow as the Replace action.
+    """
+    cfg = load_config()
+    ref_dir = _ref_dir_or_404(ref_name)
+    group = (payload.group or "").strip()
+    if not group:
+        raise HTTPException(status_code=400, detail="Group name is required")
+    positions = [str(p).strip() for p in (payload.positions or []) if str(p).strip()]
+    if not positions:
+        raise HTTPException(status_code=400, detail="At least one position is required")
+    if not (payload.rationale or "").strip():
+        raise HTTPException(status_code=400, detail="A rationale is required")
+
+    define_files = [
+        f for f in ref_dir.glob("*define_filter*.xlsx") if not f.name.startswith("~$")
+    ]
+    if not define_files:
+        raise HTTPException(
+            status_code=404,
+            detail="No define_filter file found for this reference. Create one from template first.",
+        )
+    target = define_files[0]
+
+    old_sha, archived = _backup_ref_file(ref_dir, target)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
+        json.dump({"group": group, "positions": positions}, tf)
+        tmp_json = tf.name
+    try:
+        result = subprocess.run(
+            conda_python_cmd(cfg, _DEFINE_FILTER_ADD_CODE, [str(target), tmp_json]),
+            text=True, capture_output=True,
+        )
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        if err.startswith("ERR:no_chrom"):
+            detail = "Could not detect a contig prefix — enter positions as chrom:position (e.g. NC_000962:12345)."
+        elif err.startswith("ERR:bad_position:"):
+            detail = f"Invalid position '{err.split(':',2)[2]}' — use chrom:position with a numeric position."
+        elif err.startswith("ERR:dup_position:"):
+            detail = f"Position '{err.split(':',2)[2]}' is already in the define_filter file."
+        elif err.startswith("ERR:no_positions"):
+            detail = "No valid positions provided."
+        else:
+            detail = f"Failed to add group: {err}"
+        raise HTTPException(status_code=400, detail=detail)
+    try:
+        summary = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        summary = {"group": group, "positions": positions}
+
+    new_sha = _sha256_of_path(target)
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "define_filter_add_group",
+        "reference": ref_name,
+        "filename": target.name,
+        "user": _current_os_user(),
+        "rationale": payload.rationale.strip(),
+        "group": group,
+        "positions": summary.get("positions", positions),
+        "old_sha256": old_sha,
+        "new_sha256": new_sha,
+        "archived_old": archived,
+        "target": str(target),
+    }
+    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    return {
+        "ok": True,
+        "filename": target.name,
+        "group": group,
+        "positions": summary.get("positions", positions),
+        "added": len(summary.get("positions", positions)),
+        "archived_old": archived,
+        "audit_log": audit_path,
+    }
+
+
+class RemoveSampleAddRequest(BaseModel):
+    samples: List[str]
+    rationale: str
+
+
+# openpyxl mutator for remove_from_analysis: appends sample names to the
+# single (header-less) column A, skipping any already present. Emits a JSON
+# summary {"added": [...], "skipped": [...]} on stdout.
+_REMOVE_SAMPLE_ADD_CODE = r"""
+import openpyxl, json, sys
+target = sys.argv[1]
+payload = json.load(open(sys.argv[2]))
+samples = payload['samples']
+wb = openpyxl.load_workbook(target)
+ws = wb.worksheets[0]
+existing = set()
+last = 0
+for r in range(1, ws.max_row + 1):
+    v = ws.cell(row=r, column=1).value
+    if v is not None and str(v).strip():
+        existing.add(str(v).strip())
+        last = r
+added, skipped = [], []
+row = last
+for s in samples:
+    s = str(s).strip()
+    if not s:
+        continue
+    if s in existing:
+        skipped.append(s)
+        continue
+    row += 1
+    ws.cell(row=row, column=1, value=s)
+    existing.add(s)
+    added.append(s)
+wb.save(target)
+print(json.dumps({'added': added, 'skipped': skipped}))
+"""
+
+
+@app.post("/api/references/{ref_name}/remove-from-analysis/add-sample")
+def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
+    """Add sample name(s) to a reference's *_remove_from_analysis.xlsx.
+
+    vSNP3 reads column 1 (no header) as sample names to drop from analysis.
+    Permanent edit to a shared reference file → backup + audit-log flow.
+    """
+    cfg = load_config()
+    ref_dir = _ref_dir_or_404(ref_name)
+    samples = [str(s).strip() for s in (payload.samples or []) if str(s).strip()]
+    if not samples:
+        raise HTTPException(status_code=400, detail="At least one sample name is required")
+    if not (payload.rationale or "").strip():
+        raise HTTPException(status_code=400, detail="A rationale is required")
+
+    remove_files = [
+        f for f in ref_dir.glob("*remove_from_analysis*.xlsx") if not f.name.startswith("~$")
+    ]
+    if not remove_files:
+        raise HTTPException(
+            status_code=404,
+            detail="No remove_from_analysis file found for this reference. Create one from template first.",
+        )
+    target = remove_files[0]
+
+    old_sha, archived = _backup_ref_file(ref_dir, target)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
+        json.dump({"samples": samples}, tf)
+        tmp_json = tf.name
+    try:
+        result = subprocess.run(
+            conda_python_cmd(cfg, _REMOVE_SAMPLE_ADD_CODE, [str(target), tmp_json]),
+            text=True, capture_output=True,
+        )
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        raise HTTPException(status_code=400, detail=f"Failed to add sample: {(result.stderr or '').strip()}")
+    try:
+        summary = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        summary = {"added": samples, "skipped": []}
+
+    new_sha = _sha256_of_path(target)
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "remove_from_analysis_add_sample",
+        "reference": ref_name,
+        "filename": target.name,
+        "user": _current_os_user(),
+        "rationale": payload.rationale.strip(),
+        "added": summary.get("added", samples),
+        "skipped": summary.get("skipped", []),
+        "old_sha256": old_sha,
+        "new_sha256": new_sha,
+        "archived_old": archived,
+        "target": str(target),
+    }
+    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    return {
+        "ok": True,
+        "filename": target.name,
+        "added": summary.get("added", samples),
+        "skipped": summary.get("skipped", []),
+        "archived_old": archived,
+        "audit_log": audit_path,
+    }
+
+
 class RefCreateFileRequest(BaseModel):
     file_type: str  # "define_filter" or "remove_from_analysis"
 
@@ -2503,8 +2792,22 @@ def step2_run(project: str, payload: Step2Request):
     run_dir = step2_dir / run_ts
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    remove_file = step2_dir / "remove_from_analysis.xlsx"
-    remove_arg = f" -remove_by_name {remove_file}" if remove_file.exists() else ""
+    # Effective removal set = Step 1 QC exclusions (remove_from_analysis.xlsx)
+    # ∪ Step 2 build-list exclusions (.step2_build_excluded.json). The two are
+    # tracked in separate files; union them into a run-scoped xlsx so this run
+    # honors both without either source overwriting the other.
+    qc_names = _read_remove_xlsx_names(step2_dir / "remove_from_analysis.xlsx")
+    build_names = _read_step2_build_exclusions(step2_dir)
+    effective_removals = sorted(set(qc_names) | set(build_names))
+    remove_arg = ""
+    if effective_removals:
+        remove_file = run_dir / "remove_by_name.xlsx"
+        try:
+            import pandas as pd  # vsnp3 env
+            pd.DataFrame(effective_removals).to_excel(remove_file, header=False, index=False)
+            remove_arg = f" -remove_by_name {shlex.quote(str(remove_file))}"
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to build removal list: {exc}")
     _write_step2_edit_summary(run_dir, _edited_samples_in_dir(vcf_source_dir))
     _write_figtree_groups(run_dir, vcf_source_dir, cfg, payload.label_style or "short")
     # Build Step 2 command with options
@@ -3257,6 +3560,127 @@ def qc_exclude_get(project: str):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read exclusions: {exc}")
     return {"samples": samples}
+
+
+# --- Step 2 build-list exclusions -------------------------------------------
+# A separate, Step-2-only exclusion set (distinct from the Step 1 QC
+# exclusions in remove_from_analysis.xlsx). Samples checked "Exclude" in the
+# Step 2 Build VCF set list land here. At run time, step2_run unions this set
+# with the QC set into a run-scoped remove_by_name.xlsx so both are applied
+# without either clobbering the other's file.
+
+def _step2_build_exclusions_path(step2_dir: Path) -> Path:
+    return step2_dir / ".step2_build_excluded.json"
+
+
+def _read_step2_build_exclusions(step2_dir: Path) -> List[str]:
+    p = _step2_build_exclusions_path(step2_dir)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(s).strip() for s in data if str(s).strip()]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _read_remove_xlsx_names(path: Path) -> List[str]:
+    """Read sample names from a header-less single-column remove xlsx."""
+    if not path.exists():
+        return []
+    try:
+        import pandas as pd  # vsnp3 env
+        df = pd.read_excel(path, header=None)
+        return [
+            str(s).strip()
+            for s in df.iloc[:, 0].tolist()
+            if str(s).strip() and str(s).strip().lower() != "nan"
+        ]
+    except Exception:
+        return []
+
+
+@app.get("/api/projects/{project}/step2/build-exclusions")
+def step2_build_exclusions_get(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    return {"samples": _read_step2_build_exclusions(project_dir / "step2")}
+
+
+@app.post("/api/projects/{project}/step2/build-exclusions")
+def step2_build_exclusions_set(project: str, payload: ExcludeRequest):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    step2_dir.mkdir(parents=True, exist_ok=True)
+    samples = sorted({str(s).strip() for s in (payload.samples or []) if str(s).strip()})
+    p = _step2_build_exclusions_path(step2_dir)
+    if not samples:
+        p.unlink(missing_ok=True)
+        return {"samples": [], "count": 0}
+    p.write_text(json.dumps(samples), encoding="utf-8")
+    return {"samples": samples, "count": len(samples)}
+
+
+def _parse_step2_groupings(html_text: str) -> tuple[Dict[str, List[str]], int]:
+    """Parse the 'Groupings with N listed' table from a vSNP3 step2 summary.
+
+    Each data row is `<td>SampleName</td>` followed by one `<td>` per group
+    that sample belongs to. Returns ({group_name: [sample names]}, n_samples).
+    The sample name is taken verbatim from the HTML — it usually carries
+    metadata (e.g. a state code), which is what the Step 2 group search box
+    matches against.
+
+    Splits on ``<tr`` rather than matching ``<tr>...</tr>`` because vSNP3's
+    summary uses a malformed ``<tr>`` (instead of ``</tr>``) to close its
+    header row; splitting tolerates that.
+    """
+    import html as _html
+    idx = html_text.find("Groupings with")
+    if idx == -1:
+        return {}, 0
+    tbl_start = html_text.find("<table", idx)
+    tbl_end = html_text.find("</table>", tbl_start) if tbl_start != -1 else -1
+    if tbl_start == -1 or tbl_end == -1:
+        return {}, 0
+    section = html_text[tbl_start:tbl_end]
+    groups: Dict[str, List[str]] = {}
+    samples_seen: set = set()
+    for chunk in re.split(r"<tr\b", section, flags=re.IGNORECASE):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", chunk, re.DOTALL | re.IGNORECASE)
+        cells = [_html.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in cells]
+        cells = [c for c in cells if c]
+        if len(cells) < 2:
+            continue
+        sample = cells[0]
+        samples_seen.add(sample)
+        for g in cells[1:]:
+            groups.setdefault(g, []).append(sample)
+    return groups, len(samples_seen)
+
+
+@app.get("/api/projects/{project}/step2/groupings")
+def step2_groupings(project: str, run_id: Optional[str] = Query(None)):
+    """Return {group_name: [sample names]} parsed from the run's
+    vSNP_step2_summary-*.html. Powers the Step 2 Results group search."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        return {"groups": {}, "summary_html": None, "sample_count": 0}
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
+    summaries = sorted(output_dir.glob("vSNP_step2_summary-*.html"))
+    if not summaries:
+        return {"groups": {}, "summary_html": None, "sample_count": 0}
+    summary = summaries[-1]
+    try:
+        html_text = summary.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read summary: {exc}")
+    groups, sample_count = _parse_step2_groupings(html_text)
+    return {"groups": groups, "summary_html": summary.name, "sample_count": sample_count}
 
 
 @app.post("/api/projects/{project}/step2/clear")

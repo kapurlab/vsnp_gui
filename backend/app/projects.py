@@ -140,6 +140,32 @@ def update_project_meta(project_dir: Path, updates: Dict) -> Dict:
     return meta
 
 
+def _project_last_activity(project_dir: Path) -> float:
+    """Best-effort "most recent activity" timestamp for a project, as a Unix
+    epoch float. A directory's mtime only bumps when its *direct* children
+    change, so the project root alone misses nested work (a new step1 sample
+    dir, a fresh download). We take the max mtime across the root and the key
+    workflow subdirs/files — cheap (a handful of stats) and captures adding
+    samples, runs, and downloads without walking the whole tree."""
+    candidates = [
+        project_dir,
+        project_dir / "project.json",
+        project_dir / "download",
+        project_dir / "step1",
+        project_dir / "step2",
+        project_dir / f"{project_dir.name}_VCFs",
+    ]
+    latest = 0.0
+    for c in candidates:
+        try:
+            m = c.stat().st_mtime
+        except OSError:
+            continue
+        if m > latest:
+            latest = m
+    return latest
+
+
 def list_projects(roots: RootsLike) -> List[Dict]:
     """Walk all configured roots and return a flat list of projects, each
     tagged with `scope` and `_root` (the root path it lives under). On a
@@ -177,10 +203,15 @@ def list_projects(roots: RootsLike) -> List[Dict]:
             meta.update(_project_counts(p))
             meta["scope"] = scope
             meta["_root"] = str(root)
-            try:
-                meta["_mtime"] = p.stat().st_mtime
-            except OSError:
-                meta["_mtime"] = 0
+            activity = _project_last_activity(p)
+            meta["_mtime"] = activity
+            # ISO string for display; the frontend sorts/labels by recency.
+            from datetime import datetime
+            meta["last_activity"] = (
+                datetime.fromtimestamp(activity).isoformat(timespec="seconds")
+                if activity
+                else ""
+            )
             out.append(meta)
     out.sort(key=lambda x: x.get("_mtime", 0), reverse=True)
     for meta in out:

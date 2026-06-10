@@ -56,6 +56,9 @@ export default function App() {
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [qcFilter, setQcFilter] = useState("");                   // as-you-type sample filter for Step 1 Results
+  const [showAllInputs, setShowAllInputs] = useState(false);      // download list: false = last 7 days only, true = all
+  const [qcDateStart, setQcDateStart] = useState("");             // YYYY-MM-DD; filter Step 1 Results by run date (inclusive)
+  const [qcDateEnd, setQcDateEnd] = useState("");                 // YYYY-MM-DD; empty end = open-ended
   const [projSampleFilter, setProjSampleFilter] = useState("");   // as-you-type sample filter for the Projects list
   const [excluded, setExcluded] = useState({});
   const [step1Status, setStep1Status] = useState([]);
@@ -179,6 +182,11 @@ export default function App() {
   // of {sampleName: true} for samples checked "Exclude" in the Build VCF set
   // list, plus a sample->display-label map for showing reference metadata.
   const [step2BuildExcluded, setStep2BuildExcluded] = useState({});
+  // Samples already excluded in Step 1 Results (remove_from_analysis.xlsx).
+  // The Step 2 run unions these with the build-list exclusions anyway, so we
+  // surface them in the build list as pre-checked + locked to make the build
+  // honest about what will actually be compared. Change them in Step 1 Results.
+  const [step2QcExcluded, setStep2QcExcluded] = useState({});
   const [step2BuildMeta, setStep2BuildMeta] = useState({});
   // Step 2 Results group search: {groupName: [sample names]} parsed from the
   // run summary HTML, and the live (case-insensitive) search text.
@@ -259,6 +267,86 @@ export default function App() {
 
   const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
   const excludeKey = (row) => row?._file || sampleKey(row);
+  // Run date as YYYY-MM-DD. _run_date is the backend's authoritative run
+  // timestamp (run_metadata.json started_at, falling back to the stats date /
+  // filename / mtime). Both ISO (2026-05-16T..) and filename (2026-05-16_09..)
+  // forms start with the date, so slicing 10 chars normalizes either one.
+  const qcRunDate = (row) => String(row?._run_date || "").slice(0, 10);
+
+  // Apply the Step 1 Results filters (flagged-only + name + run-date range) in
+  // one place so the table body and the "exclude all" header act on the exact
+  // same set of rows. Cheap to recompute; called per render.
+  function computeVisibleQcRows() {
+    const q = qcFilter.trim().toLowerCase();
+    const ds = qcDateStart;
+    const de = qcDateEnd;
+    return qcRows
+      .filter((r) => !showFlaggedOnly || isFlagged(r))
+      .filter((r) => !q || String(r._sample || r.sample || "").toLowerCase().includes(q))
+      .filter((r) => {
+        if (!ds && !de) return true;
+        const rd = qcRunDate(r);
+        if (!rd) return false;
+        if (ds && rd < ds) return false;
+        if (de && rd > de) return false;
+        return true;
+      });
+  }
+
+  // Aggregate state for the header "exclude all in current view" checkbox.
+  function excludeAllState() {
+    const vis = computeVisibleQcRows();
+    const total = vis.length;
+    const on = vis.reduce((n, r) => n + (excluded[excludeKey(r)] ? 1 : 0), 0);
+    return { total, on, checked: total > 0 && on === total, indeterminate: on > 0 && on < total };
+  }
+
+  // Compact "last activity" label for the projects list (today / 3d ago / date).
+  function _formatActivity(iso) {
+    if (!iso) return "";
+    const t = new Date(iso).getTime();
+    if (Number.isNaN(t)) return "";
+    const days = Math.floor((Date.now() - t) / 86400000);
+    if (days <= 0) return "today";
+    if (days === 1) return "yesterday";
+    if (days < 30) return `${days}d ago`;
+    return iso.slice(0, 10);
+  }
+
+  // Local-date YYYY-MM-DD (not UTC) so "Today" matches the user's calendar day.
+  function _isoDay(d) {
+    const tzOffset = d.getTimezoneOffset() * 60000;
+    return new Date(d.getTime() - tzOffset).toISOString().slice(0, 10);
+  }
+  // Quick range: last N days through today (inclusive). N=1 → just today.
+  function setQcRangeDays(n) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - (n - 1));
+    setQcDateStart(_isoDay(start));
+    setQcDateEnd(_isoDay(end));
+  }
+  function clearQcDates() {
+    setQcDateStart("");
+    setQcDateEnd("");
+  }
+
+  // Select / deselect Exclude for every row currently visible (honors the
+  // active flagged/name/date filters). Reuses the same debounced save as the
+  // per-row toggle so a bulk change still POSTs once.
+  function toggleExcludeAllVisible(checked) {
+    const vis = computeVisibleQcRows();
+    setExcluded((prev) => {
+      const next = { ...prev };
+      vis.forEach((row) => { next[excludeKey(row)] = checked; });
+      return next;
+    });
+    if (excludeSaveTimerRef.current) clearTimeout(excludeSaveTimerRef.current);
+    excludeSaveTimerRef.current = setTimeout(() => {
+      excludeSaveTimerRef.current = null;
+      _persistExclusions();
+    }, 400);
+  }
 
   function formatPercent(value) {
     if (value === null || value === undefined || value === "") return "-";
@@ -1302,7 +1390,23 @@ export default function App() {
       setStep2VcfCount(samples.length);
     }
     loadStep2BuildExclusions();
+    loadStep2QcExclusions();
     loadStep2BuildMeta();
+  }
+
+  // Pull the Step 1 QC exclusions so the build list can pre-check (and lock)
+  // samples the user already dropped in Step 1 Results.
+  async function loadStep2QcExclusions() {
+    if (!selectedProject) { setStep2QcExcluded({}); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`);
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        (data.samples || []).forEach((s) => { map[s] = true; });
+        setStep2QcExcluded(map);
+      }
+    } catch (e) { /* best-effort; the build still works without it */ }
   }
 
   // Step 2 build-list exclusions: a separate, Step-2-only removal set. Hydrate
@@ -1474,29 +1578,51 @@ export default function App() {
     setJobId(data.job_id);
   }
 
+  // Query string carrying the active Step 1 Results filters so a download
+  // matches what's on screen (date range + name filter). Empty filters are
+  // omitted; the backend treats absent params as "no filter".
+  function qcExportQuery() {
+    const params = new URLSearchParams();
+    if (qcDateStart) params.set("start", qcDateStart);
+    if (qcDateEnd) params.set("end", qcDateEnd);
+    const q = qcFilter.trim();
+    if (q) params.set("q", q);
+    const s = params.toString();
+    return s ? `?${s}` : "";
+  }
+
+  // Suffix for downloaded filenames so a date-scoped export is self-describing
+  // in an email attachment (e.g. _2026-05-01_to_2026-05-31).
+  function qcExportSuffix() {
+    if (qcDateStart && qcDateEnd) return `_${qcDateStart}_to_${qcDateEnd}`;
+    if (qcDateStart) return `_from_${qcDateStart}`;
+    if (qcDateEnd) return `_through_${qcDateEnd}`;
+    return "";
+  }
+
   async function downloadQC() {
     if (!selectedProject) return;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.csv`);
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.csv${qcExportQuery()}`);
     if (!res.ok) return;
     const csv = await res.text();
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${selectedProject}_qc_summary.csv`;
+    a.download = `${selectedProject}_qc_summary${qcExportSuffix()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
   async function downloadQcXlsx() {
     if (!selectedProject) return;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.xlsx`);
+    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary.xlsx${qcExportQuery()}`);
     if (!res.ok) return;
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${selectedProject}_combined_excelworksheets.xlsx`;
+    a.download = `${selectedProject}_combined_excelworksheets${qcExportSuffix()}.xlsx`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -1781,6 +1907,7 @@ export default function App() {
       // in download/ (download_sra.sh, sra_crosswalk.tsv, logs, etc.).
       if (!FASTQ_RE.test(f.name)) continue;
       const m = f.name.match(PAIR_RE);
+      const fmtime = Number(f.mtime) || 0;
       if (m) {
         const sample = m[1];
         if (sampleIdx.has(sample)) {
@@ -1788,15 +1915,30 @@ export default function App() {
           g.files.push(f);
           g.totalSize += f.size;
           g.isPair = g.files.length === 2;
+          if (fmtime > g.mtime) g.mtime = fmtime;
         } else {
           sampleIdx.set(sample, groups.length);
-          groups.push({ sample, files: [f], totalSize: f.size, isPair: false });
+          groups.push({ sample, files: [f], totalSize: f.size, isPair: false, mtime: fmtime });
         }
       } else {
-        groups.push({ sample: f.name, files: [f], totalSize: f.size, isPair: false });
+        groups.push({ sample: f.name, files: [f], totalSize: f.size, isPair: false, mtime: fmtime });
       }
     }
     return groups;
+  }
+
+  // True if this download-list sample already has a completed Step 1 run.
+  // step1Status entries are keyed by the step1/ directory name; FASTQ prefixes
+  // usually equal that name (SRA run accession or the sample id), so we match
+  // exact first, then allow the step1 name to start with the FASTQ prefix to
+  // tolerate suffixing. Running / errored / not-started do not count as "run".
+  function isSampleRunInStep1(sampleName) {
+    if (!sampleName) return false;
+    return step1Status.some((s) => {
+      const done = s.has_outputs || s.has_zc_vcf || s.status === "complete";
+      if (!done) return false;
+      return s.sample === sampleName || String(s.sample || "").startsWith(sampleName);
+    });
   }
 
   async function deletePair(groupFiles) {
@@ -3086,6 +3228,9 @@ export default function App() {
                     </div>
                     <div className="list-meta">
                       FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
+                      {p.last_activity ? (
+                        <span title={`Last activity: ${p.last_activity}`}> | {_formatActivity(p.last_activity)}</span>
+                      ) : null}
                     </div>
                     {p._root ? (
                       <div
@@ -3367,10 +3512,19 @@ export default function App() {
                     {!inputsLoading && inputs.files.length === 0 ? (
                       <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
                     ) : null}
-                    {inputs.files.length > 0 ? (
+                    {inputs.files.length > 0 ? (() => {
+                      const allGroups = groupPairedFiles(inputs.files);
+                      const weekAgo = (Date.now() / 1000) - 7 * 86400;
+                      const olderCount = allGroups.filter((g) => g.mtime && g.mtime < weekAgo).length;
+                      const groups = showAllInputs
+                        ? allGroups
+                        : allGroups.filter((g) => !g.mtime || g.mtime >= weekAgo);
+                      return (
+                      <>
                       <div style={{display:"flex", flexDirection:"column", gap:"3px", maxHeight:"260px", overflowY:"auto"}}>
-                        {groupPairedFiles(inputs.files).map((g) => {
+                        {groups.map((g) => {
                           const tip = g.files.map((f) => `${f.name} (${_formatBytes(f.size)})`).join("\n");
+                          const notRun = !isSampleRunInStep1(g.sample);
                           return (
                             <div
                               key={g.files.map((f) => f.name).join("|")}
@@ -3384,10 +3538,19 @@ export default function App() {
                               }}
                             >
                               <span
-                                style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}
-                                title={tip}
+                                style={{
+                                  flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                                  color: notRun ? "var(--accent, #2f6f9f)" : "var(--text)",
+                                  fontWeight: notRun ? 600 : "normal",
+                                }}
+                                title={notRun ? `${tip}\n\nNot yet run through Step 1` : tip}
                               >
                                 {g.sample}
+                                {notRun ? (
+                                  <span style={{marginLeft:"6px", fontSize:"10.5px", color:"var(--accent, #2f6f9f)"}}>
+                                    • not run
+                                  </span>
+                                ) : null}
                                 {g.isPair ? (
                                   <span className="muted" style={{marginLeft:"6px", fontSize:"10.5px"}}>
                                     paired · R1+R2
@@ -3407,7 +3570,20 @@ export default function App() {
                           );
                         })}
                       </div>
-                    ) : null}
+                      {olderCount > 0 ? (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setShowAllInputs((v) => !v)}
+                          style={{fontSize:"11px", padding:"2px 8px", marginTop:"4px", alignSelf:"flex-start"}}
+                          title="Files older than 7 days are hidden by default to keep this list readable as it grows."
+                        >
+                          {showAllInputs ? `Show recent only (hide ${olderCount} older)` : `Show all (${olderCount} older)`}
+                        </button>
+                      ) : null}
+                      </>
+                      );
+                    })() : null}
                   </div>
                 ) : null}
               </div>
@@ -4128,7 +4304,11 @@ export default function App() {
             {step1ResultsTab === "results" ? (
               <>
                 <div className="note">
-                  {qcRows.length ? `Loaded ${qcRows.length} sample(s) for ${selectedProject}.` : "No stats loaded yet."}
+                  {qcRows.length
+                    ? (qcDateStart || qcDateEnd || qcFilter.trim() || showFlaggedOnly
+                        ? `Showing ${computeVisibleQcRows().length} of ${qcRows.length} sample(s) for ${selectedProject}.`
+                        : `Loaded ${qcRows.length} sample(s) for ${selectedProject}.`)
+                    : "No stats loaded yet."}
                 </div>
                 <div className="row" style={{ alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
                   <label className="checkbox">
@@ -4148,15 +4328,52 @@ export default function App() {
                     style={{ flex: 1, minWidth: "10rem" }}
                   />
                 </div>
+                <div className="row" style={{ alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <span className="muted" style={{ fontSize: "0.85em" }} title="Filter by the date each sample was run through Step 1.">Run date:</span>
+                  <input
+                    type="date"
+                    value={qcDateStart}
+                    max={qcDateEnd || undefined}
+                    onChange={(e) => setQcDateStart(e.target.value)}
+                    title="Start date (inclusive). Leave blank for open-ended."
+                  />
+                  <span className="muted">–</span>
+                  <input
+                    type="date"
+                    value={qcDateEnd}
+                    min={qcDateStart || undefined}
+                    onChange={(e) => setQcDateEnd(e.target.value)}
+                    title="End date (inclusive). Set start = end for a single day."
+                  />
+                  <button className="ghost" style={{ fontSize: "0.8em" }} onClick={() => setQcRangeDays(1)} title="Samples run today">Today</button>
+                  <button className="ghost" style={{ fontSize: "0.8em" }} onClick={() => setQcRangeDays(7)} title="Samples run in the last 7 days">Last 7d</button>
+                  <button className="ghost" style={{ fontSize: "0.8em" }} onClick={() => setQcRangeDays(30)} title="Samples run in the last 30 days">Last 30d</button>
+                  {(qcDateStart || qcDateEnd) ? (
+                    <button className="ghost" style={{ fontSize: "0.8em" }} onClick={clearQcDates} title="Clear the date filter">Clear dates</button>
+                  ) : null}
+                </div>
                 {qcError ? <div className="note error">{qcError}</div> : null}
                 <QcCriteriaWidget />
                 <div className="qc-table scrollable">
                   <table>
                     <thead>
                       <tr>
-                        <th>Exclude</th>
+                        <th title="Toggle Exclude for every sample currently shown (honors the date / name / flagged filters).">
+                          <div className="cell-inline" style={{ gap: "4px", justifyContent: "center" }}>
+                            <input
+                              type="checkbox"
+                              ref={(el) => { if (el) el.indeterminate = excludeAllState().indeterminate; }}
+                              checked={excludeAllState().checked}
+                              disabled={!computeVisibleQcRows().length}
+                              onChange={(e) => toggleExcludeAllVisible(e.target.checked)}
+                              title="Select / deselect Exclude for all samples in the current view"
+                            />
+                            <span>Exclude</span>
+                          </div>
+                        </th>
                         <th>QC</th>
                         <th>Sample</th>
+                        <th>Run date</th>
                         <th>Files</th>
                         <th>Reference</th>
                         <th>Avg Depth</th>
@@ -4170,13 +4387,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {qcRows
-                        .filter((r) => !showFlaggedOnly || isFlagged(r))
-                        .filter((r) => {
-                          const q = qcFilter.trim().toLowerCase();
-                          if (!q) return true;
-                          return String(r._sample || r.sample || "").toLowerCase().includes(q);
-                        })
+                      {computeVisibleQcRows()
                         .map((row) => {
                           const key = sampleKey(row);
                           const editInfo = step1Edits[key];
@@ -4198,6 +4409,7 @@ export default function App() {
                                   {editInfo?.edited ? <span className="badge edited">Edited</span> : null}
                                 </div>
                               </td>
+                              <td title={row._run_date || ""}>{qcRunDate(row) || "-"}</td>
                               <td>
                                 <details
                                   className="inline-details"
@@ -5134,7 +5346,7 @@ export default function App() {
                             const filtered = q
                               ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
-                            const excludedCount = Object.keys(step2BuildExcluded).filter(k => step2BuildExcluded[k]).length;
+                            const excludedCount = vcfSourceSamples.filter(s => step2BuildExcluded[s.sample] || step2QcExcluded[s.sample]).length;
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
@@ -5146,19 +5358,26 @@ export default function App() {
                                   )}
                                 </div>
                                 {filtered.map(s => {
-                                  const isExcluded = !!step2BuildExcluded[s.sample];
+                                  const lockedByQc = !!step2QcExcluded[s.sample];
+                                  const isExcluded = !!step2BuildExcluded[s.sample] || lockedByQc;
                                   const metaLabel = step2BuildMeta[s.sample];
                                   return (
                                   <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: isExcluded ? 0.55 : 1}}>
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
+                                      disabled={lockedByQc}
                                       onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
-                                      title={isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"}
-                                      style={{flexShrink:0, cursor:"pointer"}}
+                                      title={lockedByQc
+                                        ? "Excluded in Step 1 Results — change it there to include in Step 2"
+                                        : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2")}
+                                      style={{flexShrink:0, cursor: lockedByQc ? "not-allowed" : "pointer"}}
                                     />
                                     <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: isExcluded ? "line-through" : "none"}}>
                                       {s.sample}
+                                      {lockedByQc && (
+                                        <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
+                                      )}
                                       {metaLabel && metaLabel !== s.sample && (
                                         <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
                                       )}

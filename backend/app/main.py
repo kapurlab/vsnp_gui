@@ -2608,15 +2608,25 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
     vcfs_dir.mkdir(parents=True, exist_ok=True)
 
     force_set = set(payload.force_samples or [])
+    # Samples excluded in Step 1 Results must not be auto-collected into the
+    # _VCFs set (they would otherwise feed a Step 2 build the user meant to drop).
+    # An explicit force_samples check still overrides, since that is a deliberate
+    # per-sample "add this anyway" action.
+    excluded_set = set(_read_remove_xlsx_names(project_dir / "step2" / "remove_from_analysis.xlsx"))
     auto_added: List[str] = []
     force_added: List[str] = []
     already_present: List[str] = []
     no_vcf: List[str] = []
+    excluded_skipped: List[str] = []
 
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
             continue
         sample = sample_dir.name
+
+        if sample in excluded_set and sample not in force_set:
+            excluded_skipped.append(sample)
+            continue
 
         # Determine pass/fail from provenance sentinel, fall back to output presence
         exit_code_path = sample_dir / ".provenance" / "exit_code"
@@ -2662,6 +2672,7 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         "force_added": force_added,
         "already_present": already_present,
         "no_vcf": no_vcf,
+        "excluded_skipped": excluded_skipped,
         "total": total,
     }
 
@@ -3012,6 +3023,80 @@ def preflight(debug: bool = Query(False)):
         raise HTTPException(status_code=500, detail=f"Preflight output parse failed: {result.stdout.strip()}")
 
 
+# Shared embedded-Python prelude for the QC summary endpoints (JSON / CSV /
+# XLSX). It scans step1/*/*_stats.xlsx, attaches a per-sample run date and the
+# source file, de-dupes to the most-recent run per sample, then applies an
+# optional date-range / name filter driven by the QC_START / QC_END / QC_Q
+# environment variables. The authoritative run date is run_metadata.json's
+# started_at (provenance); we fall back to the xlsx 'date' column, the
+# timestamp embedded in the _stats.xlsx filename, and finally the file mtime.
+# After this prelude runs, `vals` holds the filtered list[dict] of rows.
+_QC_SCAN_AND_FILTER = (
+    "import pandas as pd, glob, json, os, sys, re, datetime\n"
+    "step1=sys.argv[1]\n"
+    "start=os.environ.get('QC_START','').strip()\n"
+    "end=os.environ.get('QC_END','').strip()\n"
+    "q=os.environ.get('QC_Q','').strip().lower()\n"
+    "def _run_date(f,row):\n"
+    "    d=os.path.dirname(f)\n"
+    "    try:\n"
+    "        with open(os.path.join(d,'run_metadata.json')) as fh:\n"
+    "            meta=json.load(fh)\n"
+    "        ts=meta.get('started_at') or meta.get('finished_at')\n"
+    "        if ts: return str(ts)\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "    dt=row.get('date')\n"
+    "    if dt not in (None,'') and not (isinstance(dt,float) and pd.isna(dt)):\n"
+    "        return str(dt)\n"
+    "    m=re.search(r'(\\d{4}-\\d{2}-\\d{2})_(\\d{2}-\\d{2}-\\d{2})', os.path.basename(f))\n"
+    "    if m: return m.group(1)+'T'+m.group(2).replace('-',':')\n"
+    "    try:\n"
+    "        return datetime.datetime.fromtimestamp(os.path.getmtime(f)).isoformat()\n"
+    "    except Exception:\n"
+    "        return ''\n"
+    "rows=[]\n"
+    "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
+    "    try:\n"
+    "        df=pd.read_excel(f)\n"
+    "    except Exception:\n"
+    "        continue\n"
+    "    if df.empty:\n"
+    "        continue\n"
+    "    row=df.iloc[0].to_dict()\n"
+    "    row['_file']=f\n"
+    "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
+    "    row['_sample']=sample\n"
+    "    row['_run_date']=_run_date(f,row)\n"
+    "    rows.append(row)\n"
+    "latest={}\n"
+    "for row in rows:\n"
+    "    sample=row.get('_sample')\n"
+    "    rd=row.get('_run_date','') or ''\n"
+    "    if sample not in latest or rd > (latest[sample].get('_run_date','') or ''):\n"
+    "        latest[sample]=row\n"
+    "def _keep(row):\n"
+    "    rd=str(row.get('_run_date') or '')[:10]\n"
+    "    if start and (not rd or rd < start): return False\n"
+    "    if end and (not rd or rd > end): return False\n"
+    "    if q and q not in str(row.get('_sample','')).lower(): return False\n"
+    "    return True\n"
+    "vals=[r for r in latest.values() if _keep(r)]\n"
+)
+
+
+def _qc_filter_env(start: Optional[str], end: Optional[str], q: Optional[str]) -> Dict[str, str]:
+    """Environment overlay carrying the QC date-range / name filters into the
+    embedded scan script. Empty strings mean 'no filter' (the prelude skips
+    them), so the JSON endpoint passes nothing and returns the full set."""
+    return {
+        **os.environ,
+        "QC_START": (start or "").strip(),
+        "QC_END": (end or "").strip(),
+        "QC_Q": (q or "").strip(),
+    }
+
+
 @app.get("/api/projects/{project}/qc_summary")
 def qc_summary(project: str):
     cfg = load_config()
@@ -3019,33 +3104,9 @@ def qc_summary(project: str):
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    code = (
-        "import pandas as pd, glob, json, os, sys\n"
-        "step1=sys.argv[1]\n"
-        "rows=[]\n"
-        "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
-        "    try:\n"
-        "        df=pd.read_excel(f)\n"
-        "    except Exception:\n"
-        "        continue\n"
-        "    if df.empty:\n"
-        "        continue\n"
-        "    row=df.iloc[0].to_dict()\n"
-        "    row['_file']=f\n"
-        "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-        "    row['_sample']=sample\n"
-        "    rows.append(row)\n"
-        "latest={}\n"
-        "for row in rows:\n"
-        "    sample=row.get('_sample')\n"
-        "    date=row.get('date','') or ''\n"
-        "    if sample not in latest:\n"
-        "        latest[sample]=row\n"
-        "    else:\n"
-        "        if date > (latest[sample].get('date','') or ''):\n"
-        "            latest[sample]=row\n"
-        "print(json.dumps(list(latest.values())))\n"
-    )
+    # JSON endpoint returns every sample; the frontend filters live so the date
+    # picker is responsive. Server-side filtering is reserved for the downloads.
+    code = _QC_SCAN_AND_FILTER + "print(json.dumps(vals, default=str))\n"
     cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
     result = subprocess.run(cmd_list, text=True, capture_output=True)
     if result.returncode != 0:
@@ -3058,90 +3119,54 @@ def qc_summary(project: str):
 
 
 @app.get("/api/projects/{project}/qc_summary.csv")
-def qc_summary_csv(project: str):
+def qc_summary_csv(
+    project: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    code = (
-        "import pandas as pd, glob, os, sys\n"
-        "step1=sys.argv[1]\n"
-        "rows=[]\n"
-        "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
-        "    try:\n"
-        "        df=pd.read_excel(f)\n"
-        "    except Exception:\n"
-        "        continue\n"
-        "    if df.empty:\n"
-        "        continue\n"
-        "    row=df.iloc[0]\n"
-        "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-        "    row['_sample']=sample\n"
-        "    rows.append(row)\n"
-        "latest={}\n"
-        "for row in rows:\n"
-        "    sample=row.get('_sample')\n"
-        "    date=row.get('date','') or ''\n"
-        "    if sample not in latest:\n"
-        "        latest[sample]=row\n"
-        "    else:\n"
-        "        if date > (latest[sample].get('date','') or ''):\n"
-        "            latest[sample]=row\n"
-        "if not latest:\n"
+    code = _QC_SCAN_AND_FILTER + (
+        "if not vals:\n"
         "    print('')\n"
         "else:\n"
-        "    out=pd.DataFrame(list(latest.values()))\n"
-        "    print(out.to_csv(index=False))\n"
+        "    df=pd.DataFrame(vals).drop(columns=['_file'], errors='ignore').rename(columns={'_run_date':'run_date'})\n"
+        "    print(df.to_csv(index=False))\n"
     )
     cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    result = subprocess.run(
+        cmd_list, text=True, capture_output=True, env=_qc_filter_env(start, end, q)
+    )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"QC summary CSV failed: {result.stderr.strip()}")
     return Response(content=result.stdout, media_type="text/csv")
 
 
 @app.get("/api/projects/{project}/qc_summary.xlsx")
-def qc_summary_xlsx(project: str):
+def qc_summary_xlsx(
+    project: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
     output_path = step1_dir / "combined_excelworksheets.xlsx"
-    code = (
-        "import pandas as pd, glob, os, sys\n"
-        "step1=sys.argv[1]\n"
+    code = _QC_SCAN_AND_FILTER + (
         "out=sys.argv[2]\n"
-        "rows=[]\n"
-        "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
-        "    try:\n"
-        "        df=pd.read_excel(f)\n"
-        "    except Exception:\n"
-        "        continue\n"
-        "    if df.empty:\n"
-        "        continue\n"
-        "    row=df.iloc[0]\n"
-        "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-        "    row['_sample']=sample\n"
-        "    rows.append(row)\n"
-        "latest={}\n"
-        "for row in rows:\n"
-        "    sample=row.get('_sample')\n"
-        "    date=row.get('date','') or ''\n"
-        "    if sample not in latest:\n"
-        "        latest[sample]=row\n"
-        "    else:\n"
-        "        if date > (latest[sample].get('date','') or ''):\n"
-        "            latest[sample]=row\n"
-        "if not latest:\n"
-        "    out_df=pd.DataFrame()\n"
-        "else:\n"
-        "    out_df=pd.DataFrame(list(latest.values()))\n"
-        "out_df.to_excel(out, index=False)\n"
+        "pd.DataFrame(vals).drop(columns=['_file'], errors='ignore').rename(columns={'_run_date':'run_date'}).to_excel(out, index=False)\n"
     )
     cmd_list = conda_python_cmd(cfg, code, [str(step1_dir), str(output_path)])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
+    result = subprocess.run(
+        cmd_list, text=True, capture_output=True, env=_qc_filter_env(start, end, q)
+    )
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"QC summary XLSX failed: {result.stderr.strip()}")
     content = output_path.read_bytes()

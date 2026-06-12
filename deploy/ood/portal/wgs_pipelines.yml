@@ -40,6 +40,69 @@ pipelines:
     runtime: "GUI-based interactive fully contained sessions"
     launch_url: /pun/sys/dashboard/batch_connect/sys/kraken_id_parse_gui/session_contexts/new
 
+  - id: ncbi_submit
+    icon: N
+    title: NCBI Submit
+    description: >-
+      Prepare and submit SRA (FASTQ) and GenBank (FASTA) deposits to NCBI from
+      an Excel metadata sheet. Validates to ISO/INSDC standards, deduplicates
+      against records already in NCBI, and links BioSamples across archives.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/ncbi_submit_gui/session_contexts/new
+
+  - id: ksnp
+    icon: S
+    title: kSNP4
+    description: >-
+      Reference-free, alignment-free SNP discovery and phylogenetics from
+      genome FASTAs. Builds parsimony / ML / NJ SNP trees and core-SNP
+      matrices for outbreak clustering, with a QC + provenance PDF report.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/ksnp_gui/session_contexts/new
+
+  - id: amr
+    icon: A
+    title: AMRFinderPlus
+    description: >-
+      Antimicrobial resistance, virulence & stress-gene detection with
+      conservative organism resolution. NCBI AMRFinderPlus with QC and
+      provenance, plus PDF and Excel reports.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/amr_plus_gui/session_contexts/new
+
+  - id: mlst
+    icon: M
+    title: MLST
+    description: >-
+      Multi-locus sequence typing — autodetects the PubMLST scheme and reports
+      the sequence type (ST) for WGS isolates.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/mlst_gui/session_contexts/new
+
+  - id: genoflu
+    icon: G
+    title: GenoFLU
+    description: >-
+      Influenza A whole-genome genotyping (incl. H5N1 2.3.4.4b) by per-segment
+      BLAST — the USDA-VS GenoFLU method.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/genoflu_gui/session_contexts/new
+
+  - id: irma
+    icon: I
+    title: IRMA
+    description: >-
+      Influenza / SARS-CoV-2 genome assembly (CDC IRMA) with a metadata-built
+      submission FASTA and GenoFLU genotyping.
+    status: available
+    runtime: "GUI-based interactive fully contained sessions"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/irma_gui/session_contexts/new
+
   - id: mhc
     icon: m
     title: MHC Typer

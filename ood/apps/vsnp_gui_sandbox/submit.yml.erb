@@ -1,0 +1,21 @@
+---
+# Slurm batch_connect submission. The session runs on a COMPUTE NODE
+# (unlike wgs3's linux_host adapter, which runs on localhost). `port` is
+# allocated on that node by before.sh and proxied back through OOD's rnode.
+batch_connect:
+  template: "basic"
+  conn_params:
+    - port
+
+script:
+  # Walltime in seconds, from the duration field.
+  wall_time: "<%= context.bc_num_hours.to_i * 3600 %>"
+  native:
+    - "--nodes=1"
+    - "--ntasks=1"
+    - "--cpus-per-task=<%= context.num_cores.to_i %>"
+    - "--mem=<%= context.mem_gb.to_i %>G"
+    - "--partition=<%= context.slurm_partition.to_s.strip %>"
+<%- unless context.slurm_account.to_s.strip.empty? -%>
+    - "--account=<%= context.slurm_account.to_s.strip %>"
+<%- end -%>

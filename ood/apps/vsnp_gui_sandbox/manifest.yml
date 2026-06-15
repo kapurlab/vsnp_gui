@@ -1,0 +1,7 @@
+---
+name: vSNP GUI (sandbox)
+description: "Per-user vSNP3 SNP analysis pipeline — Slurm, no admin required"
+icon: fa://dna
+category: Bioinformatics
+subcategory: SNP Analysis
+role: batch_connect

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# vSNP GUI (sandbox) OOD batch_connect script — runs on the Slurm compute node.
+# $port is exported by before.sh. All paths resolve under $HOME (no admin).
+#
+# Resolution order for the install location + conda env:
+#   1. ~/.config/vsnp_gui/sandbox.env  (written by deploy/setup-sandbox.sh)
+#   2. sensible $HOME defaults
+
+echo "=== vSNP GUI (sandbox) Session Starting ==="
+echo "host:$(hostname)  uvicorn:${port}"
+
+# ----- Load per-user sandbox settings if present -----
+SANDBOX_ENV="${HOME}/.config/vsnp_gui/sandbox.env"
+if [ -f "${SANDBOX_ENV}" ]; then
+  # shellcheck disable=SC1090
+  . "${SANDBOX_ENV}"
+  echo "Loaded ${SANDBOX_ENV}"
+fi
+
+# ----- Defaults (overridable by sandbox.env above) -----
+VSNP_GUI_DIR="${VSNP_GUI_DIR:-${HOME}/vsnp_gui}"
+VSNP3_ENV="${VSNP3_ENV:-${HOME}/miniforge3/envs/vsnp3}"
+
+# Optional shared tree (group allocation you can both write to). If set, the
+# backend resolves shared projects/refs/tools under it; otherwise it falls
+# back to per-user $HOME paths automatically (see backend/app/config.py).
+if [ -n "${VSNP_GUI_SITE_ROOT}" ]; then
+  export VSNP_GUI_SITE_ROOT
+  echo "  site root: ${VSNP_GUI_SITE_ROOT}"
+fi
+
+PYTHON="${VSNP3_ENV}/bin/python"
+if [ ! -x "${PYTHON}" ]; then
+  echo "ERROR: python not found at ${PYTHON}" >&2
+  echo "       Run deploy/setup-sandbox.sh to create the per-user vsnp3 env." >&2
+  exit 1
+fi
+if [ ! -d "${VSNP_GUI_DIR}/backend" ]; then
+  echo "ERROR: vsnp_gui backend not found at ${VSNP_GUI_DIR}/backend" >&2
+  echo "       Set VSNP_GUI_DIR in ${SANDBOX_ENV} or clone the repo to ~/vsnp_gui." >&2
+  exit 1
+fi
+
+# Make the vsnp3 env CLI tools (vsnp3_step1.py, raxml, samtools, …) available.
+export PATH="${VSNP3_ENV}/bin:${PATH}"
+
+# Build the frontend if it hasn't been built yet (first launch after a clone).
+# setup-sandbox.sh normally does this once; this is a safety net.
+if [ ! -f "${VSNP_GUI_DIR}/frontend/dist/index.html" ]; then
+  echo "frontend/dist missing — building once (needs npm on PATH)…"
+  ( cd "${VSNP_GUI_DIR}/frontend" && npm ci && npm run build ) \
+    || echo "WARN: frontend build failed; the GUI may not load. Run npm run build manually."
+fi
+
+cd "${VSNP_GUI_DIR}/backend"
+echo "Starting uvicorn on port ${port}"
+echo "  vsnp3 env: ${VSNP3_ENV}"
+echo "  vsnp_gui:  ${VSNP_GUI_DIR}"
+exec "${PYTHON}" -m uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port "${port}" \
+    --log-level info

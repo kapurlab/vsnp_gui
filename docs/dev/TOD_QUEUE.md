@@ -137,3 +137,62 @@ Identical patch already merged into `kapurlab/vsnp_gui` at commit
 `507f192`. Tod should mirror the wgs3 patch back into the
 `kraken_id_parse_gui` repo source so the fix survives a sync from
 repo → /var/www.
+
+---
+
+## ICAR-NIVEDI deployment — 3 template-wide bugs found + fixed across all 8 GUIs — Open (2026-06-23)
+
+Stood up the full bdtools suite on the ICAR-NIVEDI OOD host (linux_host +
+Singularity, like wgs3). Hit three issues that are **not ICAR-specific — they
+live in the shared GUI template, so they affect vsnp_gui and every tool**.
+Fixed all 8 on the ICAR box as *deployed-file edits*; these need to land in the
+canonical repos (`backend/app/main.py` + `frontend/src/App.jsx` per tool).
+Full detail + diagnostics in **`docs/dev/ICAR_INSTALL_FINDINGS.md`**.
+
+**1. SSE log streaming is unusable behind the OOD `/rnode` proxy → switch to polling.**
+The `EventSource('./api/jobs/${id}/log')` stream is held open and mangled by the
+Apache `/rnode` reverse proxy: the `onerror` fires before `[DONE]`, and the old
+code treated that as failure → **successful runs showed "Failed"/"Run failed"**,
+and results never auto-refreshed. Fix: drop the EventSource entirely; add a plain
+`GET /api/jobs/{id}/logtext` (returns `{status, exit_code, log}`) and a poll-only
+`watchJob()` that takes terminal status from the recorded exit code. This is the
+real root cause of the **2026-06-04 item #2** (Kraken results don't auto-repoll)
+*and* the vSNP **step2 auto-refresh** self-flag (T-47) — same SSE-through-proxy
+failure, now fixed by polling. Done in all 8: kraken_id_parse, amr_plus, mlst,
+genoflu, irma, ksnp, ncbi_submit, vsnp (vsnp had **two** EventSources — the job
+watcher + `streamKrakenLog`; both converted).
+
+**2. Route ordering — new `/api/*` routes must be registered BEFORE the SPA catch-all.**
+A new endpoint appended to the END of `main.py` lands *after* the
+`app.mount("/", StaticFiles(...))` catch-all, so Starlette routes the request to
+the static handler → **HTTP 404 even though it shows in `/openapi.json`**. Burned
+~an hour because a Python `import` of the route fn "worked" while the HTTP route
+404'd. Lesson: register API routes before the mount, and verify with a real curl,
+not an import. (vsnp_gui serves the SPA via per-file routes, not a mount, so it's
+not exposed — but the other 7 are.)
+
+**3. The `/rnode` Apache proxy TRUNCATES buffered responses at ~43,539 bytes.**
+Confirmed: `logtext` returned 121,288 bytes on localhost but the browser got
+exactly 43,539 via the proxy → truncated → invalid JSON → blank log panel.
+Kraken slipped under (tiny log); AMRFinderPlus's verbose log blew past it.
+FileResponse/range (206) streams are unaffected (IGV BAM served 325 KB fine) —
+it's buffered 200 JSON that gets cut. App-side fix: cap `logtext` to the last
+30 KB. **Broader risk for Tod/infra**: *any* large JSON response (>~43 KB) in
+these GUIs can silently truncate — a big results table or file listing would too.
+Long-term: raise the `/rnode` proxy response buffer (Apache/OOD config, infra
+side) or stream/paginate big payloads. Diagnose by comparing a direct localhost
+curl byte count vs the Apache access-log size for the proxied request.
+
+### AMRFinderPlus GUI — three smaller fixes (also worth upstreaming) — Open (2026-06-23)
+
+1. **Demo input type**: MLST and AMR GUIs are *reads-based* (`_count_project_reads`
+   counts `*.fastq.gz` only). A reference-assembly FASTA is invisible to them, so
+   the S. aureus demo needed paired reads, not a contigs file. (kSNP is correctly
+   assembly-based; the asymmetry is fine, just worth a note in the input docs.)
+2. **`config.py` kraken_db default** pointed at non-existent `/srv/kapurlab/...`
+   paths via `_first_existing(...)`, so organism detection returned `None` and AMR
+   ran without `--organism` (no point mutations). Should fall back to a real DB or
+   be site-parameterized (T-04), not hardcoded to one site.
+3. **"View results table" button** set `selectedResultKey`/`showResults` but never
+   called the table loader, so it appeared to do nothing — now also calls
+   `loadSampleResults` + `loadAmrTable` (mirrors the Refresh button).

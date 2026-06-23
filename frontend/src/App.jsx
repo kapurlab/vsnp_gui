@@ -109,6 +109,12 @@ export default function App() {
   const step1JobStatusRef = useRef("");
   const krakenEsRef = useRef(null);
   const krakenLogRef = useRef(null);
+  // id of the job each poll loop is currently watching; newest run wins and
+  // stale loops bail out. Replaces the old SSE EventSources whose connections
+  // the OOD /rnode reverse proxy corrupted. (krakenLogRef stays the DOM ref for
+  // the log scroll container; the kraken loop uses its own guard below.)
+  const watchIdRef = useRef(null);
+  const krakenWatchIdRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -863,57 +869,98 @@ export default function App() {
     runPreflight();
   }, [settings.vsnp3_path]);
 
+  // Watch the primary job by POLLING a plain endpoint (no SSE/EventSource).
+  // The OOD /rnode Apache reverse proxy holds SSE connections open and
+  // corrupts concurrent sibling GET requests (a status poll comes back
+  // carrying the SSE's buffered body, breaking JSON parsing → successful runs
+  // were mislabelled "failed", and results/log did not auto-refresh).
+  // ./api/jobs/{id}/logtext is a normal GET returning BOTH the recorded
+  // status (from the real process exit code) and the current log text, so a
+  // single poll loop drives status + live-ish logs proxy-safely. Every state
+  // update is guarded by watchIdRef.current === id so a stale loop from a
+  // previous run cannot clobber the newest run.
   useEffect(() => {
     if (!jobId) return;
     setLogs([]);
     setJobStatus("running");
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    es.onmessage = (evt) => {
-      const line = evt.data;
-      if (line.startsWith("[job:")) {
-        const status = line.replace("[job:", "").replace("]", "");
-        setJobStatus(status);
-        // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
-        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
-          loadStep1Status();
-          loadQC();
-          refreshProjects(selectedProject);
-          collectVcfs([]);
-        }
-        // Step 2 job completed: refresh run list (auto-selects newest → triggers
-        // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
-        if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
-          loadStep2Runs(true);
-          refreshProjects(selectedProject);
-        }
-        // Update SRA status if this was an SRA job
-        if (sraJobId && jobId === sraJobId) {
-          if (status === "succeeded") {
-            setSraStatus("Download complete");
-            loadAll();
-          } else {
-            setSraStatus(`Download ${status}`);
-          }
-        }
-        // Update genome download status if this was a genome download job
-        if (genomeJobId && jobId === genomeJobId) {
-          if (status === "succeeded") {
-            setGenomeDownloadStatus("Download complete. Refreshing references...");
-            loadAll().then(() => setGenomeDownloadStatus("Download complete."));
-          } else {
-            setGenomeDownloadStatus(`Download ${status}`);
-          }
-        }
-        es.close();
-        return;
+    const id = jobId;
+    watchIdRef.current = id;   // newest run wins; stale loops below bail out
+    let errors = 0;
+    let finished = false;
+    let timer = null;
+
+    const applyTerminal = (status) => {
+      if (watchIdRef.current !== id) return;
+      setJobStatus(status);
+      // --- result-loading preserved VERBATIM from the original SSE handler ---
+      // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
+      if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
+        loadStep1Status();
+        loadQC();
+        refreshProjects(selectedProject);
+        collectVcfs([]);
       }
-      setLogs((prev) => [...prev, line]);
+      // Step 2 job completed: refresh run list (auto-selects newest → triggers
+      // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
+      if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+        loadStep2Runs(true);
+        refreshProjects(selectedProject);
+      }
+      // Update SRA status if this was an SRA job
+      if (sraJobId && jobId === sraJobId) {
+        if (status === "succeeded") {
+          setSraStatus("Download complete");
+          loadAll();
+        } else {
+          setSraStatus(`Download ${status}`);
+        }
+      }
+      // Update genome download status if this was a genome download job
+      if (genomeJobId && jobId === genomeJobId) {
+        if (status === "succeeded") {
+          setGenomeDownloadStatus("Download complete. Refreshing references...");
+          loadAll().then(() => setGenomeDownloadStatus("Download complete."));
+        } else {
+          setGenomeDownloadStatus(`Download ${status}`);
+        }
+      }
     };
-    es.onerror = () => {
-      setJobStatus("error");
-      es.close();
+
+    const tick = () => {
+      if (finished || watchIdRef.current !== id) return;
+      fetch(`${API_BASE}/api/jobs/${id}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+        .then((data) => {
+          if (watchIdRef.current !== id) return;
+          errors = 0;
+          if (typeof data.log === "string") {
+            // logtext returns the full log file (incl. the JobManager preamble
+            // line and the "$ <command>" echo); show it as the live log.
+            setLogs(data.log.split("\n"));
+          }
+          if (!data.status || data.status === "running") {
+            timer = setTimeout(tick, 2000);
+            return;
+          }
+          finished = true;
+          applyTerminal(data.status);   // succeeded | failed from the real exit code
+        })
+        .catch(() => {
+          if (finished || watchIdRef.current !== id) return;
+          errors += 1;
+          if (errors < 30) {
+            timer = setTimeout(tick, 2000);   // ride out transient proxy blips
+          } else {
+            finished = true;
+            applyTerminal("failed");
+          }
+        });
     };
-    return () => es.close();
+    timer = setTimeout(tick, 1200);
+    return () => {
+      finished = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [jobId]);
 
   useEffect(() => {
@@ -2523,51 +2570,74 @@ export default function App() {
     }
   }
 
+  // Poll the kraken sub-job (no SSE). Same OOD /rnode proxy hazard as the
+  // primary watcher above: an SSE held open concurrently with sibling GETs gets
+  // corrupted. ./api/jobs/{id}/logtext returns status + log in one proxy-safe
+  // GET. krakenWatchIdRef guards "newest kraken run wins"; stale loops bail out.
   function streamKrakenLog(jobId) {
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    krakenEsRef.current = es;
-    es.onmessage = (evt) => {
-      const data = evt.data;
-      const m = data.match(/^\[job:(succeeded|failed)\]$/);
-      if (m) {
-        es.close();
-        krakenEsRef.current = null;
-        setKrakenModal((mm) => {
-          // Refresh the project's sample browser so the new Kraken outputs
-          // (incl. parsed-read fastqs) appear under the sample, and drop any
-          // stale cached file list for it.
-          if (mm.project) {
-            if (projExpanded[mm.project]) loadProjData(mm.project);
-            // A successful run produced a new Kraken dir → refresh the cached
-            // list so the Step 1 row's "Krona" button appears right away.
-            if (m[1] === "succeeded") loadProjectKrakenDirs(mm.project);
-            // The backend auto-imports the parsed-read fastqs into the project's
-            // inputs (download/) on success; refresh the Inputs pane so they
-            // show up immediately, ready to re-run through vSNP.
-            if (m[1] === "succeeded" && mm.project === selectedProject) {
-              loadInputs(selectedProject);
-            }
-            setSampleKrakenFiles((prev) => {
-              const next = { ...prev };
-              Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
-              return next;
-            });
+    const id = jobId;
+    krakenWatchIdRef.current = id;   // newest kraken run wins
+    krakenEsRef.current = null;
+    let errors = 0;
+    let finished = false;
+    const tick = () => {
+      if (finished || krakenWatchIdRef.current !== id) return;
+      fetch(`${API_BASE}/api/jobs/${id}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+        .then((data) => {
+          if (krakenWatchIdRef.current !== id) return;
+          errors = 0;
+          if (typeof data.log === "string") {
+            setKrakenModal((mm) => ({ ...mm, log: data.log.split("\n") }));
           }
-          return { ...mm, running: false, status: m[1] };
+          if (!data.status || data.status === "running") {
+            setTimeout(tick, 2000);
+            return;
+          }
+          finished = true;
+          // Shim so the result-loading body below stays VERBATIM from the
+          // original SSE handler (which used m[1] for the terminal status).
+          const m = [null, data.status];
+          setKrakenModal((mm) => {
+            // Refresh the project's sample browser so the new Kraken outputs
+            // (incl. parsed-read fastqs) appear under the sample, and drop any
+            // stale cached file list for it.
+            if (mm.project) {
+              if (projExpanded[mm.project]) loadProjData(mm.project);
+              // A successful run produced a new Kraken dir → refresh the cached
+              // list so the Step 1 row's "Krona" button appears right away.
+              if (m[1] === "succeeded") loadProjectKrakenDirs(mm.project);
+              // The backend auto-imports the parsed-read fastqs into the project's
+              // inputs (download/) on success; refresh the Inputs pane so they
+              // show up immediately, ready to re-run through vSNP.
+              if (m[1] === "succeeded" && mm.project === selectedProject) {
+                loadInputs(selectedProject);
+              }
+              setSampleKrakenFiles((prev) => {
+                const next = { ...prev };
+                Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
+                return next;
+              });
+            }
+            return { ...mm, running: false, status: m[1] };
+          });
+          // Refresh the sample's cross-tool Kraken files if its folder is open.
+          if (folderModal.open && folderModal.sample) {
+            openStep1FolderModal(folderModal.project, folderModal.sample);
+          }
+        })
+        .catch(() => {
+          if (finished || krakenWatchIdRef.current !== id) return;
+          errors += 1;
+          if (errors < 30) {
+            setTimeout(tick, 2000);   // ride out transient proxy blips
+          } else {
+            finished = true;
+            setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+          }
         });
-        // Refresh the sample's cross-tool Kraken files if its folder is open.
-        if (folderModal.open && folderModal.sample) {
-          openStep1FolderModal(folderModal.project, folderModal.sample);
-        }
-        return;
-      }
-      setKrakenModal((mm) => ({ ...mm, log: [...mm.log, data] }));
     };
-    es.onerror = () => {
-      es.close();
-      krakenEsRef.current = null;
-      setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
-    };
+    setTimeout(tick, 1200);
   }
 
   function downloadFolderFile(project, path) {

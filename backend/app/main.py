@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
-from fastapi.responses import Response, FileResponse, HTMLResponse
+from fastapi.responses import Response, FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -2905,6 +2905,33 @@ def job_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+# ---------------------------------------------------------------------------
+# Plain (non-streaming) log + status -- POLLED by the UI instead of SSE. The OOD
+# /rnode Apache reverse proxy holds SSE connections open and corrupts concurrent
+# sibling GET requests (a status poll comes back carrying the SSE's buffered
+# body, so JSON parsing fails and successful runs are mislabelled "failed").
+# A plain GET returning BOTH the recorded status (from the real exit code) and
+# the current log text is proxy-safe and drives status + live-ish logs from one
+# poll loop. Registered among the other /api/* routes (Starlette matches in
+# registration order, so this is reached before the SPA/static handlers).
+# ---------------------------------------------------------------------------
+@app.get("/api/jobs/{job_id}/logtext")
+def job_logtext(job_id: str):
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    text = ""
+    try:
+        lp = job.get("log_path")
+        if lp and Path(lp).is_file():
+            text = Path(lp).read_text(encoding="utf-8", errors="replace")
+            if len(text) > 30000:   # OOD /rnode proxy truncates buffered responses ~43.5KB
+                text = "...(earlier log truncated)...\n" + text[-30000:]
+    except OSError:
+        pass
+    return JSONResponse({"status": job.get("status"), "exit_code": job.get("exit_code"), "log": text})
 
 
 @app.get("/api/jobs/{job_id}/events")

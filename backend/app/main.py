@@ -1925,7 +1925,11 @@ def sra_download(project: str, payload: SraRequest):
     return {"job_id": job_id}
 
 
-_FASTQ_SAMPLE_RE = re.compile(r"(.+?)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$")
+# Greedy prefix (.+) binds the read marker to the RIGHTMOST _R1/_R2 (or _1/_2),
+# so a sample ID that itself ends in _1/_2 (Mg_2_R1 -> Mg-2) isn't mis-split on
+# the first such token. Non-greedy (.+?) would latch onto the first _1/_2 and
+# let the lane group swallow the real _R1, collapsing Mg_2 back to "Mg".
+_FASTQ_SAMPLE_RE = re.compile(r"(.+)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$")
 
 
 def _sanitized_sample_and_name(filename: str) -> Tuple[str, str]:
@@ -1974,9 +1978,17 @@ def step1_setup(project: str):
         # already dashed, or a re-run, is a no-op.
         if safe_name != f.name:
             new_path = f.with_name(safe_name)
-            if not new_path.exists():
-                f.rename(new_path)
-                renamed += 1
+            if new_path.exists():
+                # A dashed file is already present (e.g. the project shipped
+                # both Mg_280_R1 and Mg-280_R1). Renaming would clobber it or
+                # leave this one orphaned, so skip this underscored duplicate —
+                # the dashed file is staged on its own pass through `fastqs`.
+                logger.warning(
+                    "step1_setup: dashed target %s already exists; skipping "
+                    "underscored duplicate %s", new_path.name, f.name)
+                continue
+            f.rename(new_path)
+            renamed += 1
             f = new_path
         sample_dir = step1_dir / sample
         sample_dir.mkdir(parents=True, exist_ok=True)

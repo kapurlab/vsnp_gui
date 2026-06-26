@@ -42,6 +42,20 @@ def main() -> int:
          "hCoV-19-deer-USA-IA-200443-2021-EPI-ISL-5804774-2021-01-09_R1.fastq.gz"),
         "GISAID EPI_ISL dashed")
 
+    # Sample IDs that END in _1 / _2: the greedy prefix must bind the read
+    # marker to the RIGHTMOST _R1/_R2, not the trailing _2 in the ID. (Regression
+    # for the non-greedy bug that collapsed Mg_2 back to "Mg".)
+    assert_eq(_sanitized_sample_and_name("Mg_2_R1.fastq.gz"),
+              ("Mg-2", "Mg-2_R1.fastq.gz"), "ID ending in _2 + _R1 dashed to Mg-2")
+    assert_eq(_sanitized_sample_and_name("Mg_1_R2.fastq.gz"),
+              ("Mg-1", "Mg-1_R2.fastq.gz"), "ID ending in _1 + _R2 dashed to Mg-1")
+    assert_eq(_sanitized_sample_and_name("Mg_3_R1.fastq.gz"),
+              ("Mg-3", "Mg-3_R1.fastq.gz"), "ID ending in _3 stays consistent")
+    # Bare SRA-style _1/_2 IS the read marker (no _R), so the sample is the
+    # prefix before it — Mg_1.fastq.gz is read 1 of sample "Mg", not "Mg_1".
+    assert_eq(_sanitized_sample_and_name("Mg_1.fastq.gz"),
+              ("Mg", "Mg_1.fastq.gz"), "bare _1 is the read marker, sample=Mg")
+
     # No-underscore prefixes are returned UNCHANGED (idempotent / no churn).
     for name in ("Mg282_R1.fastq.gz", "Mg220_R1.fastq.gz", "SRR1234567_1.fastq.gz"):
         sample, out = _sanitized_sample_and_name(name)

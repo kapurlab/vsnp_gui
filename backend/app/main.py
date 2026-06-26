@@ -2660,9 +2660,26 @@ def job_events(job_id: str):
                 yield from drain_all()
                 yield f"data: [job:{j['status']}]\n\n"
                 break
+            # Heartbeat: an SSE comment (ignored by EventSource) on every poll
+            # keeps a steady trickle flowing so the OOD reverse proxy flushes the
+            # stream instead of holding a slow producer's output in its buffer.
+            # Without it, a step2 run that emits one block every ~45s shows
+            # "Waiting for output" in the browser for minutes while the backend
+            # log is actually filling.
+            yield ": keepalive\n\n"
             time.sleep(0.5)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            # Defeat proxy/response buffering so events reach the browser live.
+            # X-Accel-Buffering disables nginx buffering (OOD's PUN); no-cache
+            # stops any intermediary from holding the response.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/preflight")

@@ -5084,7 +5084,13 @@ def vcf_lookup(project: str, payload: VcfLookupRequest):
             base_vcf,
             source_vcf
         )
-        raise HTTPException(status_code=400, detail="Record not found at locus")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{sample} has no variant at {contig}:{pos} — it matches the reference here. "
+                f"Only positions where the sample differs from the reference can be edited."
+            ),
+        )
     return {
         "ref": record.get("ref", ""),
         "alt": record.get("alt", ""),
@@ -5273,7 +5279,10 @@ def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int, 
                 line = "\t".join(parts) + "\n"
             dst.write(line)
     if not found:
-        raise ValueError("Record not found at locus")
+        raise ValueError(
+            f"No variant at {contig}:{pos} to edit — the sample matches the reference here. "
+            f"Only positions where the sample differs from the reference can be edited."
+        )
     return {"old_ref": old_ref, "old_alt": old_alt, "old_dp": old_dp, "old_ad": old_ad}
 
 

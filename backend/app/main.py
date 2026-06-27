@@ -2270,6 +2270,7 @@ def step1_setup(project: str):
 
     created = 0
     renamed = 0
+    current_samples = set()
     for f in fastqs:
         sample, safe_name = _sanitized_sample_and_name(f.name)
         # Rename underscored stems in place (Mg_280_R1 -> Mg-280_R1) BEFORE
@@ -2291,13 +2292,34 @@ def step1_setup(project: str):
             f.rename(new_path)
             renamed += 1
             f = new_path
+        current_samples.add(sample)
         sample_dir = step1_dir / sample
         sample_dir.mkdir(parents=True, exist_ok=True)
         target = sample_dir / f.name
         if not target.exists():
             target.symlink_to(f)
             created += 1
-    return {"created": created, "renamed": renamed}
+    # Prune orphaned, never-run sample dirs: a step1/<sample>/ whose reads were
+    # removed from download/ AND that has no run artifact (no exit_code / BAM /
+    # log) is dead weight that otherwise lingers in the Samples list (e.g. a
+    # sample deleted from download/). Dirs with any result are preserved.
+    import shutil
+    pruned = []
+    for d in step1_dir.iterdir():
+        if not d.is_dir() or d.name.startswith((".", "_")) or d.name in current_samples:
+            continue
+        has_run = (
+            (d / ".provenance" / "exit_code").exists()
+            or (d / "run_step1.log").exists()
+            or any(d.glob("alignment_*/*_nodup.bam"))
+        )
+        if not has_run:
+            try:
+                shutil.rmtree(d)
+                pruned.append(d.name)
+            except OSError:
+                pass
+    return {"created": created, "renamed": renamed, "pruned": pruned}
 
 
 @app.post("/api/projects/{project}/step1/run")

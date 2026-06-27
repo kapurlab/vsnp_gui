@@ -776,6 +776,7 @@ export default function App() {
       setVcfsCollectResult(data);
       await loadVcfsFolder(selectedProject);
       await refreshProjects(selectedProject);
+      await loadStep1Status();
     }
   }
 

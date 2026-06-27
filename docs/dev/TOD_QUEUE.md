@@ -220,3 +220,27 @@ Files touched: `frontend/src/App.jsx` (new list/search/chips/bulk state,
 compact left-list JSX), `frontend/src/styles.css` (`.s1l-*` styles).
 `npm run build` passes. Deployed to ICAR for live testing. Repo branch
 only — no PR.
+
+### Step 1 panel — _VCFs collect refresh + orphan prune + UX notes — Open (2026-06-28)
+
+Follow-ups from live ICAR benchmarking (on `feature/step1-left-compact-list`):
+
+1. **`collectVcfs` now refreshes Step 1 status.** After "Add checked to _VCFs" /
+   "Collect", the "N samples not in _VCFs" candidate list stayed stale until a
+   manual Refresh: `collectVcfs` reloaded the VCFs folder + projects but not
+   `loadStep1Status` (which sets `in_vcfs_folder`), and the 5 s auto-poll only
+   runs while a batch is `running`. Added `await loadStep1Status()` to collectVcfs.
+
+2. **`step1_setup` prunes orphaned, never-run sample dirs.** Deleting a read from
+   `download/` left its `step1/<sample>/` dir (the Samples list reads `step1/`,
+   not `download/`), so deleted samples lingered (e.g. ERR1744454 — a dangling
+   single-end symlink dir). Setup now removes `step1/<sample>/` dirs NOT in the
+   current download set AND with no run artifact (no `.provenance/exit_code`,
+   `run_step1.log`, or `*_nodup.bam`); returns `pruned: [...]`. Refinements:
+   also prune from the download-delete endpoint for immediacy (Setup-prune only
+   fires on the next Setup), and/or add a per-row remove.
+
+3. **UX confusion (not fixed, flagging):** the project `_VCFs` collection overlaps
+   with Step 2's "Include current project Step 1 ZC VCFs" toggle — a sample can be
+   reported "not in _VCFs" while already in the Step 2 set, which reads as
+   contradictory. Consider unifying or clarifying the two paths.

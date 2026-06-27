@@ -137,3 +137,53 @@ Identical patch already merged into `kapurlab/vsnp_gui` at commit
 `507f192`. Tod should mirror the wgs3 patch back into the
 `kraken_id_parse_gui` repo source so the fix survives a sync from
 repo → /var/www.
+
+### Per-sample Step 1 "Run this sample" — Open (2026-06-27)
+
+Branch `feature/step1-per-sample-run` (pushed, no PR yet). Adds a
+per-row **"▶ Run this sample"** button (label flips to **"↻ Re-run this
+sample"** once that sample is done) to the Step 1 Samples list, so a
+single newly-added or re-parsed sample can be run on its own instead of
+re-running the whole project batch (the only run mode today, which also
+wipes+redoes every sample on each batch).
+
+**Concurrency choice (confirmed with Vivek): allow a single-sample run
+even while a batch is in flight, gated PER-SAMPLE — refused only if that
+specific sample is itself currently in progress.** Rationale: the common
+case is adding or re-running ONE sample (e.g. a Kraken-decontaminated
+re-parse of a single isolate) and you shouldn't have to wait for, or
+re-trigger, the entire batch to fold it in. The old project-wide batch
+lock (`step1/.step1_job_id` + the 409 in `_step1_dispatch`) stays exactly
+as-is for the full-batch path; the per-sample path does NOT touch it.
+
+How the invariant ("allow if the sample is free, never let two writers
+share a dir") is held:
+- New `samples: Optional[List[str]]` field on `Step1Request`. When set,
+  `/step1/run` routes to `_step1_dispatch_single` instead of the batch
+  dispatcher — outside the `_STEP1_DISPATCH_LOCK`.
+- Requested samples are resolved against `_step1_dispatch_plan()`; invalid
+  / unknown ones are surfaced like batch `skipped_samples`.
+- Per-sample in-progress guard (`_step1_sample_in_progress`): a sample is
+  busy if (a) `step1/<sample>/.step1_job_id` points at a still-running job,
+  OR (b) `.provenance/started_at` exists with no `.provenance/exit_code`
+  and started < 24h ago (catches a sample the running batch is mid-way
+  through; the recency bound keeps a crashed run from wedging it forever).
+- The per-sample run writes a SEPARATE script (`step1/.run_one_<sample>.sh`)
+  that reuses the SAME `run_sample()` body as the batch (factored into
+  `_step1_run_sample_body()` — one source of truth, both paths) and tracks
+  a per-sample job id at `step1/<sample>/.step1_job_id`. It never writes
+  `step1/.step1_job_id` or overwrites `step1/run_step1.sh`, so the two
+  writers never collide on a shared dir. Status + per-sample "View log"
+  endpoints work unchanged (the single run writes the same
+  `run_step1.log` + `.provenance`).
+
+Files touched: `backend/app/main.py` (Step1Request, route branch,
+`_step1_run_sample_body`, `_step1_sample_in_progress`,
+`_step1_dispatch_single`, batch path now calls the shared body),
+`frontend/src/App.jsx` (per-row button + `runStep1Sample`, wired through
+the existing step1 status-poll + "View log" + error-status path).
+
+Validated the underlying single-sample behavior with an equivalent manual
+`vsnp3_step1.py` run on a Kraken-parsed sample on the ICAR box (one
+isolate re-aligned cleanly on its own, same outputs as a batch leg).
+No deploy from this branch — repo branch only.

@@ -228,3 +228,19 @@ database** (e.g. `mtbc0_v1.1` invisible) until their config was hand-edited. Fix
 ICAR by symlinking `refs/vsnp3/vcf_db_folders → databases/vsnp3/vcf_db_folders`
 (mirrors the reference_options symlink). Worth baking into the install playbook so
 both `refs/vsnp3/*` symlinks are created together.
+
+### VCF editor — clearer "no variant at locus" error — Open (2026-06-27)
+
+PR **#13** (`fix/vcf-edit-clearer-error`, off `main`, vsnp_gui only).
+
+The editor's "Fetch current" (`vcf_lookup`) and Apply (`_rewrite_vcf_with_alt`)
+showed a cryptic **"Record not found at locus"** whenever the sample matches the
+reference at the requested position — because the per-sample `*_zc.vcf` is sparse
+(only positions where the sample differs from the reference). A curator reviewing a
+defining-SNP/cascade position where *this* sample reads as reference (e.g.
+`Mg-292 @ MTBC0:5482` — a `C>G` SNP in `Mg-280`, absent in `Mg-292`) hit it and read
+it as "VCF editing is broken." Now names the sample/locus and explains the rule.
+Behavior unchanged — non-variant positions still aren't editable.
+**Open product question for Tod**: should the editor support *injecting* a call at a
+position where the sample is reference (the real cascade-curation case)? That needs
+intended DP/AD semantics + how Step 2 consumes an injected record — deferred.

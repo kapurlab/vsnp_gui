@@ -187,3 +187,36 @@ Validated the underlying single-sample behavior with an equivalent manual
 `vsnp3_step1.py` run on a Kraken-parsed sample on the ICAR box (one
 isolate re-aligned cleanly on its own, same outputs as a batch leg).
 No deploy from this branch — repo branch only.
+
+### Left-panel Step 1 Samples list redesign — Open (2026-06-27)
+
+Branch `feature/step1-left-compact-list` (pushed, no PR), built ON TOP of
+`deploy/icar-sse-plus-persample` so it inherits the SSE→poll log fix
+(`watchJob`, zero `new EventSource`) and the per-sample Step 1 run
+(`runStep1Sample`, backend `Step1Request.samples` + `_step1_dispatch_single`).
+
+Redesigns ONLY the left-panel Step 1 "Samples" list — the tall per-sample
+rows (status pill + full-width "Run/Re-run this sample" + "View log") are
+replaced with a compact, scannable list: one-line rows of
+`[checkbox] [QC status dot] [sample name] [short QC reason] [run/re-run icon] [log icon]`.
+Adds a name **search** box, **filter chips** (All / Flagged / Not started /
+Complete, each with a live count; Flagged = QC verdict review OR fail), and
+a **bulk-select bar** ("N selected → ↻ Re-run selected" + clear) that reuses
+the existing samples-aware endpoint (`samples: [...]`) via a new
+`runStep1Samples()` wrapper — no new backend endpoint.
+
+QC dot color + terse reason (e.g. `fail · 6.8×`, `review · map 82%`,
+`pass · 40×`, `not started`, `running…`) are **joined client-side** from the
+already-loaded right-hand Results data (`qcRows` / `_qc_verdict`), so there
+is NO backend change and no duplicated fetch — `loadQC()` already runs on
+project select and after each run.
+
+Right-hand "Step 1 Results" table/panel is left exactly as-is (diff does not
+touch the qc-panel / qc-table / QcChip body). Step 2, the VCFs Collect
+footer, and the per-sample Log preview are unchanged.
+
+Files touched: `frontend/src/App.jsx` (new list/search/chips/bulk state,
+`buildQcByName` + `step1RowMeta` join helpers, `runStep1Samples` bulk run,
+compact left-list JSX), `frontend/src/styles.css` (`.s1l-*` styles).
+`npm run build` passes. Deployed to ICAR for live testing. Repo branch
+only — no PR.

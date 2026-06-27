@@ -226,6 +226,11 @@ export default function App() {
   // run for, so the row's "Run this sample" button disables until the next
   // status poll reflects the running/complete state.
   const [step1SampleDispatching, setStep1SampleDispatching] = useState({});
+  // Left-panel compact Samples list: client-side search, filter chip, and
+  // bulk-select state. QC dot/reason are joined from qcRows by sample name.
+  const [step1ListSearch, setStep1ListSearch] = useState("");
+  const [step1ListFilter, setStep1ListFilter] = useState("all"); // all | flagged | not_started | complete
+  const [step1ListSelected, setStep1ListSelected] = useState(() => new Set());
   const [step2JobId, setStep2JobId] = useState("");
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
@@ -1237,6 +1242,48 @@ export default function App() {
   // see which signal tripped (e.g. "mapping rate 58.5%").
   function summarizeQcReason(reason) {
     return reason.replace(/\s*<\s*[\d.]+\s*[%×xX]\s*(pass|review|fail)\s+threshold\s*$/i, "").trim();
+  }
+
+  // --- Left-panel Step 1 list: QC join helpers -----------------------------
+  // Build a name → qcRow lookup from the already-loaded Results data (qcRows),
+  // so the compact left list can show the same verdict/reason/depth/mapping
+  // the right-hand table shows, with no extra fetch. loadQC() already runs on
+  // project select and after each run, so qcRows is populated by then.
+  function buildQcByName() {
+    const map = {};
+    (qcRows || []).forEach((row) => {
+      const name = sampleKey(row);
+      if (name) map[name] = row;
+    });
+    return map;
+  }
+
+  // For a left-list sample row, derive { dot, reason } given its run-state and
+  // the joined QC row (may be undefined when results aren't loaded / sample is
+  // not yet done). `dot` drives the colored status dot; `reason` is the terse
+  // muted caption beneath the name.
+  function step1RowMeta(s, qcRow, dispatching) {
+    const running = s.status === "running" || dispatching;
+    if (running) return { dot: "running", reason: "running…" };
+    if (s.status === "not_started") return { dot: "not_started", reason: "not started" };
+    if (s.status === "error") return { dot: "fail", reason: "error" };
+    // status === "complete" (or other) — fold in QC verdict when we have it.
+    if (qcRow && qcRow._qc_verdict) {
+      const level = qcLevel(qcRow); // pass | review | fail
+      const depth = qcRow["Average Depth"];
+      const mapping = qcMappingRate(qcRow);
+      let detail = "";
+      if (level === "pass") {
+        detail = depth ? `${String(depth).replace(/x$/i, "")}×` : "";
+      } else {
+        const reasons = qcReasons(qcRow);
+        detail = reasons.length ? summarizeQcReason(reasons[0]) : (mapping != null ? `map ${mapping.toFixed(0)}%` : "");
+      }
+      const reason = detail ? `${level} · ${detail}` : level;
+      return { dot: level, reason };
+    }
+    // Complete but no QC row joined yet (results not loaded).
+    return { dot: "complete", reason: "complete" };
   }
 
   function QcChip({ row }) {
@@ -2355,6 +2402,70 @@ export default function App() {
     // state, then clear it; loadStep1Status drives the per-row badge.
     await loadStep1Status();
     setStep1SampleDispatching((prev) => ({ ...prev, [sample]: false }));
+  }
+
+  // Bulk re-run: dispatch a single samples-aware run for every checked sample,
+  // reusing the same per-sample endpoint (`samples: [...]`) — no new endpoint.
+  async function runStep1Samples(samples) {
+    const list = (samples || []).filter(Boolean);
+    if (!list.length) return;
+    const effectiveRef = reference || projectReference;
+    if (!selectedProject || !settingsReady || !effectiveRef) return;
+    const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
+    setStep1SampleDispatching((prev) => {
+      const next = { ...prev };
+      list.forEach((s) => { next[s] = true; });
+      return next;
+    });
+    setStep1StatusError("");
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          samples: list,
+          reference: refValue,
+          debug: debugMode,
+          assemble_unmap: assembleUnmap,
+          nanopore: nanoporeMode,
+        }),
+      });
+    } catch (e) {
+      setStep1SampleDispatching((prev) => {
+        const next = { ...prev };
+        list.forEach((s) => { next[s] = false; });
+        return next;
+      });
+      setStep1StatusError(`Re-run selected failed: ${e.message || "network error"}`);
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    if (!res.ok) {
+      setStep1SampleDispatching((prev) => {
+        const next = { ...prev };
+        list.forEach((s) => { next[s] = false; });
+        return next;
+      });
+      setStep1StatusError(data.detail || `Re-run selected failed: HTTP ${res.status}`);
+      return;
+    }
+    setStep1JobId(data.job_id);
+    setStep1AutoRefreshPending(true);
+    setStep1ListSelected(new Set());
+    if (Array.isArray(data.skipped_samples) && data.skipped_samples.length > 0) {
+      const lines = data.skipped_samples
+        .map((s) => `  • ${s.sample}: ${s.reason}`)
+        .join("\n");
+      window.alert(`Step 1 (selected samples) — request had skips:\n\n${lines}`);
+    }
+    await loadStep1Status();
+    setStep1SampleDispatching((prev) => {
+      const next = { ...prev };
+      list.forEach((s) => { next[s] = false; });
+      return next;
+    });
   }
 
   async function step2Setup() {
@@ -4277,35 +4388,145 @@ export default function App() {
             </div>
             <div className="step1-status">
               <div className="step1-status-header">
-                <span>Samples</span>
+                <span>Samples <span className="muted s1l-count">({step1Status.length})</span></span>
                 <button onClick={loadStep1Status} disabled={!selectedProject}>Refresh</button>
               </div>
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
-              {step1Status.length ? (
-                <ul className="sample-list">
-                  {step1Status.map((s) => {
-                    const sampleRunning = s.status === "running" || !!step1SampleDispatching[s.sample];
-                    const isDone = s.status === "complete";
-                    const effectiveRef = reference || projectReference;
-                    return (
-                    <li key={s.sample}>
-                      <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
-                      <span className="sample-name">{s.sample}</span>
-                      <button
-                        onClick={() => runStep1Sample(s.sample)}
-                        disabled={sampleRunning || !selectedProject || !settingsReady || !effectiveRef}
-                        title={isDone ? "Re-run Step 1 for just this sample" : "Run Step 1 for just this sample"}
-                      >
-                        {isDone ? "↻ Re-run this sample" : "▶ Run this sample"}
-                      </button>
-                      <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
-                        View log
-                      </button>
-                    </li>
-                    );
-                  })}
-                </ul>
-              ) : (
+              {step1Status.length ? (() => {
+                const effectiveRef = reference || projectReference;
+                const qcByName = buildQcByName();
+                // Derive per-sample meta once (dot + reason), reused by chips,
+                // filtering and rows.
+                const enriched = step1Status.map((s) => {
+                  const dispatching = !!step1SampleDispatching[s.sample];
+                  const meta = step1RowMeta(s, qcByName[s.sample], dispatching);
+                  return { s, dispatching, meta };
+                });
+                const counts = {
+                  all: enriched.length,
+                  flagged: enriched.filter((e) => e.meta.dot === "review" || e.meta.dot === "fail").length,
+                  not_started: enriched.filter((e) => e.s.status === "not_started").length,
+                  complete: enriched.filter((e) => e.s.status === "complete").length,
+                };
+                const q = step1ListSearch.trim().toLowerCase();
+                const matchesFilter = (e) => {
+                  if (step1ListFilter === "flagged") return e.meta.dot === "review" || e.meta.dot === "fail";
+                  if (step1ListFilter === "not_started") return e.s.status === "not_started";
+                  if (step1ListFilter === "complete") return e.s.status === "complete";
+                  return true;
+                };
+                const visible = enriched
+                  .filter((e) => !q || e.s.sample.toLowerCase().includes(q))
+                  .filter(matchesFilter);
+                const selectedCount = step1ListSelected.size;
+                const chips = [
+                  { key: "all", label: "All", n: counts.all },
+                  { key: "flagged", label: "Flagged", n: counts.flagged },
+                  { key: "not_started", label: "Not started", n: counts.not_started },
+                  { key: "complete", label: "Complete", n: counts.complete },
+                ];
+                return (
+                  <>
+                    <input
+                      type="search"
+                      className="s1l-search"
+                      placeholder="Search samples…"
+                      value={step1ListSearch}
+                      onChange={(e) => setStep1ListSearch(e.target.value)}
+                      title="Case-insensitive: show only samples whose name matches."
+                    />
+                    <div className="s1l-chips">
+                      {chips.map((c) => (
+                        <button
+                          key={c.key}
+                          type="button"
+                          className={`s1l-chip${step1ListFilter === c.key ? " active" : ""}`}
+                          onClick={() => setStep1ListFilter(c.key)}
+                        >
+                          {c.label} <span className="s1l-chip-n">{c.n}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedCount > 0 ? (
+                      <div className="s1l-bulk">
+                        <span>{selectedCount} selected</span>
+                        <button
+                          type="button"
+                          className="s1l-bulk-run"
+                          disabled={!selectedProject || !settingsReady || !effectiveRef}
+                          onClick={() => runStep1Samples(Array.from(step1ListSelected))}
+                          title="Re-run Step 1 for the selected samples"
+                        >
+                          ↻ Re-run selected
+                        </button>
+                        <button
+                          type="button"
+                          className="s1l-bulk-clear"
+                          aria-label="Clear selection"
+                          onClick={() => setStep1ListSelected(new Set())}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ) : null}
+                    <ul className="s1l-list">
+                      {visible.map(({ s, dispatching, meta }) => {
+                        const sampleRunning = s.status === "running" || dispatching;
+                        const isDone = s.status === "complete";
+                        const checked = step1ListSelected.has(s.sample);
+                        return (
+                          <li key={s.sample} className="s1l-row">
+                            <input
+                              type="checkbox"
+                              className="s1l-check"
+                              checked={checked}
+                              aria-label={`Select ${s.sample}`}
+                              onChange={(e) => {
+                                setStep1ListSelected((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(s.sample);
+                                  else next.delete(s.sample);
+                                  return next;
+                                });
+                              }}
+                            />
+                            <span
+                              className={`s1l-dot s1l-dot-${meta.dot}`}
+                              title={meta.reason}
+                              aria-hidden="true"
+                            />
+                            <span className="s1l-name" title={s.sample}>{s.sample}</span>
+                            <span className="s1l-reason" title={meta.reason}>{meta.reason}</span>
+                            <button
+                              type="button"
+                              className="s1l-icon"
+                              onClick={() => runStep1Sample(s.sample)}
+                              disabled={sampleRunning || !selectedProject || !settingsReady || !effectiveRef}
+                              aria-label={isDone ? `Re-run Step 1 for ${s.sample}` : `Run Step 1 for ${s.sample}`}
+                              title={isDone ? "Re-run Step 1 for just this sample" : "Run Step 1 for just this sample"}
+                            >
+                              {isDone ? "↻" : "▶"}
+                            </button>
+                            <button
+                              type="button"
+                              className="s1l-icon"
+                              onClick={() => viewStep1Log(s.sample)}
+                              disabled={!s.has_log}
+                              aria-label={`View Step 1 log for ${s.sample}`}
+                              title="View log"
+                            >
+                              ▤
+                            </button>
+                          </li>
+                        );
+                      })}
+                      {visible.length === 0 ? (
+                        <li className="s1l-empty muted">No samples match.</li>
+                      ) : null}
+                    </ul>
+                  </>
+                );
+              })() : (
                 <div className="note">No Step 1 samples yet.</div>
               )}
               {step1Status.length > 6 ? <div className="scroll-note">Scroll for more samples.</div> : null}

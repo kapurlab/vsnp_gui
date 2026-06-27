@@ -29,6 +29,13 @@ import threading
 # single-process here, so a threading.Lock is sufficient.
 _STEP1_DISPATCH_LOCK = threading.Lock()
 
+# A sample is considered "in progress" if it wrote .provenance/started_at but
+# no .provenance/exit_code within this window. Past it, a started-but-never-
+# finished sample is treated as crashed (kill/OOM/interrupted batch) and is
+# re-runnable, so a dead run can't wedge a sample forever. Generous because a
+# single large WGS sample can take well over an hour.
+_STEP1_IN_PROGRESS_STALE_SECS = 24 * 60 * 60  # 24h
+
 from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
 from app import qc_verdict
@@ -818,6 +825,11 @@ class Step1Request(BaseModel):
     debug: bool = False
     assemble_unmap: bool = False
     nanopore: bool = False
+    # When present + non-empty, run ONLY these samples (single/subset mode).
+    # Gated per-sample (refuse if a requested sample is itself in progress)
+    # rather than on the project-wide batch lock, so a newly-added or re-parsed
+    # sample can be (re-)run alongside an in-flight batch. None → full batch.
+    samples: Optional[List[str]] = None
 
 
 class Step2Request(BaseModel):
@@ -2295,11 +2307,282 @@ def step1_run(project: str, payload: Step1Request):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
+    # Per-sample / subset mode: gated PER-SAMPLE, intentionally NOT under the
+    # project-wide batch lock, so one sample can be (re-)run while a batch is in
+    # flight as long as that sample itself is free. See _step1_dispatch_single.
+    if payload.samples:
+        return _step1_dispatch_single(project, payload, cfg, project_dir, step1_dir)
     # Hold the dispatch lock across the whole check→claim so a simultaneous
     # double-click serializes: the first request claims .step1_job_id and starts
     # the job; the second then sees it "running" and gets a 409 (below).
     with _STEP1_DISPATCH_LOCK:
         return _step1_dispatch(project, payload, cfg, project_dir, step1_dir)
+
+
+def _step1_run_sample_body(payload: Step1Request, ref_arg: str) -> List[str]:
+    """The shared `run_sample()` bash function body used by BOTH the project-wide
+    batch and the per-sample (single/subset) run.
+
+    Factoring this out keeps the per-sample cleanup + R1/R2 resolution +
+    .provenance/{started_at,exit_code,finished_at} sentinel writes + the
+    vsnp3_step1.py invocation as ONE source of truth, so a single-sample run
+    behaves byte-for-byte like the same sample inside a batch (same outputs,
+    same status/log files the GUI reads). The body cd's into the sample dir
+    given as $1, then cd's back out, so it is safe to invoke for one sample or
+    in the batch worker pool.
+    """
+    debug_flag = "--debug" if payload.debug else ""
+    assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
+    nanopore_flag = "--nanopore" if payload.nanopore else ""
+    return [
+        "run_sample() {",
+        "  local d=\"$1\"",
+        "  if [ ! -d \"$d\" ]; then",
+        "    return 0",
+        "  fi",
+        "  # Skip writer/janitor scaffolding (T-07 _provenance, .git, etc.).",
+        "  case \"$d\" in",
+        "    _*/|.*/|_*|.*) return 0 ;;",
+        "  esac",
+        "  echo \"== Running step1 in $d ==\"",
+        "  cd \"$d\"",
+        "  LOG=run_step1.log",
+        "  echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
+        "  START_TS=$(date +%s)",
+        "  echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+        "  if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
+        "    for dir in alignment_*; do",
+        "      if [ -d \"$dir\" ]; then",
+        "        rm -rf \"$dir\"",
+        "      fi",
+        "    done",
+        "    if [ -d \"unmapped_reads\" ]; then",
+        "      rm -rf \"unmapped_reads\"",
+        "    fi",
+        "    if [ -d \"sourmash\" ]; then",
+        "      rm -rf \"sourmash\"",
+        "    fi",
+        "  fi",
+        "  R1=$(ls *_R1*.fastq.gz 2>/dev/null | head -n1 || true)",
+        "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
+        "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
+        "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
+        "  if [ -z \"$R1\" ]; then",
+        "    if [ \"" + ("1" if payload.nanopore else "0") + "\" = \"1\" ]; then",
+        "      R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true)",
+        "    fi",
+        "  fi",
+        "  if [ -z \"$R1\" ]; then",
+        "    echo \"Missing R1 in $d\" | tee -a \"$LOG\"",
+        "    cd ..",
+        "    return 0",
+        "  fi",
+        "  mkdir -p .provenance",
+        "  date -u +%s.%N > .provenance/started_at",
+        "  if [ -n \"$R2\" ]; then",
+        f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+        "  else",
+        f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+        "  fi",
+        "  STATUS=$?",
+        "  echo $STATUS > .provenance/exit_code",
+        "  date -u +%s.%N > .provenance/finished_at",
+        "  if [ \"$STATUS\" -eq 0 ]; then",
+        "    END_TS=$(date +%s)",
+        "    DURATION=$((END_TS-START_TS))",
+        "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
+        "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
+        "  else",
+        "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
+        "    FAIL=1",
+        "  fi",
+        "  cd ..",
+        "  return $STATUS",
+        "}",
+    ]
+
+
+def _step1_sample_in_progress(step1_dir: Path, sample: str) -> bool:
+    """True if `sample` is currently being processed by EITHER a standalone
+    per-sample job OR a project-wide batch that is mid-way through it.
+
+    Detection (either signal is sufficient):
+      1. A per-sample job-id file (step1/<sample>/.step1_job_id) points at a
+         job the JobManager still reports as "running".
+      2. The sample dir has .provenance/started_at but no .provenance/exit_code
+         AND started_at is recent (< IN_PROGRESS_STALE_SECS ago). The batch /
+         per-sample bash writes started_at immediately before vsnp3_step1.py and
+         exit_code immediately after, so "started, not finished, recently" means
+         a writer is live in that dir. The recency bound prevents a crashed run
+         that never wrote exit_code from wedging the sample forever (the user
+         can re-run it once it's gone stale).
+    """
+    sample_dir = step1_dir / sample
+    if not sample_dir.is_dir():
+        return False
+
+    # Signal 1: a tracked per-sample job that is still running.
+    psid_path = sample_dir / ".step1_job_id"
+    if psid_path.exists():
+        try:
+            psid = psid_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            psid = ""
+        if psid:
+            job = job_manager.get_job(psid)
+            if job and job.get("status") == "running":
+                return True
+
+    # Signal 2: started_at without exit_code, recently.
+    prov = sample_dir / ".provenance"
+    started_at = prov / "started_at"
+    exit_code = prov / "exit_code"
+    if started_at.exists() and not exit_code.exists():
+        try:
+            age = time.time() - started_at.stat().st_mtime
+        except OSError:
+            age = None
+        if age is not None and age < _STEP1_IN_PROGRESS_STALE_SECS:
+            return True
+    return False
+
+
+def _step1_dispatch_single(
+    project: str, payload: Step1Request, cfg: Dict[str, Any],
+    project_dir: Path, step1_dir: Path,
+):
+    """Run ONLY the samples in payload.samples, gated PER-SAMPLE.
+
+    Unlike the project-wide batch this does NOT read/write step1/.step1_job_id
+    and does NOT overwrite step1/run_step1.sh — a single-sample run is allowed
+    to proceed even while a batch is in flight, as long as none of the requested
+    samples is itself currently in progress. We write a separate
+    step1/.run_one_<sample>.sh and track a per-sample job id at
+    step1/<sample>/.step1_job_id so status/log endpoints + the in-progress guard
+    can find it. The two writers never share a sample dir, so they can't corrupt
+    each other.
+    """
+    requested = [s for s in (payload.samples or []) if s and s.strip()]
+    # Resolve against the dispatch plan: only valid + actually-requested samples
+    # run; unknown / invalid requests are surfaced like batch `skipped_samples`.
+    valid_samples, plan_skipped = _step1_dispatch_plan(
+        step1_dir,
+        min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES),
+    )
+    valid_set = set(valid_samples)
+    plan_skip_by_name = {s["sample"]: s for s in plan_skipped}
+
+    to_run: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    seen: set = set()
+    for s in requested:
+        if s in seen:
+            continue
+        seen.add(s)
+        if s in valid_set:
+            to_run.append(s)
+        elif s in plan_skip_by_name:
+            skipped.append(plan_skip_by_name[s])
+        else:
+            skipped.append({
+                "sample": s,
+                "reason": "unknown sample (no matching step1 directory)",
+                "size_bytes": 0,
+            })
+
+    if not to_run:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No runnable samples in request. "
+                + (
+                    "; ".join(f"{x['sample']}: {x['reason']}" for x in skipped)
+                    if skipped else "no samples specified"
+                )
+            ),
+        )
+
+    # Per-sample in-progress guard (instead of the project batch lock). Refuse,
+    # naming the sample, if any requested sample is mid-run in a batch or a prior
+    # per-sample job. This is the invariant: allow if the sample is free, never
+    # let two writers share a dir.
+    for s in to_run:
+        if _step1_sample_in_progress(step1_dir, s):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Sample '{s}' is already running (in a batch or a prior "
+                    "per-sample run). Wait for it to finish before re-running it."
+                ),
+            )
+
+    if not payload.reference:
+        payload.reference = _project_reference(project_dir)
+    ref_arg = f"-t {payload.reference}" if payload.reference else ""
+    if payload.reference:
+        update_project_meta(project_dir, {
+            "reference": payload.reference,
+            "display_name": f"{project}_{payload.reference}"
+        })
+
+    # Separate script per invocation (never run_step1.sh). Name by the requested
+    # samples, sanitized, so concurrent single-sample runs don't collide.
+    tag = "-".join(re.sub(r"[^A-Za-z0-9._-]", "_", s) for s in to_run)[:120] or "sample"
+    script_path = step1_dir / f".run_one_{tag}.sh"
+    samples_bash = " ".join(shlex.quote(s) for s in to_run)
+    script_path.write_text(
+        "\n".join([
+            "#!/bin/bash",
+            "set -uo pipefail",
+            "FAIL=0",
+            *_step1_run_sample_body(payload, ref_arg),
+            f"SAMPLES=({samples_bash})",
+            "for d in \"${SAMPLES[@]}\"; do",
+            "  run_sample \"$d\" || FAIL=1",
+            "done",
+            "exit $FAIL",
+        ]),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    # T-07 provenance: reuse the batch dispatcher for the subset of samples.
+    prov_finalize_cb = None
+    if payload.reference:
+        try:
+            prov_batch_run_id, _sample_run_ids = provenance_writer.dispatch_step1_batch(
+                cfg, project_dir, to_run, payload.reference,
+                user=_current_user(),
+                ood_session_id=_ood_session_id(),
+            )
+        except provenance_writer.DispatchFailed as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Provenance dispatch failed (step1 per-sample): {e}",
+            )
+
+        def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
+            provenance_writer.finalize_step1_batch(
+                project_dir, prov_batch_run_id, exit_code, started_at, finished_at,
+            )
+
+    job_id = job_manager.start_job(
+        name="step1",
+        command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
+        cwd=step1_dir,
+        env=build_env(cfg),
+        finalize_callback=prov_finalize_cb,
+    )
+    # Track a per-sample job id so the status endpoint, per-sample "View log",
+    # and the in-progress guard can find this run. We deliberately do NOT touch
+    # step1/.step1_job_id — that belongs to the batch path.
+    for s in to_run:
+        try:
+            (step1_dir / s / ".step1_job_id").write_text(job_id, encoding="utf-8")
+        except OSError:
+            pass
+
+    return {"job_id": job_id, "samples_run": to_run, "skipped_samples": skipped}
 
 
 def _step1_dispatch(
@@ -2356,9 +2639,6 @@ def _step1_dispatch(
             ),
         )
 
-    debug_flag = "--debug" if payload.debug else ""
-    assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
-    nanopore_flag = "--nanopore" if payload.nanopore else ""
     # Auto-populate reference from project.json if not supplied in payload
     if not payload.reference:
         payload.reference = _project_reference(project_dir)
@@ -2392,70 +2672,10 @@ def _step1_dispatch(
             "OVERALL_START=$(date +%s)",
             "OVERALL_LOG=\"step1_run_summary.log\"",
             "echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
-            "run_sample() {",
-            "  local d=\"$1\"",
-            "  if [ ! -d \"$d\" ]; then",
-            "    return 0",
-            "  fi",
-            "  # Skip writer/janitor scaffolding (T-07 _provenance, .git, etc.).",
-            "  case \"$d\" in",
-            "    _*/|.*/|_*|.*) return 0 ;;",
-            "  esac",
-            "  echo \"== Running step1 in $d ==\"",
-            "  cd \"$d\"",
-            "  LOG=run_step1.log",
-            "  echo \"== Running step1 in $d ==\" | tee -a \"$LOG\"",
-            "  START_TS=$(date +%s)",
-            "  echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
-            "  if [ \"" + ("1" if payload.debug else "0") + "\" = \"0\" ]; then",
-            "    for dir in alignment_*; do",
-            "      if [ -d \"$dir\" ]; then",
-            "        rm -rf \"$dir\"",
-            "      fi",
-            "    done",
-            "    if [ -d \"unmapped_reads\" ]; then",
-            "      rm -rf \"unmapped_reads\"",
-            "    fi",
-            "    if [ -d \"sourmash\" ]; then",
-            "      rm -rf \"sourmash\"",
-            "    fi",
-            "  fi",
-            "  R1=$(ls *_R1*.fastq.gz 2>/dev/null | head -n1 || true)",
-            "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
-            "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "  if [ -z \"$R1\" ]; then",
-            "    if [ \"" + ("1" if payload.nanopore else "0") + "\" = \"1\" ]; then",
-            "      R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true)",
-            "    fi",
-            "  fi",
-            "  if [ -z \"$R1\" ]; then",
-            "    echo \"Missing R1 in $d\" | tee -a \"$LOG\"",
-            "    cd ..",
-            "    return 0",
-            "  fi",
-            "  mkdir -p .provenance",
-            "  date -u +%s.%N > .provenance/started_at",
-            f"  if [ -n \"$R2\" ]; then",
-            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
-            "  else",
-            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
-            "  fi",
-            "  STATUS=$?",
-            "  echo $STATUS > .provenance/exit_code",
-            "  date -u +%s.%N > .provenance/finished_at",
-            "  if [ \"$STATUS\" -eq 0 ]; then",
-            "    END_TS=$(date +%s)",
-            "    DURATION=$((END_TS-START_TS))",
-            "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
-            "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
-            "  else",
-            "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
-            "    FAIL=1",
-            "  fi",
-            "  cd ..",
-            "  return $STATUS",
-            "}",
+            # Shared with the per-sample path (_step1_dispatch_single) so a
+            # single-sample run is byte-for-byte the same as that sample inside
+            # the batch — same cleanup, R1/R2 resolution, .provenance sentinels.
+            *_step1_run_sample_body(payload, ref_arg),
             # Rolling worker pool. `wait -n` (bash 4.3+) blocks until ANY
             # backgrounded job finishes — vs the previous `wait $pids[0]`
             # which blocked on a specific PID and stalled the queue when the

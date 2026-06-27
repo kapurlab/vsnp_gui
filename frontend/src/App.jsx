@@ -216,6 +216,10 @@ export default function App() {
   const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
   const [genomeJobId, setGenomeJobId] = useState("");
   const [step1JobId, setStep1JobId] = useState("");
+  // Per-sample run-in-flight guard: sample names we just dispatched a single
+  // run for, so the row's "Run this sample" button disables until the next
+  // status poll reflects the running/complete state.
+  const [step1SampleDispatching, setStep1SampleDispatching] = useState({});
   const [step2JobId, setStep2JobId] = useState("");
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
@@ -2253,6 +2257,59 @@ export default function App() {
     await loadStep1Status();
   }
 
+  // Per-sample Step 1 run. POSTs the same /step1/run endpoint with a `samples`
+  // array, which the backend gates PER-SAMPLE (allowed even while a batch is
+  // running, as long as this sample is itself free). Reuses the same status-poll
+  // + per-sample "View log" mechanism as the batch — the per-sample job writes
+  // the same step1/<sample>/run_step1.log + .provenance the status endpoint reads.
+  async function runStep1Sample(sample) {
+    const effectiveRef = reference || projectReference;
+    if (!selectedProject || !settingsReady || !effectiveRef) return;
+    if (step1SampleDispatching[sample]) return;  // same-tick double-click guard
+    const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
+    setStep1SampleDispatching((prev) => ({ ...prev, [sample]: true }));
+    setStep1StatusError("");
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          samples: [sample],
+          reference: refValue,
+          debug: debugMode,
+          assemble_unmap: assembleUnmap,
+          nanopore: nanoporeMode,
+        }),
+      });
+    } catch (e) {
+      setStep1SampleDispatching((prev) => ({ ...prev, [sample]: false }));
+      setStep1StatusError(`Run sample failed: ${e.message || "network error"}`);
+      return;
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+    if (!res.ok) {
+      // 409 = this sample is already running (in a batch or a prior per-sample
+      // run); other codes carry a `detail` too. Surface via the status error.
+      setStep1SampleDispatching((prev) => ({ ...prev, [sample]: false }));
+      setStep1StatusError(data.detail || `Run sample failed: HTTP ${res.status}`);
+      return;
+    }
+    setStep1JobId(data.job_id);
+    setStep1AutoRefreshPending(true);
+    if (Array.isArray(data.skipped_samples) && data.skipped_samples.length > 0) {
+      const lines = data.skipped_samples
+        .map((s) => `  • ${s.sample}: ${s.reason}`)
+        .join("\n");
+      window.alert(`Step 1 (single sample) — request had skips:\n\n${lines}`);
+    }
+    // Leave the dispatch flag set until the next poll reflects the running
+    // state, then clear it; loadStep1Status drives the per-row badge.
+    await loadStep1Status();
+    setStep1SampleDispatching((prev) => ({ ...prev, [sample]: false }));
+  }
+
   async function step2Setup() {
     if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/setup`, { method: "POST" });
@@ -4156,15 +4213,27 @@ export default function App() {
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
               {step1Status.length ? (
                 <ul className="sample-list">
-                  {step1Status.map((s) => (
+                  {step1Status.map((s) => {
+                    const sampleRunning = s.status === "running" || !!step1SampleDispatching[s.sample];
+                    const isDone = s.status === "complete";
+                    const effectiveRef = reference || projectReference;
+                    return (
                     <li key={s.sample}>
                       <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
                       <span className="sample-name">{s.sample}</span>
+                      <button
+                        onClick={() => runStep1Sample(s.sample)}
+                        disabled={sampleRunning || !selectedProject || !settingsReady || !effectiveRef}
+                        title={isDone ? "Re-run Step 1 for just this sample" : "Run Step 1 for just this sample"}
+                      >
+                        {isDone ? "↻ Re-run this sample" : "▶ Run this sample"}
+                      </button>
                       <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
                         View log
                       </button>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               ) : (
                 <div className="note">No Step 1 samples yet.</div>

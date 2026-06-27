@@ -3020,6 +3020,31 @@ def job_events(job_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# Plain (non-streaming) log + status — POLLED by the UI instead of SSE. The OOD
+# /rnode Apache reverse proxy holds SSE connections open and corrupts concurrent
+# sibling GET requests (a status poll comes back carrying the SSE's buffered
+# body, so JSON parsing fails and successful runs are mislabelled "failed"). A
+# single proxy-safe GET that returns BOTH the recorded status and the log file
+# sidesteps that. This is the OOD-correct alternative to /events; the frontend
+# polls it on an interval. NB: unlike the /events step1 multiplexer it returns
+# only the batch log_path (not per-sample run_step1.log) — see follow-up.
+@app.get("/api/jobs/{job_id}/logtext")
+def job_logtext(job_id: str):
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    text = ""
+    try:
+        lp = job.get("log_path")
+        if lp and Path(lp).is_file():
+            text = Path(lp).read_text(encoding="utf-8", errors="replace")
+            if len(text) > 30000:
+                text = "...(earlier log truncated)...\n" + text[-30000:]
+    except OSError:
+        pass
+    return {"status": job.get("status"), "exit_code": job.get("exit_code"), "log": text}
+
+
 @app.get("/api/preflight")
 def preflight(debug: bool = Query(False)):
     cfg = load_config()

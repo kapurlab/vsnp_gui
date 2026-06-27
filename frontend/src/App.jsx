@@ -4496,7 +4496,6 @@ export default function App() {
                               aria-hidden="true"
                             />
                             <span className="s1l-name" title={s.sample}>{s.sample}</span>
-                            <span className="s1l-reason" title={meta.reason}>{meta.reason}</span>
                             <button
                               type="button"
                               className="s1l-icon"
@@ -4515,7 +4514,7 @@ export default function App() {
                               aria-label={`View Step 1 log for ${s.sample}`}
                               title="View log"
                             >
-                              ▤
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
                             </button>
                           </li>
                         );

@@ -1481,8 +1481,9 @@ export default function App() {
     await Promise.all(
       groups.map(async (group) => {
         try {
+          const runParam = step2SelectedRun ? `&run_id=${encodeURIComponent(step2SelectedRun)}` : "";
           const res = await fetch(
-            `${API_BASE}/api/projects/${selectedProject}/posthoc/status?group=${encodeURIComponent(group.name)}&tool=snp_analysis`
+            `${API_BASE}/api/projects/${selectedProject}/posthoc/status?group=${encodeURIComponent(group.name)}&tool=snp_analysis${runParam}`
           );
           if (!res.ok) return;
           const data = await res.json();
@@ -1502,7 +1503,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/posthoc/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group: groupName, tool: "snp_analysis", scope })
+      body: JSON.stringify({ group: groupName, tool: "snp_analysis", scope, run_id: step2SelectedRun || undefined })
     });
     if (!res.ok) {
       const msg = await res.json().catch(() => ({}));

@@ -4474,11 +4474,13 @@ export default function App() {
                         const sampleRunning = s.status === "running" || dispatching;
                         const isDone = s.status === "complete";
                         const checked = step1ListSelected.has(s.sample);
+                        const dotColor = ({not_started:"#cbd5e1", running:"var(--accent)", complete:"var(--success)", pass:"var(--success)", review:"var(--warning)", fail:"var(--danger)"})[meta.dot] || "#cbd5e1";
+                        const iconBtn = {flexShrink:0, width:"26px", height:"26px", padding:0, display:"inline-flex", alignItems:"center", justifyContent:"center", background:"transparent", color:"var(--muted)", border:"1px solid var(--border)", borderRadius:"6px", boxShadow:"none", fontWeight:400, cursor:"pointer"};
                         return (
-                          <li key={s.sample} className="s1l-row">
+                          <li key={s.sample} style={{display:"flex", alignItems:"center", gap:"8px", padding:"5px 8px", borderBottom:"1px solid var(--border)", fontSize:"13px"}}>
                             <input
                               type="checkbox"
-                              className="s1l-check"
+                              style={{flexShrink:0, margin:0, cursor:"pointer"}}
                               checked={checked}
                               aria-label={`Select ${s.sample}`}
                               onChange={(e) => {
@@ -4491,14 +4493,14 @@ export default function App() {
                               }}
                             />
                             <span
-                              className={`s1l-dot s1l-dot-${meta.dot}`}
+                              style={{flexShrink:0, width:"9px", height:"9px", borderRadius:"50%", background:dotColor}}
                               title={meta.reason}
                               aria-hidden="true"
                             />
-                            <span className="s1l-name" title={s.sample}>{s.sample}</span>
+                            <span title={s.sample} style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontWeight:500}}>{s.sample}</span>
                             <button
                               type="button"
-                              className="s1l-icon"
+                              style={iconBtn}
                               onClick={() => runStep1Sample(s.sample)}
                               disabled={sampleRunning || !selectedProject || !settingsReady || !effectiveRef}
                               aria-label={isDone ? `Re-run Step 1 for ${s.sample}` : `Run Step 1 for ${s.sample}`}
@@ -4508,13 +4510,13 @@ export default function App() {
                             </button>
                             <button
                               type="button"
-                              className="s1l-icon"
+                              style={iconBtn}
                               onClick={() => viewStep1Log(s.sample)}
                               disabled={!s.has_log}
                               aria-label={`View Step 1 log for ${s.sample}`}
                               title="View log"
                             >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
                             </button>
                           </li>
                         );

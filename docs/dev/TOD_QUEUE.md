@@ -196,3 +196,35 @@ curl byte count vs the Apache access-log size for the proxied request.
 3. **"View results table" button** set `selectedResultKey`/`showResults` but never
    called the table loader, so it appeared to do nothing — now also calls
    `loadSampleResults` + `loadAmrTable` (mirrors the Refresh button).
+
+---
+
+### Step 2 post-hoc SNP analysis — run-dir resolution fix — Open (2026-06-27)
+
+PR **#12** (`fix/posthoc-run-dir-clean`, off `main`, clean 17-line/2-file diff —
+worth merging straight to canonical, vsnp_gui only).
+
+`posthoc_run` / `posthoc_status` resolved `group_dir = step2/<group>`, but Step 2
+writes groups under a timestamped run dir (`step2/<run_ts>/<group>`) that every
+other read path resolves via `_resolve_step2_output_dir`. So bare group names
+404'd `"Group not found"` for **every project that uses run dirs** (i.e. all of
+them) — the post-hoc panel looked completely broken on ICAR. The SNP-analysis
+engine itself was always fine (runs by hand, produces matrix + KDP +
+closest-neighbor). Fix threads `run_id` through both endpoints + the two frontend
+calls (`runPosthoc`, `loadPosthocStatuses`); the frontend already tracks
+`step2SelectedRun`. Lock path keyed off the resolved `group_dir`.
+Corrects the earlier "kernel-density binary missing" guess — there is no separate
+binary; it's in-process matplotlib + scipy. Verified end-to-end on ICAR.
+
+### Site config — `vcf_db_folders` default resolution (T-04 follow-up) — Open (2026-06-27)
+
+Not a code change Tod must make — an **infra/symlink pattern** to replicate at any
+new site. `config.py` is already site-aware (`VSNP_GUI_SITE_ROOT`), and the default
+`vsnp3_reference_options_root` resolves because `<site>/refs/vsnp3/reference_options`
+is symlinked to `<site>/databases/vsnp3/reference_options`. But the parallel default
+`vcf_db_folders_root = <site>/refs/vsnp3/vcf_db_folders` was pointing at an EMPTY
+real dir (actual DBs under `<site>/databases/...`), so a brand-new user saw **no VCF
+database** (e.g. `mtbc0_v1.1` invisible) until their config was hand-edited. Fixed on
+ICAR by symlinking `refs/vsnp3/vcf_db_folders → databases/vsnp3/vcf_db_folders`
+(mirrors the reference_options symlink). Worth baking into the install playbook so
+both `refs/vsnp3/*` symlinks are created together.

@@ -244,3 +244,23 @@ Behavior unchanged — non-variant positions still aren't editable.
 **Open product question for Tod**: should the editor support *injecting* a call at a
 position where the sample is reference (the real cascade-curation case)? That needs
 intended DP/AD semantics + how Step 2 consumes an injected record — deferred.
+
+### AMRFinderPlus GUI — batch run concurrency + blank log; empty DB default — Open (2026-06-27)
+
+PR **kapurlab/amr_plus_gui#2** (`fix/batch-run-poll-resilience`, based on the
+`fix/ood-proxy-sse-poll-logtext` poll branch — merge that first).
+
+Found running a 5-sample AMR batch on ICAR: "Running… (0/5)", Pipeline Log stuck on
+"Waiting for output…", and samples ran ~concurrently instead of sequentially.
+Root cause = the shared `watchJob` poll loop: a failed `/logtext` poll (transient OOD
+`/rnode` proxy hiccup) hit the 30-error cap and called `finish("failed")`, which BOTH
+mislabeled the run AND, in a batch, resolved `runOne` so the loop launched the next
+sample mid-run. Fix: a poll failure never advances the queue or marks failure — it
+confirms real state via the lightweight `GET /api/jobs/{id}` status endpoint; only a
+genuine terminal status (or a long total outage) ends the watch.
+**This `watchJob` shape is shared across all 8 GUIs — propagate the hardening.**
+Also fixed `_AMRFINDER_DB_DEFAULT`: `_first_existing(kapurlab_path, "")` falls back to
+its FIRST arg when nothing exists, so off-site (ICAR) new users got a non-existent
+`--amrfinder-db`. Now resolves "" → amrfinder's bundled DB. (Same `_first_existing`
+fallback trap likely affects `kraken_db` and other GUIs' site defaults — audit.)
+Deployed to ICAR + oodadmin live config repointed.

@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import zipfile
 import csv
 import socket
@@ -2214,6 +2214,33 @@ def sra_download(project: str, payload: SraRequest):
     return {"job_id": job_id}
 
 
+# Greedy prefix (.+) binds the read marker to the RIGHTMOST _R1/_R2 (or _1/_2),
+# so a sample ID that itself ends in _1/_2 (Mg_2_R1 -> Mg-2) isn't mis-split on
+# the first such token. Non-greedy (.+?) would latch onto the first _1/_2 and
+# let the lane group swallow the real _R1, collapsing Mg_2 back to "Mg".
+_FASTQ_SAMPLE_RE = re.compile(r"(.+)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$")
+
+
+def _sanitized_sample_and_name(filename: str) -> Tuple[str, str]:
+    """Return (sample, on-disk filename) for a FASTQ, dashing the sample prefix.
+
+    vSNP3 derives the sample name from the FASTQ filename by splitting at the
+    FIRST '_'. An underscore *inside* the sample prefix therefore collapses every
+    such sample to the shared prefix — Mg_280, Mg_281, … all become "Mg",
+    silently merging distinct samples into one VCF in Step 2. Replacing the
+    prefix's underscores with '-' (Mg_280 -> Mg-280) keeps each sample distinct
+    while leaving the _R1/_R2 read indicator and any _001 lane suffix intact.
+
+    Returns the original name unchanged when the prefix has no underscore.
+    """
+    m = _FASTQ_SAMPLE_RE.match(filename)
+    sample = m.group(1) if m else filename.split(".")[0]
+    safe = sample.replace("_", "-")
+    if safe == sample:
+        return sample, filename
+    return safe, safe + filename[len(sample):]
+
+
 @app.post("/api/projects/{project}/step1/setup")
 def step1_setup(project: str):
     cfg = load_config()
@@ -2229,22 +2256,36 @@ def step1_setup(project: str):
     if not fastqs:
         return {"created": 0, "message": "No FASTQ files found"}
 
-    import re
     created = 0
+    renamed = 0
     for f in fastqs:
-        stem = f.name
-        match = re.match(r"(.+?)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$", stem)
-        if match:
-            sample = match.group(1)
-        else:
-            sample = stem.split(".")[0]
+        sample, safe_name = _sanitized_sample_and_name(f.name)
+        # Rename underscored stems in place (Mg_280_R1 -> Mg-280_R1) BEFORE
+        # staging, so vSNP3 never sees an underscore in the sample prefix.
+        # download/ entries may be symlinks (rename moves the link, not the
+        # target) or real files — both are safe to rename. Idempotent: a name
+        # already dashed, or a re-run, is a no-op.
+        if safe_name != f.name:
+            new_path = f.with_name(safe_name)
+            if new_path.exists():
+                # A dashed file is already present (e.g. the project shipped
+                # both Mg_280_R1 and Mg-280_R1). Renaming would clobber it or
+                # leave this one orphaned, so skip this underscored duplicate —
+                # the dashed file is staged on its own pass through `fastqs`.
+                logger.warning(
+                    "step1_setup: dashed target %s already exists; skipping "
+                    "underscored duplicate %s", new_path.name, f.name)
+                continue
+            f.rename(new_path)
+            renamed += 1
+            f = new_path
         sample_dir = step1_dir / sample
         sample_dir.mkdir(parents=True, exist_ok=True)
         target = sample_dir / f.name
         if not target.exists():
             target.symlink_to(f)
             created += 1
-    return {"created": created}
+    return {"created": created, "renamed": renamed}
 
 
 @app.post("/api/projects/{project}/step1/run")

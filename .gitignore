@@ -44,3 +44,8 @@ deploy/site.conf.*
 !deploy/site.conf.example
 deploy/sample_data/bundle/
 deploy/sample_data/*.tar.gz
+
+# internal dev docs / handoff / red-team notes — not for the public repo
+docs/dev/
+HANDOFF*.md
+*_HANDOFF.md

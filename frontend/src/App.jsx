@@ -109,6 +109,10 @@ export default function App() {
   const step1JobStatusRef = useRef("");
   const krakenEsRef = useRef(null);
   const krakenLogRef = useRef(null);
+  // id of the job the primary poll loop is currently watching; newest run
+  // wins and stale loops bail out (see watchJob). Replaces the old SSE
+  // EventSource whose connection the OOD /rnode proxy corrupted.
+  const watchIdRef = useRef(null);
   const [step1ResultsTab, setStep1ResultsTab] = useState("results");
   const [posthocFolders, setPosthocFolders] = useState([]);
   const [posthocRows, setPosthocRows] = useState([]);
@@ -863,57 +867,98 @@ export default function App() {
     runPreflight();
   }, [settings.vsnp3_path]);
 
+  // Watch the primary job by POLLING a plain endpoint (no SSE/EventSource).
+  // The OOD /rnode Apache reverse proxy holds SSE connections open and
+  // corrupts concurrent sibling GET requests (a status poll comes back
+  // carrying the SSE's buffered body, breaking JSON parsing → successful runs
+  // were mislabelled "failed", and results/log did not auto-refresh).
+  // ./api/jobs/{id}/logtext is a normal GET returning BOTH the recorded
+  // status (from the real process exit code) and the current log text, so a
+  // single poll loop drives status + live-ish logs proxy-safely. Every state
+  // update is guarded by watchIdRef.current === id so a stale loop from a
+  // previous run cannot clobber the newest run.
   useEffect(() => {
     if (!jobId) return;
     setLogs([]);
     setJobStatus("running");
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    es.onmessage = (evt) => {
-      const line = evt.data;
-      if (line.startsWith("[job:")) {
-        const status = line.replace("[job:", "").replace("]", "");
-        setJobStatus(status);
-        // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
-        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
-          loadStep1Status();
-          loadQC();
-          refreshProjects(selectedProject);
-          collectVcfs([]);
-        }
-        // Step 2 job completed: refresh run list (auto-selects newest → triggers
-        // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
-        if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
-          loadStep2Runs(true);
-          refreshProjects(selectedProject);
-        }
-        // Update SRA status if this was an SRA job
-        if (sraJobId && jobId === sraJobId) {
-          if (status === "succeeded") {
-            setSraStatus("Download complete");
-            loadAll();
-          } else {
-            setSraStatus(`Download ${status}`);
-          }
-        }
-        // Update genome download status if this was a genome download job
-        if (genomeJobId && jobId === genomeJobId) {
-          if (status === "succeeded") {
-            setGenomeDownloadStatus("Download complete. Refreshing references...");
-            loadAll().then(() => setGenomeDownloadStatus("Download complete."));
-          } else {
-            setGenomeDownloadStatus(`Download ${status}`);
-          }
-        }
-        es.close();
-        return;
+    const id = jobId;
+    watchIdRef.current = id;   // newest run wins; stale loops below bail out
+    let errors = 0;
+    let finished = false;
+    let timer = null;
+
+    const applyTerminal = (status) => {
+      if (watchIdRef.current !== id) return;
+      setJobStatus(status);
+      // --- result-loading preserved VERBATIM from the original SSE handler ---
+      // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
+      if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
+        loadStep1Status();
+        loadQC();
+        refreshProjects(selectedProject);
+        collectVcfs([]);
       }
-      setLogs((prev) => [...prev, line]);
+      // Step 2 job completed: refresh run list (auto-selects newest → triggers
+      // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
+      if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+        loadStep2Runs(true);
+        refreshProjects(selectedProject);
+      }
+      // Update SRA status if this was an SRA job
+      if (sraJobId && jobId === sraJobId) {
+        if (status === "succeeded") {
+          setSraStatus("Download complete");
+          loadAll();
+        } else {
+          setSraStatus(`Download ${status}`);
+        }
+      }
+      // Update genome download status if this was a genome download job
+      if (genomeJobId && jobId === genomeJobId) {
+        if (status === "succeeded") {
+          setGenomeDownloadStatus("Download complete. Refreshing references...");
+          loadAll().then(() => setGenomeDownloadStatus("Download complete."));
+        } else {
+          setGenomeDownloadStatus(`Download ${status}`);
+        }
+      }
     };
-    es.onerror = () => {
-      setJobStatus("error");
-      es.close();
+
+    const tick = () => {
+      if (finished || watchIdRef.current !== id) return;
+      fetch(`${API_BASE}/api/jobs/${id}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+        .then((data) => {
+          if (watchIdRef.current !== id) return;
+          errors = 0;
+          if (typeof data.log === "string") {
+            // logtext returns the full log file (incl. the JobManager preamble
+            // line and the "$ <command>" echo); show it as the live log.
+            setLogs(data.log.split("\n"));
+          }
+          if (!data.status || data.status === "running") {
+            timer = setTimeout(tick, 2000);
+            return;
+          }
+          finished = true;
+          applyTerminal(data.status);   // succeeded | failed from the real exit code
+        })
+        .catch(() => {
+          if (finished || watchIdRef.current !== id) return;
+          errors += 1;
+          if (errors < 30) {
+            timer = setTimeout(tick, 2000);   // ride out transient proxy blips
+          } else {
+            finished = true;
+            applyTerminal("failed");
+          }
+        });
     };
-    return () => es.close();
+    timer = setTimeout(tick, 1200);
+    return () => {
+      finished = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [jobId]);
 
   useEffect(() => {
@@ -2523,15 +2568,31 @@ export default function App() {
     }
   }
 
+  // Poll the kraken sub-job (no SSE). Same OOD /rnode proxy hazard as the
+  // primary watcher above: SSE concurrent with sibling GETs gets corrupted.
+  // ./api/jobs/{id}/logtext returns status + log in one proxy-safe GET.
   function streamKrakenLog(jobId) {
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    krakenEsRef.current = es;
-    es.onmessage = (evt) => {
-      const data = evt.data;
-      const m = data.match(/^\[job:(succeeded|failed)\]$/);
-      if (m) {
-        es.close();
-        krakenEsRef.current = null;
+    const id = jobId;
+    krakenLogRef.current = id;   // newest kraken run wins
+    krakenEsRef.current = null;
+    let errors = 0;
+    let finished = false;
+    const tick = () => {
+      if (finished || krakenLogRef.current !== id) return;
+      fetch(`${API_BASE}/api/jobs/${id}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("http " + r.status))))
+        .then((data) => {
+          if (krakenLogRef.current !== id) return;
+          errors = 0;
+          if (typeof data.log === "string") {
+            setKrakenModal((mm) => ({ ...mm, log: data.log.split("\n") }));
+          }
+          if (!data.status || data.status === "running") {
+            setTimeout(tick, 2000);
+            return;
+          }
+        finished = true;
+        const m = [null, data.status];
         setKrakenModal((mm) => {
           // Refresh the project's sample browser so the new Kraken outputs
           // (incl. parsed-read fastqs) appear under the sample, and drop any
@@ -2559,15 +2620,19 @@ export default function App() {
         if (folderModal.open && folderModal.sample) {
           openStep1FolderModal(folderModal.project, folderModal.sample);
         }
-        return;
-      }
-      setKrakenModal((mm) => ({ ...mm, log: [...mm.log, data] }));
+        })
+        .catch(() => {
+          if (finished || krakenLogRef.current !== id) return;
+          errors += 1;
+          if (errors < 30) {
+            setTimeout(tick, 2000);   // ride out transient proxy blips
+          } else {
+            finished = true;
+            setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+          }
+        });
     };
-    es.onerror = () => {
-      es.close();
-      krakenEsRef.current = null;
-      setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
-    };
+    setTimeout(tick, 1200);
   }
 
   function downloadFolderFile(project, path) {

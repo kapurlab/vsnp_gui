@@ -2456,24 +2456,23 @@ def _step1_dispatch(
             "  cd ..",
             "  return $STATUS",
             "}",
-            # Rolling worker pool. `wait -n` (bash 4.3+) blocks until ANY
-            # backgrounded job finishes — vs the previous `wait $pids[0]`
-            # which blocked on a specific PID and stalled the queue when the
-            # head was the slowest sample, capping effective parallelism well
-            # below MAX_PARALLEL on heterogeneous inputs.
+            # Rolling worker pool throttled to MAX_PARALLEL. We MUST NOT use
+            # `wait -n` here: it only exists in bash 4.3+, and macOS ships bash
+            # 3.2 as /bin/bash (what `bash run_step1.sh` resolves to). Under 3.2
+            # `wait -n` fails instantly as an invalid option WITHOUT blocking, so
+            # the gate is skipped and every sample launches at once — which
+            # exhausts RAM/CPU and hard-locks the machine. Instead poll the
+            # running-job count (`jobs -r -p`), which is portable to 3.2, and
+            # only launch a new sample once a slot frees. The SRA download path
+            # already throttles portably via `xargs -P` (see sra.py).
             "pids=()",
             f"SAMPLES=({samples_bash})",
             "for d in \"${SAMPLES[@]}\"; do",
+            "  while [ \"$(jobs -r -p | wc -l | tr -d ' ')\" -ge \"$MAX_PARALLEL\" ]; do",
+            "    sleep 1",
+            "  done",
             "  run_sample \"$d\" &",
             "  pids+=(\"$!\")",
-            "  if [ ${#pids[@]} -ge \"$MAX_PARALLEL\" ]; then",
-            "    wait -n || FAIL=1",
-            "    new_pids=()",
-            "    for p in \"${pids[@]}\"; do",
-            "      if kill -0 \"$p\" 2>/dev/null; then new_pids+=(\"$p\"); fi",
-            "    done",
-            "    pids=(\"${new_pids[@]}\")",
-            "  fi",
             "done",
             "for p in \"${pids[@]}\"; do",
             "  wait \"$p\" || FAIL=1",
@@ -2948,6 +2947,21 @@ def job_status(job_id: str):
     return job
 
 
+@app.post("/api/jobs/{job_id}/stop")
+def job_stop(job_id: str):
+    """Cancel a running job. Signals the whole process group (SIGTERM, then
+    SIGKILL after a grace period) so a step1 batch and every vsnp3 worker it
+    spawned are torn down together. Samples already finished keep their outputs;
+    in-flight samples are left partial and report as unknown/error on the next
+    status poll. Returns 404 for an unknown job, 409 if it is not running."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job_manager.stop_job(job_id):
+        raise HTTPException(status_code=409, detail="Job is not running")
+    return {"job_id": job_id, "stopped": True}
+
+
 @app.get("/api/jobs/{job_id}/events")
 def job_events(job_id: str):
     job = job_manager.get_job(job_id)
@@ -3010,7 +3024,7 @@ def job_events(job_id: str):
         while True:
             yield from drain_all()
             j = job_manager.get_job(job_id)
-            if j and j["status"] in {"succeeded", "failed"}:
+            if j and j["status"] in {"succeeded", "failed", "cancelled"}:
                 # Catch anything written between the last poll and process exit.
                 yield from drain_all()
                 yield f"data: [job:{j['status']}]\n\n"
@@ -5485,7 +5499,7 @@ def _posthoc_clear_stale_lock(lock_path: Path) -> None:
         lock_path.unlink()
         return
     job = job_manager.get_job(job_id)
-    if not job or job.get("status") in {"succeeded", "failed"}:
+    if not job or job.get("status") in {"succeeded", "failed", "cancelled"}:
         lock_path.unlink()
 
 

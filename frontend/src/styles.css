@@ -450,6 +450,17 @@ label {
   width: 100%;
 }
 
+.step1-actions button.danger {
+  background: #c84d4d;
+  border-color: #c84d4d;
+  color: #fff;
+}
+
+.step1-actions button.danger:hover:not(:disabled) {
+  background: #b23f3f;
+  border-color: #b23f3f;
+}
+
 .step1-status {
   margin-top: 12px;
   padding: 10px;

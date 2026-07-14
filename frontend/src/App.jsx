@@ -68,6 +68,9 @@ export default function App() {
   // run for this project.
   const [step1JobStatus, setStep1JobStatus] = useState("");
   const [step1StatusError, setStep1StatusError] = useState("");
+  // True while a stop request is in flight, to disable the Stop button and
+  // show feedback (the batch can take a few seconds to tear down).
+  const [step1Stopping, setStep1Stopping] = useState(false);
   const [step1LogSample, setStep1LogSample] = useState("");
   const [step1LogText, setStep1LogText] = useState("");
   const [step1LogLoading, setStep1LogLoading] = useState(false);
@@ -873,8 +876,11 @@ export default function App() {
       if (line.startsWith("[job:")) {
         const status = line.replace("[job:", "").replace("]", "");
         setJobStatus(status);
-        // Step 1 job completed: refresh sample statuses, QC table, project counts, collect VCFs
-        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed")) {
+        // Step 1 job reached a terminal state: refresh sample statuses, QC
+        // table, project counts, collect VCFs. "cancelled" is included so a
+        // user-stopped batch still collects the VCFs of samples that finished
+        // before the stop.
+        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed" || status === "cancelled")) {
           loadStep1Status();
           loadQC();
           refreshProjects(selectedProject);
@@ -2251,6 +2257,30 @@ export default function App() {
     // about to read "running" (loadStep1Status), which keeps the button disabled.
     step1DispatchingRef.current = false;
     await loadStep1Status();
+  }
+
+  async function stopStep1() {
+    if (!step1JobId || step1JobStatus !== "running") return;
+    const ok = window.confirm(
+      "Stop the Step 1 run?\n\n" +
+      "Samples that have already finished keep their results. Any samples still " +
+      "running will be terminated and left incomplete — you can re-run them later."
+    );
+    if (!ok) return;
+    setStep1Stopping(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${step1JobId}/stop`, { method: "POST" });
+      if (!res.ok && res.status !== 409) {
+        let data = {};
+        try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+        window.alert(`Could not stop Step 1: ${data.detail || `HTTP ${res.status}`}`);
+      }
+    } catch (e) {
+      window.alert(`Could not stop Step 1: ${e.message || "network error"}`);
+    } finally {
+      setStep1Stopping(false);
+      await loadStep1Status();
+    }
   }
 
   async function step2Setup() {
@@ -4146,6 +4176,16 @@ export default function App() {
                 >
                   {step1JobStatus === "running" ? "Running…" : "Run"}
                 </button>
+                {step1JobStatus === "running" ? (
+                  <button
+                    className="danger"
+                    onClick={stopStep1}
+                    disabled={step1Stopping}
+                    title="Terminate the running Step 1 batch. Finished samples keep their results."
+                  >
+                    {step1Stopping ? "Stopping…" : "Stop"}
+                  </button>
+                ) : null}
               </div>
             </div>
             <div className="step1-status">

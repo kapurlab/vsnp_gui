@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -26,6 +27,11 @@ FinalizeCallback = Callable[[str, int, datetime, datetime], None]
 
 
 class JobManager:
+    # After a stop request we SIGTERM the whole process group, then give the
+    # tree this long to exit cleanly (let vsnp3 flush logs / remove temp files)
+    # before escalating to SIGKILL.
+    _STOP_GRACE_SECONDS = 10
+
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -80,6 +86,59 @@ class JobManager:
             # Strip internal-only fields from the returned snapshot.
             return {k: v for k, v in job.items() if not k.startswith("_")}
 
+    def stop_job(self, job_id: str) -> bool:
+        """Request cancellation of a running job.
+
+        Marks the job stop-requested and signals its process group (SIGTERM,
+        then SIGKILL after a grace period). Returns True if a running job was
+        found and signaled, False if the job is unknown or already terminal.
+        Idempotent — a second call on an already-stopping job is a no-op that
+        still returns True.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            if job.get("status") != "running":
+                return False
+            already = job.get("_stop_requested", False)
+            job["_stop_requested"] = True
+            process = job.get("_process")
+        if already:
+            return True
+        if process is None:
+            # Worker thread hasn't spawned the subprocess yet; _run() checks the
+            # _stop_requested flag right after Popen and will terminate it then.
+            return True
+        self._terminate_group(process)
+        return True
+
+    def _terminate_group(self, process: subprocess.Popen) -> None:
+        """SIGTERM the job's process group, then SIGKILL survivors after a grace
+        period. The grace/escalation runs in a daemon thread so callers (the API
+        handler) return immediately. Falls back to signaling just the process if
+        the group is already gone."""
+        def _signal(sig: int) -> None:
+            try:
+                os.killpg(os.getpgid(process.pid), sig)
+            except (ProcessLookupError, PermissionError):
+                # Group already reaped, or we can't signal it — try the leader
+                # directly as a best effort.
+                try:
+                    process.send_signal(sig)
+                except (ProcessLookupError, ValueError):
+                    pass
+
+        _signal(signal.SIGTERM)
+
+        def _escalate() -> None:
+            try:
+                process.wait(timeout=self._STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                _signal(signal.SIGKILL)
+
+        threading.Thread(target=_escalate, daemon=True).start()
+
     def _run(self, job_id: str, command: str, cwd: Optional[Path], env: Optional[Dict[str, str]], log_path: Path) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8") as log:
@@ -94,8 +153,24 @@ class JobManager:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 shell=True,
-                text=True
+                text=True,
+                # Own session/process group so stop_job() can signal the whole
+                # tree (the wrapping shell, the bash batch, and every vsnp3
+                # worker it spawns) with a single killpg — not just the top
+                # shell, which would orphan the running vsnp3 children.
+                start_new_session=True,
             )
+            # Publish the handle so stop_job() can reach the group. If a stop
+            # request beat us here (job created, thread not yet scheduled),
+            # honor it now instead of letting the batch run unkillable.
+            stop_requested = False
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is not None:
+                    job["_process"] = process
+                    stop_requested = job.get("_stop_requested", False)
+            if stop_requested:
+                self._terminate_group(process)
             exit_code = process.wait()
             finished_at = datetime.now(timezone.utc)
             duration = (finished_at - started_at).total_seconds()
@@ -108,7 +183,13 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job:
                 job["exit_code"] = exit_code
-                job["status"] = "succeeded" if exit_code == 0 else "failed"
+                # A stopped job exits non-zero from the SIGTERM/SIGKILL; report
+                # it as "cancelled" rather than "failed" so the GUI can tell a
+                # user-requested stop apart from a real pipeline error.
+                if job.get("_stop_requested"):
+                    job["status"] = "cancelled"
+                else:
+                    job["status"] = "succeeded" if exit_code == 0 else "failed"
                 job["finished_at"] = finished_at.isoformat()
                 job["duration_seconds"] = duration
                 callback = job.get("_finalize_callback")

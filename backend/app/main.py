@@ -323,8 +323,25 @@ def _safe_stat_size(p: Path) -> Optional[int]:
         return None
 
 
+def _step1_is_complete(sample_dir: Path) -> bool:
+    """True if a sample already finished Step 1 successfully — same signal the
+    status endpoint uses: a `.provenance/exit_code` of 0, or (legacy) the
+    annotated VCF + de-duplicated BAM both present. Used to skip re-aligning
+    samples that are already Complete when a batch is re-run after adding new
+    samples (re-running would delete alignment_* and redo the slow alignment)."""
+    ec = sample_dir / ".provenance" / "exit_code"
+    if ec.exists():
+        try:
+            return ec.read_text(encoding="utf-8").strip() == "0"
+        except OSError:
+            return False
+    vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
+    nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+    return bool(vcf and nodup)
+
+
 def _step1_dispatch_plan(
-    step1_dir: Path, min_bytes: int = _T46_JUNK_FASTQ_BYTES
+    step1_dir: Path, min_bytes: int = _T46_JUNK_FASTQ_BYTES, force_rerun: bool = False
 ) -> tuple[List[str], List[Dict[str, Any]]]:
     """Decide which sample dirs to actually dispatch and which to skip.
 
@@ -334,6 +351,9 @@ def _step1_dispatch_plan(
     strings — they end up in an alert in the GUI.
 
     Skip rules (in order):
+      0. Already completed (exit_code 0, or VCF+BAM present) → skip so a
+         re-run after adding new samples doesn't re-align finished ones.
+         Overridden by `force_rerun` (the GUI's "Force re-run" option).
       1. R1 not found (no *_R1*/*_1* pattern) → single-end-only. Phase 1
          skips these; Phase 2 (separate ticket) will add real single-end
          Illumina support via a vsnp3 patch.
@@ -348,6 +368,13 @@ def _step1_dispatch_plan(
     skipped: List[Dict[str, Any]] = []
     for p in sorted(step1_dir.iterdir()):
         if not p.is_dir() or p.name.startswith(("_", ".")):
+            continue
+        if not force_rerun and _step1_is_complete(p):
+            skipped.append({
+                "sample": p.name,
+                "reason": "already completed in a previous run (use Force re-run to re-align)",
+                "size_bytes": 0,
+            })
             continue
         r1_matches = sorted(p.glob("*_R1*.fastq.gz")) or sorted(p.glob("*_1.fastq.gz"))
         r2_matches = sorted(p.glob("*_R2*.fastq.gz")) or sorted(p.glob("*_2.fastq.gz"))
@@ -818,6 +845,7 @@ class Step1Request(BaseModel):
     debug: bool = False
     assemble_unmap: bool = False
     nanopore: bool = False
+    force_rerun: bool = False   # re-align even samples already marked Complete
 
 
 class Step2Request(BaseModel):
@@ -2380,7 +2408,9 @@ def _step1_dispatch(
     # from being run and failing the whole batch — those are surfaced to the
     # user as `skipped_samples` instead.
     samples, skipped_samples = _step1_dispatch_plan(
-        step1_dir, min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES)
+        step1_dir,
+        min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES),
+        force_rerun=bool(getattr(payload, "force_rerun", False)),
     )
     samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(

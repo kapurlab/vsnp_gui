@@ -33,6 +33,7 @@ export default function App() {
   const [debugMode, setDebugMode] = useState(false);
   const [assembleUnmap, setAssembleUnmap] = useState(false);
   const [nanoporeMode, setNanoporeMode] = useState(false);
+  const [forceRerun, setForceRerun] = useState(false);   // re-align samples already Complete
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -2220,7 +2221,7 @@ export default function App() {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode })
+        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun })
       });
     } catch (e) {
       step1DispatchingRef.current = false;
@@ -4166,6 +4167,14 @@ export default function App() {
                   onChange={(e) => setNanoporeMode(e.target.checked)}
                 />
                 Nanopore (ONT) reads
+              </label>
+              <label className="checkbox" title="By default, samples already marked Complete are skipped so re-running a batch (e.g. after adding newly-parsed samples) only aligns the new ones. Tick this to re-align everything.">
+                <input
+                  type="checkbox"
+                  checked={forceRerun}
+                  onChange={(e) => setForceRerun(e.target.checked)}
+                />
+                Force re-run (re-align samples already Complete)
               </label>
               <div className="step1-actions">
                 <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>

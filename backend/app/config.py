@@ -65,6 +65,8 @@ DEFAULTS: Dict[str, Any] = {
     "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
     "projects_root": str(HOME_DIR / "projects"),
     "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
+    # Curated, user-managed Projects-root bookmarks (Settings: save/remove/jump).
+    "saved_project_roots": [],
     "bcftools_path": _DEFAULT_BCFTOOLS,
     "step1_max_parallel": 3,
     "sra": {

@@ -789,7 +789,7 @@ export default function App() {
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https),
-      recent_projects_roots: Array.isArray(cfg.recent_projects_roots) ? cfg.recent_projects_roots : []
+      saved_project_roots: Array.isArray(cfg.saved_project_roots) ? cfg.saved_project_roots : []
     });
     if (cfg._validation) {
       setPathValidation(cfg._validation);
@@ -1122,12 +1122,41 @@ export default function App() {
       body: JSON.stringify({
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
+        saved_project_roots: settings.saved_project_roots,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
       })
     });
     await loadAll();
+  }
+
+  // Curated Projects-root bookmarks. Each action persists immediately (POST +
+  // reload) so the list sticks without relying on the separate Save button.
+  async function persistProjectRoots(next) {
+    const merged = { ...settings, ...next };
+    setSettings(merged);
+    await fetch(`${API_BASE}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projects_root: merged.projects_root,
+        saved_project_roots: merged.saved_project_roots
+      })
+    });
+    await loadAll();
+  }
+  function saveCurrentLocation() {
+    const cur = (settings.projects_root || "").trim();
+    const list = settings.saved_project_roots || [];
+    if (!cur || list.includes(cur)) return;
+    persistProjectRoots({ saved_project_roots: [...list, cur] });
+  }
+  function removeSavedLocation(path) {
+    persistProjectRoots({ saved_project_roots: (settings.saved_project_roots || []).filter((r) => r !== path) });
+  }
+  function jumpToLocation(path) {
+    if (path) persistProjectRoots({ projects_root: path });
   }
 
   async function runPreflight() {
@@ -3087,20 +3116,38 @@ export default function App() {
                     )}
                   </span>
                 </div>
-                {Array.isArray(settings.recent_projects_roots) && settings.recent_projects_roots.length > 0 && (
-                  <div className="settings-row">
-                    <label className="label">Recent roots</label>
+                <div className="settings-row">
+                  <label className="label">Saved locations</label>
+                  <span style={{display:"inline-flex", alignItems:"center", gap:"6px", flexWrap:"wrap"}}>
                     <select
                       value=""
-                      onChange={(e) => { if (e.target.value) setSettings({ ...settings, projects_root: e.target.value }); }}
+                      onChange={(e) => jumpToLocation(e.target.value)}
+                      disabled={!(settings.saved_project_roots && settings.saved_project_roots.length)}
+                      title="Jump the Projects root to a saved location"
                     >
-                      <option value="">↻ Switch to a recent root…</option>
-                      {settings.recent_projects_roots.map((r) => (
+                      <option value="">
+                        {settings.saved_project_roots && settings.saved_project_roots.length
+                          ? "↦ Jump to a saved location…"
+                          : "No saved locations yet"}
+                      </option>
+                      {(settings.saved_project_roots || []).map((r) => (
                         <option key={r} value={r}>{r}</option>
                       ))}
                     </select>
-                  </div>
-                )}
+                    <button
+                      className="ghost action"
+                      onClick={saveCurrentLocation}
+                      disabled={!settings.projects_root || (settings.saved_project_roots || []).includes(settings.projects_root)}
+                      title="Save the current Projects root as a bookmark"
+                    >★ Save current</button>
+                    <button
+                      className="ghost action"
+                      onClick={() => removeSavedLocation(settings.projects_root)}
+                      disabled={!(settings.saved_project_roots || []).includes(settings.projects_root)}
+                      title="Remove the current Projects root from saved locations"
+                    >Remove</button>
+                  </span>
+                </div>
                 <label className="checkbox">
                   <input
                     type="checkbox"

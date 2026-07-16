@@ -807,6 +807,7 @@ class ConfigUpdate(BaseModel):
     vsnp3_path: Optional[str] = None
     projects_root: Optional[str] = None
     shared_projects_root: Optional[str] = None
+    saved_project_roots: Optional[List[str]] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -927,14 +928,18 @@ def update_config(update: ConfigUpdate):
         cfg["vsnp3_path"] = update.vsnp3_path
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
-        # Track recently-used project roots (MRU, max 10) for quick switching.
-        root = (update.projects_root or "").strip()
-        if root:
-            recent = [r for r in cfg.get("recent_projects_roots", []) if r != root]
-            recent.insert(0, root)
-            cfg["recent_projects_roots"] = recent[:10]
     if update.shared_projects_root is not None:
         cfg["shared_projects_root"] = update.shared_projects_root
+    if update.saved_project_roots is not None:
+        # Curated, user-managed bookmarks (add/remove in Settings). Store a
+        # de-duplicated, order-preserving list of non-empty paths.
+        seen, cleaned = set(), []
+        for r in update.saved_project_roots:
+            r = (r or "").strip()
+            if r and r not in seen:
+                seen.add(r)
+                cleaned.append(r)
+        cfg["saved_project_roots"] = cleaned
     if update.bcftools_path is not None:
         cfg["bcftools_path"] = update.bcftools_path
     if update.step1_max_parallel is not None:

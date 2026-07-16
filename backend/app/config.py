@@ -40,11 +40,18 @@ _DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSN
 _DEFAULT_BCFTOOLS = str(_DEFAULT_VSNP3_PATH / "bin" / "bcftools")
 
 # Shared projects root (T-12a). Surfaces in /api/config; backend's project
-# listing scans both this and per-user projects_root.
+# listing scans both this and per-user projects_root. Multi-user server installs
+# leave it deriving from SITE_ROOT/projects (shared visibility for the whole
+# lab). Single-user installs (e.g. `bdtools local`) set the env var
+# VSNP_GUI_SHARED_PROJECTS_ROOT — when PRESENT (even empty), it is authoritative
+# and wins over both this default and any previously-saved value, so the local
+# launcher can set it to "" to collapse to a single Projects root.
 _SHARED_PROJECTS_ROOT = _SITE_ROOT / "projects"
 _DEFAULT_SHARED_PROJECTS_ROOT = (
     str(_SHARED_PROJECTS_ROOT) if _SHARED_PROJECTS_ROOT.is_dir() else ""
 )
+# os.environ.get(...) is None when the var is unset; "" when explicitly disabled.
+_ENV_SHARED_PROJECTS_ROOT = os.environ.get("VSNP_GUI_SHARED_PROJECTS_ROOT")
 
 # Shared VCF database root. Subdirectories under this path are auto-discovered
 # as VCF DB folders for every user (in addition to whatever they add manually
@@ -110,6 +117,11 @@ def load_config() -> Dict[str, Any]:
     # whatever they've customized.
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
+    # A present VSNP_GUI_SHARED_PROJECTS_ROOT overrides any saved/default value
+    # on every load, so a single-user launcher setting it to "" reliably
+    # disables the shared root regardless of what was persisted earlier.
+    if _ENV_SHARED_PROJECTS_ROOT is not None:
+        cfg["shared_projects_root"] = _ENV_SHARED_PROJECTS_ROOT.strip()
     return cfg
 
 

@@ -17,20 +17,15 @@ export default function App() {
   const [references, setReferences] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
-  // Where a newly-created project is written: "personal" (projects_root) or
-  // "shared" (shared_projects_root). Only offered when a shared root is set.
-  const [newProjectScope, setNewProjectScope] = useState("personal");
   const [settings, setSettings] = useState({
     vsnp3_path: "",
     projects_root: "",
-    shared_projects_root: "",
     bcftools_path: "",
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
   });
-  // Server-side folder browser for picking a projects root. `target` names the
-  // settings key it writes back to (projects_root or shared_projects_root).
-  const [folderBrowser, setFolderBrowser] = useState({ open: false, target: "projects_root", path: "", parent: null, entries: [], loading: false, error: "" });
+  // Server-side folder browser for picking the projects root.
+  const [folderBrowser, setFolderBrowser] = useState({ open: false, path: "", parent: null, entries: [], loading: false, error: "" });
   const [sraText, setSraText] = useState("");
   const [sraFolder, setSraFolder] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -791,7 +786,6 @@ export default function App() {
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
-      shared_projects_root: cfg.shared_projects_root || "",
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https),
@@ -1057,9 +1051,6 @@ export default function App() {
     if (!newProjectName.trim()) return;
     const body = { name: newProjectName.trim() };
     if (newProjectReference) body.reference = newProjectReference;
-    // Only send "shared" when a shared root is actually configured; otherwise
-    // fall through to the backend's personal default.
-    body.scope = settings.shared_projects_root ? newProjectScope : "personal";
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1115,13 +1106,12 @@ export default function App() {
       .then((d) => setFolderBrowser((s) => ({ ...s, path: d.path, parent: d.parent, entries: d.entries, loading: false })))
       .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message })));
   }
-  function openFolderBrowser(target = "projects_root") {
-    setFolderBrowser({ open: true, target, path: "", parent: null, entries: [], loading: true, error: "" });
-    browseDirs(settings[target] || "");
+  function openFolderBrowser() {
+    setFolderBrowser({ open: true, path: "", parent: null, entries: [], loading: true, error: "" });
+    browseDirs(settings.projects_root || "");
   }
   function chooseFolder() {
-    const target = folderBrowser.target || "projects_root";
-    setSettings((s) => ({ ...s, [target]: folderBrowser.path }));
+    setSettings((s) => ({ ...s, projects_root: folderBrowser.path }));
     setFolderBrowser((s) => ({ ...s, open: false }));
   }
 
@@ -1132,7 +1122,6 @@ export default function App() {
       body: JSON.stringify({
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
-        shared_projects_root: settings.shared_projects_root,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
@@ -3075,7 +3064,7 @@ export default function App() {
                     onChange={(e) => setSettings({ ...settings, projects_root: e.target.value })}
                   />
                   <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
-                    <button className="ghost action" onClick={() => openFolderBrowser("projects_root")}>Browse…</button>
+                    <button className="ghost action" onClick={openFolderBrowser}>Browse…</button>
                     {canPickPath ? (
                       <button
                         className="ghost action"
@@ -3112,40 +3101,6 @@ export default function App() {
                     </select>
                   </div>
                 )}
-                <div className="settings-row">
-                  <label className="label">Shared projects root</label>
-                  <input
-                    placeholder="(optional) shared location, e.g. a lab/group /path/to/projects"
-                    value={settings.shared_projects_root}
-                    onChange={(e) => setSettings({ ...settings, shared_projects_root: e.target.value })}
-                    title="Optional. When set, projects here are listed alongside your personal ones, and you can choose 'Shared' when creating a project."
-                  />
-                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
-                    <button className="ghost action" onClick={() => openFolderBrowser("shared_projects_root")}>Browse…</button>
-                    {canPickPath ? (
-                      <button
-                        className="ghost action"
-                        onClick={() =>
-                          pickPath(
-                            "directory",
-                            "Select shared projects root",
-                            settings.shared_projects_root,
-                            (value) => setSettings({ ...settings, shared_projects_root: value })
-                          )
-                        }
-                      >
-                        Choose
-                      </button>
-                    ) : null}
-                    {settings.shared_projects_root ? (
-                      pathValidation.shared_projects_root === true ? (
-                        <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
-                      ) : (
-                        <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
-                      )
-                    ) : null}
-                  </span>
-                </div>
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -3238,17 +3193,6 @@ export default function App() {
                   <option key={r.name} value={r.name}>{r.name}</option>
                 ))}
               </select>
-              {settings.shared_projects_root ? (
-                <select
-                  value={newProjectScope}
-                  onChange={(e) => setNewProjectScope(e.target.value)}
-                  title="Where to create this project: your personal projects root, or the shared projects root"
-                  style={{ minWidth: "8rem" }}
-                >
-                  <option value="personal">Personal</option>
-                  <option value="shared">Shared</option>
-                </select>
-              ) : null}
               <button onClick={createProject}>Create</button>
             </div>
             <div className="row" style={{ marginTop: "4px" }}>
@@ -5946,7 +5890,7 @@ export default function App() {
             style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
           >
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700 }}>
-              {folderBrowser.target === "shared_projects_root" ? "Select the shared projects root" : "Select a projects root"}
+              Select a projects root
             </div>
             <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
               <button type="button" className="ghost" disabled={!folderBrowser.parent || folderBrowser.loading} onClick={() => browseDirs(folderBrowser.parent)}>↑ Up</button>

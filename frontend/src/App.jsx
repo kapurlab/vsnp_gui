@@ -145,7 +145,9 @@ export default function App() {
   const [posthocStatus, setPosthocStatus] = useState({});
   const [posthocRunError, setPosthocRunError] = useState("");
   const [posthocScopeByGroup, setPosthocScopeByGroup] = useState({});
-  const [step2Mode, setStep2Mode] = useState("custom");
+  // Default to the common path: run Step 2 on this project's own Step 1 samples.
+  // "custom" is the advanced path for adding external / reference-DB VCFs.
+  const [step2Mode, setStep2Mode] = useState("step1");
   // Step 2 run options
   const [s2NoFilters, setS2NoFilters] = useState(false);
   const [s2QualThreshold, setS2QualThreshold] = useState(150);
@@ -250,7 +252,10 @@ export default function App() {
   const [vcfsFolderSamples, setVcfsFolderSamples] = useState([]);
   const [vcfsCollectResult, setVcfsCollectResult] = useState(null);
   const [vcfsForceSet, setVcfsForceSet] = useState(new Set());
-  const [vcfsIncludeFolder, setVcfsIncludeFolder] = useState(true);
+  // Off by default: this is the project's OWN vcf_database, which already holds
+  // the same Step 1 samples that "Include current project Step 1 ZC VCFs" adds.
+  // Including both double-counted the set (the "Large import (1981)" surprise).
+  const [vcfsIncludeFolder, setVcfsIncludeFolder] = useState(false);
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -5156,20 +5161,28 @@ export default function App() {
           <section className="panel run-panel">
             <h2>Step 2</h2>
             <div className="block">
+              <p className="muted" style={{marginTop:0, marginBottom:"0.5em", fontSize:"0.85em"}}>
+                Step 2 compares a set of VCFs to build the SNP matrix and tree. Choose where that set comes from:
+              </p>
               <div className="mode-toggle">
-                <button
-                  className={step2Mode === "custom" ? "active" : ""}
-                  onClick={() => setStep2Mode("custom")}
-                >
-                  Use custom VCF set
-                </button>
                 <button
                   className={step2Mode === "step1" ? "active" : ""}
                   onClick={() => setStep2Mode("step1")}
                 >
-                  Use Step 1 only
+                  This project's Step 1 samples
+                </button>
+                <button
+                  className={step2Mode === "custom" ? "active" : ""}
+                  onClick={() => setStep2Mode("custom")}
+                >
+                  Add reference / external VCFs
                 </button>
               </div>
+              <p className="muted" style={{marginTop:"0.5em", marginBottom:0, fontSize:"0.8em"}}>
+                {step2Mode === "step1"
+                  ? "Uses only the VCFs from this project's completed Step 1 samples — the typical choice. Click Setup to build the set, then Run."
+                  : "Combines this project's Step 1 samples with VCFs from shared reference databases or other folders. For comparing against an existing panel."}
+              </p>
             </div>
 
             {step2Mode === "custom" ? (
@@ -5366,6 +5379,13 @@ export default function App() {
                   />
                   Include current project Step 1 ZC VCFs
                 </label>
+                {vcfsIncludeFolder && importIncludeStep1 ? (
+                  <div className="note warning" style={{fontSize:"0.8em"}}>
+                    Heads up: the "{vcfsFolderName || "vcf_database"}" folder above already holds this project's Step 1 VCFs,
+                    so it overlaps with "Include current project Step 1 ZC VCFs". Duplicates are removed automatically, but you
+                    normally only need one of the two.
+                  </div>
+                ) : null}
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -5410,8 +5430,8 @@ export default function App() {
                   </select>
                 </div>
                 <div className="row">
-                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady}>Build VCF set</button>
-                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady}>Clear VCF set</button>
+                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady} title="Collect the selected sources into this project's Step 2 VCF set (step2/vcf_database)">Build / update set</button>
+                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 VCF set">Clear set</button>
                   <button
                     className="ghost action"
                     onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_database`, "vcf_database path")}
@@ -5422,7 +5442,7 @@ export default function App() {
                   </button>
                 </div>
                 <div className="note">
-                  VCFs in set: {step2VcfCount}
+                  VCFs in this project's Step 2 set: {step2VcfCount} <span className="muted">(unique)</span>
                   {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
                 </div>
                 {importMismatchReport ? (
@@ -5532,7 +5552,9 @@ export default function App() {
             ) : (
               <div className="block">
                 <div className="note">
-                  Step 2 will use only this project's Step 1 ZC VCFs.
+                  Step 2 will compare this project's Step 1 samples
+                  {typeof step2VcfCount === "number" ? ` — ${step2VcfCount} VCF${step2VcfCount === 1 ? "" : "s"} in the set` : ""}.
+                  Click <strong>Setup</strong> to (re)build the set from Step 1, then <strong>Run</strong>.
                 </div>
               </div>
             )}
@@ -5615,7 +5637,7 @@ export default function App() {
 
             <div className="block">
               {step2Mode === "step1" ? (
-                <button onClick={step2Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
+                <button onClick={step2Setup} disabled={!selectedProject || !settingsReady} title="Collect this project's Step 1 VCFs into the Step 2 set">Setup (build set from Step 1)</button>
               ) : null}
                 {(reference || projectReference) ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
@@ -5652,7 +5674,9 @@ export default function App() {
                 Run
               </button>
               <div className="note">
-                {step2SetupMsg || (selected ? `VCFs ready: ${selected.step2_vcfs || 0}` : "")}
+                {step2SetupMsg || (typeof step2VcfCount === "number" && step2VcfCount > 0
+                  ? `VCFs in set: ${step2VcfCount} — ready to Run`
+                  : (selected ? `VCFs in set: ${selected.step2_vcfs || 0}` : ""))}
               </div>
               {step2EditedCount > 0 ? (
                 <div className="note warning">

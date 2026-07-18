@@ -29,6 +29,17 @@ import threading
 # single-process here, so a threading.Lock is sufficient.
 _STEP1_DISPATCH_LOCK = threading.Lock()
 
+# Per-sample status cache for the Step 1 status endpoint. A sample that has
+# written .provenance/exit_code is terminal — its on-disk outputs won't change
+# until it is re-run (which rewrites exit_code, bumping the mtime). We key the
+# cache on that mtime so a poll over a mostly-finished 1000-sample project does
+# a single stat() per completed sample instead of re-globbing every sample's
+# whole output tree every 5 seconds (what tripped "Failed to load Step 1
+# status"). Maps sample_dir path -> (exit_code_mtime_ns, cached_entry_without_
+# in_vcfs_folder). Access is under the GIL from the sync-endpoint threadpool;
+# dict get/set are atomic enough that no extra lock is warranted.
+_STEP1_STATUS_CACHE: Dict[str, tuple] = {}
+
 from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
 from app import qc_verdict
@@ -354,15 +365,19 @@ def _step1_dispatch_plan(
       0. Already completed (exit_code 0, or VCF+BAM present) → skip so a
          re-run after adding new samples doesn't re-align finished ones.
          Overridden by `force_rerun` (the GUI's "Force re-run" option).
-      1. R1 not found (no *_R1*/*_1* pattern) → single-end-only. Phase 1
-         skips these; Phase 2 (separate ticket) will add real single-end
-         Illumina support via a vsnp3 patch.
-      2. R1 found but no R2 → incomplete download or single-end with R1
-         naming. Skip with a distinct message.
-      3. R1 < min_bytes OR R2 < min_bytes → suspiciously small. Default floor
-         is 50 KB (config: step1_min_fastq_bytes), which catches the 43-47 KB
-         SRA submission errors seen in the LSDV batch while passing legitimately
-         small viral/amplicon reads (SARS-CoV-2 amplicon is ~200 KB).
+      1. No fastq files at all in the sample dir → skip.
+      2. R1 (or the lone single-end read) is a broken symlink / missing —
+         the download source was removed → skip so it doesn't crash the batch.
+      3. Read(s) < min_bytes → suspiciously small. Default floor is 50 KB
+         (config: step1_min_fastq_bytes), which catches the 43-47 KB SRA
+         submission errors while passing legitimately small viral/amplicon
+         reads (SARS-CoV-2 amplicon is ~200 KB).
+
+    Both paired-end and single-end inputs are dispatched: vsnp3 accepts a lone
+    ``-r1`` (its help: "A single read file can also be supplied to this option")
+    and auto-selects nanopore alignment by read length, so single-end Illumina
+    and long-read/ONT are first-class. The generated batch script picks the right
+    ``-r1``/``-r2`` combination and sets ``--nanopore`` per sample by read length.
     """
     samples: List[str] = []
     skipped: List[Dict[str, Any]] = []
@@ -379,43 +394,30 @@ def _step1_dispatch_plan(
         r1_matches = sorted(p.glob("*_R1*.fastq.gz")) or sorted(p.glob("*_1.fastq.gz"))
         r2_matches = sorted(p.glob("*_R2*.fastq.gz")) or sorted(p.glob("*_2.fastq.gz"))
         all_fq = sorted(p.glob("*.fastq.gz"))
-        if not r1_matches:
-            if not all_fq:
-                skipped.append({
-                    "sample": p.name,
-                    "reason": "no fastq files in sample directory",
-                    "size_bytes": 0,
-                })
-            else:
-                total = sum(f.stat().st_size for f in all_fq if f.is_file())
-                if total < min_bytes:
-                    skipped.append({
-                        "sample": p.name,
-                        "reason": f"single-end and suspiciously small ({total} bytes); likely SRA submission error",
-                        "size_bytes": total,
-                    })
-                else:
-                    skipped.append({
-                        "sample": p.name,
-                        "reason": "single-end (paired-end required; single-end support is T-46 Phase 2)",
-                        "size_bytes": total,
-                    })
-            continue
-        if not r2_matches:
+        # Resolve the effective R1/R2. Prefer an _R1/_1-tagged pair; if there's
+        # no read-tag naming, fall back to a bare single fastq (single-end or
+        # long-read). r2 stays None for single-end — vsnp3 aligns from -r1 alone.
+        if r1_matches:
+            r1 = r1_matches[0]
+            r2 = r2_matches[0] if r2_matches else None
+        elif all_fq:
+            r1 = all_fq[0]
+            r2 = None
+        else:
             skipped.append({
                 "sample": p.name,
-                "reason": "R1 found but no R2 — paired download incomplete or single-end with R1 naming",
-                "size_bytes": _safe_stat_size(r1_matches[0]) or 0,
+                "reason": "no fastq files in sample directory",
+                "size_bytes": 0,
             })
             continue
-        r1_size = _safe_stat_size(r1_matches[0])
-        r2_size = _safe_stat_size(r2_matches[0])
-        if r1_size is None or r2_size is None:
-            # One or both reads are missing / a broken symlink (the download
-            # source was removed). Skip rather than crash the whole batch.
+        r1_size = _safe_stat_size(r1)
+        r2_size = _safe_stat_size(r2) if r2 is not None else None
+        if r1_size is None or (r2 is not None and r2_size is None):
+            # A read is a broken symlink (the download source was removed).
+            # Skip rather than crash the whole batch.
             missing = [
-                m.name for m in (r1_matches[0], r2_matches[0])
-                if _safe_stat_size(m) is None
+                m.name for m in (r1, r2)
+                if m is not None and _safe_stat_size(m) is None
             ]
             skipped.append({
                 "sample": p.name,
@@ -423,11 +425,13 @@ def _step1_dispatch_plan(
                 "size_bytes": 0,
             })
             continue
-        if r1_size < min_bytes or r2_size < min_bytes:
+        if r1_size < min_bytes or (r2_size is not None and r2_size < min_bytes):
+            layout = "paired" if r2 is not None else "single-end"
+            detail = f"R1={r1_size}" + (f", R2={r2_size}" if r2_size is not None else "")
             skipped.append({
                 "sample": p.name,
-                "reason": f"suspiciously small paired fastqs (R1={r1_size}, R2={r2_size} bytes); likely junk",
-                "size_bytes": r1_size + r2_size,
+                "reason": f"suspiciously small {layout} fastqs ({detail} bytes); likely SRA submission error / junk",
+                "size_bytes": r1_size + (r2_size or 0),
             })
             continue
         samples.append(p.name)
@@ -2459,22 +2463,33 @@ def _step1_dispatch(
             "  R2=$(ls *_R2*.fastq.gz 2>/dev/null | head -n1 || true)",
             "  if [ -z \"$R1\" ]; then R1=$(ls *_1*.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "  if [ -z \"$R2\" ]; then R2=$(ls *_2*.fastq.gz 2>/dev/null | head -n1 || true); fi",
-            "  if [ -z \"$R1\" ]; then",
-            "    if [ \"" + ("1" if payload.nanopore else "0") + "\" = \"1\" ]; then",
-            "      R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true)",
-            "    fi",
-            "  fi",
+            # No read-tag naming → single-end / long-read: use the lone fastq as
+            # R1. vsnp3 accepts -r1 by itself (see dispatch-plan docstring).
+            "  if [ -z \"$R1\" ]; then R1=$(ls *.fastq.gz 2>/dev/null | head -n1 || true); fi",
             "  if [ -z \"$R1\" ]; then",
             "    echo \"Missing R1 in $d\" | tee -a \"$LOG\"",
             "    cd ..",
             "    return 0",
             "  fi",
+            # Read-type detection. NP starts from the batch-level nanopore
+            # override (checkbox); if that's off, auto-detect long reads by the
+            # average length of the first ~400 reads and flip on --nanopore when
+            # it exceeds 600 bp. This never forces nanopore OFF, so it composes
+            # safely with vsnp3's own internal >701 bp auto-detection.
+            "  NP=\"" + nanopore_flag + "\"",
+            "  if [ -z \"$NP\" ]; then",
+            "    AVG=$(zcat \"$R1\" 2>/dev/null | head -n 1600 | awk 'NR%4==2{n++;s+=length($0)} END{if(n>0)printf \"%d\", s/n; else print 0}')",
+            "    if [ \"${AVG:-0}\" -gt 600 ]; then",
+            "      NP=\"--nanopore\"",
+            "      echo \"Auto-detected long reads (avg ${AVG}bp) — using --nanopore\" | tee -a \"$LOG\"",
+            "    fi",
+            "  fi",
             "  mkdir -p .provenance",
             "  date -u +%s.%N > .provenance/started_at",
             f"  if [ -n \"$R2\" ]; then",
-            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP >> \"$LOG\" 2>&1",
             "  else",
-            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} {nanopore_flag} >> \"$LOG\" 2>&1",
+            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP >> \"$LOG\" 2>&1",
             "  fi",
             "  STATUS=$?",
             "  echo $STATUS > .provenance/exit_code",
@@ -2573,8 +2588,18 @@ def step1_status(project: str):
     job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
     job = job_manager.get_job(job_id) if job_id else None
     job_status = job["status"] if job else "unknown"
+    # Restart resilience: the batch is one bash job that keeps running (as an
+    # orphan) across a backend restart, but the in-memory JobManager state is
+    # lost, so `job` is None and job_status would read "unknown" — making live
+    # samples render as "unknown" instead of "running". If the wrapper process
+    # is still alive on this host, it IS running; report that so the panel keeps
+    # showing progress after a reconnect/restart.
+    if job_status in ("unknown", ""):
+        script_path = step1_dir / "run_step1.sh"
+        if script_path.exists() and _wrapper_process_alive(script_path):
+            job_status = "running"
 
-    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir = vcf_db_dir(project_dir / "step2")
     in_vcfs_folder: set = set()
     if vcfs_dir.exists():
         for vf in vcfs_dir.glob("*_zc.vcf*"):
@@ -2592,9 +2617,31 @@ def step1_status(project: str):
         sample = sample_dir.name
         log_path = sample_dir / "run_step1.log"
         exit_code_path = sample_dir / ".provenance" / "exit_code"
+
+        # Fast path: a sample with an exit_code sentinel is terminal. Serve it
+        # from cache (keyed on the sentinel's mtime) so we skip the per-sample
+        # globs below on every poll. in_vcfs_folder is layered on fresh since it
+        # tracks the separate VCF collection, which the user can change anytime.
+        cache_key = str(sample_dir)
+        try:
+            ec_mtime = exit_code_path.stat().st_mtime_ns
+        except OSError:
+            ec_mtime = None
+        if ec_mtime is not None:
+            cached = _STEP1_STATUS_CACHE.get(cache_key)
+            if cached and cached[0] == ec_mtime:
+                entry = dict(cached[1])
+                entry["in_vcfs_folder"] = sample in in_vcfs_folder
+                statuses.append(entry)
+                continue
+
         vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
         nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
-        zc_vcf = next(sample_dir.glob("**/*_zc.vcf"), None) or next(sample_dir.glob("**/*_zc.vcf.gz"), None)
+        # Non-recursive: the per-sample zc VCF is always written under
+        # alignment_*/. A recursive **/*_zc.vcf glob walked each sample's entire
+        # output subtree (unmapped_reads/, sourmash/, spoligo/, …) on every poll
+        # — the dominant cost that made the endpoint time out at ~1000 samples.
+        zc_vcf = next(sample_dir.glob("alignment_*/*_zc.vcf"), None) or next(sample_dir.glob("alignment_*/*_zc.vcf.gz"), None)
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
@@ -2623,7 +2670,7 @@ def step1_status(project: str):
             status = "complete"
         elif log_path.exists():
             status = "running" if job_status == "running" else "unknown"
-        statuses.append({
+        entry = {
             "sample": sample,
             "status": status,
             "log_path": str(log_path),
@@ -2631,7 +2678,15 @@ def step1_status(project: str):
             "has_outputs": bool(vcf and nodup),
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
-        })
+        }
+        # Cache terminal samples (exit_code written) so later polls take the
+        # fast path above. Store everything except in_vcfs_folder, which is
+        # re-layered per poll from the current VCF collection.
+        if ec_mtime is not None and status in ("complete", "error"):
+            _STEP1_STATUS_CACHE[cache_key] = (
+                ec_mtime, {k: v for k, v in entry.items() if k != "in_vcfs_folder"}
+            )
+        statuses.append(entry)
     return {"job_status": job_status, "samples": statuses}
 
 
@@ -2656,7 +2711,7 @@ def project_vcfs_list(project: str):
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
-    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir = vcf_db_dir(project_dir / "step2")
     vcfs_dir.mkdir(parents=True, exist_ok=True)
     vcfs = sorted([*vcfs_dir.glob("*_zc.vcf"), *vcfs_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name)
     samples = []
@@ -2672,19 +2727,21 @@ class VcfsCollectRequest(BaseModel):
 
 @app.post("/api/projects/{project}/vcfs/collect")
 def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
-    """Scan step1/ for passing _zc.vcf files and symlink them into <project>_VCFs/.
-    Samples in force_samples are included even if they did not pass Step 1."""
+    """Scan step1/ for passing _zc.vcf files and symlink them into the cumulative
+    VCF database (step2/vcf_database/). Accumulates — existing entries (including
+    imported/historical VCFs with no step1 source) are preserved. Samples in
+    force_samples are included even if they did not pass Step 1."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
-    vcfs_dir = project_dir / f"{project}_VCFs"
+    vcfs_dir = vcf_db_dir(project_dir / "step2")
     vcfs_dir.mkdir(parents=True, exist_ok=True)
 
     force_set = set(payload.force_samples or [])
     # Samples excluded in Step 1 Results must not be auto-collected into the
-    # _VCFs set (they would otherwise feed a Step 2 build the user meant to drop).
+    # VCF database (they would otherwise feed a Step 2 build the user meant to drop).
     # An explicit force_samples check still overrides, since that is a deliberate
     # per-sample "add this anyway" action.
     excluded_set = set(_read_remove_xlsx_names(project_dir / "step2" / "remove_from_analysis.xlsx"))
@@ -2719,23 +2776,28 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         if not passed and sample not in force_set:
             continue
 
-        # Find the latest _zc.vcf (prefer uncompressed; fall back to .gz)
-        candidates = sorted(sample_dir.glob("**/*_zc.vcf"), key=lambda p: p.stat().st_mtime)
-        candidates_gz = sorted(sample_dir.glob("**/*_zc.vcf.gz"), key=lambda p: p.stat().st_mtime)
-        all_candidates = candidates + candidates_gz
+        # Find the latest _zc.vcf under alignment_*/ (non-recursive to avoid
+        # walking the whole sample tree). Prefer an edited/patched VCF if one
+        # exists, and use the same target-name rule as step2_setup so both
+        # writers agree on filenames in the shared database.
+        all_candidates = sorted(
+            sample_dir.glob("alignment_*/*_zc.vcf*"), key=lambda p: p.stat().st_mtime
+        )
         if not all_candidates:
             if sample in force_set:
                 no_vcf.append(sample)
             continue
 
-        source_vcf = all_candidates[-1].resolve()
-        target = vcfs_dir / source_vcf.name
+        source_vcf = all_candidates[-1]
+        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+        chosen_vcf = (patched_vcf or source_vcf).resolve()
+        target = vcfs_dir / _target_name_for_vcf(source_vcf, chosen_vcf)
 
         if target.exists():
             already_present.append(sample)
             continue
 
-        target.symlink_to(source_vcf)
+        target.symlink_to(chosen_vcf)
         if sample in force_set and not passed:
             force_added.append(sample)
         else:
@@ -2761,12 +2823,11 @@ def step2_setup(project: str):
     step1_dir = project_dir / "step1"
     step2_dir = vcf_db_dir(project_dir / "step2")
     step2_dir.mkdir(parents=True, exist_ok=True)
-    # Clean existing VCFs so the source matches the selected workflow
-    for existing in step2_dir.glob("*.vcf*"):
-        try:
-            existing.unlink()
-        except FileNotFoundError:
-            pass
+    # vcf_database is the cumulative, persistent store — do NOT wipe it. We
+    # accumulate: add/refresh VCFs from step1, apply the exclusion set (below),
+    # and preserve any VCF whose step1 source is gone (imported/historical
+    # runs). Exclusions are still enforced by actively removing an excluded
+    # sample's VCF if it's already in the database.
 
     # Read the persisted exclusion set (written by qc_exclude when the user
     # toggles checkboxes). Previously step2_setup ignored this list — it
@@ -2790,34 +2851,61 @@ def step2_setup(project: str):
             # -remove_by_name at run time is the backstop. Surface a warning.
             logger.warning("step2_setup: failed to parse exclusion xlsx %s: %s", remove_xlsx, exc)
 
+    # Enforce exclusions against the existing database: an excluded sample must
+    # not linger in the cumulative store from an earlier setup/collect.
+    for name in excluded_names:
+        for stale in step2_dir.glob(f"{name}_zc.vcf*"):
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+
     count = 0
     skipped_excluded = 0
     edited_samples = []
+    step1_samples: set[str] = set()
+    for sample_dir in sorted(step1_dir.glob("*")):
+        if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
+            continue
+        sample = sample_dir.name
+        step1_samples.add(sample)
+        if sample in excluded_names:
+            skipped_excluded += 1
+            continue
+        vcf_candidates = sorted(sample_dir.glob("alignment_*/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
+        if not vcf_candidates:
+            continue
+        source_vcf = vcf_candidates[-1]
+        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+        chosen_vcf = patched_vcf or source_vcf
+        target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
+        target = step2_dir / target_name
+        if patched_vcf:
+            edited_samples.append(sample)
+        if target.exists():
+            continue
+        target.symlink_to(chosen_vcf)
+        count += 1
+
+    # Rebuild the manifest from the FINAL database contents so preserved /
+    # imported VCFs (those with no step1 source) are recorded too, not just
+    # the freshly linked ones.
+    preserved = 0
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
-        for sample_dir in sorted(step1_dir.glob("*")):
-            if not sample_dir.is_dir():
-                continue
-            sample = sample_dir.name
-            if sample in excluded_names:
-                skipped_excluded += 1
-                continue
-            vcf_candidates = sorted(sample_dir.glob("**/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
-            if not vcf_candidates:
-                continue
-            source_vcf = vcf_candidates[-1]
-            patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
-            chosen_vcf = patched_vcf or source_vcf
-            target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
-            target = step2_dir / target_name
-            if target.exists():
-                continue
-            target.symlink_to(chosen_vcf)
-            manifest.write(f"{target.name},step1,{chosen_vcf}\n")
-            count += 1
-            if patched_vcf:
-                edited_samples.append(sample)
+        for vcf in sorted([*step2_dir.glob("*_zc.vcf"), *step2_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name):
+            stem = vcf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            try:
+                resolved = vcf.resolve()
+            except OSError:
+                resolved = vcf
+            if stem in step1_samples:
+                source_type = "step1"
+            else:
+                source_type = "imported"
+                preserved += 1
+            manifest.write(f"{vcf.name},{source_type},{resolved}\n")
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
     total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
     return {
@@ -2825,6 +2913,7 @@ def step2_setup(project: str):
         "total": total,
         "edited": len(set(edited_samples)),
         "skipped_excluded": skipped_excluded,
+        "preserved": preserved,
     }
 
 

@@ -82,10 +82,12 @@ def vcf_db_dir(step2_dir: Path) -> Path:
 
 
 def ensure_project_dirs(project_dir: Path) -> None:
+    # A project has exactly two workflow folders: step1/ and step2/. The single
+    # cumulative VCF store lives at step2/vcf_database/ (the classic vSNP3
+    # layout) — there is no separate <project>_VCFs/ folder anymore.
     (project_dir / "download").mkdir(parents=True, exist_ok=True)
     (project_dir / "step1").mkdir(parents=True, exist_ok=True)
     vcf_db_dir(project_dir / "step2").mkdir(parents=True, exist_ok=True)
-    (project_dir / f"{project_dir.name}_VCFs").mkdir(parents=True, exist_ok=True)
 
 
 def project_meta_path(project_dir: Path) -> Path:
@@ -153,7 +155,7 @@ def _project_last_activity(project_dir: Path) -> float:
         project_dir / "download",
         project_dir / "step1",
         project_dir / "step2",
-        project_dir / f"{project_dir.name}_VCFs",
+        vcf_db_dir(project_dir / "step2"),
     ]
     latest = 0.0
     for c in candidates:
@@ -290,14 +292,16 @@ def _project_counts(project_dir: Path) -> Dict:
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
     step2_dir = project_dir / "step2"
-    vcfs_dir = project_dir / f"{project_dir.name}_VCFs"
+    # The cumulative VCF store is step2/vcf_database now; vcfs_count (the card's
+    # "collected VCFs" badge) and step2_vcfs both read from it.
+    vcfs_dir = vcf_db_dir(step2_dir)
     try:
         return {
             "fastq_count": _count_project_reads(download_dir, step1_dir),
             "step1_samples": len([d for d in step1_dir.iterdir() if d.is_dir()]) if step1_dir.exists() else 0,
-            "step1_vcfs": len(list(step1_dir.glob("**/*_zc.vcf"))) if step1_dir.exists() else 0,
+            "step1_vcfs": len(list(step1_dir.glob("*/alignment_*/*_zc.vcf"))) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
-            "step2_vcfs": len(list(vcf_db_dir(step2_dir).glob("*.vcf"))) if vcf_db_dir(step2_dir).exists() else 0,
+            "step2_vcfs": len(list(vcfs_dir.glob("*.vcf"))) if vcfs_dir.exists() else 0,
             "vcfs_count": (
                 len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
                 if vcfs_dir.exists() else 0

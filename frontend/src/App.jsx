@@ -243,7 +243,7 @@ export default function App() {
   const [dfStatus, setDfStatus] = useState("");
   const [rmSampleText, setRmSampleText] = useState("");
   const [rmStatus, setRmStatus] = useState("");
-  // _VCFs accumulation folder
+  // Cumulative VCF database (step2/vcf_database)
   const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
   const [vcfsFolderPath, setVcfsFolderPath] = useState("");
   const [vcfsFolderName, setVcfsFolderName] = useState("");
@@ -2280,7 +2280,7 @@ export default function App() {
       window.alert(
         `Step 1 dispatched — ${data.skipped_samples.length} sample(s) auto-skipped:\n\n` +
         lines +
-        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run. Single-end Illumina support is a separate ticket (T-46 Phase 2).`
+        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run (junk/broken reads, or already complete — use Force re-run to redo completed ones).`
       );
     }
     // Clear the re-entry guard now that the job is recorded; step1JobStatus is
@@ -3305,7 +3305,7 @@ export default function App() {
                       ) : null}
                     </div>
                     <div className="list-meta">
-                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | _VCFs: {p.vcfs_count ?? p.step1_vcfs}
+                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF DB: {p.vcfs_count ?? p.step1_vcfs}
                       {p.last_activity ? (
                         <span title={`Last activity: ${p.last_activity}`}> | {_formatActivity(p.last_activity)}</span>
                       ) : null}
@@ -4269,7 +4269,7 @@ export default function App() {
               {step1Status.length > 0 ? (
                 <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
-                    <span><strong>{vcfsFolderName || `${selectedProject}_VCFs`}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
+                    <span><strong>{vcfsFolderName || "vcf_database"}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
                     <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect</button>
                   </div>
                   {vcfsCollectResult ? (
@@ -4292,7 +4292,7 @@ export default function App() {
                     return (
                       <details style={{marginTop:"0.3em"}}>
                         <summary style={{cursor:"pointer", fontSize:"0.82em", color:"var(--muted,#666)"}}>
-                          {notCollected.length} sample{notCollected.length !== 1 ? "s" : ""} not in _VCFs
+                          {notCollected.length} sample{notCollected.length !== 1 ? "s" : ""} not in vcf_database
                           {hasAnyVcf ? " — check to add" : ""}
                         </summary>
                         <ul style={{listStyle:"none", padding:0, margin:"0.3em 0 0.2em 0"}}>
@@ -4327,7 +4327,7 @@ export default function App() {
                               setVcfsForceSet(new Set());
                             }}
                           >
-                            Add {vcfsForceSet.size > 0 ? `${vcfsForceSet.size} ` : ""}checked to _VCFs
+                            Add {vcfsForceSet.size > 0 ? `${vcfsForceSet.size} ` : ""}checked to vcf_database
                           </button>
                         ) : null}
                       </details>

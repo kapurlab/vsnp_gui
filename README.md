@@ -30,13 +30,13 @@ This project consists of two separate repositories:
 Create a single environment with vSNP3 and all dependencies:
 
 ```bash
-mamba create -n vsnp3 -c conda-forge -c bioconda vsnp3 bcftools nodejs
+mamba create -n vsnp3 -c conda-forge -c bioconda vsnp3 nodejs
 ```
 
 Notes:
 - The environment name can be anything. Set the full path in **vSNP3 path** in Settings (e.g. `~/miniconda3/envs/vsnp3`).
 - `nodejs` is required for running the Electron app in dev mode; browser-only usage can omit it.
-- `bcftools` is required for the VCF edit workflow.
+- `bcftools` (required for the VCF edit workflow) ships as a dependency of the `vsnp3` bioconda package, so it does not need to be installed separately.
 
 ## Quick Start (5 minutes)
 

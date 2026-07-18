@@ -1984,6 +1984,26 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         resolved_vcfs.append(vcf)
     vcfs = resolved_vcfs
 
+    # De-duplicate by the real file each VCF resolves to. The project's
+    # step2/vcf_database is now the cumulative collection of the same step1
+    # _zc.vcf files (kept as symlinks), so including both step1 and vcf_database
+    # as sources would otherwise count and import each shared VCF twice — the
+    # "Large import (1981)" surprise. Two *different* files that merely share a
+    # sample ID resolve to different paths and are both kept here; collapsing
+    # those is what the dedupe / prefix-duplicates options handle downstream.
+    _seen_targets: set = set()
+    _deduped = []
+    for v in vcfs:
+        try:
+            key = v.resolve()
+        except OSError:
+            key = v
+        if key in _seen_targets:
+            continue
+        _seen_targets.add(key)
+        _deduped.append(v)
+    vcfs = _deduped
+
     if not vcfs:
         raise HTTPException(status_code=400, detail="No *_zc.vcf files found in provided sources")
     if len(vcfs) > 500 and not payload.confirm_large:

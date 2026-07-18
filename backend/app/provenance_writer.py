@@ -1231,9 +1231,12 @@ def _build_step1_inputs(
     naming conventions — same as the bash step1 batch script.
     """
     inputs: list[dict[str, Any]] = []
-    # (mate_label, [glob_patterns_to_try_in_order])
+    # (mate_label, [glob_patterns_to_try_in_order]). R1's final fallbacks match a
+    # bare single fastq (`<sample>.fastq.gz`) so single-end / long-read samples
+    # are captured too — R2 is optional (see the missing-R2 handling below).
     mate_patterns = (
-        ("R1", [f"{sample}*R1*.f*q.gz", f"{sample}*_1.f*q.gz", "*R1*.f*q.gz", "*_1.f*q.gz"]),
+        ("R1", [f"{sample}*R1*.f*q.gz", f"{sample}*_1.f*q.gz", "*R1*.f*q.gz", "*_1.f*q.gz",
+                f"{sample}*.f*q.gz", "*.f*q.gz"]),
         ("R2", [f"{sample}*R2*.f*q.gz", f"{sample}*_2.f*q.gz", "*R2*.f*q.gz", "*_2.f*q.gz"]),
     )
     for label, patterns in mate_patterns:
@@ -1243,6 +1246,10 @@ def _build_step1_inputs(
             if candidates:
                 break
         if not candidates:
+            if label == "R2":
+                # Single-end / long-read: no second mate exists. R1 alone is a
+                # valid vsnp3 input, so record just R1 instead of hard-failing.
+                continue
             raise DispatchFailed(f"no {label} fastq found for sample {sample} in {sample_dir}")
         # Take the first match if multiple
         path = candidates[0].resolve()

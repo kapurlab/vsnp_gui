@@ -2485,6 +2485,9 @@ def _step1_dispatch(
             "    fi",
             "  fi",
             "  mkdir -p .provenance",
+            # Record the read type for the results table: paired (R2 present),
+            # ont (nanopore alignment — auto-detected or forced), else single.
+            "  if [ -n \"$R2\" ]; then echo paired > .provenance/read_type; elif [ -n \"$NP\" ]; then echo ont > .provenance/read_type; else echo single > .provenance/read_type; fi",
             "  date -u +%s.%N > .provenance/started_at",
             f"  if [ -n \"$R2\" ]; then",
             f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP >> \"$LOG\" 2>&1",
@@ -3211,7 +3214,7 @@ def preflight(debug: bool = Query(False)):
 # timestamp embedded in the _stats.xlsx filename, and finally the file mtime.
 # After this prelude runs, `vals` holds the filtered list[dict] of rows.
 _QC_SCAN_AND_FILTER = (
-    "import pandas as pd, glob, json, os, sys, re, datetime\n"
+    "import pandas as pd, glob, json, os, sys, re, datetime, gzip\n"
     "step1=sys.argv[1]\n"
     "start=os.environ.get('QC_START','').strip()\n"
     "end=os.environ.get('QC_END','').strip()\n"
@@ -3234,6 +3237,37 @@ _QC_SCAN_AND_FILTER = (
     "        return datetime.datetime.fromtimestamp(os.path.getmtime(f)).isoformat()\n"
     "    except Exception:\n"
     "        return ''\n"
+    "def _read_type(d):\n"
+    "    mk=os.path.join(d,'.provenance','read_type')\n"
+    "    try:\n"
+    "        v=open(mk).read().strip()\n"
+    "        if v in ('paired','single','ont'): return v\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "    fqs=[x for x in glob.glob(os.path.join(d,'*.fastq.gz')) if '_unmapped_' not in os.path.basename(x)]\n"
+    "    r2=[x for x in fqs if re.search(r'(_R2[_.]|_2\\.)', os.path.basename(x))]\n"
+    "    if r2:\n"
+    "        rt='paired'\n"
+    "    else:\n"
+    "        rt='single'\n"
+    "        tgt=fqs[0] if fqs else None\n"
+    "        try:\n"
+    "            if tgt:\n"
+    "                n=0; s=0\n"
+    "                with gzip.open(tgt,'rt') as gh:\n"
+    "                    for i,line in enumerate(gh):\n"
+    "                        if i>=1600: break\n"
+    "                        if i%4==1:\n"
+    "                            n+=1; s+=len(line.rstrip())\n"
+    "                if n and s/float(n)>600: rt='ont'\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    try:\n"
+    "        os.makedirs(os.path.join(d,'.provenance'), exist_ok=True)\n"
+    "        open(mk,'w').write(rt)\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "    return rt\n"
     "rows=[]\n"
     "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
     "    try:\n"
@@ -3246,6 +3280,7 @@ _QC_SCAN_AND_FILTER = (
     "    row['_file']=f\n"
     "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
     "    row['_sample']=sample\n"
+    "    row['read_type']=_read_type(os.path.dirname(f))\n"
     "    row['_run_date']=_run_date(f,row)\n"
     "    rows.append(row)\n"
     "latest={}\n"

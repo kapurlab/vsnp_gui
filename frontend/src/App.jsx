@@ -277,6 +277,23 @@ export default function App() {
   // forms start with the date, so slicing 10 chars normalizes either one.
   const qcRunDate = (row) => String(row?._run_date || "").slice(0, 10);
 
+  // Read-type chip: paired-end, single-end, or long-read (ONT). Backend derives
+  // it per sample (R2 present -> paired; single fastq classified by read length).
+  const readTypeBadge = (rt) => {
+    const map = {
+      paired: { label: "Paired", bg: "#e3f0e6", fg: "#256029" },
+      single: { label: "Single", bg: "#e6eef7", fg: "#1f4e79" },
+      ont: { label: "ONT", bg: "#f3e8f7", fg: "#6b2d7a" },
+    };
+    const s = map[rt];
+    if (!s) return <span className="muted">-</span>;
+    return (
+      <span style={{ background: s.bg, color: s.fg, borderRadius: "0.5em", padding: "0.1em 0.5em", fontSize: "0.8em", fontWeight: 600, whiteSpace: "nowrap" }}>
+        {s.label}
+      </span>
+    );
+  };
+
   // Apply the Step 1 Results filters (flagged-only + name + run-date range) in
   // one place so the table body and the "exclude all" header act on the exact
   // same set of rows. Cheap to recompute; called per render.
@@ -4469,6 +4486,7 @@ export default function App() {
                         </th>
                         <th>QC</th>
                         <th>Sample</th>
+                        <th>Read type</th>
                         <th>Run date</th>
                         <th>Files</th>
                         <th>Reference</th>
@@ -4505,6 +4523,7 @@ export default function App() {
                                   {editInfo?.edited ? <span className="badge edited">Edited</span> : null}
                                 </div>
                               </td>
+                              <td>{readTypeBadge(row.read_type)}</td>
                               <td title={row._run_date || ""}>{qcRunDate(row) || "-"}</td>
                               <td>
                                 <details

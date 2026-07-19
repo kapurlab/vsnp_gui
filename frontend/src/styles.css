@@ -806,12 +806,10 @@ button:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  /* Grow to fill the panel (which is stretched to the row's full height) and
-     scroll when the content overflows, instead of a fixed 320px cap that left
-     the rest of the panel as dead space. min-height:0 lets the flex child
-     shrink so overflow:auto actually scrolls. */
-  flex: 1 1 auto;
-  min-height: 240px;
+  /* Show ~15 samples of an expanded project, then scroll — roughly level with
+     the Inputs panel. Capped by 62vh so it never runs past the viewport on
+     shorter screens. */
+  max-height: min(680px, 62vh);
   overflow: auto;
   padding-right: 6px;
 }

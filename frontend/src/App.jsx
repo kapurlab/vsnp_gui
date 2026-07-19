@@ -226,6 +226,11 @@ export default function App() {
   // Set synchronously the instant Run is clicked so the button gives immediate
   // feedback (before the POST resolves); cleared on completion/error.
   const [step2Running, setStep2Running] = useState(false);
+  // True from the moment Stop is clicked until the poll loop sees the job reach
+  // a terminal ("cancelled") state — i.e. the "shutting down" phase. Drives the
+  // "Shutting down…" button label; the whole tree is confirmed down when this
+  // clears and the "all shut down" message is posted.
+  const [step2Stopping, setStep2Stopping] = useState(false);
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -956,7 +961,14 @@ export default function App() {
     loadStep1Status();
     setStep2Runs([]);
     setStep2SelectedRun(null);
+    // Reset the run/stop UI, then ask the server whether a Step 2 job is still
+    // running for this project. loadStep2Active re-sets these if so — so the
+    // Stop button survives a page reload and can't leak across a project switch.
+    setStep2Running(false);
+    setStep2Stopping(false);
+    setStep2JobId("");
     loadStep2Runs(true);
+    loadStep2Active();
     loadStep2Outputs();
     loadVcfSourceSamples();
     loadInputs(selectedProject);
@@ -1039,25 +1051,36 @@ export default function App() {
   // read-timeout (~60 s); polling is the reliable fallback.
   useEffect(() => {
     if (!step2JobId || !selectedProject) return;
-    let cancelled = false;
+    let stopped = false;
+    let t;
     const poll = async () => {
-      if (cancelled) return;
+      if (stopped) return;
       try {
         const res = await fetch(`${API_BASE}/api/jobs/${step2JobId}`);
         if (!res.ok) return;
         const job = await res.json();
-        if (job.status === "succeeded" || job.status === "failed") {
-          cancelled = true;
+        // "cancelled" is the terminal state a user Stop produces — the whole
+        // process tree (vsnp3 workers, RAxML) has actually exited by the time
+        // the job reports it, so that's when we announce "all shut down".
+        if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
+          stopped = true;
           clearInterval(t);
           setStep2Running(false);
+          setStep2Stopping(false);
+          if (job.status === "cancelled") {
+            setStep2SetupMsg("Step 2 stopped — all background processes shut down.");
+          }
           loadStep2Runs(true);
           refreshProjects(selectedProject);
         }
       } catch {}
     };
-    const t = setInterval(poll, 5000);
-    return () => { cancelled = true; clearInterval(t); };
-  }, [step2JobId, selectedProject]);
+    poll(); // check immediately so a stop/finish is reflected without a full interval wait
+    // Poll faster while a stop is in flight so "Shutting down…" flips to
+    // "all shut down" promptly; slower during a normal (possibly hour-long) run.
+    t = setInterval(poll, step2Stopping ? 1500 : 5000);
+    return () => { stopped = true; clearInterval(t); };
+  }, [step2JobId, selectedProject, step2Stopping]);
 
   useEffect(() => {
     if (!selectedProject) return;
@@ -2433,6 +2456,59 @@ export default function App() {
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
     setStep2JobId(data.job_id);
+  }
+
+  async function stopStep2() {
+    if (!step2JobId || !step2Running) return;
+    const ok = window.confirm(
+      "Stop the Step 2 run?\n\n" +
+      "This terminates the SNP-matrix / tree build and every background process " +
+      "it spawned (vsnp3 workers, RAxML). Partial outputs for this run are " +
+      "discarded — you can start a new run afterward."
+    );
+    if (!ok) return;
+    // Enter the "shutting down" phase. The backend SIGTERMs the whole process
+    // group immediately and escalates to SIGKILL after a grace period; the job
+    // flips to "cancelled" only once the tree has fully exited. We keep
+    // step2Stopping true (showing "Shutting down…") until the poll loop sees
+    // that terminal state, then it posts the "all shut down" message.
+    setStep2Stopping(true);
+    setStep2SetupMsg("Stopping Step 2 — shutting down background processes…");
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${step2JobId}/stop`, { method: "POST" });
+      // 409 = the job already finished on its own between the click and the
+      // request; the poll loop will pick up its terminal status. Any other
+      // non-OK is a real failure to signal — surface it and drop out of the
+      // shutting-down state.
+      if (!res.ok && res.status !== 409) {
+        let data = {};
+        try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+        window.alert(`Could not stop Step 2: ${data.detail || `HTTP ${res.status}`}`);
+        setStep2Stopping(false);
+        setStep2SetupMsg("");
+      }
+    } catch (e) {
+      window.alert(`Could not stop Step 2: ${e.message || "network error"}`);
+      setStep2Stopping(false);
+      setStep2SetupMsg("");
+    }
+  }
+
+  // Rehydrate the Run/Stop UI from the server after a page reload: the Step 2
+  // job id otherwise lives only in browser state, so a refresh mid-run would
+  // hide the Stop button while the job keeps running server-side.
+  async function loadStep2Active() {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/active`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.job_id) {
+        setStep2JobId(data.job_id);
+        setStep2Running(true);
+        setStep2SetupMsg("Step 2 running…");
+      }
+    } catch {}
   }
 
   async function loadStep1Status() {
@@ -5705,6 +5781,16 @@ export default function App() {
                 >
                 {step2Running ? (<><span className="pulse-dot" />Running…</>) : "Run"}
               </button>
+              {step2Running ? (
+                <button
+                  className="danger"
+                  onClick={stopStep2}
+                  disabled={step2Stopping}
+                  title="Terminate the running Step 2 build and every background process it spawned (vsnp3 workers, RAxML)."
+                >
+                  {step2Stopping ? "Shutting down…" : "Stop"}
+                </button>
+              ) : null}
               <div className="note">
                 {step2SetupMsg || (typeof step2VcfCount === "number" && step2VcfCount > 0
                   ? `VCFs in set: ${step2VcfCount} — ready to Run`

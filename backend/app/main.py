@@ -3088,6 +3088,41 @@ def job_status(job_id: str):
     return job
 
 
+@app.get("/api/projects/{project}/step2/active")
+def step2_active(project: str):
+    """Return the currently-running Step 2 job for this project, if any.
+
+    The Step 2 job id normally lives only in browser state (set at launch), so a
+    page reload mid-run loses the Run/Stop UI. This lets the GUI rehydrate that
+    state from the server, which is the source of truth: it reads the
+    `.step2_job_id` sentinel written by step2_run and confirms the job is still
+    running in the JobManager. Returns {"job_id": None} when nothing is running.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    job_id_path = step2_dir / ".step2_job_id"
+    if not job_id_path.exists():
+        return {"job_id": None}
+    try:
+        job_id = job_id_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {"job_id": None}
+    if not job_id:
+        return {"job_id": None}
+    job = job_manager.get_job(job_id)
+    if not job or job.get("status") != "running":
+        return {"job_id": None}
+    run_id = ""
+    cur = step2_dir / ".current_run"
+    if cur.exists():
+        try:
+            run_id = cur.read_text(encoding="utf-8").strip()
+        except OSError:
+            run_id = ""
+    return {"job_id": job_id, "run_id": run_id, "status": job.get("status")}
+
+
 @app.post("/api/jobs/{job_id}/stop")
 def job_stop(job_id: str):
     """Cancel a running job. Signals the whole process group (SIGTERM, then

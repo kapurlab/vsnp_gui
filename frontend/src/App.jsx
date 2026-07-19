@@ -1077,8 +1077,15 @@ export default function App() {
           setStep2Running(false);
           setStep2Stopping(false);
           setStep2JobStatus("");
+          // Always replace the "Step 2 running…" message on a terminal state —
+          // otherwise a finished run keeps showing "running…" even though the
+          // button has already reverted to Run.
           if (job.status === "cancelled") {
             setStep2SetupMsg("Step 2 stopped — all background processes shut down.");
+          } else if (job.status === "failed") {
+            setStep2SetupMsg("Step 2 failed — check the run log.");
+          } else {
+            setStep2SetupMsg("Step 2 complete.");
           }
           loadStep2Runs(true);
           refreshProjects(selectedProject);

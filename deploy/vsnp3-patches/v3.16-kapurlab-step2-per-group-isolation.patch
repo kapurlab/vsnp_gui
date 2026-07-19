@@ -1,0 +1,123 @@
+# Kapur Lab — vsnp3 Step 2: per-group isolation (2026-07-19)
+# Applies on top of v3.16-kapurlab-step2-read-length.patch. Idempotent via patch -N.
+#
+# One failing group no longer aborts the whole Step 2 run. group_on_defining_snps
+# processes groups in two loops (FASTA/dataframe build, then RAxML tree/table via
+# pool.map — which re-raises the first worker exception). Any error in one group
+# (rare/degenerate lineage: empty df, bad alignment, RAxML/BioPython failure)
+# would kill every other group's results. Now each group is wrapped: on failure
+# it's flagged with a BUILD_ERROR marker and dropped from remove_list/working set,
+# and the run continues so the groups that CAN finish — including the -a all_vcf
+# set — still produce trees/tables. Also skips blank FASTA lines defensively.
+--- a/bin/vsnp3_group_on_defining_snps.py
++++ b/bin/vsnp3_group_on_defining_snps.py
+@@ -335,30 +335,50 @@
+         group_dataframe_dict={}
+         remove_list=[]
+         for group, sample_dict in finished_groupings_dict.items():
+-            os.mkdir(group)
+-            fasta = f'{group}/{group}-{self.st}.fasta'
+-            self.dict_to_fasta(sample_dict, fasta)
+-            num_lines=0
+-            read_length=0 # kapurlab: guard against an unbound read_length when the group FASTA has no sequence lines (empty/header-only) — otherwise this degenerate group raises UnboundLocalError and aborts the whole -a run before the all_vcf tree/table is built
+-            with open(fasta) as opened_file:
+-                for line in opened_file:
+-                    num_lines+=1
+-                    string = line.split()[0]
+-                    if string.startswith('>'):
+-                        pass
+-                    else:
+-                        read_length = len(string)
+-            if read_length <= 3 : # no informative SNP columns: nothing to tabulate
+-                with open(f'{group}/TOO_FEW_SAMPLES_OR_SHORT_SEQUENCE_TO_BUILD_TREE', 'w') as message_out:
+-                    print(f'check sample numbers or sequence lengths', file=message_out)
+-                remove_list.append(group)
+-            else:
+-                group_fasta_dict[group] = fasta
+-                group_df = self.dict_to_dataframe(sample_dict, group)
+-                group_dataframe_dict[group] = group_df
+-                if num_lines < 7 : # <4 taxa: too few for a RAxML tree, but still build the SNP table
++            # kapurlab: isolate each group — a failure building one group's FASTA/
++            # dataframe (rare or degenerate lineage) must never abort the whole
++            # run. The bad group is flagged (BUILD_ERROR) and dropped; every other
++            # group, including the -a all_vcf set, still finishes.
++            try:
++                os.mkdir(group)
++                fasta = f'{group}/{group}-{self.st}.fasta'
++                self.dict_to_fasta(sample_dict, fasta)
++                num_lines=0
++                read_length=0 # kapurlab: guard against an unbound read_length when the group FASTA has no sequence lines (empty/header-only)
++                with open(fasta) as opened_file:
++                    for line in opened_file:
++                        num_lines+=1
++                        parts = line.split()
++                        if not parts: # kapurlab: skip blank lines (avoid IndexError)
++                            continue
++                        string = parts[0]
++                        if string.startswith('>'):
++                            pass
++                        else:
++                            read_length = len(string)
++                if read_length <= 3 : # no informative SNP columns: nothing to tabulate
+                     with open(f'{group}/TOO_FEW_SAMPLES_OR_SHORT_SEQUENCE_TO_BUILD_TREE', 'w') as message_out:
+                         print(f'check sample numbers or sequence lengths', file=message_out)
++                    remove_list.append(group)
++                else:
++                    group_fasta_dict[group] = fasta
++                    group_df = self.dict_to_dataframe(sample_dict, group)
++                    group_dataframe_dict[group] = group_df
++                    if num_lines < 7 : # <4 taxa: too few for a RAxML tree, but still build the SNP table
++                        with open(f'{group}/TOO_FEW_SAMPLES_OR_SHORT_SEQUENCE_TO_BUILD_TREE', 'w') as message_out:
++                            print(f'check sample numbers or sequence lengths', file=message_out)
++            except Exception as group_err: # kapurlab: skip this group, keep the run alive
++                print(f'\n\t##### skipping group {group}: {type(group_err).__name__}: {group_err}\n')
++                try:
++                    os.makedirs(group, exist_ok=True)
++                    with open(f'{group}/BUILD_ERROR', 'w') as message_out:
++                        print(f'{type(group_err).__name__}: {group_err}', file=message_out)
++                except OSError:
++                    pass
++                if group not in remove_list:
++                    remove_list.append(group)
++                group_fasta_dict.pop(group, None)
++                group_dataframe_dict.pop(group, None)
+         
+         self.group_fasta_dict = group_fasta_dict
+         self.group_dataframe_dict = group_dataframe_dict
+@@ -367,10 +387,10 @@
+ 
+         if debug:
+             for group in working_group_list:
+-                tree = self.raxml_table_build(group)
++                tree = self._safe_raxml_table_build(group)
+         else:
+             with futures.ThreadPoolExecutor(max_workers=cpu_count) as pool: #ProcessPoolExecutor ThreadPoolExecutor ## thread works best for raxml calls
+-                for tree in pool.map(self.raxml_table_build, working_group_list):
++                for tree in pool.map(self._safe_raxml_table_build, working_group_list):
+                     pass
+ 
+         print(f'\n\tFASTAs out and RAxML trees {datetime.now() - self.startTime}\n')
+@@ -535,6 +555,23 @@
+         df = df[['abs_pos', 'ALT']]
+         return df
+ 
++    def _safe_raxml_table_build(self, group): # kapurlab: isolate per-group tree/table build
++        # A failure building one group's tree/table (RAxML, BioPython, pandas)
++        # must never abort the whole run — pool.map re-raises the first worker
++        # exception, which would kill every other group's results. Flag the bad
++        # group (BUILD_ERROR) and carry on; the rest, incl. all_vcf, still finish.
++        try:
++            return self.raxml_table_build(group)
++        except Exception as tree_err:
++            print(f'\n\t##### tree/table build failed for group {group}: {type(tree_err).__name__}: {tree_err}\n')
++            try:
++                os.makedirs(group, exist_ok=True)
++                with open(f'{group}/BUILD_ERROR', 'w') as message_out:
++                    print(f'{type(tree_err).__name__}: {tree_err}', file=message_out)
++            except OSError:
++                pass
++            return None
++
+     def raxml_table_build(self, group):
+         # kapurlab: skip degenerate groups (no usable dataframe/alignment). Their
+         # group dataframe is None (empty after filtering), and building a tree/

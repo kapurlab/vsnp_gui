@@ -11,6 +11,7 @@ PATCHES=(
   "${SCRIPT_DIR}/v3.16-kapurlab.patch"
   "${SCRIPT_DIR}/v3.16-kapurlab-step2-robustness.patch"
   "${SCRIPT_DIR}/v3.16-kapurlab-step2-read-length.patch"
+  "${SCRIPT_DIR}/v3.16-kapurlab-step2-per-group-isolation.patch"
 )
 
 if [ ! -d "${PREFIX}/bin" ]; then
@@ -23,7 +24,7 @@ fi
 # present, the whole set is applied. Bump this marker whenever a newer patch is
 # added, so existing installs (which already carry the older sentinels) still
 # re-run apply and pick up the new hunk (patch -N harmlessly skips old ones).
-if grep -q "read_length=0 # kapurlab" "${PREFIX}/bin/vsnp3_group_on_defining_snps.py" 2>/dev/null; then
+if grep -q "kapurlab: isolate each group" "${PREFIX}/bin/vsnp3_group_on_defining_snps.py" 2>/dev/null; then
   echo "patches already applied at ${PREFIX}; nothing to do"
   exit 0
 fi

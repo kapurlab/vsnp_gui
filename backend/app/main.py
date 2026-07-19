@@ -3097,7 +3097,17 @@ def step2_run(project: str, payload: Step2Request):
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:
-        cmd = f"{cmd} && python {shlex.quote(str(label_script))}"
+        # The tree-tip re-labeling is cosmetic (FigTree labels/colors). It must
+        # NOT decide the run's success: vsnp3 has already written the trees and
+        # tables (and, per the vsnp3 per-group isolation patch, completes even
+        # when individual groups are skipped). Keep vsnp3's own exit code
+        # authoritative — run the label step only if vsnp3 succeeded (&&), but
+        # swallow a label-step failure (|| echo …) so a cosmetic hiccup can't
+        # mark a valid run "failed". The warning still lands in the job log.
+        cmd = (
+            f"{cmd} && {{ python {shlex.quote(str(label_script))} "
+            f"|| echo 'WARN: tree tip re-labeling failed; trees/tables are valid and complete'; }}"
+        )
     step2_env = build_env(cfg)
     if payload.bootstrap and payload.bootstrap > 0:
         step2_env["VSNP3_BOOTSTRAP"] = str(int(payload.bootstrap))

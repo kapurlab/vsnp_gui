@@ -1917,16 +1917,22 @@ export default function App() {
   // One file row in a sample's expanded output list (shared by the vSNP and
   // Kraken sections). Inline-openable files link; fastq.gz get import helpers;
   // everything has a download arrow.
-  function sampleFileRow(project, f) {
+  function sampleFileRow(project, f, kind = "input") {
     const base = `${API_BASE}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(f.path)}`;
     const isFastq = f.name.endsWith(".fastq.gz");
+    // "parsed reads" is specifically Kraken output (reads targeted to a taxon and
+    // written to new FASTQs). The FASTQs under a sample's vSNP outputs are the
+    // input reads that were aligned, so label those "input reads".
+    const fastqBadge = kind === "kraken"
+      ? { text: "parsed reads", title: "Kraken-parsed reads — import to run through Step 1", bg: "#fef3c7", fg: "#92400e" }
+      : { text: "input reads", title: "Input reads — the FASTQs staged for this sample's Step 1 run", bg: "#e6eef7", fg: "#1f4e79" };
     return (
       <div key={f.path} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
           {f.openable ? (
             <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
           ) : f.relpath}
-          {isFastq ? <span title="Parsed reads — import to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+          {isFastq ? <span title={fastqBadge.title} style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: fastqBadge.bg, color: fastqBadge.fg, fontWeight: 600 }}>{fastqBadge.text}</span> : null}
         </span>
         <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
         {isFastq ? (
@@ -3439,7 +3445,7 @@ export default function App() {
                                     ) : !kRes || !(kRes.files || []).length ? (
                                       <span className="muted" style={{ fontSize: "11px" }}>No Kraken output files.</span>
                                     ) : (
-                                      kRes.files.map((f) => sampleFileRow(p.name, f))
+                                      kRes.files.map((f) => sampleFileRow(p.name, f, "kraken"))
                                     )}
                                   </div>
                                 ) : null}

@@ -3014,10 +3014,9 @@ export default function App() {
       window.alert("Select a project to edit this sample.");
       return;
     }
-    if (!settings.bcftools_path) {
-      window.alert("bcftools path is not configured in Settings.");
-      return;
-    }
+    // bcftools comes from the vsnp3 conda env — the backend resolves it from
+    // PATH and returns a clear error if it's genuinely missing. No client-side
+    // path check needed.
     if (!editVcfLocus || !editVcfAlt) {
       window.alert("Locus and ALT are required.");
       return;
@@ -3323,33 +3322,8 @@ export default function App() {
               </div>
               <div className="input-column">
                 <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Optional</label>
-                <div className="settings-row">
-                  <label className="label">bcftools</label>
-                  <input
-                    placeholder="/path/to/bcftools"
-                    value={settings.bcftools_path}
-                    onChange={(e) => setSettings({ ...settings, bcftools_path: e.target.value })}
-                  />
-                  <span style={{display:"inline-flex", alignItems:"center", gap:"4px"}}>
-                    {canPickPath ? (
-                      <button
-                        className="ghost action"
-                        onClick={() =>
-                          pickPath("file", "Select bcftools", settings.bcftools_path, (value) =>
-                            setSettings({ ...settings, bcftools_path: value })
-                          )
-                        }
-                      >
-                        Choose
-                      </button>
-                    ) : null}
-                    {pathValidation.bcftools_path === true ? (
-                      <span style={{color:"var(--success)", fontWeight:600, fontSize:"14px"}}>&#10003;</span>
-                    ) : pathValidation.bcftools_path === false ? (
-                      <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
-                    ) : null}
-                  </span>
-                </div>
+                {/* bcftools is provided by the vsnp3 conda env (resolved from PATH
+                    by the backend), so there's no path to configure or check here. */}
                 <div className="settings-row">
                   <label className="label">Max parallel</label>
                   <input

@@ -5625,11 +5625,14 @@ def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
 
 
 def _resolve_bcftools(cfg: Dict) -> str:
-    path = cfg.get("bcftools_path", "").strip()
-    if path:
-        return path
+    # bcftools ships with the vsnp3 conda env the backend runs in, so resolve it
+    # from PATH first — no explicit path config needed (or shown in the UI). An
+    # explicit bcftools_path in config.json is still honored as an override for
+    # unusual installs.
     found = shutil.which("bcftools")
-    return found or ""
+    if found:
+        return found
+    return cfg.get("bcftools_path", "").strip()
     subprocess.run(["open", str(target)])
 
 

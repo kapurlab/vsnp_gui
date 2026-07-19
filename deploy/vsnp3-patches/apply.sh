@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCHES=(
   "${SCRIPT_DIR}/v3.16-kapurlab.patch"
   "${SCRIPT_DIR}/v3.16-kapurlab-step2-robustness.patch"
+  "${SCRIPT_DIR}/v3.16-kapurlab-step2-read-length.patch"
 )
 
 if [ ! -d "${PREFIX}/bin" ]; then
@@ -17,10 +18,12 @@ if [ ! -d "${PREFIX}/bin" ]; then
   exit 1
 fi
 
-# Detect "fully applied" via the newest sentinel: VSNP3_MAX_CPUS, added by the
-# step2-robustness patch (the last one in the list). If it's present, the whole
-# set — including all earlier patches — is applied.
-if grep -q "VSNP3_MAX_CPUS" "${PREFIX}/bin/vsnp3_step2.py" 2>/dev/null; then
+# Detect "fully applied" via a sentinel unique to the NEWEST patch (the last one
+# in the list) — the read_length guard in group_on_defining_snps. If it's
+# present, the whole set is applied. Bump this marker whenever a newer patch is
+# added, so existing installs (which already carry the older sentinels) still
+# re-run apply and pick up the new hunk (patch -N harmlessly skips old ones).
+if grep -q "read_length=0 # kapurlab" "${PREFIX}/bin/vsnp3_group_on_defining_snps.py" 2>/dev/null; then
   echo "patches already applied at ${PREFIX}; nothing to do"
   exit 0
 fi

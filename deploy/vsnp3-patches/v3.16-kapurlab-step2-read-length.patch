@@ -1,0 +1,21 @@
+# Kapur Lab — vsnp3 Step 2: guard unbound read_length (2026-07-19)
+# Applies on top of v3.16-kapurlab-step2-robustness.patch. Idempotent via patch -N.
+#
+# group_on_defining_snps FASTAs/RAxML loop: read_length is only assigned inside
+# the else-branch of the per-line loop, so a group whose FASTA has no sequence
+# lines (empty, or header-only after group filtering) reaches `if read_length
+# <= 3` with read_length never bound -> UnboundLocalError, which aborts the
+# ENTIRE Step 2 run (including the -a all_vcf tree/table that should build even
+# when individual groups are degenerate). Initialize read_length=0 so such a
+# group is flagged TOO_FEW_SAMPLES_OR_SHORT_SEQUENCE and added to remove_list,
+# and the loop continues to the remaining groups + all_vcf.
+--- a/bin/vsnp3_group_on_defining_snps.py
++++ b/bin/vsnp3_group_on_defining_snps.py
+@@ -339,6 +339,7 @@
+             fasta = f'{group}/{group}-{self.st}.fasta'
+             self.dict_to_fasta(sample_dict, fasta)
+             num_lines=0
++            read_length=0 # kapurlab: guard against an unbound read_length when the group FASTA has no sequence lines (empty/header-only) — otherwise this degenerate group raises UnboundLocalError and aborts the whole -a run before the all_vcf tree/table is built
+             with open(fasta) as opened_file:
+                 for line in opened_file:
+                     num_lines+=1

@@ -3262,7 +3262,7 @@ export default function App() {
 
         {showRowProjects ? (
           <div className="row-grid">
-          <section className="panel">
+          <section className="panel" style={{ display: "flex", flexDirection: "column" }}>
             <h2>Projects</h2>
             <div className="row">
               <input

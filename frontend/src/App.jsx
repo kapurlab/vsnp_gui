@@ -2351,10 +2351,13 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/setup`, { method: "POST" });
     if (res.ok) {
       const data = await res.json();
-      const total = data.total ?? data.linked;
-      const excluded = data.skipped_excluded || 0;
-      const suffix = excluded > 0 ? ` · ${excluded} excluded per QC` : "";
-      setStep2SetupMsg(`VCFs ready for Step 2: ${total} (linked ${data.linked})${suffix}`);
+      const total = data.total ?? data.linked ?? 0;
+      const excluded = data.excluded ?? data.skipped_excluded ?? 0;
+      const comparison = data.comparison ?? (total - excluded);
+      // Invariant: total = comparison + excluded.
+      setStep2SetupMsg(
+        `vcf_database total: ${total} · VCFs for Step 2 comparison: ${comparison} · excluded above: ${excluded}`
+      );
     }
     await loadAll();
   }

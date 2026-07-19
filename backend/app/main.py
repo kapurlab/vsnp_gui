@@ -2846,19 +2846,16 @@ def step2_setup(project: str):
     step1_dir = project_dir / "step1"
     step2_dir = vcf_db_dir(project_dir / "step2")
     step2_dir.mkdir(parents=True, exist_ok=True)
-    # vcf_database is the cumulative, persistent store — do NOT wipe it. We
-    # accumulate: add/refresh VCFs from step1, apply the exclusion set (below),
-    # and preserve any VCF whose step1 source is gone (imported/historical
-    # runs). Exclusions are still enforced by actively removing an excluded
-    # sample's VCF if it's already in the database.
+    # vcf_database is the cumulative, persistent store — do NOT wipe it, and do
+    # NOT delete QC-excluded samples from it. We accumulate: add/refresh every
+    # step1 VCF and preserve any VCF whose step1 source is gone (imported /
+    # historical runs). QC exclusions are applied at RUN time (step2_run's
+    # -remove_by_name), so an excluded sample stays in the DB (part of the total)
+    # but is left out of the comparison. The response reports total / comparison /
+    # excluded so the UI shows the breakdown honestly (total = comparison + excluded).
 
-    # Read the persisted exclusion set (written by qc_exclude when the user
-    # toggles checkboxes). Previously step2_setup ignored this list — it
-    # symlinked every step1 VCF regardless, leaving the user with a
-    # "VCFs in set: N" count that didn't match what they'd checked. vsnp3
-    # later filtered them out via -remove_by_name at run time, so the final
-    # analysis was correct, but the UI display lied. Filter at link time so
-    # the count and the file list reflect what'll actually be analyzed.
+    # Read the persisted QC exclusion set (written by qc_exclude when the user
+    # toggles checkboxes) — used to compute the excluded count for display.
     excluded_names: set[str] = set()
     remove_xlsx = project_dir / "step2" / "remove_from_analysis.xlsx"
     if remove_xlsx.exists():
@@ -2874,17 +2871,7 @@ def step2_setup(project: str):
             # -remove_by_name at run time is the backstop. Surface a warning.
             logger.warning("step2_setup: failed to parse exclusion xlsx %s: %s", remove_xlsx, exc)
 
-    # Enforce exclusions against the existing database: an excluded sample must
-    # not linger in the cumulative store from an earlier setup/collect.
-    for name in excluded_names:
-        for stale in step2_dir.glob(f"{name}_zc.vcf*"):
-            try:
-                stale.unlink()
-            except FileNotFoundError:
-                pass
-
     count = 0
-    skipped_excluded = 0
     edited_samples = []
     step1_samples: set[str] = set()
     for sample_dir in sorted(step1_dir.glob("*")):
@@ -2892,9 +2879,8 @@ def step2_setup(project: str):
             continue
         sample = sample_dir.name
         step1_samples.add(sample)
-        if sample in excluded_names:
-            skipped_excluded += 1
-            continue
+        # Every step1 sample goes into the cumulative DB, including QC-excluded
+        # ones — they're filtered out at run time, not deleted here.
         vcf_candidates = sorted(sample_dir.glob("alignment_*/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
         if not vcf_candidates:
             continue
@@ -2914,6 +2900,7 @@ def step2_setup(project: str):
     # imported VCFs (those with no step1 source) are recorded too, not just
     # the freshly linked ones.
     preserved = 0
+    excluded = 0
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
@@ -2928,14 +2915,21 @@ def step2_setup(project: str):
             else:
                 source_type = "imported"
                 preserved += 1
+            if stem in excluded_names:
+                excluded += 1
             manifest.write(f"{vcf.name},{source_type},{resolved}\n")
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
     total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
+    # total = every VCF in the cumulative DB; comparison = what Step 2 actually
+    # compares (total minus QC-excluded); excluded = QC-excluded but still in DB.
     return {
         "linked": count,
         "total": total,
+        "comparison": total - excluded,
+        "excluded": excluded,
         "edited": len(set(edited_samples)),
-        "skipped_excluded": skipped_excluded,
+        # kept for back-compat with older callers:
+        "skipped_excluded": excluded,
         "preserved": preserved,
     }
 

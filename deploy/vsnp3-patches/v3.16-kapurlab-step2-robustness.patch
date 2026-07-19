@@ -1,0 +1,76 @@
+# Kapur Lab — vsnp3 Step 2 robustness + CPU cap (2026-07-19)
+# Applies on top of v3.16-kapurlab.patch. Idempotent via patch -N.
+#  1) group_on_defining_snps: guard degenerate/rare-lineage groups (empty df,
+#     None group, None fasta) so Step 2 completes instead of crashing at the
+#     tree stage (abs_pos KeyError / 'No objects to concatenate' / NoneType.read).
+#  2) cap worker pools at min(cpu/1.2, VSNP3_MAX_CPUS or 32) — cross-platform;
+#     stops a high-core shared server being fully consumed (was 106 on 128 cores).
+--- a/bin/vsnp3_group_on_defining_snps.py
++++ b/bin/vsnp3_group_on_defining_snps.py
+@@ -57,8 +57,10 @@
+         else:
+             self.cwd = cwd
+ 
+-        cpu_count = int(multiprocessing.cpu_count() / 1.2)
+-        
++        # kapurlab: cap workers so a high-core shared server isn't fully consumed
++        # (cross-platform: Mac/Linux/WSL). Override with the VSNP3_MAX_CPUS env var.
++        cpu_count = max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))
++
+         if abs_pos and group:
+             print(f'Dropping {defining_snps} for single grouping')
+             defining_snps = None
+@@ -421,7 +423,13 @@
+ 
+     def dict_to_dataframe(self, sample_dict, group): # dict_to_fasta will not have abs_pos this dataframe will retain abs_pos
+         try:
+-            dict_of_dfs = { sample: df.set_index('abs_pos') for sample, df in sample_dict.items()} #set ALT column to sample name and merge
++            # kapurlab: skip samples whose group df has no 'abs_pos' (empty after
++            # group filtering) — mirrors dict_to_fasta's KeyError guard. Without
++            # this, one empty sample df aborts the whole Step 2 run with
++            # KeyError: 'abs_pos' at the FASTAs/RAxML stage (pandas >=2 / 3.14).
++            dict_of_dfs = { sample: df.set_index('abs_pos') for sample, df in sample_dict.items() if 'abs_pos' in df.columns} #set ALT column to sample name and merge
++            if not dict_of_dfs: # kapurlab: no usable samples for this group -> skip it (None) instead of pd.concat raising "No objects to concatenate"
++                return None
+             group_df = pd.concat(dict_of_dfs, axis=1)
+             group_df.columns = group_df.columns.droplevel(-1)
+             return group_df.T
+@@ -527,6 +535,12 @@
+         return df
+ 
+     def raxml_table_build(self, group):
++        # kapurlab: skip degenerate groups (no usable dataframe/alignment). Their
++        # group dataframe is None (empty after filtering), and building a tree/
++        # table on a None alignment raises 'NoneType has no attribute read' deep
++        # in BioPython. vsnp3 already flags these with TOO_FEW_SAMPLES markers.
++        if self.group_dataframe_dict.get(group) is None or not self.group_fasta_dict.get(group):
++            return
+         tree = Tree(fasta_alignments=self.group_fasta_dict[group], write_path=f'{self.cwd}/{group}', tree_name=group)
+         self.raxml_version = tree.raxml_version
+         newick = tree.newick if (tree.newick and os.path.isfile(tree.newick)) else None
+--- a/bin/vsnp3_step2.py
++++ b/bin/vsnp3_step2.py
+@@ -41,7 +41,9 @@
+         '''
+         self.startTime = datetime.now()
+         self.vcf_bad_list=[]
+-        cpu_count = int(multiprocessing.cpu_count() / 1.2)
++        # kapurlab: cap workers so a high-core shared server isn't fully consumed
++        # (cross-platform: Mac/Linux/WSL). Override with the VSNP3_MAX_CPUS env var.
++        cpu_count = max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))
+         dataframes={}
+         self.vcf_original_count = len(vcf_list)
+         if debug:
+--- a/bin/vsnp3_fasta_to_snps_table.py
++++ b/bin/vsnp3_fasta_to_snps_table.py
+@@ -53,7 +53,9 @@
+                                 raxml = 'raxmlHPC'
+             # print(f'set RAxML to {raxml}')
+         self.raxml = raxml
+-        self.cpu_count = int(multiprocessing.cpu_count() / 1.2)
++        # kapurlab: cap workers so a high-core shared server isn't fully consumed
++        # (cross-platform: Mac/Linux/WSL). Override with the VSNP3_MAX_CPUS env var.
++        self.cpu_count = max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))
+         # self.hash_names = hash_names
+         self.debug = debug
+         

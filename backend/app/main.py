@@ -2934,6 +2934,71 @@ def step2_setup(project: str):
     }
 
 
+# --- Step 2 concurrency control ---------------------------------------------
+# Two layers:
+#   1. A per-project lock (restart-proof) so a project can never have two Step 2
+#      runs against its shared vcf_database at once — the in-memory JobManager
+#      guard alone fails open across a backend restart.
+#   2. A global cap + queue across projects (VSNP3_STEP2_MAX_CONCURRENT, default
+#      1): excess runs wait in status "queued" and start automatically as slots
+#      free, rather than all piling onto the CPU at once.
+
+def _step2_max_concurrent() -> int:
+    """Max Step 2 runs allowed to run concurrently across all projects. Excess
+    runs queue. Configurable via VSNP3_STEP2_MAX_CONCURRENT (default 1). Note
+    each run can spawn a large multiprocessing pool + RAxML -T 4, so raise this
+    only alongside a lower VSNP3_MAX_CPUS."""
+    try:
+        n = int(os.environ.get("VSNP3_STEP2_MAX_CONCURRENT", "1"))
+    except ValueError:
+        n = 1
+    return max(1, n)
+
+
+def _pgid_alive(pgid: int) -> bool:
+    """True if a process group still exists (used to detect a Step 2 run that
+    was orphaned by a backend restart but is still running on the box)."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another uid — treat as alive (conservative).
+        return True
+
+
+def _step2_active_job(step2_dir: Path) -> Optional[str]:
+    """Return the job id of an active (running or queued) Step 2 run for this
+    project, or None. Authoritative when the backend that launched it is still
+    up (JobManager knows the job); falls back to an OS process-group liveness
+    check via the recorded .step2_pgid so a run orphaned by a backend restart
+    still blocks a second dispatch against the same vcf_database."""
+    jid_path = step2_dir / ".step2_job_id"
+    if not jid_path.exists():
+        return None
+    try:
+        job_id = jid_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not job_id:
+        return None
+    job = job_manager.get_job(job_id)
+    if job and job.get("status") in ("running", "queued"):
+        return job_id
+    # Backend no longer tracks it (likely restarted). Is the process tree still
+    # alive on this host?
+    pgid_path = step2_dir / ".step2_pgid"
+    if pgid_path.exists():
+        try:
+            pgid = int(pgid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pgid = 0
+        if pgid and _pgid_alive(pgid):
+            return job_id
+    return None
+
+
 @app.post("/api/projects/{project}/step2/run")
 def step2_run(project: str, payload: Step2Request):
     cfg = load_config()
@@ -2959,20 +3024,19 @@ def step2_run(project: str, payload: Step2Request):
     step2_dir = project_dir / "step2"
     step2_dir.mkdir(parents=True, exist_ok=True)
 
-    # Concurrency guard: one step2 run at a time per project
+    # Concurrency guard: at most one Step 2 run per project (restart-proof —
+    # checks the JobManager and, if the backend was restarted, the OS liveness
+    # of any orphaned run). Prevents two runs clobbering the same vcf_database.
     job_id_path = step2_dir / ".step2_job_id"
-    if job_id_path.exists():
-        prior_id = job_id_path.read_text(encoding="utf-8").strip()
-        if prior_id:
-            prior_job = job_manager.get_job(prior_id)
-            if prior_job and prior_job.get("status") == "running":
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Step 2 is already running for this project (job {prior_id}). "
-                        "Wait for it to finish before starting a new run."
-                    ),
-                )
+    active_id = _step2_active_job(step2_dir)
+    if active_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Step 2 is already running or queued for this project (job {active_id}). "
+                "Wait for it to finish, or Stop it, before starting a new run."
+            ),
+        )
 
     vcf_source_dir = vcf_db_dir(step2_dir)
 
@@ -3061,11 +3125,29 @@ def step2_run(project: str, payload: Step2Request):
             detail=f"Provenance dispatch failed (step2): {e}",
         )
 
+    pgid_path = step2_dir / ".step2_pgid"
+
     def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
+        # Release the per-project lock so a finished/cancelled run frees the
+        # project for the next dispatch. Best-effort; the .step2_job_id guard
+        # (JobManager status) also stops treating it as active once terminal.
+        for p in (pgid_path,):
+            try:
+                p.unlink()
+            except OSError:
+                pass
         provenance_writer.finalize_step2(
             project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
             step2_run_dir=run_dir,
         )
+
+    def on_start_cb(job_id, pid):
+        # Record the OS process-group id (== pid, via start_new_session) so the
+        # per-project guard can detect a run orphaned by a backend restart.
+        try:
+            pgid_path.write_text(str(os.getpgid(pid)), encoding="utf-8")
+        except OSError:
+            pass
 
     job_id = job_manager.start_job(
         name="step2",
@@ -3073,11 +3155,18 @@ def step2_run(project: str, payload: Step2Request):
         cwd=run_dir,
         env=step2_env,
         finalize_callback=prov_finalize_cb,
+        category="step2",
+        max_concurrent=_step2_max_concurrent(),
+        on_start=on_start_cb,
     )
-    # Record the active job and the current run so the frontend can auto-select it
+    # Record the active job and the current run so the frontend can auto-select
+    # it (and so the per-project guard survives a page reload / backend restart).
     job_id_path.write_text(job_id, encoding="utf-8")
     (step2_dir / ".current_run").write_text(run_ts, encoding="utf-8")
-    return {"job_id": job_id, "run_id": run_ts}
+    # Snapshot the initial status (may already be "queued" if the global cap is
+    # full) so the GUI can show Queued vs Running immediately.
+    snap = job_manager.get_job(job_id) or {}
+    return {"job_id": job_id, "run_id": run_ts, "status": snap.get("status", "running")}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -3090,29 +3179,24 @@ def job_status(job_id: str):
 
 @app.get("/api/projects/{project}/step2/active")
 def step2_active(project: str):
-    """Return the currently-running Step 2 job for this project, if any.
+    """Return the active (running or queued) Step 2 job for this project, if any.
 
     The Step 2 job id normally lives only in browser state (set at launch), so a
     page reload mid-run loses the Run/Stop UI. This lets the GUI rehydrate that
-    state from the server, which is the source of truth: it reads the
-    `.step2_job_id` sentinel written by step2_run and confirms the job is still
-    running in the JobManager. Returns {"job_id": None} when nothing is running.
+    state from the server (the source of truth). `controllable` is true when the
+    JobManager still owns the job (so Stop works); false for a run orphaned by a
+    backend restart (still alive on the box, but not stoppable via the API).
+    Returns {"job_id": None} when nothing is active.
     """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
-    job_id_path = step2_dir / ".step2_job_id"
-    if not job_id_path.exists():
-        return {"job_id": None}
-    try:
-        job_id = job_id_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return {"job_id": None}
+    job_id = _step2_active_job(step2_dir)
     if not job_id:
         return {"job_id": None}
     job = job_manager.get_job(job_id)
-    if not job or job.get("status") != "running":
-        return {"job_id": None}
+    controllable = bool(job and job.get("status") in ("running", "queued"))
+    status = job.get("status") if job else "running"
     run_id = ""
     cur = step2_dir / ".current_run"
     if cur.exists():
@@ -3120,7 +3204,7 @@ def step2_active(project: str):
             run_id = cur.read_text(encoding="utf-8").strip()
         except OSError:
             run_id = ""
-    return {"job_id": job_id, "run_id": run_id, "status": job.get("status")}
+    return {"job_id": job_id, "run_id": run_id, "status": status, "controllable": controllable}
 
 
 @app.post("/api/jobs/{job_id}/stop")

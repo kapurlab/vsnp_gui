@@ -231,6 +231,12 @@ export default function App() {
   // "Shutting down…" button label; the whole tree is confirmed down when this
   // clears and the "all shut down" message is posted.
   const [step2Stopping, setStep2Stopping] = useState(false);
+  // Live job status while active: "queued" (waiting for a global concurrency
+  // slot) or "running". Drives the Queued…/Running… button label.
+  const [step2JobStatus, setStep2JobStatus] = useState("");
+  // False only for a run orphaned by a backend restart (alive server-side but
+  // not stoppable via the API) — hides the Stop button in that case.
+  const [step2Controllable, setStep2Controllable] = useState(true);
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -966,6 +972,8 @@ export default function App() {
     // Stop button survives a page reload and can't leak across a project switch.
     setStep2Running(false);
     setStep2Stopping(false);
+    setStep2JobStatus("");
+    setStep2Controllable(true);
     setStep2JobId("");
     loadStep2Runs(true);
     loadStep2Active();
@@ -1059,6 +1067,7 @@ export default function App() {
         const res = await fetch(`${API_BASE}/api/jobs/${step2JobId}`);
         if (!res.ok) return;
         const job = await res.json();
+        setStep2JobStatus(job.status || "");
         // "cancelled" is the terminal state a user Stop produces — the whole
         // process tree (vsnp3 workers, RAxML) has actually exited by the time
         // the job reports it, so that's when we announce "all shut down".
@@ -1067,6 +1076,7 @@ export default function App() {
           clearInterval(t);
           setStep2Running(false);
           setStep2Stopping(false);
+          setStep2JobStatus("");
           if (job.status === "cancelled") {
             setStep2SetupMsg("Step 2 stopped — all background processes shut down.");
           }
@@ -2451,7 +2461,15 @@ export default function App() {
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
-    setStep2SetupMsg("Step 2 running…");
+    // May come back "queued" if the global concurrency cap is full — it will
+    // start automatically when a slot frees.
+    setStep2JobStatus(data.status || "running");
+    setStep2Controllable(true);
+    setStep2SetupMsg(
+      data.status === "queued"
+        ? "Step 2 queued — will start when a run slot is free…"
+        : "Step 2 running…"
+    );
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
@@ -2461,10 +2479,12 @@ export default function App() {
   async function stopStep2() {
     if (!step2JobId || !step2Running) return;
     const ok = window.confirm(
-      "Stop the Step 2 run?\n\n" +
-      "This terminates the SNP-matrix / tree build and every background process " +
-      "it spawned (vsnp3 workers, RAxML). Partial outputs for this run are " +
-      "discarded — you can start a new run afterward."
+      step2JobStatus === "queued"
+        ? "Cancel this queued Step 2 run?\n\nIt hasn't started yet — cancelling just removes it from the queue."
+        : "Stop the Step 2 run?\n\n" +
+          "This terminates the SNP-matrix / tree build and every background process " +
+          "it spawned (vsnp3 workers, RAxML). Partial outputs for this run are " +
+          "discarded — you can start a new run afterward."
     );
     if (!ok) return;
     // Enter the "shutting down" phase. The backend SIGTERMs the whole process
@@ -2506,7 +2526,15 @@ export default function App() {
       if (data.job_id) {
         setStep2JobId(data.job_id);
         setStep2Running(true);
-        setStep2SetupMsg("Step 2 running…");
+        setStep2JobStatus(data.status || "running");
+        setStep2Controllable(data.controllable !== false);
+        if (data.controllable === false) {
+          // Orphaned by a backend restart — still running on the server, but
+          // can't be stopped through the API. Surface it; hide the Stop button.
+          setStep2SetupMsg("Step 2 is running (started before a backend restart — not stoppable from here).");
+        } else {
+          setStep2SetupMsg(data.status === "queued" ? "Step 2 queued…" : "Step 2 running…");
+        }
       }
     } catch {}
   }
@@ -5779,16 +5807,22 @@ export default function App() {
                     (refLock.references && refLock.references.length > 1)
                   }
                 >
-                {step2Running ? (<><span className="pulse-dot" />Running…</>) : "Run"}
+                {step2Running
+                  ? (<><span className="pulse-dot" />{step2JobStatus === "queued" ? "Queued…" : "Running…"}</>)
+                  : "Run"}
               </button>
-              {step2Running ? (
+              {step2Running && step2Controllable ? (
                 <button
                   className="danger"
                   onClick={stopStep2}
                   disabled={step2Stopping}
-                  title="Terminate the running Step 2 build and every background process it spawned (vsnp3 workers, RAxML)."
+                  title={
+                    step2JobStatus === "queued"
+                      ? "Cancel this queued Step 2 run before it starts."
+                      : "Terminate the running Step 2 build and every background process it spawned (vsnp3 workers, RAxML)."
+                  }
                 >
-                  {step2Stopping ? "Shutting down…" : "Stop"}
+                  {step2Stopping ? "Shutting down…" : (step2JobStatus === "queued" ? "Cancel" : "Stop")}
                 </button>
               ) : null}
               <div className="note">

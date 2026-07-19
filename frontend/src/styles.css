@@ -768,6 +768,19 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* A button mid-action (e.g. Step 2 Run) stays visibly ACTIVE — colored, full
+   opacity, progress cursor — rather than looking dead/disabled, so the click
+   reads as "working" not "broken". Higher specificity than button:disabled. */
+button.is-running:disabled {
+  opacity: 1;
+  cursor: progress;
+  background: var(--accent);
+  color: var(--accent-text, #f7faf9);
+}
+button.is-running .pulse-dot {
+  background: var(--accent-text, #f7faf9);
+}
+
 button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 6px 20px rgba(76, 140, 138, 0.25);

@@ -223,6 +223,9 @@ export default function App() {
   const [genomeJobId, setGenomeJobId] = useState("");
   const [step1JobId, setStep1JobId] = useState("");
   const [step2JobId, setStep2JobId] = useState("");
+  // Set synchronously the instant Run is clicked so the button gives immediate
+  // feedback (before the POST resolves); cleared on completion/error.
+  const [step2Running, setStep2Running] = useState(false);
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -912,6 +915,7 @@ export default function App() {
         // Step 2 job completed: refresh run list (auto-selects newest → triggers
         // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
         if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+          setStep2Running(false);
           loadStep2Runs(true);
           refreshProjects(selectedProject);
         }
@@ -1045,6 +1049,7 @@ export default function App() {
         if (job.status === "succeeded" || job.status === "failed") {
           cancelled = true;
           clearInterval(t);
+          setStep2Running(false);
           loadStep2Runs(true);
           refreshProjects(selectedProject);
         }
@@ -2368,31 +2373,45 @@ export default function App() {
   }
 
   async function step2Run() {
-    if (!selectedProject || !settingsReady) return;
+    if (!selectedProject || !settingsReady || step2Running) return;
+    // Instant feedback: flip the button to a disabled "Running…" state and post
+    // a starting message BEFORE the async POST so the click clearly registers.
+    setStep2Running(true);
+    setStep2SetupMsg("Starting Step 2…");
     const effectiveRef = reference || projectReference || null;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        reference: effectiveRef,
-        no_filters: s2NoFilters,
-        qual_threshold: s2QualThreshold,
-        n_threshold: s2NThreshold,
-        mq_threshold: s2MqThreshold,
-        all_vcf: s2AllVcf,
-        label_style: s2LabelStyle,
-        find_new_filters: s2FindNewFilters,
-        hash_groups: s2HashGroups,
-        show_groups: s2ShowGroups,
-        html_tree: s2HtmlTree,
-        dp: s2Dp,
-        density_threshold: s2DensityThreshold !== "" ? parseInt(s2DensityThreshold, 10) : null,
-        density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null,
-        bootstrap: s2Bootstrap !== "" ? parseInt(s2Bootstrap, 10) || 0 : 0
-      })
-    });
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reference: effectiveRef,
+          no_filters: s2NoFilters,
+          qual_threshold: s2QualThreshold,
+          n_threshold: s2NThreshold,
+          mq_threshold: s2MqThreshold,
+          all_vcf: s2AllVcf,
+          label_style: s2LabelStyle,
+          find_new_filters: s2FindNewFilters,
+          hash_groups: s2HashGroups,
+          show_groups: s2ShowGroups,
+          html_tree: s2HtmlTree,
+          dp: s2Dp,
+          density_threshold: s2DensityThreshold !== "" ? parseInt(s2DensityThreshold, 10) : null,
+          density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null,
+          bootstrap: s2Bootstrap !== "" ? parseInt(s2Bootstrap, 10) || 0 : 0
+        })
+      });
+    } catch (e) {
+      setStep2Running(false);
+      setStep2SetupMsg("");
+      window.alert(`Step 2 failed to start: ${e.message || "network error"}`);
+      return;
+    }
     if (!res.ok) {
-      const msg = await res.json();
+      setStep2Running(false);
+      setStep2SetupMsg("");
+      const msg = await res.json().catch(() => ({}));
       window.alert(msg.detail || "Step 2 failed to start");
       return;
     }
@@ -2400,6 +2419,7 @@ export default function App() {
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
+    setStep2SetupMsg("Step 2 running…");
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
@@ -5661,7 +5681,10 @@ export default function App() {
                 ) : null}
                 <button
                   onClick={step2Run}
+                  className={step2Running ? "is-running" : ""}
+                  title={step2Running ? "Step 2 is running — building the SNP matrix and tree" : ""}
                   disabled={
+                    step2Running ||
                     !selectedProject ||
                     !settingsReady ||
                     (!reference && !projectReference) ||
@@ -5671,7 +5694,7 @@ export default function App() {
                     (refLock.references && refLock.references.length > 1)
                   }
                 >
-                Run
+                {step2Running ? (<><span className="pulse-dot" />Running…</>) : "Run"}
               </button>
               <div className="note">
                 {step2SetupMsg || (typeof step2VcfCount === "number" && step2VcfCount > 0

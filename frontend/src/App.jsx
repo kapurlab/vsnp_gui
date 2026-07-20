@@ -195,6 +195,10 @@ export default function App() {
   // .xlsx). Always excluded, shown locked + distinctly — cannot be re-included
   // from Step 2 (edit the reference file to change it).
   const [step2Blocklist, setStep2Blocklist] = useState({});
+  // Accessions available from an enabled reference panel — these override a
+  // Step 1 exclusion (an external panel VCF isn't a Step 1 sample), so the build
+  // list shows them kept rather than "excluded in Step 1".
+  const [step2PanelAccessions, setStep2PanelAccessions] = useState({});
   const [step2BuildMeta, setStep2BuildMeta] = useState({});
   // Step 2 Results group search: {groupName: [sample names]} parsed from the
   // run summary HTML, and the live (case-insensitive) search text.
@@ -1497,6 +1501,7 @@ export default function App() {
     loadStep2BuildExclusions();
     loadStep2QcExclusions();
     loadStep2Blocklist();
+    loadStep2PanelAccessions();
     loadStep2BuildMeta();
   }
 
@@ -1528,6 +1533,20 @@ export default function App() {
         setStep2Blocklist(map);
       }
     } catch (e) { /* best-effort; the build still works without it */ }
+  }
+
+  // Accessions backed by an enabled reference panel — override Step 1 exclusions.
+  async function loadStep2PanelAccessions() {
+    if (!selectedProject) { setStep2PanelAccessions({}); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/panel-accessions`);
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        (data.samples || []).forEach((s) => { map[s] = true; });
+        setStep2PanelAccessions(map);
+      }
+    } catch (e) { /* best-effort */ }
   }
 
   // Step 2 build-list exclusions: a separate, Step-2-only removal set. Hydrate
@@ -2482,7 +2501,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           reference: effectiveRef,
-          exclude: uiExclude,
+          step1_exclude: Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
+          build_exclude: Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
           no_filters: s2NoFilters,
           qual_threshold: s2QualThreshold,
           n_threshold: s2NThreshold,
@@ -2518,7 +2538,11 @@ export default function App() {
     // job and tell the user. `excluded_count` is absent on older backends that
     // ignore `exclude` — treat that as 0 so this still catches them.
     const excludedCount = data.excluded_count ?? 0;
-    if (uiExclude.length > 0 && excludedCount === 0) {
+    const panelExempt = data.panel_exempt_count ?? 0;
+    // Only warn if we asked to exclude but NOTHING was excluded AND nothing was
+    // legitimately kept via a reference panel (otherwise it's the intended
+    // panel-override, not a silent miss).
+    if (uiExclude.length > 0 && excludedCount === 0 && panelExempt === 0) {
       if (data.job_id) {
         try { await fetch(`${API_BASE}/api/jobs/${data.job_id}/stop`, { method: "POST" }); } catch {}
       }
@@ -2541,9 +2565,10 @@ export default function App() {
     setStep2JobStatus(data.status || "running");
     setStep2Controllable(true);
     const blk = data.blocklist_count > 0 ? `, ${data.blocklist_count} reference-blocked` : "";
+    const kept = data.panel_exempt_count > 0 ? `, ${data.panel_exempt_count} kept via panel` : "";
     const countSuffix = excludedCount > 0
-      ? ` (excluding ${excludedCount}${blk}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
-      : "";
+      ? ` (excluding ${excludedCount}${blk}${kept}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
+      : (kept ? ` (${data.panel_exempt_count} kept via panel)` : "");
     setStep2SetupMsg(
       (data.status === "queued"
         ? "Step 2 queued — will start when a run slot is free…"
@@ -5667,7 +5692,11 @@ export default function App() {
                             const filtered = q
                               ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
-                            const excludedCount = vcfSourceSamples.filter(s => step2BuildExcluded[s.sample] || step2QcExcluded[s.sample] || step2Blocklist[s.sample]).length;
+                            const excludedCount = vcfSourceSamples.filter(s =>
+                              step2Blocklist[s.sample]
+                              || step2BuildExcluded[s.sample]
+                              || (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample])  // panel overrides Step 1 exclusion
+                            ).length;
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
@@ -5680,8 +5709,13 @@ export default function App() {
                                 </div>
                                 {filtered.map(s => {
                                   const lockedByBlocklist = !!step2Blocklist[s.sample];
-                                  const lockedByQc = !!step2QcExcluded[s.sample];
-                                  const locked = lockedByBlocklist || lockedByQc; // tier A/B — not toggleable here
+                                  const inPanel = !!step2PanelAccessions[s.sample];
+                                  // A reference-panel accession overrides a Step 1 exclusion (it's an
+                                  // external panel VCF, not a Step 1 sample). Blocklist still wins.
+                                  const qcExcludedRaw = !!step2QcExcluded[s.sample];
+                                  const keptByPanel = qcExcludedRaw && inPanel && !lockedByBlocklist;
+                                  const effectiveQc = qcExcludedRaw && !inPanel;
+                                  const locked = lockedByBlocklist || effectiveQc; // tier A/B — not toggleable here
                                   const isExcluded = !!step2BuildExcluded[s.sample] || locked;
                                   const metaLabel = step2BuildMeta[s.sample];
                                   return (
@@ -5693,16 +5727,20 @@ export default function App() {
                                       onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
                                       title={lockedByBlocklist
                                         ? "On the reference blocklist (…_remove_from_analysis.xlsx) — never included in any analysis; edit the reference file to change it"
-                                        : (lockedByQc
-                                          ? "Excluded in Step 1 Results — change it there to include in Step 2"
-                                          : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
+                                        : keptByPanel
+                                          ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
+                                          : (effectiveQc
+                                            ? "Excluded in Step 1 Results — change it there to include in Step 2"
+                                            : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
                                       style={{flexShrink:0, cursor: locked ? "not-allowed" : "pointer"}}
                                     />
                                     <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: isExcluded ? "line-through" : "none"}}>
                                       {s.sample}
                                       {lockedByBlocklist ? (
                                         <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — blocked (reference)</span>
-                                      ) : lockedByQc ? (
+                                      ) : keptByPanel ? (
+                                        <span style={{color:"var(--success, #2e7d32)", fontFamily:"sans-serif", fontStyle:"italic"}}> — in reference panel (kept despite Step 1 exclusion)</span>
+                                      ) : effectiveQc ? (
                                         <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
                                       ) : null}
                                       {metaLabel && metaLabel !== s.sample && (

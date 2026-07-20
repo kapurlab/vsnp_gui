@@ -869,10 +869,14 @@ class Step2Request(BaseModel):
     density_threshold: Optional[int] = None
     density_window: Optional[int] = None
     bootstrap: int = 0
-    # Authoritative exclusion set from the UI (build-list ∪ QC checkboxes). When
-    # present it is honored directly at run time (and persisted), so the run can
-    # never silently ignore exclusions because a debounced side-channel save
-    # hadn't flushed. None = "not sent" (fall back to the on-disk files only).
+    # Authoritative exclusion sets the UI sends so the run never silently
+    # ignores exclusions a debounced save hadn't flushed. Kept as two tiers so
+    # the panel exemption can apply to Step 1 exclusions only (build-list
+    # exclusions are explicit per-run choices and are never exempted).
+    step1_exclude: Optional[List[str]] = None   # tier B
+    build_exclude: Optional[List[str]] = None   # tier C
+    # Deprecated merged field (older frontends). Treated as build-list (tier C)
+    # so it is never panel-exempted — safe default.
     exclude: Optional[List[str]] = None
 
 
@@ -3057,17 +3061,24 @@ def step2_run(project: str, payload: Step2Request):
     # wait for — so a run could analyze everything while the UI showed N
     # excluded. When the UI sends `exclude`, we also persist it so the on-disk
     # build-exclusions stay consistent for later loads.
-    # Three tiers unioned (see the exclusion-tiers helpers): A reference
-    # blocklist (always), B Step 1 exclusions, C build-list exclusions. plus the
-    # authoritative set the UI sent this request (payload.exclude = B∪C), so the
-    # run is correct even if a debounced save hadn't flushed to the tier files.
-    ref_block = _reference_blocklist_names(cfg, payload.reference)
-    step1_names = _read_step1_exclusions(step2_dir)
-    build_names = _read_step2_build_exclusions(step2_dir)
-    payload_excl = [str(s).strip() for s in (payload.exclude or []) if str(s).strip()]
-    effective_removals = sorted(
-        set(ref_block) | set(step1_names) | set(build_names) | set(payload_excl)
+    # Tiers (see the exclusion-tiers helpers), unioned with the authoritative
+    # sets the UI sends (so a debounced save that hadn't flushed can't cause a
+    # silent miss):
+    #   A reference blocklist  — always excluded.
+    #   B Step 1 exclusions    — EXEMPTED for accessions available from a
+    #     reference panel (external reference VCFs, not Step 1 samples).
+    #   C build-list exclusions — explicit per-run; never exempted.
+    def _clean(xs):
+        return {str(s).strip() for s in (xs or []) if str(s).strip()}
+    ref_block = set(_reference_blocklist_names(cfg, payload.reference))
+    panel_accessions = _reference_panel_accessions(cfg, payload.reference)
+    step1_names = (set(_read_step1_exclusions(step2_dir)) | _clean(payload.step1_exclude)) - panel_accessions
+    build_names = (
+        set(_read_step2_build_exclusions(step2_dir))
+        | _clean(payload.build_exclude)
+        | _clean(payload.exclude)  # deprecated merged field -> treat as build (not exempted)
     )
+    effective_removals = sorted(ref_block | step1_names | build_names)
     remove_arg = ""
     if effective_removals:
         remove_file = run_dir / "remove_by_name.xlsx"
@@ -3197,12 +3208,19 @@ def step2_run(project: str, payload: Step2Request):
     except OSError:
         vcf_total = 0
     excluded_count = len(effective_removals)
+    # How many Step 1 exclusions were overridden because the accession is in a
+    # reference panel (so the UI can explain the count).
+    panel_exempt_count = len(
+        (set(_read_step1_exclusions(step2_dir)) | {str(s).strip() for s in (payload.step1_exclude or []) if str(s).strip()})
+        & panel_accessions
+    )
     return {
         "job_id": job_id,
         "run_id": run_ts,
         "status": snap.get("status", "running"),
         "excluded_count": excluded_count,
         "blocklist_count": len(ref_block),
+        "panel_exempt_count": panel_exempt_count,
         "vcf_total": vcf_total,
         "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
     }
@@ -3948,6 +3966,17 @@ def step2_blocklist_get(project: str):
     return {"reference": ref, "samples": _reference_blocklist_names(cfg, ref)}
 
 
+@app.get("/api/projects/{project}/step2/panel-accessions")
+def step2_panel_accessions_get(project: str):
+    """Accessions available from enabled reference VCF-db panels for this
+    project's reference. The build list marks these so the user sees that a
+    Step 1 exclusion of the same accession is overridden (the panel keeps it)."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    ref = _project_reference(project_dir) or ""
+    return {"reference": ref, "samples": sorted(_reference_panel_accessions(cfg, ref))}
+
+
 # --- Exclusion tiers --------------------------------------------------------
 # Step 2 filters samples out of the comparison at run time via vsnp3
 # -remove_by_name (vcf_database stays the cumulative store). Three independent
@@ -4023,6 +4052,32 @@ def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]
             continue
         names.update(_read_remove_xlsx_names(f))
     return sorted(names)
+
+
+def _reference_panel_accessions(cfg: Dict, reference: Optional[str]) -> set:
+    """Sample names available from ENABLED reference VCF-db panels for this
+    reference. These are EXEMPT from Step 1 name exclusions: a curated panel VCF
+    is an external reference file, not a Step 1 sample, so a Step 1 QC exclusion
+    of the same accession must not drop it from the comparison. Re-derived at run
+    time from the enabled db folders, so it survives later Step 1 re-exclusions.
+    (Tier A blocklist and explicit build-list exclusions still apply.)"""
+    if not reference:
+        return set()
+    names: set = set()
+    for folder in _resolved_vcf_db_folders(cfg):
+        if not folder.get("enabled"):
+            continue
+        fref = folder.get("reference", "") or ""
+        # A folder tagged for another reference doesn't apply; an untagged
+        # (legacy) folder the user enabled is treated as applicable.
+        if fref and not _refs_match(fref, reference, True):
+            continue
+        p = Path(folder.get("path", ""))
+        if not p.is_dir():
+            continue
+        for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz")):
+            names.add(f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""))
+    return names
 
 
 # --- Step 2 build-list exclusions (tier C) ----------------------------------

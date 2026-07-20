@@ -188,11 +188,13 @@ export default function App() {
   // of {sampleName: true} for samples checked "Exclude" in the Build VCF set
   // list, plus a sample->display-label map for showing reference metadata.
   const [step2BuildExcluded, setStep2BuildExcluded] = useState({});
-  // Samples already excluded in Step 1 Results (remove_from_analysis.xlsx).
-  // The Step 2 run unions these with the build-list exclusions anyway, so we
-  // surface them in the build list as pre-checked + locked to make the build
-  // honest about what will actually be compared. Change them in Step 1 Results.
+  // Tier B: samples excluded via the Step 1 Results checkboxes. Surfaced in the
+  // build list pre-checked + locked (change them in Step 1 Results).
   const [step2QcExcluded, setStep2QcExcluded] = useState({});
+  // Tier A: the reference-level permanent blocklist (<ref>_remove_from_analysis
+  // .xlsx). Always excluded, shown locked + distinctly — cannot be re-included
+  // from Step 2 (edit the reference file to change it).
+  const [step2Blocklist, setStep2Blocklist] = useState({});
   const [step2BuildMeta, setStep2BuildMeta] = useState({});
   // Step 2 Results group search: {groupName: [sample names]} parsed from the
   // run summary HTML, and the live (case-insensitive) search text.
@@ -1494,6 +1496,7 @@ export default function App() {
     }
     loadStep2BuildExclusions();
     loadStep2QcExclusions();
+    loadStep2Blocklist();
     loadStep2BuildMeta();
   }
 
@@ -1508,6 +1511,21 @@ export default function App() {
         const map = {};
         (data.samples || []).forEach((s) => { map[s] = true; });
         setStep2QcExcluded(map);
+      }
+    } catch (e) { /* best-effort; the build still works without it */ }
+  }
+
+  // Tier A: the reference-level permanent blocklist for this project's
+  // reference. Shown locked in the build list; never included in an analysis.
+  async function loadStep2Blocklist() {
+    if (!selectedProject) { setStep2Blocklist({}); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/blocklist`);
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        (data.samples || []).forEach((s) => { map[s] = true; });
+        setStep2Blocklist(map);
       }
     } catch (e) { /* best-effort; the build still works without it */ }
   }
@@ -2436,6 +2454,11 @@ export default function App() {
       clearTimeout(step2BuildExcludeTimerRef.current);
       step2BuildExcludeTimerRef.current = null;
     }
+    // Flush tier C (build-list) to disk now so its store is current (the run
+    // also sends the set below, so the run is correct even if this save lagged).
+    try { await _persistStep2BuildExclusions(step2BuildExcluded); } catch { /* run still sends the set */ }
+    // Authoritative user-chosen removal set = tier B (Step 1) ∪ tier C (build).
+    // Tier A (reference blocklist) is applied server-side regardless.
     const uiExclude = Array.from(new Set([
       ...Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
       ...Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
@@ -2505,8 +2528,9 @@ export default function App() {
     // start automatically when a slot frees.
     setStep2JobStatus(data.status || "running");
     setStep2Controllable(true);
+    const blk = data.blocklist_count > 0 ? `, ${data.blocklist_count} reference-blocked` : "";
     const countSuffix = excludedCount > 0
-      ? ` (excluding ${excludedCount}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
+      ? ` (excluding ${excludedCount}${blk}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
       : "";
     setStep2SetupMsg(
       (data.status === "queued"
@@ -5631,7 +5655,7 @@ export default function App() {
                             const filtered = q
                               ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
-                            const excludedCount = vcfSourceSamples.filter(s => step2BuildExcluded[s.sample] || step2QcExcluded[s.sample]).length;
+                            const excludedCount = vcfSourceSamples.filter(s => step2BuildExcluded[s.sample] || step2QcExcluded[s.sample] || step2Blocklist[s.sample]).length;
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
@@ -5643,26 +5667,32 @@ export default function App() {
                                   )}
                                 </div>
                                 {filtered.map(s => {
+                                  const lockedByBlocklist = !!step2Blocklist[s.sample];
                                   const lockedByQc = !!step2QcExcluded[s.sample];
-                                  const isExcluded = !!step2BuildExcluded[s.sample] || lockedByQc;
+                                  const locked = lockedByBlocklist || lockedByQc; // tier A/B — not toggleable here
+                                  const isExcluded = !!step2BuildExcluded[s.sample] || locked;
                                   const metaLabel = step2BuildMeta[s.sample];
                                   return (
                                   <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: isExcluded ? 0.55 : 1}}>
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
-                                      disabled={lockedByQc}
+                                      disabled={locked}
                                       onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
-                                      title={lockedByQc
-                                        ? "Excluded in Step 1 Results — change it there to include in Step 2"
-                                        : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2")}
-                                      style={{flexShrink:0, cursor: lockedByQc ? "not-allowed" : "pointer"}}
+                                      title={lockedByBlocklist
+                                        ? "On the reference blocklist (…_remove_from_analysis.xlsx) — never included in any analysis; edit the reference file to change it"
+                                        : (lockedByQc
+                                          ? "Excluded in Step 1 Results — change it there to include in Step 2"
+                                          : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
+                                      style={{flexShrink:0, cursor: locked ? "not-allowed" : "pointer"}}
                                     />
                                     <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: isExcluded ? "line-through" : "none"}}>
                                       {s.sample}
-                                      {lockedByQc && (
+                                      {lockedByBlocklist ? (
+                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — blocked (reference)</span>
+                                      ) : lockedByQc ? (
                                         <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
-                                      )}
+                                      ) : null}
                                       {metaLabel && metaLabel !== s.sample && (
                                         <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
                                       )}

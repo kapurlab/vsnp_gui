@@ -2772,7 +2772,7 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
     # VCF database (they would otherwise feed a Step 2 build the user meant to drop).
     # An explicit force_samples check still overrides, since that is a deliberate
     # per-sample "add this anyway" action.
-    excluded_set = set(_read_remove_xlsx_names(project_dir / "step2" / "remove_from_analysis.xlsx"))
+    excluded_set = set(_read_step1_exclusions(project_dir / "step2"))
     auto_added: List[str] = []
     force_added: List[str] = []
     already_present: List[str] = []
@@ -2859,22 +2859,12 @@ def step2_setup(project: str):
     # but is left out of the comparison. The response reports total / comparison /
     # excluded so the UI shows the breakdown honestly (total = comparison + excluded).
 
-    # Read the persisted QC exclusion set (written by qc_exclude when the user
-    # toggles checkboxes) — used to compute the excluded count for display.
-    excluded_names: set[str] = set()
-    remove_xlsx = project_dir / "step2" / "remove_from_analysis.xlsx"
-    if remove_xlsx.exists():
-        try:
-            import pandas as pd  # vsnp3 env always has pandas
-            df = pd.read_excel(remove_xlsx, header=None)
-            for s in df.iloc[:, 0].tolist():
-                name = str(s).strip()
-                if name and name.lower() != "nan":
-                    excluded_names.add(name)
-        except Exception as exc:
-            # Don't fail the whole build for a broken xlsx — vsnp3's
-            # -remove_by_name at run time is the backstop. Surface a warning.
-            logger.warning("step2_setup: failed to parse exclusion xlsx %s: %s", remove_xlsx, exc)
+    # Excluded count for the setup breakdown = tier A (reference blocklist) ∪
+    # tier B (Step 1 exclusions). Both are always filtered out of the comparison
+    # at run time. Tier C (build-list) is per-run and shown live in the UI.
+    excluded_names: set = set(_read_step1_exclusions(project_dir / "step2")) | set(
+        _reference_blocklist_names(cfg, _project_reference(project_dir))
+    )
 
     count = 0
     edited_samples = []
@@ -3061,23 +3051,17 @@ def step2_run(project: str, payload: Step2Request):
     # wait for — so a run could analyze everything while the UI showed N
     # excluded. When the UI sends `exclude`, we also persist it so the on-disk
     # build-exclusions stay consistent for later loads.
-    qc_names = _read_remove_xlsx_names(step2_dir / "remove_from_analysis.xlsx")
+    # Three tiers unioned (see the exclusion-tiers helpers): A reference
+    # blocklist (always), B Step 1 exclusions, C build-list exclusions. plus the
+    # authoritative set the UI sent this request (payload.exclude = B∪C), so the
+    # run is correct even if a debounced save hadn't flushed to the tier files.
+    ref_block = _reference_blocklist_names(cfg, payload.reference)
+    step1_names = _read_step1_exclusions(step2_dir)
     build_names = _read_step2_build_exclusions(step2_dir)
     payload_excl = [str(s).strip() for s in (payload.exclude or []) if str(s).strip()]
-    if payload.exclude is not None:
-        # Persist the UI's set authoritatively (minus QC names, which live in
-        # their own file) so a later page load reflects reality.
-        ui_build_excl = sorted(set(payload_excl) - set(qc_names))
-        try:
-            p = _step2_build_exclusions_path(step2_dir)
-            if ui_build_excl:
-                p.write_text(json.dumps(ui_build_excl), encoding="utf-8")
-            else:
-                p.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("step2_run: could not persist build-exclusions: %s", exc)
-        build_names = ui_build_excl
-    effective_removals = sorted(set(qc_names) | set(build_names) | set(payload_excl))
+    effective_removals = sorted(
+        set(ref_block) | set(step1_names) | set(build_names) | set(payload_excl)
+    )
     remove_arg = ""
     if effective_removals:
         remove_file = run_dir / "remove_by_name.xlsx"
@@ -3212,6 +3196,7 @@ def step2_run(project: str, payload: Step2Request):
         "run_id": run_ts,
         "status": snap.get("status", "running"),
         "excluded_count": excluded_count,
+        "blocklist_count": len(ref_block),
         "vcf_total": vcf_total,
         "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
     }
@@ -3932,62 +3917,109 @@ def qc_exclude(project: str, payload: ExcludeRequest):
     project_dir = _project_dir_for(cfg, project)
     step2_dir = project_dir / "step2"
     step2_dir.mkdir(parents=True, exist_ok=True)
-    remove_path = step2_dir / "remove_from_analysis.xlsx"
-    # If the GUI clears every checkbox, delete the file rather than writing
-    # an empty xlsx — `step2_run` checks for file existence to decide whether
-    # to pass `-remove_by_name` to vsnp3, and an empty list is logically the
-    # same as "no exclusions".
-    if not payload.samples:
-        if remove_path.exists():
-            try:
-                remove_path.unlink()
-            except OSError:
-                pass
-        return {"remove_file": str(remove_path), "count": 0}
-    code = (
-        "import pandas as pd, sys; "
-        "out=sys.argv[1]; "
-        "samples=sys.argv[2:]; "
-        "df=pd.DataFrame(samples); "
-        "df.to_excel(out, header=False, index=False)"
-    )
-    cmd_list = conda_python_cmd(cfg, code, [str(remove_path), *payload.samples])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"Exclude list failed: {result.stderr.strip()}")
-    return {"remove_file": str(remove_path), "count": len(payload.samples)}
+    # Tier B (Step 1 exclusions). Stored in step2/.step1_excluded.json — NOT
+    # remove_from_analysis.xlsx, which is the reference-level blocklist (tier A).
+    names = _write_step1_exclusions(step2_dir, payload.samples)
+    return {"count": len(names)}
 
 
 @app.get("/api/projects/{project}/qc_exclude")
 def qc_exclude_get(project: str):
-    """Return the persisted exclusion set so the GUI can hydrate the QC table
-    on project load. Reads `step2/remove_from_analysis.xlsx` directly via
-    pandas (uvicorn runs in the vsnp3 env). Returns empty list if the file
-    is absent — that is the canonical "no exclusions" state."""
+    """Return the persisted Step 1 exclusion set (tier B) so the GUI can hydrate
+    the QC table / build list on load. Empty list = no exclusions."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
-    remove_path = project_dir / "step2" / "remove_from_analysis.xlsx"
-    if not remove_path.exists():
-        return {"samples": []}
+    return {"samples": _read_step1_exclusions(project_dir / "step2")}
+
+
+@app.get("/api/projects/{project}/step2/blocklist")
+def step2_blocklist_get(project: str):
+    """Tier A: the reference-level permanent blocklist for this project's
+    reference. Names here are always excluded and locked in the build list."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    ref = _project_reference(project_dir) or ""
+    return {"reference": ref, "samples": _reference_blocklist_names(cfg, ref)}
+
+
+# --- Exclusion tiers --------------------------------------------------------
+# Step 2 filters samples out of the comparison at run time via vsnp3
+# -remove_by_name (vcf_database stays the cumulative store). Three independent
+# tiers, each with its own store, unioned at run time:
+#   A. Reference blocklist  — <ref>_remove_from_analysis.xlsx in the reference
+#      dir. A permanent, per-reference dependency file: any name in it is NEVER
+#      included in an analysis. Read-only here (edited via the reference editor);
+#      shown locked in the build list.
+#   B. Step 1 exclusions    — step2/.step1_excluded.json, set by the Step 1
+#      Results "exclude" checkboxes. (Historically written to the project's
+#      remove_from_analysis.xlsx, which collided in name/meaning with tier A —
+#      migrated away below.)
+#   C. Step 2 build-list    — step2/.step2_build_excluded.json, set by the
+#      "Exclude" checkboxes in the Step 2 build list.
+
+def _step1_exclusions_path(step2_dir: Path) -> Path:
+    return step2_dir / ".step1_excluded.json"
+
+
+def _read_step1_exclusions(step2_dir: Path) -> List[str]:
+    p = _step1_exclusions_path(step2_dir)
+    if not p.exists():
+        # One-time migration from the legacy project-level remove_from_analysis
+        # .xlsx (tier B used to live there, colliding with the tier-A reference
+        # file of the same name). Move it into the JSON store and drop the xlsx.
+        legacy = step2_dir / "remove_from_analysis.xlsx"
+        if legacy.exists():
+            names = sorted(set(_read_remove_xlsx_names(legacy)))
+            try:
+                if names:
+                    p.write_text(json.dumps(names), encoding="utf-8")
+                legacy.unlink()
+            except OSError:
+                pass
+            return names
+        return []
     try:
-        import pandas as pd  # vsnp3 env always has pandas
-        df = pd.read_excel(remove_path, header=None)
-        samples = [
-            str(s).strip()
-            for s in df.iloc[:, 0].tolist()
-            if str(s).strip() and str(s).strip().lower() != "nan"
-        ]
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to read exclusions: {exc}")
-    return {"samples": samples}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(s).strip() for s in data if str(s).strip()]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
 
 
-# --- Step 2 build-list exclusions -------------------------------------------
-# A separate, Step-2-only exclusion set (distinct from the Step 1 QC
-# exclusions in remove_from_analysis.xlsx). Samples checked "Exclude" in the
-# Step 2 Build VCF set list land here. At run time, step2_run unions this set
-# with the QC set into a run-scoped remove_by_name.xlsx so both are applied
-# without either clobbering the other's file.
+def _write_step1_exclusions(step2_dir: Path, samples) -> List[str]:
+    names = sorted({str(s).strip() for s in (samples or []) if str(s).strip()})
+    p = _step1_exclusions_path(step2_dir)
+    try:
+        if names:
+            p.write_text(json.dumps(names), encoding="utf-8")
+        else:
+            p.unlink(missing_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to write Step 1 exclusions: {exc}")
+    return names
+
+
+def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]:
+    """Tier A: names in the reference's *_remove_from_analysis.xlsx — a permanent
+    per-reference blocklist, never included in any analysis. Read-only here."""
+    if not reference:
+        return []
+    root = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
+    if not root:
+        return []
+    ref_dir = Path(root) / reference
+    if not ref_dir.is_dir():
+        return []
+    names: set = set()
+    for f in ref_dir.glob("*remove_from_analysis*.xlsx"):
+        if f.name.startswith("~$"):
+            continue
+        names.update(_read_remove_xlsx_names(f))
+    return sorted(names)
+
+
+# --- Step 2 build-list exclusions (tier C) ----------------------------------
 
 def _step2_build_exclusions_path(step2_dir: Path) -> Path:
     return step2_dir / ".step2_build_excluded.json"

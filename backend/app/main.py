@@ -869,6 +869,11 @@ class Step2Request(BaseModel):
     density_threshold: Optional[int] = None
     density_window: Optional[int] = None
     bootstrap: int = 0
+    # Authoritative exclusion set from the UI (build-list ∪ QC checkboxes). When
+    # present it is honored directly at run time (and persisted), so the run can
+    # never silently ignore exclusions because a debounced side-channel save
+    # hadn't flushed. None = "not sent" (fall back to the on-disk files only).
+    exclude: Optional[List[str]] = None
 
 
 class PosthocRunRequest(BaseModel):
@@ -3049,12 +3054,30 @@ def step2_run(project: str, payload: Step2Request):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Effective removal set = Step 1 QC exclusions (remove_from_analysis.xlsx)
-    # ∪ Step 2 build-list exclusions (.step2_build_excluded.json). The two are
-    # tracked in separate files; union them into a run-scoped xlsx so this run
-    # honors both without either source overwriting the other.
+    # ∪ Step 2 build-list exclusions (.step2_build_excluded.json) ∪ the
+    # authoritative set the UI sends in this request. The payload set is what
+    # closes the silent-miss bug: previously the run trusted only the on-disk
+    # files, which are written by a debounced best-effort save that Run didn't
+    # wait for — so a run could analyze everything while the UI showed N
+    # excluded. When the UI sends `exclude`, we also persist it so the on-disk
+    # build-exclusions stay consistent for later loads.
     qc_names = _read_remove_xlsx_names(step2_dir / "remove_from_analysis.xlsx")
     build_names = _read_step2_build_exclusions(step2_dir)
-    effective_removals = sorted(set(qc_names) | set(build_names))
+    payload_excl = [str(s).strip() for s in (payload.exclude or []) if str(s).strip()]
+    if payload.exclude is not None:
+        # Persist the UI's set authoritatively (minus QC names, which live in
+        # their own file) so a later page load reflects reality.
+        ui_build_excl = sorted(set(payload_excl) - set(qc_names))
+        try:
+            p = _step2_build_exclusions_path(step2_dir)
+            if ui_build_excl:
+                p.write_text(json.dumps(ui_build_excl), encoding="utf-8")
+            else:
+                p.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("step2_run: could not persist build-exclusions: %s", exc)
+        build_names = ui_build_excl
+    effective_removals = sorted(set(qc_names) | set(build_names) | set(payload_excl))
     remove_arg = ""
     if effective_removals:
         remove_file = run_dir / "remove_by_name.xlsx"
@@ -3176,7 +3199,22 @@ def step2_run(project: str, payload: Step2Request):
     # Snapshot the initial status (may already be "queued" if the global cap is
     # full) so the GUI can show Queued vs Running immediately.
     snap = job_manager.get_job(job_id) or {}
-    return {"job_id": job_id, "run_id": run_ts, "status": snap.get("status", "running")}
+    # Report what will actually be excluded/compared so the UI can confirm the
+    # run matches intent (and warn if it doesn't) instead of trusting a caption.
+    try:
+        vcf_total = sum(1 for p in vcf_source_dir.iterdir()
+                        if p.name.endswith((".vcf", ".vcf.gz")))
+    except OSError:
+        vcf_total = 0
+    excluded_count = len(effective_removals)
+    return {
+        "job_id": job_id,
+        "run_id": run_ts,
+        "status": snap.get("status", "running"),
+        "excluded_count": excluded_count,
+        "vcf_total": vcf_total,
+        "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
+    }
 
 
 @app.get("/api/jobs/{job_id}")

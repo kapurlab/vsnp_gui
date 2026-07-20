@@ -2428,6 +2428,18 @@ export default function App() {
     setStep2Running(true);
     setStep2SetupMsg("Starting Step 2…");
     const effectiveRef = reference || projectReference || null;
+    // Authoritative exclusion set = whatever the UI currently shows excluded
+    // (build-list ∪ Step 1 QC). Sent in the request so the run can't silently
+    // ignore exclusions that a debounced save hadn't flushed yet. Cancel any
+    // pending debounced save so it can't later overwrite what the run persists.
+    if (step2BuildExcludeTimerRef.current) {
+      clearTimeout(step2BuildExcludeTimerRef.current);
+      step2BuildExcludeTimerRef.current = null;
+    }
+    const uiExclude = Array.from(new Set([
+      ...Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
+      ...Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
+    ]));
     let res;
     try {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
@@ -2435,6 +2447,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           reference: effectiveRef,
+          exclude: uiExclude,
           no_filters: s2NoFilters,
           qual_threshold: s2QualThreshold,
           n_threshold: s2NThreshold,
@@ -2465,6 +2478,26 @@ export default function App() {
       return;
     }
     const data = await res.json();
+    // Guard: if we asked to exclude samples but the server excluded none, do NOT
+    // silently analyze the whole database (the old bug). Stop the just-started
+    // job and tell the user. `excluded_count` is absent on older backends that
+    // ignore `exclude` — treat that as 0 so this still catches them.
+    const excludedCount = data.excluded_count ?? 0;
+    if (uiExclude.length > 0 && excludedCount === 0) {
+      if (data.job_id) {
+        try { await fetch(`${API_BASE}/api/jobs/${data.job_id}/stop`, { method: "POST" }); } catch {}
+      }
+      setStep2Running(false);
+      setStep2SetupMsg("");
+      window.alert(
+        `Step 2 was NOT run against your exclusions.\n\n` +
+        `You have ${uiExclude.length} sample(s) marked excluded, but the server applied 0. ` +
+        `The run was stopped so it wouldn't analyze the entire database.\n\n` +
+        `Reload the page (Refresh), confirm the exclusions still show, and Run again. ` +
+        `If it persists, the backend may be older than v0.3.9 — update it.`
+      );
+      return;
+    }
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
@@ -2472,10 +2505,13 @@ export default function App() {
     // start automatically when a slot frees.
     setStep2JobStatus(data.status || "running");
     setStep2Controllable(true);
+    const countSuffix = excludedCount > 0
+      ? ` (excluding ${excludedCount}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
+      : "";
     setStep2SetupMsg(
-      data.status === "queued"
+      (data.status === "queued"
         ? "Step 2 queued — will start when a run slot is free…"
-        : "Step 2 running…"
+        : "Step 2 running…") + countSuffix
     );
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);

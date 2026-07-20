@@ -1956,10 +1956,15 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     vcfs = []
     source_roots = []
+    missing_sources: List[str] = []
     for raw in payload.source_paths or []:
         src = Path((raw or "").strip()).expanduser()
         if not src.exists():
-            raise HTTPException(status_code=400, detail=f"Source path not found: {src}")
+            # Skip a missing source (e.g. a typo'd DB path) instead of aborting
+            # the whole import — one bad path must not block the valid databases.
+            # Surfaced to the UI as skipped_missing so the user still sees it.
+            missing_sources.append(str(src))
+            continue
         source_roots.append(src)
         vcfs.extend(list(src.rglob("*_zc.vcf")))
         vcfs.extend(list(src.rglob("*_zc.vcf.gz")))
@@ -2111,7 +2116,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         "detected_reference": detected_ref or payload.reference or "",
         "mismatched": len(mismatched),
         "mismatch_report": mismatch_report,
-        "total_found": len(vcfs)
+        "total_found": len(vcfs),
+        "skipped_missing": missing_sources,
     }
 
 

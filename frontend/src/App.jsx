@@ -2296,12 +2296,24 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
+    // A missing source path (e.g. a typo'd DB) is now skipped rather than
+    // aborting the whole import — surface it prominently so the user knows that
+    // database was NOT included (and can fix its path), while the valid ones did.
+    const missing = data.skipped_missing || [];
+    if (missing.length) {
+      window.alert(
+        `${missing.length} database path(s) were not found and were SKIPPED (not included):\n\n` +
+        missing.join("\n") +
+        `\n\nCheck the path for these databases. The other selected databases were imported.`
+      );
+    }
     const parts = [
       `Imported ${data.imported}`,
       data.already_present ? `Already in set: ${data.already_present}` : null,
       data.renamed ? `Renamed ${data.renamed}` : null,
       data.dedup_skipped ? `Deduped (older copy): ${data.dedup_skipped}` : null,
       data.ref_skipped ? `Ref mismatch: ${data.ref_skipped}` : null,
+      missing.length ? `Skipped (path not found): ${missing.length}` : null,
       data.detected_reference ? `Ref: ${data.detected_reference}` : null
     ].filter(Boolean);
     setImportStatus(parts.join(" | "));

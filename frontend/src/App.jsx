@@ -425,6 +425,18 @@ export default function App() {
     return posthocRows.filter((r) => normalizeReferenceName(r.Reference) === refNorm);
   }, [posthocRows, reference]);
 
+  // Display order for the Step 1 sample list: float not-yet-run samples to the
+  // top so newly added files are easy to spot in a large project, then the
+  // in-flight/indeterminate ones, then finished samples last. The backend
+  // returns samples alphabetically; sort is stable so alphabetical order is
+  // preserved within each status group.
+  const step1StatusSorted = useMemo(() => {
+    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4 };
+    return [...step1Status].sort(
+      (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
+    );
+  }, [step1Status]);
+
   // The post-hoc table can mix samples from several projects; make sure each
   // referenced project's Kraken dir list is cached so its rows can show a
   // Krona button. Only fetches projects we haven't loaded yet.
@@ -4485,7 +4497,7 @@ export default function App() {
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
               {step1Status.length ? (
                 <ul className="sample-list">
-                  {step1Status.map((s) => (
+                  {step1StatusSorted.map((s) => (
                     <li key={s.sample}>
                       <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
                       <span className="sample-name">{s.sample}</span>

@@ -6136,7 +6136,7 @@ export default function App() {
                                 "• kdp.png — density plot of all pairwise distances (how tight/spread the group is)\n" +
                                 "• closest_neighbor.png — each isolate's distance to its nearest match\n\n" +
                                 "Use it to see how closely related isolates are (e.g. possible transmission links within N SNPs). The tree shows topology; this puts numbers on the distances.\n\n" +
-                                "Include: 'All isolates' counts the reference-panel genomes too; 'My samples only' restricts to your Step 1 (sequenced) samples.";
+                                "Include: 'samples + reference' counts the reference-panel genomes alongside your Step 1 samples; 'only samples' restricts to your Step 1 (sequenced) samples. (The root/outgroup is excluded either way.)";
                               const posthocBtnTitle =
                                 "Compute pairwise SNP distances (snp-dists): distance matrix + density plot + closest-neighbor plot. Results land in this group's file list.";
                               return (
@@ -6165,8 +6165,8 @@ export default function App() {
                                           }))
                                         }
                                       >
-                                        <option value="all">Include: all isolates</option>
-                                        <option value="step1_only">Include: my samples only</option>
+                                        <option value="all">Include: samples + reference</option>
+                                        <option value="step1_only">Include: only samples</option>
                                       </select>
                                       <button
                                         className="small"

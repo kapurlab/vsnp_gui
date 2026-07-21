@@ -2445,17 +2445,14 @@ def step1_setup(project: str):
             # or deleted. copy2 follows the source (download/ entries may
             # themselves be symlinks) so we copy the actual bytes. The reads stay
             # in download/ too. Cost: ~doubles read storage.
+            #
+            # Only NEW entries are copied. We deliberately do NOT rewrite existing
+            # symlink entries from before this change into copies here — doing so
+            # would make the next Setup on a large project copy hundreds of GB
+            # synchronously and hang the request. Legacy symlinked samples keep
+            # their symlink until re-staged; migrate them separately if needed.
             shutil.copy2(f, target)
             created += 1
-        elif target.is_symlink():
-            # Upgrade a legacy symlink entry (from before the copy change) to a
-            # durable real copy in place.
-            real = target.resolve()
-            target.unlink()
-            try:
-                shutil.copy2(real, target)
-            except OSError:
-                target.symlink_to(f)  # fall back rather than lose the entry
     return {"created": created, "renamed": renamed}
 
 

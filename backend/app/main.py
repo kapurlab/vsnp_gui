@@ -14,6 +14,7 @@ import time
 import subprocess
 import shutil
 import gzip
+import signal
 import sys
 import logging
 import shlex
@@ -196,12 +197,12 @@ def _path_under_any_project_root(cfg_in: Dict, target: Path) -> bool:
     return False
 
 
-def _wrapper_process_alive(script_path: Path) -> bool:
-    """Return True if any process has the given wrapper script in its command line.
+def _wrapper_pids(script_path: Path) -> List[int]:
+    """PIDs of any process whose command line references the wrapper script.
 
-    Used as a fallback concurrency guard that survives backend reloads, where
-    in-memory JobManager state is lost but an orphaned bash wrapper may still
-    be running.
+    Used to detect (and, via _terminate_step1_wrapper, kill) an orphaned bash
+    wrapper that survived a backend reload, where in-memory JobManager state is
+    gone but the batch is still running.
     """
     try:
         result = subprocess.run(
@@ -211,8 +212,63 @@ def _wrapper_process_alive(script_path: Path) -> bool:
             timeout=3,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    pids: List[int] = []
+    for line in result.stdout.split():
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return pids
+
+
+def _wrapper_process_alive(script_path: Path) -> bool:
+    """True if an orphaned wrapper process for the script is still running."""
+    return bool(_wrapper_pids(script_path))
+
+
+def _terminate_step1_wrapper(script_path: Path) -> bool:
+    """Kill an orphaned Step 1 batch by signaling its process group(s).
+
+    Restart-resilient counterpart to JobManager.stop_job: after a backend
+    reload the in-memory job (and its Popen handle) is gone, so stop_job can't
+    find anything to signal. The wrapper is launched with start_new_session=True
+    (jobs.py), so its PID == its process-group id and every vsnp3 worker it
+    spawned shares that group. We rediscover the live wrapper via pgrep, derive
+    the group(s), SIGTERM them, then SIGKILL survivors after a grace period in a
+    daemon thread so the request returns immediately. Returns True if at least
+    one group was signaled."""
+    pgids = set()
+    for pid in _wrapper_pids(script_path):
+        try:
+            pgids.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+    if not pgids:
         return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+
+    def _signal_all(sig: int) -> None:
+        for pgid in pgids:
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                continue
+
+    _signal_all(signal.SIGTERM)
+
+    def _escalate() -> None:
+        # Poll for the grace period; SIGKILL anything still alive.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not _wrapper_process_alive(script_path):
+                return
+            time.sleep(0.5)
+        _signal_all(signal.SIGKILL)
+
+    threading.Thread(target=_escalate, daemon=True).start()
+    return True
 
 
 def _script_bin_dir(cfg: Dict) -> Optional[Path]:
@@ -2726,6 +2782,40 @@ def step1_status(project: str):
             )
         statuses.append(entry)
     return {"job_status": job_status, "samples": statuses}
+
+
+@app.post("/api/projects/{project}/step1/stop")
+def step1_stop(project: str):
+    """Stop a running Step 1 batch for a project — restart-resilient.
+
+    The generic /api/jobs/{id}/stop path 404s after a backend reload because
+    the in-memory JobManager no longer knows the (orphaned) batch. This
+    project-scoped endpoint first tries the normal in-memory stop, then falls
+    back to killing the live wrapper's process group directly (see
+    _terminate_step1_wrapper). Finished samples keep their outputs; in-flight
+    samples are left partial. Returns 409 only if nothing is actually running.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step1_dir = project_dir / "step1"
+    if not step1_dir.exists():
+        raise HTTPException(status_code=404, detail="Step1 directory not found")
+
+    job_id_path = step1_dir / ".step1_job_id"
+    job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
+
+    # Normal path: the JobManager still holds this run (no backend restart since
+    # dispatch) and can signal its tracked Popen process group.
+    if job_id and job_manager.stop_job(job_id):
+        return {"stopped": True, "method": "job_manager", "job_id": job_id}
+
+    # Fallback path: in-memory state was lost (backend reloaded / reconnected
+    # from another machine), but an orphaned wrapper may still be running.
+    script_path = step1_dir / "run_step1.sh"
+    if script_path.exists() and _terminate_step1_wrapper(script_path):
+        return {"stopped": True, "method": "wrapper_group", "job_id": job_id}
+
+    raise HTTPException(status_code=409, detail="No running Step 1 batch to stop")
 
 
 @app.get("/api/projects/{project}/step1/log")

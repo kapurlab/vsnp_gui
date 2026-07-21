@@ -2424,7 +2424,12 @@ export default function App() {
   }
 
   async function stopStep1() {
-    if (!step1JobId || step1JobStatus !== "running") return;
+    // Stop is project-scoped, not keyed on the locally-remembered step1JobId:
+    // after reconnecting from another machine (or a backend restart) the batch
+    // still runs server-side but step1JobId is empty, so gating on it here — or
+    // hitting /api/jobs/{id}/stop — would silently fail. The project endpoint is
+    // restart-resilient (falls back to killing the orphaned wrapper's group).
+    if (!selectedProject || step1JobStatus !== "running") return;
     const ok = window.confirm(
       "Stop the Step 1 run?\n\n" +
       "Samples that have already finished keep their results. Any samples still " +
@@ -2433,7 +2438,7 @@ export default function App() {
     if (!ok) return;
     setStep1Stopping(true);
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${step1JobId}/stop`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/stop`, { method: "POST" });
       if (!res.ok && res.status !== 409) {
         let data = {};
         try { data = await res.json(); } catch (_) { /* non-JSON body */ }

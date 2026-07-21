@@ -6198,6 +6198,7 @@ export default function App() {
               const groupQuery = step2GroupSearch.trim().toLowerCase();
               const searchedStep2Groups = (groupQuery && groupSearchAvailable)
                 ? sortedStep2Groups.filter((g) =>
+                    g.name.toLowerCase().includes(groupQuery) ||
                     (step2Groupings[g.name] || []).some((m) => m.toLowerCase().includes(groupQuery))
                   )
                 : sortedStep2Groups;

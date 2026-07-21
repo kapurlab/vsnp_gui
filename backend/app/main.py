@@ -4581,6 +4581,24 @@ def step2_groupings(project: str, run_id: Optional[str] = Query(None)):
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read summary: {exc}")
     groups, sample_count = _parse_step2_groupings(html_text)
+    # The summary's Groupings table carries RAW accessions (e.g. ERR1462610),
+    # but the tree leaves the user sees are lineage-labeled (e.g. Caprae_ERR1462610)
+    # via the vcf_refs label map. So a search for "Caprae" found nothing. Append
+    # each sample's friendly label (and the "Label_accession" form) to the
+    # group's member list as extra SEARCH TOKENS so the search matches what's on
+    # the tree. (These lists are used only by the group-search box.)
+    label_map = _load_vcf_label_map(cfg, "short")
+    if label_map:
+        for members in groups.values():
+            tokens: List[str] = []
+            for s in members:
+                for ident, friendly in label_map.items():
+                    if ident and friendly and ident in s:
+                        tokens.append(friendly)
+                        tokens.append(f"{friendly}_{s}")
+            for t in tokens:
+                if t not in members:
+                    members.append(t)
     return {"groups": groups, "summary_html": summary.name, "sample_count": sample_count}
 
 

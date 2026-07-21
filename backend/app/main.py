@@ -2831,11 +2831,19 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         chosen_vcf = (patched_vcf or source_vcf).resolve()
         target = vcfs_dir / _target_name_for_vcf(source_vcf, chosen_vcf)
 
-        if target.exists():
+        if target.exists() or target.is_symlink():
+            # Already in the database. If it's a legacy (or broken) symlink,
+            # replace it with a durable real copy so the cumulative collection
+            # is self-contained and survives a step1 cleanup; a real file is
+            # left untouched (accumulate, never clobber).
+            if target.is_symlink():
+                target.unlink()
+                shutil.copy2(chosen_vcf, target)
             already_present.append(sample)
             continue
 
-        target.symlink_to(chosen_vcf)
+        # Copy (don't symlink) so vcf_database is a standalone, permanent store.
+        shutil.copy2(chosen_vcf, target)
         if sample in force_set and not passed:
             force_added.append(sample)
         else:
@@ -2896,9 +2904,16 @@ def step2_setup(project: str):
         target = step2_dir / target_name
         if patched_vcf:
             edited_samples.append(sample)
-        if target.exists():
+        if target.exists() or target.is_symlink():
+            # Upgrade a legacy (or broken) symlink entry to a durable real copy;
+            # leave an existing real file in place (accumulate, never clobber).
+            if target.is_symlink():
+                target.unlink()
+                shutil.copy2(chosen_vcf, target)
+                count += 1
             continue
-        target.symlink_to(chosen_vcf)
+        # Copy (don't symlink) so vcf_database is a standalone, permanent store.
+        shutil.copy2(chosen_vcf, target)
         count += 1
 
     # Rebuild the manifest from the FINAL database contents so preserved /
@@ -3053,6 +3068,33 @@ def step2_run(project: str, payload: Step2Request):
     run_dir = step2_dir / run_ts
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Copy the VCFs out of the persistent database into this dated run folder and
+    # run vsnp3 against the COPIES, never the database itself. vsnp3_step2.py
+    # deletes every VCF out of its -wd after ingesting them (they survive only
+    # inside the vcf_starting_files zip it writes). If -wd pointed at
+    # step2/vcf_database, each run would empty the cumulative collection. The DB
+    # is the ongoing store for the project; only the dated folder is disposable.
+    # copy2 follows symlinks, so the real VCF content (the DB entries are
+    # symlinks into step1) lands in the run folder as regular files.
+    copied_vcfs = 0
+    for src in sorted([*vcf_source_dir.glob("*.vcf"), *vcf_source_dir.glob("*.vcf.gz")]):
+        try:
+            shutil.copy2(src, run_dir / src.name)
+            copied_vcfs += 1
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to stage {src.name} into the run folder: {exc}",
+            )
+    if not copied_vcfs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No VCFs in step2/vcf_database to compare. Run Step 1 and collect "
+                "VCFs (or import VCFs) before starting Step 2."
+            ),
+        )
+
     # Effective removal set = Step 1 QC exclusions (remove_from_analysis.xlsx)
     # ∪ Step 2 build-list exclusions (.step2_build_excluded.json) ∪ the
     # authoritative set the UI sends in this request. The payload set is what
@@ -3117,7 +3159,10 @@ def step2_run(project: str, payload: Step2Request):
     if payload.density_window is not None:
         step2_flags.append(f"--density_window {payload.density_window}")
     flags_str = " ".join(step2_flags)
-    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(vcf_source_dir))} {flags_str} -t {payload.reference}{remove_arg}"
+    # -wd is the dated run folder holding the staged COPIES (see the copy loop
+    # above), not step2/vcf_database — vsnp3 removes VCFs from its -wd, so the
+    # cumulative database must never be handed to it directly.
+    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(run_dir))} {flags_str} -t {payload.reference}{remove_arg}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:

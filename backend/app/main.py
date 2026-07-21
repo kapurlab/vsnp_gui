@@ -2694,9 +2694,17 @@ def _step1_dispatch(
     )
     (step1_dir / ".step1_job_id").write_text(job_id, encoding="utf-8")
     # T-46 Phase 1: surface samples auto-excluded from the dispatch so the
-    # user can see what didn't run and why. The frontend renders this in
-    # the Step 1 status panel.
-    return {"job_id": job_id, "skipped_samples": skipped_samples}
+    # user can see what didn't run and why — but only the NOTEWORTHY ones.
+    # "Already completed" skips are expected on any re-run (that's the whole
+    # point of skipping finished work), so listing them just spams the dispatch
+    # popup with hundreds of lines; drop them. Junk-size / broken-link /
+    # errored / no-fastq skips remain — those are the "why didn't my sample
+    # run?" cases the popup exists for.
+    noteworthy_skips = [
+        s for s in skipped_samples
+        if not str(s.get("reason", "")).startswith("already completed")
+    ]
+    return {"job_id": job_id, "skipped_samples": noteworthy_skips}
 
 
 @app.get("/api/projects/{project}/step1/status")

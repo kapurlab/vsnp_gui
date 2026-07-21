@@ -76,6 +76,8 @@ export default function App() {
   const [step1LogText, setStep1LogText] = useState("");
   const [step1LogLoading, setStep1LogLoading] = useState(false);
   const [step1FilesCache, setStep1FilesCache] = useState({});
+  // Quarantine: samples removed from Step 1, held recoverably (restore or delete).
+  const [quarantine, setQuarantine] = useState([]);
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
   const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   // Run Kraken ID Parse on a single sample, launched from Step 1. mode is
@@ -985,6 +987,7 @@ export default function App() {
     setExcluded({});
     loadQC();
     loadStep1Status();
+    loadQuarantine();
     setStep2Runs([]);
     setStep2SelectedRun(null);
     // Reset the run/stop UI, then ask the server whether a Step 2 job is still
@@ -2470,9 +2473,10 @@ export default function App() {
   async function removeStep1Sample(sample) {
     if (!selectedProject || !sample) return;
     const ok = window.confirm(
-      `Remove "${sample}" from this project?\n\n` +
-      "This permanently deletes its Step 1 folder AND its downloaded reads, so Setup " +
-      "won't re-add it. Samples already collected into vcf_database are not affected."
+      `Move "${sample}" to Quarantine?\n\n` +
+      "Its reads move out of download/ (so Setup won't re-add it) into Quarantine, " +
+      "where you can Restore or Delete them later — see the Quarantine panel under " +
+      "Inputs. Nothing is permanently deleted. Samples already in vcf_database are unaffected."
     );
     if (!ok) return;
     try {
@@ -2490,6 +2494,67 @@ export default function App() {
       return;
     }
     await loadStep1Status();
+    await loadQuarantine();
+  }
+
+  async function loadQuarantine() {
+    if (!selectedProject) { setQuarantine([]); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/quarantine`);
+      if (!res.ok) { setQuarantine([]); return; }
+      const data = await res.json();
+      setQuarantine(data.quarantine || []);
+    } catch {
+      setQuarantine([]);
+    }
+  }
+
+  async function restoreQuarantine(sample) {
+    if (!selectedProject || !sample) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${selectedProject}/quarantine/${encodeURIComponent(sample)}/restore`,
+        { method: "POST" }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(`Could not restore ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        return;
+      }
+      if ((data.skipped || []).length) {
+        window.alert(`Restored ${sample}, but skipped (already in download/): ${data.skipped.join(", ")}`);
+      }
+    } catch (e) {
+      window.alert(`Could not restore ${sample}: ${e.message || "network error"}`);
+      return;
+    }
+    // Reads are back in download/; a Setup will re-create the Step 1 sample.
+    await loadQuarantine();
+    await loadAll();
+  }
+
+  async function deleteQuarantine(sample) {
+    if (!selectedProject || !sample) return;
+    const ok = window.confirm(
+      `Permanently delete "${sample}" from Quarantine?\n\n` +
+      "This erases its held reads for good — it cannot be restored afterward."
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${selectedProject}/quarantine/${encodeURIComponent(sample)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        window.alert(`Could not delete ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        return;
+      }
+    } catch (e) {
+      window.alert(`Could not delete ${sample}: ${e.message || "network error"}`);
+      return;
+    }
+    await loadQuarantine();
   }
 
   async function step2Setup() {
@@ -3988,6 +4053,34 @@ export default function App() {
                     <span className="muted"> — sample/study accessions you submitted → run accessions actually downloaded.</span>
                   </div>
                 ) : null}
+                <div className="quarantine-panel" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>
+                  <h3 style={{ marginBottom: "4px" }}>
+                    Quarantine <span className="muted" style={{ fontSize: "12px", fontWeight: "normal" }}>({quarantine.length})</span>
+                  </h3>
+                  <div className="muted" style={{ fontSize: "11px", marginBottom: "8px" }}>
+                    Samples removed from Step 1 land here — nothing is deleted until you say so.
+                    Restore puts the reads back in download/ (then Setup re-adds it); Delete erases them for good.
+                  </div>
+                  {quarantine.length ? (
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {quarantine.map((q) => (
+                        <li key={q.sample} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 8px" }}>
+                          <span style={{ flex: "1 1 auto", minWidth: 0 }}>
+                            <span style={{ fontWeight: 600, wordBreak: "break-all" }}>{q.sample}</span>
+                            <span className="muted" style={{ display: "block", fontSize: "10.5px" }}>
+                              {q.size_bytes ? `${(q.size_bytes / 1048576).toFixed(1)} MB` : "no reads"}
+                              {q.removed_at ? ` • removed ${q.removed_at.replace("T", " ").replace("Z", " UTC")}` : ""}
+                            </span>
+                          </span>
+                          <button className="ghost small" disabled={!q.restorable} title="Move the reads back to download/ so the next Setup re-creates this Step 1 sample" onClick={() => restoreQuarantine(q.sample)}>Restore</button>
+                          <button className="ghost small danger-text" title="Permanently delete the held reads — cannot be undone" onClick={() => deleteQuarantine(q.sample)}>Delete</button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="muted" style={{ fontSize: "11px" }}>No removed samples. Use “Remove” on a Step 1 sample to move it here.</div>
+                  )}
+                </div>
               </div>
             </div>
           </section>

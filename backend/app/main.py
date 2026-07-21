@@ -2817,65 +2817,177 @@ def step1_status(project: str):
     return {"job_status": job_status, "samples": statuses}
 
 
+def _safe_child(parent: Path, name: str) -> Path:
+    """Resolve `name` as a direct child of `parent`, rejecting separators /
+    traversal. Raises HTTPException(400) on anything suspicious."""
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid name")
+    child = (parent / name).resolve()
+    if child.parent != parent.resolve():
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return child
+
+
+def _step1_batch_running(step1_dir: Path) -> bool:
+    job_id_path = step1_dir / ".step1_job_id"
+    job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
+    job = job_manager.get_job(job_id) if job_id else None
+    if job and job.get("status") == "running":
+        return True
+    script_path = step1_dir / "run_step1.sh"
+    return script_path.exists() and _wrapper_process_alive(script_path)
+
+
 @app.delete("/api/projects/{project}/step1/samples/{sample}")
 def step1_remove_sample(project: str, sample: str):
-    """Remove one sample from the project's Step 1 area — permanently.
+    """Move one Step 1 sample to the project's Quarantine — recoverable, not a
+    hard delete.
 
-    Deletes step1/<sample>/ AND the sample's downloaded reads under download/
-    (found by resolving the fastq symlinks). The download must go too, otherwise
-    step1_setup rescans download/ and re-creates the sample on the next Setup.
-    Refuses while a batch is running for this project, so we don't yank a dir out
-    from under the live bash loop. Path-guarded to stay inside step1/."""
+    The sample's reads are moved out of download/ (and any real fastqs in the
+    step1 dir) into quarantine/<sample>/, so step1_setup no longer re-creates it
+    on the next Setup, but nothing irreplaceable is destroyed — from the
+    Quarantine panel the user can Restore (reads back to download/) or Delete
+    forever. The step1 output dir (regenerable by re-running) is discarded.
+    Refuses while a batch is running. Path-guarded to stay inside step1/."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    # Path safety: no separators / traversal; must resolve to a direct child.
-    if not sample or "/" in sample or "\\" in sample or sample in (".", ".."):
-        raise HTTPException(status_code=400, detail="Invalid sample name")
-    target = (step1_dir / sample).resolve()
-    if target.parent != step1_dir.resolve():
-        raise HTTPException(status_code=400, detail="Invalid sample path")
+    target = _safe_child(step1_dir, sample)
     if not target.is_dir():
         raise HTTPException(status_code=404, detail=f"Sample not found: {sample}")
-    # Don't remove mid-run.
-    job_id_path = step1_dir / ".step1_job_id"
-    job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
-    job = job_manager.get_job(job_id) if job_id else None
-    running = bool(job and job.get("status") == "running")
-    if not running:
-        script_path = step1_dir / "run_step1.sh"
-        running = script_path.exists() and _wrapper_process_alive(script_path)
-    if running:
+    if _step1_batch_running(step1_dir):
         raise HTTPException(status_code=409, detail="Step 1 is running — stop it before removing samples.")
-    # Also delete the sample's downloaded reads, otherwise step1_setup rescans
-    # download/ and re-creates the sample on the next Setup. We find them by
-    # resolving the fastq symlinks in the sample dir (the durable link back to
-    # download/), collected BEFORE rmtree destroys them. Only targets that live
-    # under this project's download/ are removed.
+
     download_dir = (project_dir / "download").resolve()
-    download_targets: List[Path] = []
+    quarantine_dir = project_dir / "quarantine" / sample
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect the read files to preserve: download/ targets (resolved from the
+    # step1 symlinks) plus any real fastqs living inside the step1 dir itself.
+    moved: List[str] = []
     for fq in list(target.glob("*.fastq.gz")) + list(target.glob("*.fastq")):
         try:
             real = fq.resolve()
         except OSError:
             continue
-        if real.is_file() and str(real).startswith(str(download_dir) + os.sep):
-            download_targets.append(real)
+        if not real.is_file():
+            continue
+        under_download = str(real).startswith(str(download_dir) + os.sep)
+        under_step1 = str(real).startswith(str(target) + os.sep)
+        if under_download or under_step1:
+            dest = quarantine_dir / real.name
+            try:
+                shutil.move(str(real), str(dest))
+                moved.append(real.name)
+            except OSError:
+                pass
+
+    size_bytes = 0
+    for m in moved:
+        size_bytes += _safe_stat_size(quarantine_dir / m) or 0
+    meta = {
+        "sample": sample,
+        "removed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "files": moved,
+        "size_bytes": size_bytes,
+        "reason": _step1_status_reason(
+            "error" if _step1_errored(target) else "not_started",
+            target,
+            int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES),
+        ),
+    }
+    (quarantine_dir / ".quarantine.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
     try:
         shutil.rmtree(target)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to remove sample: {exc}")
-    removed_downloads = 0
-    for d in download_targets:
+    _STEP1_STATUS_CACHE.pop(str(step1_dir / sample), None)
+    return {"quarantined": sample, "files": moved}
+
+
+@app.get("/api/projects/{project}/quarantine")
+def quarantine_list(project: str):
+    """List samples currently in the project's Quarantine (removed from Step 1,
+    recoverable). Each entry carries when/why it was removed and its read size."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    qroot = project_dir / "quarantine"
+    items: List[Dict[str, Any]] = []
+    if qroot.is_dir():
+        for d in sorted(qroot.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            meta: Dict[str, Any] = {}
+            mp = d / ".quarantine.json"
+            if mp.exists():
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            fastqs = list(d.glob("*.fastq.gz")) + list(d.glob("*.fastq"))
+            items.append({
+                "sample": d.name,
+                "removed_at": meta.get("removed_at", ""),
+                "reason": meta.get("reason", ""),
+                "files": [f.name for f in fastqs],
+                "size_bytes": meta.get("size_bytes") or sum(_safe_stat_size(f) or 0 for f in fastqs),
+                "restorable": bool(fastqs),
+            })
+    return {"quarantine": items}
+
+
+@app.post("/api/projects/{project}/quarantine/{sample}/restore")
+def quarantine_restore(project: str, sample: str):
+    """Restore a quarantined sample: move its reads back to download/ so the next
+    Setup re-creates it for Step 1. Skips a read whose name already exists in
+    download/ (won't clobber). Removes the quarantine entry when empty."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    qroot = project_dir / "quarantine"
+    qdir = _safe_child(qroot, sample)
+    if not qdir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Not in quarantine: {sample}")
+    download_dir = project_dir / "download"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    restored: List[str] = []
+    skipped: List[str] = []
+    for fq in list(qdir.glob("*.fastq.gz")) + list(qdir.glob("*.fastq")):
+        dest = download_dir / fq.name
+        if dest.exists():
+            skipped.append(fq.name)
+            continue
         try:
-            d.unlink()
-            removed_downloads += 1
+            shutil.move(str(fq), str(dest))
+            restored.append(fq.name)
+        except OSError:
+            skipped.append(fq.name)
+    # Only tear down the quarantine entry if nothing was left behind.
+    if not skipped:
+        try:
+            shutil.rmtree(qdir)
         except OSError:
             pass
-    _STEP1_STATUS_CACHE.pop(str(step1_dir / sample), None)
-    return {"removed": sample, "removed_downloads": removed_downloads}
+    return {"restored": restored, "skipped": skipped, "sample": sample}
+
+
+@app.delete("/api/projects/{project}/quarantine/{sample}")
+def quarantine_delete(project: str, sample: str):
+    """Permanently delete a quarantined sample (its held reads). The only place
+    a hard delete happens — Remove just quarantines."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    qroot = project_dir / "quarantine"
+    qdir = _safe_child(qroot, sample)
+    if not qdir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Not in quarantine: {sample}")
+    try:
+        shutil.rmtree(qdir)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {exc}")
+    return {"deleted": sample}
 
 
 @app.post("/api/projects/{project}/step1/stop")

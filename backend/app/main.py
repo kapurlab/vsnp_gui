@@ -940,6 +940,10 @@ class PosthocRunRequest(BaseModel):
     group: str
     tool: str
     scope: Optional[str] = "all"
+    # Which step2 run the group belongs to. Groups live under a timestamped run
+    # dir (step2/<run_id>/<group>); without this the group can't be located and
+    # the run 404s on the current layout. None → resolver picks current/latest.
+    run_id: Optional[str] = None
 
 
 class PosthocScanRequest(BaseModel):
@@ -3845,12 +3849,15 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
         raise HTTPException(status_code=400, detail=f"Missing dependencies: {', '.join(status['missing'])}")
     project_dir = Path(cfg["projects_root"]) / project
     step2_dir = project_dir / "step2"
-    group_dir = step2_dir / payload.group
+    # Groups live under a timestamped run dir (step2/<run_id>/<group>), so
+    # resolve the run the group belongs to instead of assuming step2/<group>.
+    output_dir = _resolve_step2_output_dir(step2_dir, payload.run_id)
+    group_dir = output_dir / payload.group
     if not group_dir.exists():
         raise HTTPException(status_code=404, detail=f"Group not found: {payload.group}")
     posthoc_dir = group_dir / "posthoc"
     posthoc_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = _posthoc_lock_path(step2_dir, payload.group, tool.tool_id)
+    lock_path = _posthoc_lock_path(group_dir, tool.tool_id)
     _posthoc_clear_stale_lock(lock_path)
     if lock_path.exists():
         raise HTTPException(status_code=409, detail="Posthoc job already running for this group")
@@ -3877,17 +3884,18 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
 
 
 @app.get("/api/projects/{project}/posthoc/status")
-def posthoc_status(project: str, group: str, tool: str = "snp_analysis"):
+def posthoc_status(project: str, group: str, tool: str = "snp_analysis", run_id: Optional[str] = Query(None)):
     cfg = load_config()
     tool_obj = posthoc_get_tool(tool)
     if not tool_obj:
         raise HTTPException(status_code=404, detail="Unknown posthoc tool")
     step2_dir = Path(cfg["projects_root"]) / project / "step2"
-    group_dir = step2_dir / group
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
+    group_dir = output_dir / group
     if not group_dir.exists():
         raise HTTPException(status_code=404, detail=f"Group not found: {group}")
     posthoc_dir = group_dir / "posthoc"
-    lock_path = _posthoc_lock_path(step2_dir, group, tool_obj.tool_id)
+    lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
     _posthoc_clear_stale_lock(lock_path)
     running = lock_path.exists()
     outputs = []
@@ -6058,8 +6066,8 @@ if _frontend_dist.exists():
                 return _FileResponse(_frontend_dist / fname)
 
 
-def _posthoc_lock_path(step2_dir: Path, group: str, tool: str) -> Path:
-    return step2_dir / group / "posthoc" / f".{tool}.lock"
+def _posthoc_lock_path(group_dir: Path, tool: str) -> Path:
+    return group_dir / "posthoc" / f".{tool}.lock"
 
 
 def _posthoc_clear_stale_lock(lock_path: Path) -> None:

@@ -1627,14 +1627,17 @@ export default function App() {
     }
   }
 
-  async function loadPosthocStatuses(groups) {
+  async function loadPosthocStatuses(groups, { merge = false } = {}) {
     if (!selectedProject) return;
+    // Groups belong to a specific step2 run; pass run_id so the backend looks
+    // under step2/<run_id>/<group> (not step2/<group>, which no longer exists).
+    const runParam = step2SelectedRun ? `&run_id=${encodeURIComponent(step2SelectedRun)}` : "";
     const statusMap = {};
     await Promise.all(
       groups.map(async (group) => {
         try {
           const res = await fetch(
-            `${API_BASE}/api/projects/${selectedProject}/posthoc/status?group=${encodeURIComponent(group.name)}&tool=snp_analysis`
+            `${API_BASE}/api/projects/${selectedProject}/posthoc/status?group=${encodeURIComponent(group.name)}&tool=snp_analysis${runParam}`
           );
           if (!res.ok) return;
           const data = await res.json();
@@ -1644,7 +1647,9 @@ export default function App() {
         }
       })
     );
-    setPosthocStatus(statusMap);
+    // merge: keep other groups' statuses when refreshing just one (post-run),
+    // so their "posthoc ready" chips don't vanish. Full loads replace.
+    setPosthocStatus((prev) => (merge ? { ...prev, ...statusMap } : statusMap));
   }
 
   async function runPosthoc(groupName) {
@@ -1654,7 +1659,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/posthoc/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group: groupName, tool: "snp_analysis", scope })
+      body: JSON.stringify({ group: groupName, tool: "snp_analysis", scope, run_id: step2SelectedRun || null })
     });
     if (!res.ok) {
       const msg = await res.json().catch(() => ({}));
@@ -1662,7 +1667,7 @@ export default function App() {
       window.alert(msg.detail || "Failed to start SNP analysis");
       return;
     }
-    loadPosthocStatuses([{ name: groupName }]);
+    loadPosthocStatuses([{ name: groupName }], { merge: true });
   }
 
   function downloadOutput(path, downloadName) {

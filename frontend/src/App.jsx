@@ -3785,7 +3785,7 @@ export default function App() {
             <h2>Inputs</h2>
             <div className="input-columns">
               <div className="input-column">
-                <h3>Bring Your Own FASTQ</h3>
+                <h3>Add local FASTQ</h3>
                 {window?.vsnp?.selectPath ? (
                   <button
                     onClick={async () => {
@@ -3869,7 +3869,7 @@ export default function App() {
                 )}
                 {localPath ? <div className="note">Selected: {localPath}</div> : null}
                 <div className="block">
-                  <h3>Upload / Drag & Drop</h3>
+                  <div className="muted" style={{fontSize:"12px", margin:"4px 0 6px"}}>…or upload / drag & drop</div>
                   <div
                     className="dropzone"
                     onDragOver={(e) => e.preventDefault()}
@@ -3918,6 +3918,40 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                <h3>SRA Download</h3>
+                <textarea
+                  placeholder="SRR/SRX/SRS accessions (one per line)"
+                  value={sraText}
+                  onChange={(e) => setSraText(e.target.value)}
+                  rows={6}
+                />
+                <input
+                  placeholder="Optional subfolder (e.g. 2026-02-01_batch1)"
+                  value={sraFolder}
+                  onChange={(e) => setSraFolder(e.target.value)}
+                />
+                <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
+                {sraStatus ? (
+                  <div className={`note${sraStatus.toLowerCase().includes("fail") ? " error" : ""}`}>
+                    {sraStatus.includes("Downloading") ? (
+                      <span className="pulse-dot" />
+                    ) : null}
+                    {sraStatus}
+                  </div>
+                ) : null}
+                {inputs.files.some((f) => f.name === "sra_crosswalk.tsv") ? (
+                  <div className="note" style={{marginTop:"6px", fontSize:"12px"}}>
+                    <a
+                      href="#"
+                      onClick={(e) => { e.preventDefault(); window.open(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/sra-crosswalk`, "_blank", "noopener"); }}
+                    >
+                      View crosswalk
+                    </a>
+                    <span className="muted"> — sample/study accessions you submitted → run accessions actually downloaded.</span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="input-column">
                 {/* T-07-adjacent: file list in <project>/download/ so users can see what
                     they've uploaded (without going through OOD Files) and clean up
                     partial files left behind by a cancelled upload. */}
@@ -4008,40 +4042,6 @@ export default function App() {
                       </>
                       );
                     })() : null}
-                  </div>
-                ) : null}
-              </div>
-              <div className="input-column">
-                <h3>SRA Download</h3>
-                <textarea
-                  placeholder="SRR/SRX/SRS accessions (one per line)"
-                  value={sraText}
-                  onChange={(e) => setSraText(e.target.value)}
-                  rows={6}
-                />
-                <input
-                  placeholder="Optional subfolder (e.g. 2026-02-01_batch1)"
-                  value={sraFolder}
-                  onChange={(e) => setSraFolder(e.target.value)}
-                />
-                <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
-                {sraStatus ? (
-                  <div className={`note${sraStatus.toLowerCase().includes("fail") ? " error" : ""}`}>
-                    {sraStatus.includes("Downloading") ? (
-                      <span className="pulse-dot" />
-                    ) : null}
-                    {sraStatus}
-                  </div>
-                ) : null}
-                {inputs.files.some((f) => f.name === "sra_crosswalk.tsv") ? (
-                  <div className="note" style={{marginTop:"6px", fontSize:"12px"}}>
-                    <a
-                      href="#"
-                      onClick={(e) => { e.preventDefault(); window.open(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/sra-crosswalk`, "_blank", "noopener"); }}
-                    >
-                      View crosswalk
-                    </a>
-                    <span className="muted"> — sample/study accessions you submitted → run accessions actually downloaded.</span>
                   </div>
                 ) : null}
                 <div className="quarantine-panel" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>

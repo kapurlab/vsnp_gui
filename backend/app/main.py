@@ -4200,17 +4200,35 @@ def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]
     per-reference blocklist, never included in any analysis. Read-only here."""
     if not reference:
         return []
-    root = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
-    if not root:
-        return []
-    ref_dir = Path(root) / reference
-    if not ref_dir.is_dir():
-        return []
-    names: set = set()
-    for f in ref_dir.glob("*remove_from_analysis*.xlsx"):
-        if f.name.startswith("~$"):
+    # Search EVERY registered reference root, not just the single configured
+    # root: a reference can live in any of them (e.g. a shared /srv set the user
+    # registered while the GUI's primary root holds only supplemental refs). The
+    # configured root is included first; reference_roots() adds the rest from
+    # reference_options_paths.txt. De-duped by resolved path.
+    roots: List[Path] = []
+    seen_roots: set = set()
+    configured = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
+    candidates = ([Path(configured)] if configured else []) + list(
+        reference_roots(Path(str(cfg.get("vsnp3_path", "") or "")))
+    )
+    for r in candidates:
+        try:
+            key = str(r.resolve())
+        except OSError:
+            key = str(r)
+        if key in seen_roots:
             continue
-        names.update(_read_remove_xlsx_names(f))
+        seen_roots.add(key)
+        roots.append(r)
+    names: set = set()
+    for root in roots:
+        ref_dir = root / reference
+        if not ref_dir.is_dir():
+            continue
+        for f in ref_dir.glob("*remove_from_analysis*.xlsx"):
+            if f.name.startswith("~$"):
+                continue
+            names.update(_read_remove_xlsx_names(f))
     return sorted(names)
 
 

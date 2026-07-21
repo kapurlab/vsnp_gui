@@ -3976,10 +3976,27 @@ def step2_vcf_count(project: str):
     for vcf in vcfs:
         if _vcf_is_edited(vcf):
             edited_samples.add(_sample_from_vcf(vcf))
+    # Comparison breakdown, same rule as step2/setup: excluded = tier A (reference
+    # blocklist) ∪ tier B (Step 1 Results exclusions); those stay in the DB but
+    # are dropped from the Step 2 comparison at run time. comparison = total −
+    # excluded. Surfaced so the Build panel shows what will actually be compared,
+    # not just the raw stored count.
+    excluded_names = set(_read_step1_exclusions(project_dir / "step2")) | set(
+        _reference_blocklist_names(cfg, _project_reference(project_dir))
+    )
+    excluded = 0
+    for vcf in vcfs:
+        stem = vcf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
+        if stem in excluded_names:
+            excluded += 1
+    total = len(vcfs)
     return {
-        "count": len(vcfs),
+        "count": total,
         "path": str(vcf_source_dir),
-        "edited_count": len(edited_samples)
+        "edited_count": len(edited_samples),
+        "total": total,
+        "excluded": excluded,
+        "comparison": total - excluded,
     }
 
 

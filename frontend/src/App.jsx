@@ -166,6 +166,9 @@ export default function App() {
   const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
+  // Comparison breakdown of the Step 2 set (total = comparison + excluded).
+  const [step2ComparisonCount, setStep2ComparisonCount] = useState(0);
+  const [step2ExcludedCount, setStep2ExcludedCount] = useState(0);
   const [step1AutoRefreshPending, setStep1AutoRefreshPending] = useState(false);
   const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
@@ -173,7 +176,6 @@ export default function App() {
   const [importAction, setImportAction] = useState("copy");
   const [importConflict, setImportConflict] = useState("skip");
   const [importStatus, setImportStatus] = useState("");
-  const [importIncludeStep1, setImportIncludeStep1] = useState(true);
   const [importAllowMismatch, setImportAllowMismatch] = useState(false);
   const [importMismatchReport, setImportMismatchReport] = useState("");
   const [importPrefixDupes, setImportPrefixDupes] = useState(true);
@@ -1492,8 +1494,14 @@ export default function App() {
       const countData = await countRes.json();
       setStep2VcfCount(countData.count || 0);
       setStep2EditedCount(countData.edited_count || 0);
+      setStep2ComparisonCount(
+        typeof countData.comparison === "number" ? countData.comparison : (countData.count || 0)
+      );
+      setStep2ExcludedCount(countData.excluded || 0);
     } else {
       setStep2EditedCount(0);
+      setStep2ComparisonCount(0);
+      setStep2ExcludedCount(0);
     }
     if (groups.length) {
       loadPosthocStatuses(groups);
@@ -2283,8 +2291,10 @@ export default function App() {
     // and get re-included in the next build (manifesting as a
     // mysterious "Mismatched 57" the user didn't ask for).
     const sources = allPaths;
-    if (!sources.length && !importIncludeStep1) {
-      setImportStatus("Provide at least one source path or include Step 1.");
+    if (!sources.length) {
+      // Step 1 samples come in via the Collect button, not Build — so Build
+      // needs at least one reference / external source to do anything.
+      setImportStatus("Add at least one reference / external VCF source. (Step 1 samples are added via the Collect button in the Step 1 pane.)");
       return;
     }
     if (!importReference) {
@@ -2294,7 +2304,7 @@ export default function App() {
     setImportStatus("");
     const payload = {
       source_paths: sources,
-      include_step1: importIncludeStep1,
+      include_step1: false,
       reference: importReference,
       action: importAction,
       on_conflict: importConflict,
@@ -5604,21 +5614,11 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={importIncludeStep1}
-                    onChange={(e) => setImportIncludeStep1(e.target.checked)}
-                  />
-                  Include current project Step 1 ZC VCFs
-                </label>
-                {vcfsIncludeFolder && importIncludeStep1 ? (
-                  <div className="note warning" style={{fontSize:"0.8em"}}>
-                    Heads up: the "{vcfsFolderName || "vcf_database"}" folder above already holds this project's Step 1 VCFs,
-                    so it overlaps with "Include current project Step 1 ZC VCFs". Duplicates are removed automatically, but you
-                    normally only need one of the two.
-                  </div>
-                ) : null}
+                <div className="note" style={{fontSize:"0.8em"}}>
+                  This project's Step 1 samples go into <strong>{vcfsFolderName || "vcf_database"}</strong> via
+                  the <strong>Collect</strong> button in the Step 1 pane (which respects your Step 1 exclusions).
+                  Build / update set adds reference / external VCFs on top of that.
+                </div>
                 <label className="checkbox">
                   <input
                     type="checkbox"
@@ -5675,7 +5675,12 @@ export default function App() {
                   </button>
                 </div>
                 <div className="note">
-                  VCFs in this project's Step 2 set: {step2VcfCount} <span className="muted">(unique)</span>
+                  Step 2 comparison set: <strong>{step2ComparisonCount}</strong> VCF{step2ComparisonCount === 1 ? "" : "s"}
+                  {step2ExcludedCount > 0 ? (
+                    <span className="muted"> ({step2VcfCount} in {vcfsFolderName || "vcf_database"} − {step2ExcludedCount} excluded in Step 1)</span>
+                  ) : (
+                    <span className="muted"> ({step2VcfCount} in {vcfsFolderName || "vcf_database"}, none excluded)</span>
+                  )}
                   {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
                 </div>
                 {importMismatchReport ? (

@@ -647,6 +647,29 @@ label {
   line-height: 1.4;
 }
 
+/* Step 1 sample-row actions: keep View log + Remove together in the row's
+   third grid cell (Remove was wrapping onto its own line). */
+.sample-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.danger-text {
+  color: var(--danger, #b91c1c);
+}
+
+/* Log viewer shown as a modal (not the old inline block that rendered below the
+   fold). Drop the inline block's dashed top rule; let the log fill the modal. */
+.modal.log-viewer {
+  margin-top: 0;
+  border-top: 0;
+}
+.modal.log-viewer pre {
+  max-height: 60vh;
+  margin: 0;
+}
+
 .note.error {
   color: var(--danger);
 }

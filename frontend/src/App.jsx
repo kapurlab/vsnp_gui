@@ -2471,9 +2471,8 @@ export default function App() {
     if (!selectedProject || !sample) return;
     const ok = window.confirm(
       `Remove "${sample}" from this project?\n\n` +
-      "This deletes its Step 1 folder (any outputs + the project's link to the reads). " +
-      "The raw download is kept, so you can re-add the sample later. Samples already " +
-      "collected into vcf_database are not affected."
+      "This permanently deletes its Step 1 folder AND its downloaded reads, so Setup " +
+      "won't re-add it. Samples already collected into vcf_database are not affected."
     );
     if (!ok) return;
     try {
@@ -4554,17 +4553,19 @@ export default function App() {
                           </span>
                         ) : null}
                       </span>
-                      <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
-                        View log
-                      </button>
-                      <button
-                        className="ghost"
-                        title="Remove this sample from the project (deletes its Step 1 folder; the raw download is kept). You can re-add it later."
-                        disabled={s.status === "running"}
-                        onClick={() => removeStep1Sample(s.sample)}
-                      >
-                        Remove
-                      </button>
+                      <div className="sample-actions">
+                        <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
+                          View log
+                        </button>
+                        <button
+                          className="ghost small danger-text"
+                          title="Permanently remove this sample from the project (deletes its Step 1 folder + downloaded reads, so Setup won't re-add it)."
+                          disabled={s.status === "running"}
+                          onClick={() => removeStep1Sample(s.sample)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -4642,11 +4643,14 @@ export default function App() {
                 </div>
               ) : null}
               {step1LogSample ? (
-                <div className="log-viewer">
-                  <div className="log-title">
-                    Log: {step1LogSample}
+                <div className="modal-backdrop" onClick={() => setStep1LogSample("")}>
+                  <div className="modal modal-wide log-viewer" onClick={(e) => e.stopPropagation()}>
+                    <div className="log-title" style={{ fontWeight: 700 }}>Log: {step1LogSample}</div>
+                    <pre>{step1LogLoading ? "Loading..." : (step1LogText || "No log content")}</pre>
+                    <div className="modal-actions">
+                      <button onClick={() => setStep1LogSample("")}>Close</button>
+                    </div>
                   </div>
-                  <pre>{step1LogLoading ? "Loading..." : (step1LogText || "No log content")}</pre>
                 </div>
               ) : null}
             </div>

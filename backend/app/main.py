@@ -2819,11 +2819,11 @@ def step1_status(project: str):
 
 @app.delete("/api/projects/{project}/step1/samples/{sample}")
 def step1_remove_sample(project: str, sample: str):
-    """Remove one sample from the project's Step 1 area.
+    """Remove one sample from the project's Step 1 area — permanently.
 
-    Deletes step1/<sample>/ (which for SRA-downloaded samples is just a dir with
-    a symlink to the raw read in download/ plus any partial outputs). The raw
-    download is left in place — only the project's copy/link and its outputs go.
+    Deletes step1/<sample>/ AND the sample's downloaded reads under download/
+    (found by resolving the fastq symlinks). The download must go too, otherwise
+    step1_setup rescans download/ and re-creates the sample on the next Setup.
     Refuses while a batch is running for this project, so we don't yank a dir out
     from under the live bash loop. Path-guarded to stay inside step1/."""
     cfg = load_config()
@@ -2849,12 +2849,33 @@ def step1_remove_sample(project: str, sample: str):
         running = script_path.exists() and _wrapper_process_alive(script_path)
     if running:
         raise HTTPException(status_code=409, detail="Step 1 is running — stop it before removing samples.")
+    # Also delete the sample's downloaded reads, otherwise step1_setup rescans
+    # download/ and re-creates the sample on the next Setup. We find them by
+    # resolving the fastq symlinks in the sample dir (the durable link back to
+    # download/), collected BEFORE rmtree destroys them. Only targets that live
+    # under this project's download/ are removed.
+    download_dir = (project_dir / "download").resolve()
+    download_targets: List[Path] = []
+    for fq in list(target.glob("*.fastq.gz")) + list(target.glob("*.fastq")):
+        try:
+            real = fq.resolve()
+        except OSError:
+            continue
+        if real.is_file() and str(real).startswith(str(download_dir) + os.sep):
+            download_targets.append(real)
     try:
         shutil.rmtree(target)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to remove sample: {exc}")
+    removed_downloads = 0
+    for d in download_targets:
+        try:
+            d.unlink()
+            removed_downloads += 1
+        except OSError:
+            pass
     _STEP1_STATUS_CACHE.pop(str(step1_dir / sample), None)
-    return {"removed": sample}
+    return {"removed": sample, "removed_downloads": removed_downloads}
 
 
 @app.post("/api/projects/{project}/step1/stop")

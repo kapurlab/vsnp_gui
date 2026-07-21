@@ -155,7 +155,11 @@ export default function App() {
   const [s2QualThreshold, setS2QualThreshold] = useState(150);
   const [s2NThreshold, setS2NThreshold] = useState(50);
   const [s2MqThreshold, setS2MqThreshold] = useState(56);
-  const [s2AllVcf, setS2AllVcf] = useState(true);
+  // "All VCF table (-a)": off by default, but auto-checked when the build is
+  // small (<=100 VCFs). s2AllVcfTouched tracks a manual toggle so the auto rule
+  // stops overriding the user's explicit choice.
+  const [s2AllVcf, setS2AllVcf] = useState(false);
+  const s2AllVcfTouched = useRef(false);
   const [s2FindNewFilters, setS2FindNewFilters] = useState(false);
   const [s2HashGroups, setS2HashGroups] = useState(false);
   const [s2ShowGroups, setS2ShowGroups] = useState(false);
@@ -459,6 +463,14 @@ export default function App() {
     [inputs, step1Status, quarantine]
   );
   const shownDownloadBytes = shownDownloadGroups.reduce((n, g) => n + (g.totalSize || 0), 0);
+
+  // Auto-default the "All VCF table (-a)" option from the build size: on for a
+  // small set (<=100 VCFs in the comparison), off for a large one (the -a table
+  // gets unwieldy / slow at scale). Only until the user toggles it themselves.
+  useEffect(() => {
+    if (s2AllVcfTouched.current) return;
+    setS2AllVcf(step2ComparisonCount > 0 && step2ComparisonCount <= 100);
+  }, [step2ComparisonCount]);
 
   // The post-hoc table can mix samples from several projects; make sure each
   // referenced project's Kraken dir list is cached so its rows can show a
@@ -1004,6 +1016,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
     setExcluded({});
+    s2AllVcfTouched.current = false;  // re-apply the size-based -a default per project
     loadQC();
     loadStep1Status();
     loadQuarantine();
@@ -5976,7 +5989,7 @@ export default function App() {
               <div className="step2-options-grid">
                 <div className="step2-options-col">
                   <label className="checkbox">
-                    <input type="checkbox" checked={s2AllVcf} onChange={(e) => setS2AllVcf(e.target.checked)} />
+                    <input type="checkbox" checked={s2AllVcf} onChange={(e) => { s2AllVcfTouched.current = true; setS2AllVcf(e.target.checked); }} />
                     All VCF table (-a)
                   </label>
                   <label className="checkbox">

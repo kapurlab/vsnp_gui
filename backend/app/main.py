@@ -407,6 +407,60 @@ def _step1_is_complete(sample_dir: Path) -> bool:
     return bool(vcf and nodup)
 
 
+def _step1_errored(sample_dir: Path) -> bool:
+    """True if the sample has a terminal non-zero exit_code sentinel — it ran and
+    failed. Used to skip auto-retrying it on a plain Run (Force re-run overrides)."""
+    ec = sample_dir / ".provenance" / "exit_code"
+    if not ec.exists():
+        return False
+    try:
+        return ec.read_text(encoding="utf-8").strip() not in ("", "0")
+    except OSError:
+        return False
+
+
+def _step1_input_issue(sample_dir: Path, min_bytes: int) -> Optional[str]:
+    """Return a user-readable reason the sample's INPUT can't be dispatched
+    (no fastq / broken link / too small), or None if the input is usable.
+    Shared by the dispatcher (to skip) and the status endpoint (to explain a
+    sample that's stuck at 'not started')."""
+    r1_matches = sorted(sample_dir.glob("*_R1*.fastq.gz")) or sorted(sample_dir.glob("*_1.fastq.gz"))
+    r2_matches = sorted(sample_dir.glob("*_R2*.fastq.gz")) or sorted(sample_dir.glob("*_2.fastq.gz"))
+    all_fq = sorted(sample_dir.glob("*.fastq.gz"))
+    if r1_matches:
+        r1 = r1_matches[0]
+        r2 = r2_matches[0] if r2_matches else None
+    elif all_fq:
+        r1 = all_fq[0]
+        r2 = None
+    else:
+        return "no fastq files in the sample directory"
+    r1_size = _safe_stat_size(r1)
+    r2_size = _safe_stat_size(r2) if r2 is not None else None
+    if r1_size is None or (r2 is not None and r2_size is None):
+        missing = [m.name for m in (r1, r2) if m is not None and _safe_stat_size(m) is None]
+        return f"fastq missing or broken link ({', '.join(missing)}); its source was removed — re-import the reads"
+    if r1_size < min_bytes or (r2_size is not None and r2_size < min_bytes):
+        layout = "paired" if r2 is not None else "single-end"
+        detail = f"R1={r1_size}" + (f", R2={r2_size}" if r2_size is not None else "")
+        return f"input too small ({detail} bytes, under the {min_bytes}-byte floor) — likely a truncated/failed download or SRA submission error"
+    return None
+
+
+def _step1_status_reason(status: str, sample_dir: Path, min_bytes: int) -> str:
+    """Human-readable explanation for a non-complete sample's state, shown inline
+    in the Samples list so 'Not started'/'Error' aren't opaque. Empty string when
+    there's nothing to explain (e.g. a genuinely queued sample, or complete)."""
+    if status == "error":
+        return "Failed during Step 1 — open View log for the error."
+    if status == "unknown":
+        return "Interrupted before finishing (batch killed / OOM / restart) — re-run to retry."
+    if status == "not_started":
+        # If the input is unusable it will never run until fixed; say why.
+        return _step1_input_issue(sample_dir, min_bytes) or ""
+    return ""
+
+
 def _step1_dispatch_plan(
     step1_dir: Path, min_bytes: int = _T46_JUNK_FASTQ_BYTES, force_rerun: bool = False
 ) -> tuple[List[str], List[Dict[str, Any]]]:
@@ -447,48 +501,19 @@ def _step1_dispatch_plan(
                 "size_bytes": 0,
             })
             continue
-        r1_matches = sorted(p.glob("*_R1*.fastq.gz")) or sorted(p.glob("*_1.fastq.gz"))
-        r2_matches = sorted(p.glob("*_R2*.fastq.gz")) or sorted(p.glob("*_2.fastq.gz"))
-        all_fq = sorted(p.glob("*.fastq.gz"))
-        # Resolve the effective R1/R2. Prefer an _R1/_1-tagged pair; if there's
-        # no read-tag naming, fall back to a bare single fastq (single-end or
-        # long-read). r2 stays None for single-end — vsnp3 aligns from -r1 alone.
-        if r1_matches:
-            r1 = r1_matches[0]
-            r2 = r2_matches[0] if r2_matches else None
-        elif all_fq:
-            r1 = all_fq[0]
-            r2 = None
-        else:
+        if not force_rerun and _step1_errored(p):
+            # Ran and failed before. Don't silently retry on every plain Run
+            # (a sample that reliably fails — e.g. bcftools on some ONT data —
+            # would re-hang the batch each time). Force re-run overrides.
             skipped.append({
                 "sample": p.name,
-                "reason": "no fastq files in sample directory",
+                "reason": "errored in a previous run — use Force re-run to retry",
                 "size_bytes": 0,
             })
             continue
-        r1_size = _safe_stat_size(r1)
-        r2_size = _safe_stat_size(r2) if r2 is not None else None
-        if r1_size is None or (r2 is not None and r2_size is None):
-            # A read is a broken symlink (the download source was removed).
-            # Skip rather than crash the whole batch.
-            missing = [
-                m.name for m in (r1, r2)
-                if m is not None and _safe_stat_size(m) is None
-            ]
-            skipped.append({
-                "sample": p.name,
-                "reason": f"fastq missing or broken link ({', '.join(missing)}); its source was removed — re-import the reads",
-                "size_bytes": 0,
-            })
-            continue
-        if r1_size < min_bytes or (r2_size is not None and r2_size < min_bytes):
-            layout = "paired" if r2 is not None else "single-end"
-            detail = f"R1={r1_size}" + (f", R2={r2_size}" if r2_size is not None else "")
-            skipped.append({
-                "sample": p.name,
-                "reason": f"suspiciously small {layout} fastqs ({detail} bytes); likely SRA submission error / junk",
-                "size_bytes": r1_size + (r2_size or 0),
-            })
+        issue = _step1_input_issue(p, min_bytes)
+        if issue:
+            skipped.append({"sample": p.name, "reason": issue, "size_bytes": 0})
             continue
         samples.append(p.name)
     return samples, skipped
@@ -2682,6 +2707,7 @@ def step1_status(project: str):
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
 
+    min_bytes = int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES)
     job_id_path = step1_dir / ".step1_job_id"
     job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
     job = job_manager.get_job(job_id) if job_id else None
@@ -2730,6 +2756,7 @@ def step1_status(project: str):
             if cached and cached[0] == ec_mtime:
                 entry = dict(cached[1])
                 entry["in_vcfs_folder"] = sample in in_vcfs_folder
+                entry["reason"] = _step1_status_reason(entry.get("status", ""), sample_dir, min_bytes)
                 statuses.append(entry)
                 continue
 
@@ -2776,16 +2803,58 @@ def step1_status(project: str):
             "has_outputs": bool(vcf and nodup),
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
+            "reason": _step1_status_reason(status, sample_dir, min_bytes),
         }
         # Cache terminal samples (exit_code written) so later polls take the
-        # fast path above. Store everything except in_vcfs_folder, which is
-        # re-layered per poll from the current VCF collection.
+        # fast path above. Store everything except in_vcfs_folder and reason,
+        # which are re-layered per poll (the former tracks the VCF collection;
+        # the latter is cheap and kept fresh alongside it).
         if ec_mtime is not None and status in ("complete", "error"):
             _STEP1_STATUS_CACHE[cache_key] = (
-                ec_mtime, {k: v for k, v in entry.items() if k != "in_vcfs_folder"}
+                ec_mtime, {k: v for k, v in entry.items() if k not in ("in_vcfs_folder", "reason")}
             )
         statuses.append(entry)
     return {"job_status": job_status, "samples": statuses}
+
+
+@app.delete("/api/projects/{project}/step1/samples/{sample}")
+def step1_remove_sample(project: str, sample: str):
+    """Remove one sample from the project's Step 1 area.
+
+    Deletes step1/<sample>/ (which for SRA-downloaded samples is just a dir with
+    a symlink to the raw read in download/ plus any partial outputs). The raw
+    download is left in place — only the project's copy/link and its outputs go.
+    Refuses while a batch is running for this project, so we don't yank a dir out
+    from under the live bash loop. Path-guarded to stay inside step1/."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step1_dir = project_dir / "step1"
+    if not step1_dir.exists():
+        raise HTTPException(status_code=404, detail="Step1 directory not found")
+    # Path safety: no separators / traversal; must resolve to a direct child.
+    if not sample or "/" in sample or "\\" in sample or sample in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid sample name")
+    target = (step1_dir / sample).resolve()
+    if target.parent != step1_dir.resolve():
+        raise HTTPException(status_code=400, detail="Invalid sample path")
+    if not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"Sample not found: {sample}")
+    # Don't remove mid-run.
+    job_id_path = step1_dir / ".step1_job_id"
+    job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
+    job = job_manager.get_job(job_id) if job_id else None
+    running = bool(job and job.get("status") == "running")
+    if not running:
+        script_path = step1_dir / "run_step1.sh"
+        running = script_path.exists() and _wrapper_process_alive(script_path)
+    if running:
+        raise HTTPException(status_code=409, detail="Step 1 is running — stop it before removing samples.")
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to remove sample: {exc}")
+    _STEP1_STATUS_CACHE.pop(str(step1_dir / sample), None)
+    return {"removed": sample}
 
 
 @app.post("/api/projects/{project}/step1/stop")

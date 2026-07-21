@@ -2467,6 +2467,32 @@ export default function App() {
     }
   }
 
+  async function removeStep1Sample(sample) {
+    if (!selectedProject || !sample) return;
+    const ok = window.confirm(
+      `Remove "${sample}" from this project?\n\n` +
+      "This deletes its Step 1 folder (any outputs + the project's link to the reads). " +
+      "The raw download is kept, so you can re-add the sample later. Samples already " +
+      "collected into vcf_database are not affected."
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/projects/${selectedProject}/step1/samples/${encodeURIComponent(sample)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        window.alert(`Could not remove ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        return;
+      }
+    } catch (e) {
+      window.alert(`Could not remove ${sample}: ${e.message || "network error"}`);
+      return;
+    }
+    await loadStep1Status();
+  }
+
   async function step2Setup() {
     if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/setup`, { method: "POST" });
@@ -4520,9 +4546,24 @@ export default function App() {
                   {step1StatusSorted.map((s) => (
                     <li key={s.sample}>
                       <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
-                      <span className="sample-name">{s.sample}</span>
+                      <span className="sample-name" title={s.reason || ""}>
+                        {s.sample}
+                        {s.reason ? (
+                          <span className="muted" style={{ display: "block", fontSize: "0.78em", fontWeight: "normal", whiteSpace: "normal" }}>
+                            {s.reason}
+                          </span>
+                        ) : null}
+                      </span>
                       <button onClick={() => viewStep1Log(s.sample)} disabled={!s.has_log}>
                         View log
+                      </button>
+                      <button
+                        className="ghost"
+                        title="Remove this sample from the project (deletes its Step 1 folder; the raw download is kept). You can re-add it later."
+                        disabled={s.status === "running"}
+                        onClick={() => removeStep1Sample(s.sample)}
+                      >
+                        Remove
                       </button>
                     </li>
                   ))}

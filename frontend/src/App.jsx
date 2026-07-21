@@ -6067,7 +6067,7 @@ export default function App() {
                 <>
                   {snpToolMissing ? (
                     <div className="note warning">
-                      SNP Analysis unavailable: missing {snpTool.missing?.join(", ") || "dependencies"}.
+                      SNP distances unavailable: missing {snpTool.missing?.join(", ") || "dependencies"}.
                     </div>
                   ) : null}
                   <div className="results-list">
@@ -6130,18 +6130,34 @@ export default function App() {
                               if (!canRunPosthoc && !hasPosthocOutputs) {
                                 return null;
                               }
-                              const posthocTitle = "Runs post-hoc SNP distance/KDP using the group FASTA.";
+                              const posthocHelp =
+                                "SNP distances for this group. Runs snp-dists on the group's alignment to quantify how many SNPs separate the isolates, and writes three files into this group's list below:\n" +
+                                "• snp_matrix.csv — pairwise SNP-distance matrix (every isolate vs every other)\n" +
+                                "• kdp.png — density plot of all pairwise distances (how tight/spread the group is)\n" +
+                                "• closest_neighbor.png — each isolate's distance to its nearest match\n\n" +
+                                "Use it to see how closely related isolates are (e.g. possible transmission links within N SNPs). The tree shows topology; this puts numbers on the distances.\n\n" +
+                                "Include: 'All isolates' counts the reference-panel genomes too; 'My samples only' restricts to your Step 1 (sequenced) samples.";
+                              const posthocBtnTitle =
+                                "Compute pairwise SNP distances (snp-dists): distance matrix + density plot + closest-neighbor plot. Results land in this group's file list.";
                               return (
                                 <>
                                   {hasPosthocOutputs ? (
-                                    <span className="group-chip">posthoc ready</span>
+                                    <span className="group-chip" title="SNP-distance results are available in this group's file list below.">distances ready</span>
                                   ) : null}
                                   {canRunPosthoc ? (
                                     <>
+                                      <span
+                                        className="help"
+                                        title={posthocHelp}
+                                        style={{ cursor: "help", fontWeight: "bold", color: "var(--muted,#666)", padding: "0 0.2em" }}
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                      >
+                                        (?)
+                                      </span>
                                       <select
                                         className="small-select"
                                         value={posthocScopeByGroup[group.name] || "all"}
-                                        title="Choose isolates for SNP analysis (Step 1 only excludes reference VCFs)."
+                                        title="Which isolates to include in the SNP-distance calculation."
                                         onChange={(e) =>
                                           setPosthocScopeByGroup((prev) => ({
                                             ...prev,
@@ -6149,20 +6165,20 @@ export default function App() {
                                           }))
                                         }
                                       >
-                                        <option value="all">All VCFs</option>
-                                        <option value="step1_only">Step 1 only</option>
+                                        <option value="all">Include: all isolates</option>
+                                        <option value="step1_only">Include: my samples only</option>
                                       </select>
                                       <button
                                         className="small"
                                         disabled={posthocStatus[group.name]?.running}
-                                        title={posthocStatus[group.name]?.running ? "SNP Analysis is running." : posthocTitle}
+                                        title={posthocStatus[group.name]?.running ? "SNP-distance analysis is running." : posthocBtnTitle}
                                         onClick={(e) => {
                                           e.preventDefault();
                                           e.stopPropagation();
                                           runPosthoc(group.name);
                                         }}
                                       >
-                                        {posthocStatus[group.name]?.running ? "SNP Analysis (running)" : "SNP Analysis"}
+                                        {posthocStatus[group.name]?.running ? "SNP distances (running)" : "SNP distances"}
                                       </button>
                                     </>
                                   ) : null}

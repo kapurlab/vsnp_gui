@@ -2440,8 +2440,22 @@ def step1_setup(project: str):
         sample_dir.mkdir(parents=True, exist_ok=True)
         target = sample_dir / f.name
         if not target.exists():
-            target.symlink_to(f)
+            # Real COPY, not a symlink: the step1 sample folder must retain the
+            # exact reads used for its alignment even if download/ is later moved
+            # or deleted. copy2 follows the source (download/ entries may
+            # themselves be symlinks) so we copy the actual bytes. The reads stay
+            # in download/ too. Cost: ~doubles read storage.
+            shutil.copy2(f, target)
             created += 1
+        elif target.is_symlink():
+            # Upgrade a legacy symlink entry (from before the copy change) to a
+            # durable real copy in place.
+            real = target.resolve()
+            target.unlink()
+            try:
+                shutil.copy2(real, target)
+            except OSError:
+                target.symlink_to(f)  # fall back rather than lose the entry
     return {"created": created, "renamed": renamed}
 
 
@@ -2868,27 +2882,32 @@ def step1_remove_sample(project: str, sample: str):
     if _step1_batch_running(step1_dir):
         raise HTTPException(status_code=409, detail="Step 1 is running — stop it before removing samples.")
 
-    download_dir = (project_dir / "download").resolve()
     quarantine_dir = project_dir / "quarantine" / sample
     quarantine_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect the read files to preserve: download/ targets (resolved from the
-    # step1 symlinks) plus any real fastqs living inside the step1 dir itself.
+    # Preserve one copy of each read in quarantine and clear it from download/
+    # so a quarantined sample no longer shows under "Files in download". The
+    # step1 folder now holds real COPIES, and download/ holds its own copy, so
+    # for each read we MOVE the download/ copy into quarantine (preferred — that
+    # empties download/); if there's no download copy, fall back to the step1
+    # copy. The step1 dir (with any remaining copies + outputs) is removed below.
+    download_root = project_dir / "download"
     moved: List[str] = []
     for fq in list(target.glob("*.fastq.gz")) + list(target.glob("*.fastq")):
-        try:
-            real = fq.resolve()
-        except OSError:
-            continue
-        if not real.is_file():
-            continue
-        under_download = str(real).startswith(str(download_dir) + os.sep)
-        under_step1 = str(real).startswith(str(target) + os.sep)
-        if under_download or under_step1:
-            dest = quarantine_dir / real.name
+        name = fq.name
+        dest = quarantine_dir / name
+        src: Optional[Path] = None
+        if download_root.is_dir():
+            for cand in download_root.rglob(name):
+                if cand.is_file():
+                    src = cand
+                    break
+        if src is None and fq.is_file():
+            src = fq  # no download copy left — preserve the step1 copy
+        if src is not None:
             try:
-                shutil.move(str(real), str(dest))
-                moved.append(real.name)
+                shutil.move(str(src), str(dest))
+                moved.append(name)
             except OSError:
                 pass
 

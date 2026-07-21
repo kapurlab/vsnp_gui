@@ -57,7 +57,6 @@ export default function App() {
   const [qcError, setQcError] = useState("");
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [qcFilter, setQcFilter] = useState("");                   // as-you-type sample filter for Step 1 Results
-  const [showAllInputs, setShowAllInputs] = useState(false);      // download list: false = last 7 days only, true = all
   const [qcDateStart, setQcDateStart] = useState("");             // YYYY-MM-DD; filter Step 1 Results by run date (inclusive)
   const [qcDateEnd, setQcDateEnd] = useState("");                 // YYYY-MM-DD; empty end = open-ended
   const [projSampleFilter, setProjSampleFilter] = useState("");   // as-you-type sample filter for the Projects list
@@ -440,6 +439,19 @@ export default function App() {
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
   }, [step1Status]);
+
+  // "Files in download" shows only samples not yet run in Step 1 and not in
+  // Quarantine — once a sample is run its reads are copied into step1/ (and a
+  // quarantined sample's reads are moved out of download/), so it no longer
+  // needs to clutter this "still to process" list.
+  const shownDownloadGroups = useMemo(
+    () => groupPairedFiles(inputs.files || []).filter(
+      (g) => !isSampleRunInStep1(g.sample) && !quarantine.some((q) => q.sample === g.sample)
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [inputs, step1Status, quarantine]
+  );
+  const shownDownloadBytes = shownDownloadGroups.reduce((n, g) => n + (g.totalSize || 0), 0);
 
   // The post-hoc table can mix samples from several projects; make sure each
   // referenced project's Kraken dir list is cached so its rows can show a
@@ -3913,10 +3925,10 @@ export default function App() {
                   <div className="block">
                     <h3 style={{display:"flex", alignItems:"center", gap:"8px"}}>
                       <span style={{flex:1}}>
-                        Files in download/
-                        {inputs.count > 0 ? (
+                        Files in download
+                        {shownDownloadGroups.length > 0 ? (
                           <span className="muted" style={{marginLeft:"6px", fontWeight:"normal", fontSize:"12px"}}>
-                            ({inputs.count} file{inputs.count > 1 ? "s" : ""}, {_formatBytes(inputs.total_bytes)})
+                            ({shownDownloadGroups.length} not yet run, {_formatBytes(shownDownloadBytes)})
                           </span>
                         ) : null}
                       </span>
@@ -3945,19 +3957,16 @@ export default function App() {
                     {!inputsLoading && inputs.files.length === 0 ? (
                       <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
                     ) : null}
-                    {inputs.files.length > 0 ? (() => {
-                      const allGroups = groupPairedFiles(inputs.files);
-                      const weekAgo = (Date.now() / 1000) - 7 * 86400;
-                      const olderCount = allGroups.filter((g) => g.mtime && g.mtime < weekAgo).length;
-                      const groups = showAllInputs
-                        ? allGroups
-                        : allGroups.filter((g) => !g.mtime || g.mtime >= weekAgo);
+                    {!inputsLoading && inputs.files.length > 0 && shownDownloadGroups.length === 0 ? (
+                      <div className="muted" style={{fontSize:"12px"}}>All downloaded samples have been run in Step 1 (or are in Quarantine).</div>
+                    ) : null}
+                    {shownDownloadGroups.length > 0 ? (() => {
+                      const groups = shownDownloadGroups;
                       return (
                       <>
                       <div style={{display:"flex", flexDirection:"column", gap:"3px", maxHeight:"260px", overflowY:"auto"}}>
                         {groups.map((g) => {
                           const tip = g.files.map((f) => `${f.name} (${_formatBytes(f.size)})`).join("\n");
-                          const notRun = !isSampleRunInStep1(g.sample);
                           return (
                             <div
                               key={g.files.map((f) => f.name).join("|")}
@@ -3973,17 +3982,10 @@ export default function App() {
                               <span
                                 style={{
                                   flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-                                  color: notRun ? "var(--accent, #2f6f9f)" : "var(--text)",
-                                  fontWeight: notRun ? 600 : "normal",
                                 }}
-                                title={notRun ? `${tip}\n\nNot yet run through Step 1` : tip}
+                                title={`${tip}\n\nNot yet run through Step 1`}
                               >
                                 {g.sample}
-                                {notRun ? (
-                                  <span style={{marginLeft:"6px", fontSize:"10.5px", color:"var(--accent, #2f6f9f)"}}>
-                                    • not run
-                                  </span>
-                                ) : null}
                                 {g.isPair ? (
                                   <span className="muted" style={{marginLeft:"6px", fontSize:"10.5px"}}>
                                     paired · R1+R2
@@ -4003,17 +4005,6 @@ export default function App() {
                           );
                         })}
                       </div>
-                      {olderCount > 0 ? (
-                        <button
-                          type="button"
-                          className="ghost"
-                          onClick={() => setShowAllInputs((v) => !v)}
-                          style={{fontSize:"11px", padding:"2px 8px", marginTop:"4px", alignSelf:"flex-start"}}
-                          title="Files older than 7 days are hidden by default to keep this list readable as it grows."
-                        >
-                          {showAllInputs ? `Show recent only (hide ${olderCount} older)` : `Show all (${olderCount} older)`}
-                        </button>
-                      ) : null}
                       </>
                       );
                     })() : null}

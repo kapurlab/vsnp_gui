@@ -3972,10 +3972,10 @@ export default function App() {
                   <div className="block">
                     <h3 style={{display:"flex", alignItems:"center", gap:"8px"}}>
                       <span style={{flex:1}}>
-                        Files in download
+                        Ready to run
                         {shownDownloadGroups.length > 0 ? (
                           <span className="muted" style={{marginLeft:"6px", fontWeight:"normal", fontSize:"12px"}}>
-                            ({shownDownloadGroups.length} not yet run, {_formatBytes(shownDownloadBytes)})
+                            ({shownDownloadGroups.length} sample{shownDownloadGroups.length === 1 ? "" : "s"}, {_formatBytes(shownDownloadBytes)})
                           </span>
                         ) : null}
                       </span>
@@ -4611,7 +4611,7 @@ export default function App() {
                 Force re-run (re-align samples already Complete)
               </label>
               <div className="step1-actions">
-                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady} title="Stage the FASTQs in download/ into Step 1 as samples (they appear below as Not Started, ready to Run).">Grab from Files in download</button>
+                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady} title="Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run).">Grab ready-to-run samples</button>
                 <button
                   onClick={step1Run}
                   disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}
@@ -4687,7 +4687,7 @@ export default function App() {
                 <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
                     <span><strong>{vcfsFolderName || "vcf_database"}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
-                    <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect</button>
+                    <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect Step 1 VCFs</button>
                   </div>
                   {vcfsCollectResult ? (
                     <div className="note" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
@@ -5818,8 +5818,8 @@ export default function App() {
                   </select>
                 </div>
                 <div className="row">
-                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady} title="Collect the selected sources into this project's Step 2 VCF set (step2/vcf_database)">Build / update set</button>
-                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 VCF set">Clear set</button>
+                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady} title="Add the selected reference / external VCFs into this project's Step 2 comparison set (step2/vcf_database)">Build comparison set</button>
+                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 comparison set">Clear comparison set</button>
                   <button
                     className="ghost action"
                     onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_database`, "vcf_database path")}

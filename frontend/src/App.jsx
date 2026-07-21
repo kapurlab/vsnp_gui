@@ -4611,7 +4611,7 @@ export default function App() {
                 Force re-run (re-align samples already Complete)
               </label>
               <div className="step1-actions">
-                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady}>Setup</button>
+                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady} title="Stage the FASTQs in download/ into Step 1 as samples (they appear below as Not Started, ready to Run).">Grab from Files in download</button>
                 <button
                   onClick={step1Run}
                   disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}

@@ -6137,8 +6137,6 @@ export default function App() {
                                 "• closest_neighbor.png — each isolate's distance to its nearest match\n\n" +
                                 "Use it to see how closely related isolates are (e.g. possible transmission links within N SNPs). The tree shows topology; this puts numbers on the distances.\n\n" +
                                 "Include: 'samples + reference' counts the reference-panel genomes alongside your Step 1 samples; 'only samples' restricts to your Step 1 (sequenced) samples. (The root/outgroup is excluded either way.)";
-                              const posthocBtnTitle =
-                                "Compute pairwise SNP distances (snp-dists): distance matrix + density plot + closest-neighbor plot. Results land in this group's file list.";
                               return (
                                 <>
                                   {hasPosthocOutputs ? (
@@ -6146,14 +6144,6 @@ export default function App() {
                                   ) : null}
                                   {canRunPosthoc ? (
                                     <>
-                                      <span
-                                        className="help"
-                                        title={posthocHelp}
-                                        style={{ cursor: "help", fontWeight: "bold", color: "var(--muted,#666)", padding: "0 0.2em" }}
-                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                      >
-                                        (?)
-                                      </span>
                                       <select
                                         className="small-select"
                                         value={posthocScopeByGroup[group.name] || "all"}
@@ -6171,7 +6161,7 @@ export default function App() {
                                       <button
                                         className="small"
                                         disabled={posthocStatus[group.name]?.running}
-                                        title={posthocStatus[group.name]?.running ? "SNP-distance analysis is running." : posthocBtnTitle}
+                                        title={posthocStatus[group.name]?.running ? "SNP-distance analysis is running." : posthocHelp}
                                         onClick={(e) => {
                                           e.preventDefault();
                                           e.stopPropagation();

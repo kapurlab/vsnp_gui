@@ -4053,7 +4053,7 @@ export default function App() {
                     Restore puts the reads back in download/ (then Setup re-adds it); Delete erases them for good.
                   </div>
                   {quarantine.length ? (
-                    <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px", maxHeight: "300px", overflowY: "auto" }}>
                       {quarantine.map((q) => (
                         <li key={q.sample} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", border: "1px solid var(--border)", borderRadius: "8px", padding: "6px 8px" }}>
                           <span style={{ flex: "1 1 auto", minWidth: 0 }}>

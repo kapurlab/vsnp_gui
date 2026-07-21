@@ -2114,7 +2114,13 @@ export default function App() {
           groups.push({ sample, files: [f], totalSize: f.size, isPair: false, mtime: fmtime });
         }
       } else {
-        groups.push({ sample: f.name, files: [f], totalSize: f.size, isPair: false, mtime: fmtime });
+        // Single-end / non-paired: derive the sample from the filename WITHOUT
+        // the fastq extension, so it matches the Step 1 dir name (e.g.
+        // ERR1198997.fastq.gz -> ERR1198997). Keeping the full name here made
+        // isSampleRunInStep1 never match, so run single-end samples wrongly
+        // stayed in "Files in download".
+        const sample = f.name.replace(FASTQ_RE, "");
+        groups.push({ sample, files: [f], totalSize: f.size, isPair: false, mtime: fmtime });
       }
     }
     return groups;

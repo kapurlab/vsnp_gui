@@ -2831,11 +2831,19 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         chosen_vcf = (patched_vcf or source_vcf).resolve()
         target = vcfs_dir / _target_name_for_vcf(source_vcf, chosen_vcf)
 
-        if target.exists():
+        if target.exists() or target.is_symlink():
+            # Already in the database. If it's a legacy (or broken) symlink,
+            # replace it with a durable real copy so the cumulative collection
+            # is self-contained and survives a step1 cleanup; a real file is
+            # left untouched (accumulate, never clobber).
+            if target.is_symlink():
+                target.unlink()
+                shutil.copy2(chosen_vcf, target)
             already_present.append(sample)
             continue
 
-        target.symlink_to(chosen_vcf)
+        # Copy (don't symlink) so vcf_database is a standalone, permanent store.
+        shutil.copy2(chosen_vcf, target)
         if sample in force_set and not passed:
             force_added.append(sample)
         else:
@@ -2896,9 +2904,16 @@ def step2_setup(project: str):
         target = step2_dir / target_name
         if patched_vcf:
             edited_samples.append(sample)
-        if target.exists():
+        if target.exists() or target.is_symlink():
+            # Upgrade a legacy (or broken) symlink entry to a durable real copy;
+            # leave an existing real file in place (accumulate, never clobber).
+            if target.is_symlink():
+                target.unlink()
+                shutil.copy2(chosen_vcf, target)
+                count += 1
             continue
-        target.symlink_to(chosen_vcf)
+        # Copy (don't symlink) so vcf_database is a standalone, permanent store.
+        shutil.copy2(chosen_vcf, target)
         count += 1
 
     # Rebuild the manifest from the FINAL database contents so preserved /

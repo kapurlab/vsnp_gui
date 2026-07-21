@@ -77,6 +77,7 @@ export default function App() {
   const [step1FilesCache, setStep1FilesCache] = useState({});
   // Quarantine: samples removed from Step 1, held recoverably (restore or delete).
   const [quarantine, setQuarantine] = useState([]);
+  const [step1SampleFilter, setStep1SampleFilter] = useState("");
   const [openStep1FilesRow, setOpenStep1FilesRow] = useState("");
   const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   // Run Kraken ID Parse on a single sample, launched from Step 1. mode is
@@ -439,6 +440,12 @@ export default function App() {
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
   }, [step1Status]);
+
+  const step1StatusFiltered = useMemo(() => {
+    const q = step1SampleFilter.trim().toLowerCase();
+    if (!q) return step1StatusSorted;
+    return step1StatusSorted.filter((s) => String(s.sample || "").toLowerCase().includes(q));
+  }, [step1StatusSorted, step1SampleFilter]);
 
   // "Files in download" shows only samples not yet run in Step 1 and not in
   // Quarantine — once a sample is run its reads are copied into step1/ (and a
@@ -4623,10 +4630,20 @@ export default function App() {
                 <span>Samples</span>
                 <button onClick={loadStep1Status} disabled={!selectedProject}>Refresh</button>
               </div>
+              {step1Status.length ? (
+                <input
+                  type="text"
+                  placeholder="Filter samples…"
+                  value={step1SampleFilter}
+                  onChange={(e) => setStep1SampleFilter(e.target.value)}
+                  style={{ width: "100%", marginBottom: "6px" }}
+                />
+              ) : null}
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
               {step1Status.length ? (
+                step1StatusFiltered.length ? (
                 <ul className="sample-list">
-                  {step1StatusSorted.map((s) => (
+                  {step1StatusFiltered.map((s) => (
                     <li key={s.sample}>
                       <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
                       <span className="sample-name" title={s.reason || ""}>
@@ -4653,6 +4670,9 @@ export default function App() {
                     </li>
                   ))}
                 </ul>
+                ) : (
+                  <div className="note">No samples match “{step1SampleFilter.trim()}”.</div>
+                )
               ) : (
                 <div className="note">No Step 1 samples yet.</div>
               )}

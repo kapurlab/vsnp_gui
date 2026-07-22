@@ -366,6 +366,28 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
     return samples
 
 
+def _step1_browser_samples(step1_dir: Path) -> List[Dict]:
+    """List step1 sample dirs for the inline project sample browser.
+
+    A step1 sample is any non-hidden subdirectory of step1/ (the writer's
+    _provenance/ sibling and dot-dirs are excluded). Unlike
+    _step1_sample_names(), this does NOT require reads to still be present:
+    a command-line / imported project keeps its reads inside step1/<sample>/,
+    but a native GUI run may have had them removed after alignment — either
+    way the sample dir (with its vSNP outputs) is a real sample and should
+    list. `is_pair` is best-effort from whatever reads remain on disk, mirroring
+    the R1/R2 detection used elsewhere; it only drives the "R1+R2" badge."""
+    out: List[Dict] = []
+    if not step1_dir.is_dir():
+        return out
+    for p in sorted(step1_dir.iterdir()):
+        if not p.is_dir() or p.name.startswith(("_", ".")):
+            continue
+        has_r2 = any(p.glob("*_R2*.fastq.gz")) or any(p.glob("*_2*.fastq.gz"))
+        out.append({"sample": p.name, "is_pair": bool(has_r2)})
+    return out
+
+
 # T-46 Phase 1: filter at dispatch time so Step 1 doesn't abort on samples
 # that vsnp3 can't actually process (single-end, or suspiciously small
 # fastqs that are usually SRA submission errors). Without this, one bad
@@ -4270,38 +4292,49 @@ def step2_vcf_count(project: str):
 
 @app.get("/api/projects/{project}/step2/vcf_database/samples")
 def step2_vcf_database_samples(project: str):
-    """Return all sample names in the VCF database directory, parsed from the manifest."""
+    """Return all sample names in the VCF database directory.
+
+    The on-disk ``*_zc.vcf(.gz)`` files are the source of truth for what the
+    collection contains: command-line / imported projects (and any VCFs copied
+    straight into vcf_database/) may not be recorded in the manifest. Older
+    versions read only the manifest, so those VCFs were invisible in the Step 2
+    build list even though they sat in the database (and matched the card's
+    "VCF DB" count). We now enumerate every VCF on disk and enrich it with the
+    manifest's source_type/source_path when an entry exists — so the full
+    collection lists exactly as if the GUI had produced it, while GUI-imported
+    samples keep their provenance badge."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if not vcf_source_dir.exists():
         return []
+    # Manifest (when present) carries provenance metadata keyed by filename.
+    meta_by_filename: Dict[str, Dict] = {}
     manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
-    samples = []
     if manifest_path.exists():
         with manifest_path.open("r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
-            seen: set = set()
             for row in reader:
                 fn = row.get("filename", "").strip()
-                if not fn or fn in seen:
-                    continue
-                seen.add(fn)
-                samples.append({
-                    "filename": fn,
-                    "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
-                    "source_type": row.get("source_type", ""),
-                    "source_path": row.get("source_path", ""),
-                })
-    else:
-        for vcf in sorted(vcf_source_dir.glob("*.vcf")) + sorted(vcf_source_dir.glob("*.vcf.gz")):
-            fn = vcf.name
-            samples.append({
-                "filename": fn,
-                "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
-                "source_type": "",
-                "source_path": str(vcf),
-            })
+                if fn and fn not in meta_by_filename:
+                    meta_by_filename[fn] = {
+                        "source_type": row.get("source_type", ""),
+                        "source_path": row.get("source_path", ""),
+                    }
+    samples = []
+    seen: set = set()
+    for vcf in sorted(vcf_source_dir.glob("*_zc.vcf")) + sorted(vcf_source_dir.glob("*_zc.vcf.gz")):
+        fn = vcf.name
+        if fn in seen:
+            continue
+        seen.add(fn)
+        meta = meta_by_filename.get(fn, {})
+        samples.append({
+            "filename": fn,
+            "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+            "source_type": meta.get("source_type", ""),
+            "source_path": meta.get("source_path", str(vcf)),
+        })
     samples.sort(key=lambda x: x["sample"].lower())
     return samples
 
@@ -4888,6 +4921,24 @@ def step1_sample_stats_preview(project: str, sample: str, download: int = 0):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)
+
+
+@app.get("/api/projects/{project}/step1/samples")
+def step1_samples(project: str):
+    """List step1 sample directories for the inline project sample browser.
+
+    Native GUI projects stage reads in download/ and get a step1/<sample>/
+    dir when Step 1 runs; command-line / imported projects keep their reads
+    inside step1/<sample>/ and never populate download/. Surfacing the step1
+    dirs directly makes both layouts list the same samples under the project,
+    so a command-line run appears exactly as if the GUI had produced it. The
+    frontend merges this with any download-only (not-yet-run) FASTQ groups."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    step1_dir = project_dir / "step1"
+    return {"samples": _step1_browser_samples(step1_dir)}
 
 
 @app.get("/api/projects/{project}/step1/samples/{sample}/files")

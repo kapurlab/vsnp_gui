@@ -1944,12 +1944,25 @@ export default function App() {
   async function loadProjData(project) {
     setProjData((m) => ({ ...m, [project]: { loading: true, samples: (m[project]?.samples || []), krakenDirs: (m[project]?.krakenDirs || []) } }));
     try {
-      const [inRes, kRes] = await Promise.all([
+      const [inRes, s1Res, kRes] = await Promise.all([
         fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/inputs`),
+        fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/samples`).catch(() => null),
         fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/samples`).catch(() => null),
       ]);
       const inData = inRes.ok ? await inRes.json() : { files: [] };
-      const samples = groupPairedFiles(inData.files || []);
+      const downloadSamples = groupPairedFiles(inData.files || []);
+      let step1Samples = [];
+      if (s1Res && s1Res.ok) {
+        step1Samples = ((await s1Res.json()).samples || []).map((s) => ({
+          sample: s.sample,
+          isPair: !!s.is_pair,
+          hasStep1: true,
+          files: [],
+          totalSize: 0,
+          mtime: 0,
+        }));
+      }
+      const samples = mergeProjectSamples(step1Samples, downloadSamples);
       let krakenDirs = [];
       if (kRes && kRes.ok) krakenDirs = (await kRes.json()).samples || [];
       setProjData((m) => ({ ...m, [project]: { loading: false, samples, krakenDirs } }));
@@ -2150,6 +2163,24 @@ export default function App() {
       }
     }
     return groups;
+  }
+
+  // Merge step1 sample dirs with download-only FASTQ groups so both native
+  // (GUI-run) and command-line / imported projects list the same samples under
+  // a project. step1 samples are the ones already run (they own a
+  // step1/<sample>/ dir); download groups not yet represented in step1 are
+  // shown as not-yet-run inputs. A download group counts as "already in step1"
+  // when a step1 dir matches its name exactly or as a `<name>_...` suffix —
+  // the same tolerance _resolve_sample_dir uses (e.g. 13-1941-6 -> 13-1941-6_S4_L001).
+  function mergeProjectSamples(step1Samples, downloadSamples) {
+    const inStep1 = (name) =>
+      step1Samples.some(
+        (s) => s.sample === name || String(s.sample || "").startsWith(`${name}_`)
+      );
+    const extras = (downloadSamples || []).filter((d) => !inStep1(d.sample));
+    const merged = [...step1Samples, ...extras];
+    merged.sort((a, b) => a.sample.localeCompare(b.sample));
+    return merged;
   }
 
   // True if this download-list sample already has a completed Step 1 run.
@@ -3770,7 +3801,7 @@ export default function App() {
                       <div className="muted" style={{ fontSize: "12px" }}>Loading samples…</div>
                     ) : !projData[p.name] || projData[p.name].samples.length === 0 ? (
                       <div className="muted" style={{ fontSize: "12px" }}>
-                        No samples in download/ yet. Add FASTQs in the Inputs panel.
+                        No samples yet. Add FASTQs in the Inputs panel, or run Step 1.
                       </div>
                     ) : (() => {
                       const q = projSampleFilter.trim().toLowerCase();

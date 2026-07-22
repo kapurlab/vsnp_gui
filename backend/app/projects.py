@@ -298,7 +298,13 @@ def _project_counts(project_dir: Path) -> Dict:
     try:
         return {
             "fastq_count": _count_project_reads(download_dir, step1_dir),
-            "step1_samples": len([d for d in step1_dir.iterdir() if d.is_dir()]) if step1_dir.exists() else 0,
+            # Count real sample dirs only — exclude the writer's _provenance/
+            # sibling and any dot-dirs so the badge matches the inline sample
+            # browser (which lists the same non-hidden step1 subdirs).
+            "step1_samples": len([
+                d for d in step1_dir.iterdir()
+                if d.is_dir() and not d.name.startswith(("_", "."))
+            ]) if step1_dir.exists() else 0,
             "step1_vcfs": len(list(step1_dir.glob("*/alignment_*/*_zc.vcf"))) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
             "step2_vcfs": len(list(vcfs_dir.glob("*.vcf"))) if vcfs_dir.exists() else 0,

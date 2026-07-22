@@ -2408,6 +2408,14 @@ export default function App() {
     setStep2BuiltAt(new Date().toISOString());
     await refreshProjects(selectedProject);
     await loadVcfSourceSamples();
+    // Build only refreshes step2VcfCount (via loadVcfSourceSamples). The
+    // excluded / comparison counts shown in the "Step 2 comparison set" note
+    // are computed by the /step2/vcf_count endpoint, which is only re-pulled by
+    // loadStep2Outputs. Without this, those two numbers stay stale after a
+    // build until the user hits Results → Refresh (e.g. showing a phantom
+    // "N excluded in Step 1" from a prior state). Refresh them here so the note
+    // reflects the set that was just built.
+    await loadStep2Outputs();
   }
 
   async function step1Setup() {

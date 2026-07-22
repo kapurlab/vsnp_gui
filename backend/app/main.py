@@ -2274,6 +2274,37 @@ def project_sra_crosswalk(project: str):
     return FileResponse(crosswalk, media_type="text/plain")
 
 
+@app.get("/api/projects/{project}/sra-download-report")
+def project_sra_download_report(project: str):
+    """Parsed outcome of the most recent SRA download into this project.
+
+    The download script writes download/sra_download_report.tsv (one
+    ``outcome<TAB>accession`` row per accession, overwritten each run). We parse
+    it into buckets so the UI can persistently show which accessions were
+    downloaded, skipped because already aligned in Step 1, or failed — the
+    skipped ones leave no other on-screen trace (they were never fetched, so
+    they don't appear in download/ or the "Ready to run" list).
+
+    Returns empty buckets (not 404) when no download has run yet, so the caller
+    can treat "no report" and "report with nothing skipped" uniformly.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    report = project_dir / "download" / "sra_download_report.tsv"
+    buckets = {"downloaded": [], "already_in_step1": [], "failed": []}
+    if report.is_file():
+        for line in report.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#"):
+                continue
+            outcome, _, acc = line.partition("\t")
+            acc = acc.strip()
+            if acc and outcome in buckets:
+                buckets[outcome].append(acc)
+    return buckets
+
+
 @app.get("/api/projects/{project}/inputs")
 def project_inputs(project: str):
     """List files currently in <project>/download/.
@@ -2385,6 +2416,9 @@ def sra_download(project: str, payload: SraRequest):
         expanded,
         cfg["sra"]["allow_insecure_https"],
         step1_dir=project_dir / "step1",
+        # Always at the top-level download/ (not the optional subfolder) so the
+        # report endpoint has one fixed place to read regardless of subfolder.
+        report_path=project_dir / "download" / "sra_download_report.tsv",
     )
     script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")

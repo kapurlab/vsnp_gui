@@ -261,6 +261,11 @@ export default function App() {
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
+  // Persistent outcome of the last SRA download (from sra_download_report.tsv).
+  // Buckets survive a reload, so skipped-because-already-in-Step-1 accessions —
+  // which never land in download/ and so leave no other on-screen trace — stay
+  // visible when working through hundreds of samples.
+  const [sraReport, setSraReport] = useState({ downloaded: [], already_in_step1: [], failed: [] });
   // Item 6: Reference Editor
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
@@ -1011,6 +1016,9 @@ export default function App() {
           } else {
             setSraStatus(`Download ${status}`);
           }
+          // Either way, refresh the persistent outcome report (a failed job can
+          // still have skipped/succeeded some accessions before failing).
+          if (selectedProject) loadSraReport(selectedProject);
         }
         // Update genome download status if this was a genome download job
         if (genomeJobId && jobId === genomeJobId) {
@@ -1055,6 +1063,7 @@ export default function App() {
     loadStep2Outputs();
     loadVcfSourceSamples();
     loadInputs(selectedProject);
+    loadSraReport(selectedProject);
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
@@ -1948,6 +1957,29 @@ export default function App() {
       setInputs({ files: [], total_bytes: 0, count: 0 });
     } finally {
       setInputsLoading(false);
+    }
+  }
+
+  // Load the last SRA download's per-accession outcome (empty buckets if none).
+  async function loadSraReport(project) {
+    if (!project) {
+      setSraReport({ downloaded: [], already_in_step1: [], failed: [] });
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/sra-download-report`);
+      if (res.ok) {
+        const data = await res.json();
+        setSraReport({
+          downloaded: data.downloaded || [],
+          already_in_step1: data.already_in_step1 || [],
+          failed: data.failed || [],
+        });
+      } else {
+        setSraReport({ downloaded: [], already_in_step1: [], failed: [] });
+      }
+    } catch (_) {
+      setSraReport({ downloaded: [], already_in_step1: [], failed: [] });
     }
   }
 
@@ -4035,6 +4067,41 @@ export default function App() {
                       <span className="pulse-dot" />
                     ) : null}
                     {sraStatus}
+                  </div>
+                ) : null}
+                {/* Persistent outcome of the last download. The skipped bucket is
+                    the whole point: those accessions were already aligned in Step 1
+                    so they were NOT re-fetched, and they appear nowhere else in the
+                    UI — this is the only on-screen confirmation that a sample
+                    missing from download/ is missing on purpose, not by error. */}
+                {(sraReport.already_in_step1.length > 0 || sraReport.failed.length > 0 || sraReport.downloaded.length > 0) ? (
+                  <div className="note" style={{marginTop:"6px", fontSize:"12px"}}>
+                    <div style={{fontWeight:600, marginBottom:"3px"}}>Last download</div>
+                    <div className="muted">
+                      {sraReport.downloaded.length} downloaded
+                      {sraReport.already_in_step1.length > 0 ? ` · ${sraReport.already_in_step1.length} already in Step 1 (skipped, not re-downloaded)` : ""}
+                      {sraReport.failed.length > 0 ? ` · ${sraReport.failed.length} failed` : ""}
+                    </div>
+                    {sraReport.already_in_step1.length > 0 ? (
+                      <details style={{marginTop:"4px"}}>
+                        <summary style={{cursor:"pointer"}}>
+                          Already in Step 1 — {sraReport.already_in_step1.length} skipped
+                        </summary>
+                        <div style={{fontFamily:"monospace", fontSize:"11px", maxHeight:"140px", overflowY:"auto", marginTop:"3px", whiteSpace:"pre-wrap"}}>
+                          {sraReport.already_in_step1.join("\n")}
+                        </div>
+                      </details>
+                    ) : null}
+                    {sraReport.failed.length > 0 ? (
+                      <details style={{marginTop:"4px"}} open>
+                        <summary style={{cursor:"pointer", color:"var(--danger, #b00)"}}>
+                          Failed — {sraReport.failed.length}
+                        </summary>
+                        <div style={{fontFamily:"monospace", fontSize:"11px", maxHeight:"140px", overflowY:"auto", marginTop:"3px", whiteSpace:"pre-wrap"}}>
+                          {sraReport.failed.join("\n")}
+                        </div>
+                      </details>
+                    ) : null}
                   </div>
                 ) : null}
                 {inputs.files.some((f) => f.name === "sra_crosswalk.tsv") ? (

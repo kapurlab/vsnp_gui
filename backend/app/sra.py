@@ -152,6 +152,7 @@ def build_download_script(
     allow_insecure_https: bool,
     concurrency: int = 4,
     step1_dir: Path | None = None,
+    report_path: Path | None = None,
 ) -> str:
     """Generate a bash script that downloads each accession via xargs -P
     parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
@@ -161,12 +162,21 @@ def build_download_script(
     step1_dir is the project's step1/ folder. When given, an accession that has
     already been aligned there is skipped (and reported as such) instead of being
     re-fetched over the network — Step 1 keeps its own copy of the reads, so the
-    download/ copy can be gone while the sample is fully processed."""
+    download/ copy can be gone while the sample is fully processed.
+
+    report_path, when given, is a TSV the script (over)writes at the end with one
+    ``outcome<TAB>accession`` row per accession (downloaded / already_in_step1 /
+    failed). It's the persistent, machine-readable record of the last download so
+    the UI can show which accessions were skipped-because-already-run without the
+    user having to scroll the live log — the point being that with hundreds of
+    samples a skipped one leaves no other on-screen trace."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
     acc_block = "\n".join([f'    "{a}"' for a in accessions])
     # Empty string disables the Step 1 skip check (older callers / no project).
     step1_dir_str = str(step1_dir) if step1_dir is not None else ""
+    # Empty string disables report writing (older callers / no project).
+    report_path_str = str(report_path) if report_path is not None else ""
 
     return f"""#!/bin/bash
 set -u
@@ -176,6 +186,8 @@ cd "{download_dir}"
 # Project's step1/ folder (empty = skip check disabled). Used by
 # already_in_step1 to avoid re-downloading a sample that's already been aligned.
 STEP1_DIR="{step1_dir_str}"
+# Persistent per-accession outcome report (empty = disabled).
+REPORT_PATH="{report_path_str}"
 
 # ── Tool detection ──────────────────────────────────────────────
 HAS_WGET=0; HAS_FASTERQ=0; HAS_ENADATAGET=0; HAS_CURL=0; HAS_PIGZ=0
@@ -437,16 +449,29 @@ FAILED_COUNT=0
 FAILED_LIST=""
 SKIPPED_STEP1=0
 SKIPPED_LIST=""
+# Fresh report each run: it records THIS download's outcomes, so the UI's
+# "Last download" summary reflects the most recent action, not an accumulation.
+if [ -n "$REPORT_PATH" ]; then
+  : > "$REPORT_PATH"
+  printf '# Last SRA download outcome — regenerated each download.\n' >> "$REPORT_PATH"
+  printf '# outcome\taccession  (outcome in: downloaded, already_in_step1, failed)\n' >> "$REPORT_PATH"
+fi
 for acc in "${{ACCESSIONS[@]}}"; do
   status="$(cat ".status_${{acc}}" 2>/dev/null)"
   if [ "$status" = "ok" ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
+    outcome="downloaded"
   elif [ "$status" = "skip_step1" ]; then
     SKIPPED_STEP1=$((SKIPPED_STEP1 + 1))
     SKIPPED_LIST="$SKIPPED_LIST $acc"
+    outcome="already_in_step1"
   else
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_LIST="$FAILED_LIST $acc"
+    outcome="failed"
+  fi
+  if [ -n "$REPORT_PATH" ]; then
+    printf '%s\t%s\n' "$outcome" "$acc" >> "$REPORT_PATH"
   fi
   rm -f ".status_${{acc}}"
 done

@@ -2380,7 +2380,12 @@ def sra_download(project: str, payload: SraRequest):
         write_crosswalk_tsv(download_root, mapping)
     except OSError as e:
         logger.warning("Failed to write sra_crosswalk.tsv: %s", e)
-    script = build_download_script(download_root, expanded, cfg["sra"]["allow_insecure_https"])
+    script = build_download_script(
+        download_root,
+        expanded,
+        cfg["sra"]["allow_insecure_https"],
+        step1_dir=project_dir / "step1",
+    )
     script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")
     script_path.chmod(0o755)

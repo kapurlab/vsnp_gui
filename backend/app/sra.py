@@ -151,19 +151,31 @@ def build_download_script(
     accessions: List[str],
     allow_insecure_https: bool,
     concurrency: int = 4,
+    step1_dir: Path | None = None,
 ) -> str:
     """Generate a bash script that downloads each accession via xargs -P
     parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
     per-IP S3 throttling and the local fasterq-dump CPU/disk start to bite,
-    so 4 is the documented sweet spot."""
+    so 4 is the documented sweet spot.
+
+    step1_dir is the project's step1/ folder. When given, an accession that has
+    already been aligned there is skipped (and reported as such) instead of being
+    re-fetched over the network — Step 1 keeps its own copy of the reads, so the
+    download/ copy can be gone while the sample is fully processed."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
     acc_block = "\n".join([f'    "{a}"' for a in accessions])
+    # Empty string disables the Step 1 skip check (older callers / no project).
+    step1_dir_str = str(step1_dir) if step1_dir is not None else ""
 
     return f"""#!/bin/bash
 set -u
 
 cd "{download_dir}"
+
+# Project's step1/ folder (empty = skip check disabled). Used by
+# already_in_step1 to avoid re-downloading a sample that's already been aligned.
+STEP1_DIR="{step1_dir_str}"
 
 # ── Tool detection ──────────────────────────────────────────────
 HAS_WGET=0; HAS_FASTERQ=0; HAS_ENADATAGET=0; HAS_CURL=0; HAS_PIGZ=0
@@ -221,6 +233,26 @@ already_have() {{
   fi
   # Check for single-end file
   if [ -f "${{acc}}.fastq.gz" ]; then
+    return 0
+  fi
+  return 1
+}}
+
+# True if this accession has already been ALIGNED in the project's Step 1.
+# Mirrors the backend's own "run" signal (main.py step1_status): the per-sample
+# .provenance/exit_code sentinel written as 0 on success, or — for legacy
+# projects predating the sentinel — a finished alignment's *_nodup.bam. Reads
+# staged into step1/ but not yet aligned do NOT count, so a sample you set up
+# but never ran can still be (re)fetched.
+already_in_step1() {{
+  local acc="$1"
+  [ -n "$STEP1_DIR" ] || return 1
+  local d="$STEP1_DIR/$acc"
+  [ -d "$d" ] || return 1
+  if [ -f "$d/.provenance/exit_code" ] && [ "$(cat "$d/.provenance/exit_code" 2>/dev/null)" = "0" ]; then
+    return 0
+  fi
+  if ls "$d"/alignment_*/*_nodup.bam >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -341,8 +373,17 @@ download_one() {{
   local acc="$1"
   echo "── $acc ──"
 
+  # Already processed in this project — don't re-fetch over the network. Step 1
+  # keeps its own copy of the reads, so download/ can be empty while the sample
+  # is done. Reported separately in the summary so the user knows why it's here.
+  if already_in_step1 "$acc"; then
+    echo "  [$acc] already aligned in Step 1 for this project — skipping (reads in step1/$acc; no re-download)"
+    echo "skip_step1" > ".status_${{acc}}"
+    return 0
+  fi
+
   if already_have "$acc"; then
-    echo "  [$acc] Already have reads, skipping"
+    echo "  [$acc] Already have reads in download/, skipping"
     echo "ok" > ".status_${{acc}}"
     return 0
   fi
@@ -365,9 +406,10 @@ download_one() {{
 }}
 
 # xargs subshells need our functions and the HAS_*/CAN_* state.
-export -f download_one already_have compress_fastqs method1 method2 method3
+export -f download_one already_have already_in_step1 compress_fastqs method1 method2 method3
 export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ
 export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
+export STEP1_DIR
 
 # ── Main download loop (parallel via xargs -P) ────────────────
 
@@ -393,9 +435,15 @@ printf '%s\n' "${{ACCESSIONS[@]}}" | \
 SUCCEEDED=0
 FAILED_COUNT=0
 FAILED_LIST=""
+SKIPPED_STEP1=0
+SKIPPED_LIST=""
 for acc in "${{ACCESSIONS[@]}}"; do
-  if [ -f ".status_${{acc}}" ] && [ "$(cat ".status_${{acc}}")" = "ok" ]; then
+  status="$(cat ".status_${{acc}}" 2>/dev/null)"
+  if [ "$status" = "ok" ]; then
     SUCCEEDED=$((SUCCEEDED + 1))
+  elif [ "$status" = "skip_step1" ]; then
+    SKIPPED_STEP1=$((SKIPPED_STEP1 + 1))
+    SKIPPED_LIST="$SKIPPED_LIST $acc"
   else
     FAILED_COUNT=$((FAILED_COUNT + 1))
     FAILED_LIST="$FAILED_LIST $acc"
@@ -409,6 +457,10 @@ echo ""
 echo "== Summary =="
 echo "Succeeded: $SUCCEEDED / ${{#ACCESSIONS[@]}}"
 
+if [ "$SKIPPED_STEP1" -gt 0 ]; then
+  echo "Skipped (already aligned in Step 1, not re-downloaded):$SKIPPED_LIST"
+fi
+
 if [ "$FAILED_COUNT" -gt 0 ]; then
   echo "[FAILED] Failed accessions:$FAILED_LIST"
 fi
@@ -416,11 +468,15 @@ fi
 if ls *.fastq.gz >/dev/null 2>&1; then
   echo ""; echo "Downloaded files:"
   ls -lh *.fastq.gz
+elif [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -gt 0 ]; then
+  echo "No new files downloaded — every accession was already aligned in Step 1."
 else
   echo "[FAILED] No .fastq.gz files found after download"
 fi
 
-if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ]; then
+# Fail the job only if real download attempts failed and nothing else worked;
+# a run where every accession was skipped (already in Step 1) is a success.
+if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -eq 0 ]; then
   exit 1
 fi
 exit 0

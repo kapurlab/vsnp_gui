@@ -462,13 +462,26 @@ export default function App() {
   // Quarantine — once a sample is run its reads are copied into step1/ (and a
   // quarantined sample's reads are moved out of download/), so it no longer
   // needs to clutter this "still to process" list.
-  const shownDownloadGroups = useMemo(
-    () => groupPairedFiles(inputs.files || []).filter(
-      (g) => !isSampleRunInStep1(g.sample) && !quarantine.some((q) => q.sample === g.sample)
-    ),
+  // Split every downloaded sample into shown (still to process) vs hidden, and
+  // for hidden, why: already run in Step 1 vs in Quarantine. Downloads land the
+  // reads regardless of prior state, so without this the panel silently drops a
+  // just-downloaded sample and the count looks wrong (see the footnote below).
+  const { shownDownloadGroups, hiddenRunGroups, hiddenQuarantinedGroups } = useMemo(() => {
+    const shown = [];
+    const hiddenRun = [];
+    const hiddenQuarantined = [];
+    for (const g of groupPairedFiles(inputs.files || [])) {
+      if (isSampleRunInStep1(g.sample)) hiddenRun.push(g);
+      else if (quarantine.some((q) => q.sample === g.sample)) hiddenQuarantined.push(g);
+      else shown.push(g);
+    }
+    return {
+      shownDownloadGroups: shown,
+      hiddenRunGroups: hiddenRun,
+      hiddenQuarantinedGroups: hiddenQuarantined,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [inputs, step1Status, quarantine]
-  );
+  }, [inputs, step1Status, quarantine]);
   const shownDownloadBytes = shownDownloadGroups.reduce((n, g) => n + (g.totalSize || 0), 0);
 
   // Auto-default the "All VCF table (-a)" option from the build size: on for a
@@ -4073,6 +4086,28 @@ export default function App() {
                         {inputsLoading ? "…" : "Refresh"}
                       </button>
                     </h3>
+                    {/* Why the list can be shorter than what just downloaded: a sample
+                        is fetched into download/ regardless of prior state, but it's
+                        hidden here once it's been run in Step 1 or moved to Quarantine.
+                        Surfacing the count (with the accessions on hover) keeps that
+                        from looking like a lost download. */}
+                    {!inputsLoading && (hiddenRunGroups.length > 0 || hiddenQuarantinedGroups.length > 0) ? (
+                      <div className="muted" style={{fontSize:"11px", marginTop:"-2px", marginBottom:"6px"}}>
+                        Not shown:{" "}
+                        {hiddenRunGroups.length > 0 ? (
+                          <span title={hiddenRunGroups.map((g) => g.sample).join("\n")} style={{cursor:"help", textDecoration:"underline dotted"}}>
+                            {hiddenRunGroups.length} already run in Step 1
+                          </span>
+                        ) : null}
+                        {hiddenRunGroups.length > 0 && hiddenQuarantinedGroups.length > 0 ? " · " : null}
+                        {hiddenQuarantinedGroups.length > 0 ? (
+                          <span title={hiddenQuarantinedGroups.map((g) => g.sample).join("\n")} style={{cursor:"help", textDecoration:"underline dotted"}}>
+                            {hiddenQuarantinedGroups.length} in Quarantine
+                          </span>
+                        ) : null}
+                        {" "}(downloaded, hover to see which).
+                      </div>
+                    ) : null}
                     {!inputsLoading && inputs.files.length === 0 ? (
                       <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
                     ) : null}

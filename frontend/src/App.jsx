@@ -175,6 +175,10 @@ export default function App() {
   // Comparison breakdown of the Step 2 set (total = comparison + excluded).
   const [step2ComparisonCount, setStep2ComparisonCount] = useState(0);
   const [step2ExcludedCount, setStep2ExcludedCount] = useState(0);
+  // Comparison-set composition by source database ([{name, count}], where
+  // "vcf_database" is this project's own samples). Counts sum to the comparison
+  // total. Refreshed from /step2/vcf_count on every Build and Refresh.
+  const [step2Composition, setStep2Composition] = useState([]);
   const [step1AutoRefreshPending, setStep1AutoRefreshPending] = useState(false);
   const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
@@ -1038,6 +1042,7 @@ export default function App() {
     setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
+    setStep2Composition([]);
     setVcfSourceSamples([]);
     setVcfSourceFilter("");
     setVcfSourceOpen(false);
@@ -1533,10 +1538,12 @@ export default function App() {
         typeof countData.comparison === "number" ? countData.comparison : (countData.count || 0)
       );
       setStep2ExcludedCount(countData.excluded || 0);
+      setStep2Composition(Array.isArray(countData.composition) ? countData.composition : []);
     } else {
       setStep2EditedCount(0);
       setStep2ComparisonCount(0);
       setStep2ExcludedCount(0);
+      setStep2Composition([]);
     }
     if (groups.length) {
       loadPosthocStatuses(groups);
@@ -2395,7 +2402,10 @@ export default function App() {
       );
     }
     const parts = [
-      `Imported ${data.imported}`,
+      // "Imported 0" is noise on a rebuild where every reference VCF is already
+      // in the set — only report it when something new actually landed. The
+      // per-source composition line above shows the standing set makeup.
+      data.imported ? `Imported ${data.imported}` : null,
       data.already_present ? `Already in set: ${data.already_present}` : null,
       data.renamed ? `Renamed ${data.renamed}` : null,
       data.dedup_skipped ? `Deduped (older copy): ${data.dedup_skipped}` : null,
@@ -2439,6 +2449,7 @@ export default function App() {
     setStep2SetupMsg("Step 1 rerun started. Rebuild Step 2 VCF set before running Step 2.");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
+    setStep2Composition([]);
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
@@ -2626,6 +2637,7 @@ export default function App() {
       setStep2SetupMsg("VCF set cleared");
       setStep2BuiltAt("");
       setStep2VcfCount(0);
+      setStep2Composition([]);
       setImportStatus("");
       setImportMismatchReport("");
       setVcfSourceSamples([]);
@@ -5850,15 +5862,21 @@ export default function App() {
                     Copy vcf_database path
                   </button>
                 </div>
-                <div className="note">
-                  Step 2 comparison set: <strong>{step2ComparisonCount}</strong> VCF{step2ComparisonCount === 1 ? "" : "s"}
-                  {step2ExcludedCount > 0 ? (
-                    <span className="muted"> ({step2VcfCount} in {vcfsFolderName || "vcf_database"} − {step2ExcludedCount} excluded in Step 1)</span>
-                  ) : (
-                    <span className="muted"> ({step2VcfCount} in {vcfsFolderName || "vcf_database"}, none excluded)</span>
-                  )}
-                  {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
-                </div>
+                {step2Composition.length > 0 && (
+                  <div
+                    className="note"
+                    title="Where the comparison-set VCFs come from. Each VCF is counted once, under the first database (in order) whose panel contains it; whatever no panel claims is this project's own vcf_database samples. Counts sum to the comparison total. Re-derived on every Build and Refresh."
+                  >
+                    Comparison set by source:
+                    {step2Composition.map((c, i) => (
+                      <span key={c.name}>
+                        {i > 0 ? " | " : " "}
+                        <strong>{c.name}</strong>: {c.count}
+                      </span>
+                    ))}
+                    {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
+                  </div>
+                )}
                 {importMismatchReport ? (
                   <button
                     className="ghost action"

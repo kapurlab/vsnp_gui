@@ -4207,15 +4207,38 @@ def step2_vcf_count(project: str):
     # are dropped from the Step 2 comparison at run time. comparison = total −
     # excluded. Surfaced so the Build panel shows what will actually be compared,
     # not just the raw stored count.
+    reference = _project_reference(project_dir)
     excluded_names = set(_read_step1_exclusions(project_dir / "step2")) | set(
-        _reference_blocklist_names(cfg, _project_reference(project_dir))
+        _reference_blocklist_names(cfg, reference)
     )
+    comparison_stems: List[str] = []
     excluded = 0
     for vcf in vcfs:
         stem = vcf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
         if stem in excluded_names:
             excluded += 1
+        else:
+            comparison_stems.append(stem)
     total = len(vcfs)
+    # Composition of the comparison set by source database. Each comparison-set
+    # VCF is assigned to the FIRST enabled panel whose accession list contains
+    # it; whatever no panel claims is attributed to this project's own
+    # vcf_database samples. Priority bucketing keeps the buckets mutually
+    # exclusive so the counts always sum to the comparison total, letting the
+    # user see how many VCFs each database in use contributes.
+    panels = _reference_panels_by_name(cfg, reference)
+    panel_counts = {name: 0 for name, _ in panels}
+    own = 0
+    for stem in comparison_stems:
+        for name, accs in panels:
+            if stem in accs:
+                panel_counts[name] += 1
+                break
+        else:
+            own += 1
+    composition = [{"name": "vcf_database", "count": own}] + [
+        {"name": name, "count": panel_counts[name]} for name, _ in panels
+    ]
     return {
         "count": total,
         "path": str(vcf_source_dir),
@@ -4223,6 +4246,8 @@ def step2_vcf_count(project: str):
         "total": total,
         "excluded": excluded,
         "comparison": total - excluded,
+        "reference": reference or "",
+        "composition": composition,
     }
 
 
@@ -4482,6 +4507,37 @@ def _reference_panel_accessions(cfg: Dict, reference: Optional[str]) -> set:
         for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz")):
             names.add(f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""))
     return names
+
+
+def _reference_panels_by_name(cfg: Dict, reference: Optional[str]) -> List[tuple]:
+    """Per-panel accession sets for the ENABLED reference VCF-db panels matching
+    this reference, as an ordered list of (panel_name, {accession, ...}).
+
+    Unlike _reference_panel_accessions (which merges every panel into one set),
+    this keeps each panel separate so the Build panel can report how many of the
+    comparison set's VCFs are accounted for by each database being used. The
+    accession lists are read live from the panel folders — not from the project
+    manifest, which loses origin-DB attribution once Collect copies VCFs into
+    vcf_database and rebuilds the manifest from the destination folder."""
+    panels: List[tuple] = []
+    if not reference:
+        return panels
+    for folder in _resolved_vcf_db_folders(cfg):
+        if not folder.get("enabled"):
+            continue
+        fref = folder.get("reference", "") or ""
+        if fref and not _refs_match(fref, reference, True):
+            continue
+        p = Path(folder.get("path", ""))
+        if not p.is_dir():
+            continue
+        accs = {
+            f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
+        }
+        if accs:
+            panels.append((folder.get("name", p.name), accs))
+    return panels
 
 
 # --- Step 2 build-list exclusions (tier C) ----------------------------------

@@ -4229,7 +4229,23 @@ def step2_vcf_count(project: str):
     panels = _reference_panels_by_name(cfg, reference)
     panel_counts = {name: 0 for name, _ in panels}
     own = 0
+    # Duplicate = a comparison sample whose ID (filename stem) is available from
+    # more than one selected source — this project's own Step 1 samples and/or
+    # one or more reference panels. Since vcf_database is a flat directory the
+    # sample is physically present only once; this counts the cross-source
+    # identity overlap so the user can see, at a glance, how many of the
+    # comparison samples the reference databases share with each other or with
+    # the project. It also explains why a panel's bucket above can be smaller
+    # than the panel's raw size (shared IDs are attributed to one bucket only).
+    step1_dir = project_dir / "step1"
+    step1_set = set(_step1_sample_names(step1_dir)) if step1_dir.is_dir() else set()
+    duplicates = 0
     for stem in comparison_stems:
+        sources = sum(1 for _, accs in panels if stem in accs)
+        if stem in step1_set:
+            sources += 1
+        if sources >= 2:
+            duplicates += 1
         for name, accs in panels:
             if stem in accs:
                 panel_counts[name] += 1
@@ -4248,6 +4264,7 @@ def step2_vcf_count(project: str):
         "comparison": total - excluded,
         "reference": reference or "",
         "composition": composition,
+        "duplicates": duplicates,
     }
 
 

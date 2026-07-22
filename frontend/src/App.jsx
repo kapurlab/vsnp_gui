@@ -179,6 +179,9 @@ export default function App() {
   // "vcf_database" is this project's own samples). Counts sum to the comparison
   // total. Refreshed from /step2/vcf_count on every Build and Refresh.
   const [step2Composition, setStep2Composition] = useState([]);
+  // Count of comparison samples whose ID appears in more than one selected
+  // source (this project's vcf_database and/or a reference panel).
+  const [step2Duplicates, setStep2Duplicates] = useState(0);
   const [step1AutoRefreshPending, setStep1AutoRefreshPending] = useState(false);
   const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
@@ -1043,6 +1046,7 @@ export default function App() {
     setStep2BuiltAt("");
     setStep2VcfCount(0);
     setStep2Composition([]);
+    setStep2Duplicates(0);
     setVcfSourceSamples([]);
     setVcfSourceFilter("");
     setVcfSourceOpen(false);
@@ -1539,11 +1543,13 @@ export default function App() {
       );
       setStep2ExcludedCount(countData.excluded || 0);
       setStep2Composition(Array.isArray(countData.composition) ? countData.composition : []);
+      setStep2Duplicates(countData.duplicates || 0);
     } else {
       setStep2EditedCount(0);
       setStep2ComparisonCount(0);
       setStep2ExcludedCount(0);
       setStep2Composition([]);
+      setStep2Duplicates(0);
     }
     if (groups.length) {
       loadPosthocStatuses(groups);
@@ -2450,6 +2456,7 @@ export default function App() {
     setStep2BuiltAt("");
     setStep2VcfCount(0);
     setStep2Composition([]);
+    setStep2Duplicates(0);
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
@@ -2638,6 +2645,7 @@ export default function App() {
       setStep2BuiltAt("");
       setStep2VcfCount(0);
       setStep2Composition([]);
+      setStep2Duplicates(0);
       setImportStatus("");
       setImportMismatchReport("");
       setVcfSourceSamples([]);
@@ -5874,6 +5882,14 @@ export default function App() {
                         <strong>{c.name}</strong>: {c.count}
                       </span>
                     ))}
+                    {step2Composition.length > 1 ? (
+                      <span
+                        className="muted"
+                        title="Comparison samples whose ID appears in more than one selected source (this project's vcf_database and/or a reference panel). Each is still included only once; this is the cross-database overlap."
+                      >
+                        {" "}· duplicates across DBs: <strong>{step2Duplicates}</strong>
+                      </span>
+                    ) : null}
                     {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
                   </div>
                 )}

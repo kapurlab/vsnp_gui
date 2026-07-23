@@ -137,6 +137,12 @@ def main() -> int:
         time.sleep(0.1)
         public = jm.get_job(job_id)
         assert_true("_finalize_callback" not in public, "get_job sanitizes _finalize_callback when set")
+        listed = jm.list_jobs()
+        assert_true(any(j["id"] == job_id for j in listed), "list_jobs includes the job")
+        assert_true(
+            all("_finalize_callback" not in j for j in listed),
+            "list_jobs sanitizes internal callbacks",
+        )
 
         print("\nAll JobManager finalize_callback smoke assertions passed.")
         return 0

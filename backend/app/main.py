@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import Response, FileResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
@@ -43,6 +42,7 @@ _STEP1_STATUS_CACHE: Dict[str, tuple] = {}
 
 from app.config import load_config, save_config, SITE_ROOT
 from app.jobs import JobManager
+from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app.projects import (
@@ -71,13 +71,7 @@ from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_ge
 app = FastAPI(title="vSNP GUI API")
 logger = logging.getLogger("uvicorn.error")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
+install_request_safety(app)
 
 cfg = load_config()
 projects_root = Path(cfg["projects_root"])
@@ -3683,6 +3677,16 @@ def step2_run(project: str, payload: Step2Request):
         "vcf_total": vcf_total,
         "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
     }
+
+
+@app.get("/api/jobs")
+def jobs_list():
+    """Suite-management contract: expose active/queued jobs conservatively.
+
+    The consolidated dashboard checks this endpoint before restart, shutdown,
+    or tool updates so it never orphans a vSNP analysis.
+    """
+    return job_manager.list_jobs()
 
 
 @app.get("/api/jobs/{job_id}")

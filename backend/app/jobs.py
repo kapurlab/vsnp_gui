@@ -142,6 +142,14 @@ class JobManager:
             # Strip internal-only fields from the returned snapshot.
             return {k: v for k, v in job.items() if not k.startswith("_")}
 
+    def list_jobs(self) -> list:
+        """Return public snapshots for dashboard lifecycle/readiness checks."""
+        with self._lock:
+            return [
+                {k: v for k, v in job.items() if not k.startswith("_")}
+                for job in self._jobs.values()
+            ]
+
     def stop_job(self, job_id: str) -> bool:
         """Request cancellation of a running OR queued job.
 

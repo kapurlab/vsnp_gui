@@ -5203,6 +5203,26 @@ def _write_kraken_taxa(taxa: List[str]) -> None:
             lines.append(f"- {name}")
     _KRAKEN_TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+def _kraken_gui_config() -> Dict[str, Any]:
+    """Read the Kraken ID Parse GUI's own user config so the vSNP GUI inherits
+    whatever DB paths the user already set THERE (that GUI has a Settings panel
+    with kraken_db / blast_db fields; the vSNP GUI does not). Mirrors that tool's
+    config-dir logic — XDG_CONFIG_HOME, else ~/.config/kraken_id_parse_gui.
+
+    Without this, a local `bdtools` install — where VSNP_GUI_SITE_ROOT points at
+    the per-user vsnp3-site tree that has no databases/ dir — falls through to a
+    non-existent default and Kraken dies with "does not contain ... taxo.k2d",
+    even though the Kraken GUI runs fine off its configured /srv DB.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg) if xdg else (Path.home() / ".config")
+    path = base / "kraken_id_parse_gui" / "config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
 # Read-tag stripping identical to Kraken ID Parse's own pairing logic, so the
 # sample name and R1/R2 selection match what that tool would pick on its own.
 _KRAKEN_READ_TAG_RE = re.compile(r'(?:_R([12])(?:_\d+)?|_([12]))\.fastq\.gz$', re.IGNORECASE)
@@ -5431,10 +5451,19 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     # finds the results instead of showing "No Kraken results yet".
     kraken_sample = _kraken_strip_read_tag(r1.name)[0]
 
-    # Kraken DB: request override → vsnp config (if a user set one) → shared default.
+    # Kraken/BLAST DB resolution, in order:
+    #   1. request override (payload)
+    #   2. vsnp GUI's own config (if a user set one here)
+    #   3. the Kraken ID Parse GUI's config — inherit whatever DB that tool is
+    #      already using, so a working Kraken GUI means a working vSNP Kraken run
+    #      (the vSNP GUI has no DB field of its own).
+    #   4. shared site-root default (correct on the /srv reference install).
+    _kgui = _kraken_gui_config()
     kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
+        or str(_kgui.get("kraken_db", "") or "").strip() \
         or str(SITE_ROOT / "databases" / "kraken2" / "k2_standard_08gb")
     blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
+        or str(_kgui.get("blast_db", "") or "").strip() \
         or str(SITE_ROOT / "databases" / "blast" / "ref_prok_rep_genomes")
     if kraken_only and not kraken_db:
         raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")

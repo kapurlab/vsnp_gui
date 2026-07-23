@@ -6561,7 +6561,13 @@ _frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
     @app.get("/", include_in_schema=False)
     async def _serve_root():
-        return _FileResponse(_frontend_dist / "index.html")
+        # The entry document points at content-hashed bundles and must be
+        # revalidated after an update. In particular, Safari may otherwise keep
+        # an already-open GUI tab on the previous bundle indefinitely.
+        return _FileResponse(
+            _frontend_dist / "index.html",
+            headers={"Cache-Control": "no-store"},
+        )
 
     app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="static_assets")
 

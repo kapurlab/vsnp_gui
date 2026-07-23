@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import igv from "igv";
 import { APP_VERSION } from "./version";
+import ThemeToggle from "./ThemeToggle";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -2132,8 +2133,8 @@ export default function App() {
     // written to new FASTQs). The FASTQs under a sample's vSNP outputs are the
     // input reads that were aligned, so label those "input reads".
     const fastqBadge = kind === "kraken"
-      ? { text: "parsed reads", title: "Kraken-parsed reads — import to run through Step 1", bg: "#fef3c7", fg: "#92400e" }
-      : { text: "input reads", title: "Input reads — the FASTQs staged for this sample's Step 1 run", bg: "#e6eef7", fg: "#1f4e79" };
+      ? { text: "parsed reads", title: "Kraken-parsed reads — import to run through Step 1", bg: "var(--badge-warning-bg)", fg: "var(--badge-warning-fg)" }
+      : { text: "input reads", title: "Input reads — the FASTQs staged for this sample's Step 1 run", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" };
     return (
       <div key={f.path} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
@@ -3520,9 +3521,12 @@ export default function App() {
             <p>Local workflows for vSNP3 implementation</p>
           </div>
         </div>
-        <div className="status-pill">
-          <span className="dot" data-state={jobStatus}></span>
-          <span>{jobStatus}</span>
+        <div className="header-actions">
+          <ThemeToggle />
+          <div className="status-pill">
+            <span className="dot" data-state={jobStatus}></span>
+            <span>{jobStatus}</span>
+          </div>
         </div>
       </header>
 
@@ -3775,8 +3779,8 @@ export default function App() {
                             fontSize: "0.7em",
                             padding: "1px 6px",
                             borderRadius: "10px",
-                            background: "#dbe9ff",
-                            color: "#13294b",
+                            background: "var(--badge-info-bg)",
+                            color: "var(--badge-info-fg)",
                             fontWeight: 600,
                             letterSpacing: "0.02em",
                           }}
@@ -3791,8 +3795,8 @@ export default function App() {
                             fontSize: "0.7em",
                             padding: "1px 6px",
                             borderRadius: "10px",
-                            background: "#e8f5e9",
-                            color: "#1b5e20",
+                            background: "var(--badge-success-bg)",
+                            color: "var(--badge-success-fg)",
                             fontWeight: 600,
                             letterSpacing: "0.02em",
                           }}
@@ -4709,8 +4713,8 @@ export default function App() {
                     style={{
                       padding: "3px 10px",
                       borderRadius: "10px",
-                      background: "#e8f5e9",
-                      color: "#1b5e20",
+                      background: "var(--badge-success-bg)",
+                      color: "var(--badge-success-fg)",
                       fontWeight: 600,
                       fontSize: "0.9em",
                     }}
@@ -5377,8 +5381,8 @@ export default function App() {
               bottom: 0,
               top: igvPanel.fullscreen ? 0 : "auto",
               height: igvPanel.fullscreen ? "100vh" : `${igvPanel.height}vh`,
-              background: "#fff",
-              borderTop: igvPanel.fullscreen ? "none" : "1px solid #ccc",
+              background: "var(--panel)",
+              borderTop: igvPanel.fullscreen ? "none" : "1px solid var(--border)",
               boxShadow: igvPanel.fullscreen ? "none" : "0 -4px 12px rgba(0,0,0,0.12)",
               zIndex: 9000,
               display: "flex",
@@ -5392,8 +5396,8 @@ export default function App() {
                 style={{
                   height: "6px",
                   cursor: "ns-resize",
-                  background: "#e6e6e6",
-                  borderBottom: "1px solid #d0d0d0",
+                  background: "var(--panel-2)",
+                  borderBottom: "1px solid var(--border)",
                 }}
               />
             ) : null}
@@ -5403,8 +5407,8 @@ export default function App() {
                 alignItems: "center",
                 gap: "1rem",
                 padding: "0.4rem 0.8rem",
-                borderBottom: "1px solid #eee",
-                background: "#f7f7f7",
+                borderBottom: "1px solid var(--border)",
+                background: "var(--panel-2)",
               }}
             >
               <strong>IGV</strong>
@@ -5417,7 +5421,7 @@ export default function App() {
                 })()}
               </span>
               {igvPanel.status ? (
-                <span style={{ color: "#b34", fontSize: "0.85em" }}>{igvPanel.status}</span>
+                <span style={{ color: "var(--danger)", fontSize: "0.85em" }}>{igvPanel.status}</span>
               ) : null}
               <span style={{ flex: 1 }} />
               <button onClick={popOutIgv} title="Open this panel in a new tab">Pop out</button>
@@ -5499,7 +5503,7 @@ export default function App() {
                               <tr key={f.relpath}>
                                 <td style={{ wordBreak: "break-all" }}>
                                   {f.relpath}
-                                  {isFastq ? <span title="Parsed reads — add to the project to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "#fef3c7", color: "#92400e", fontWeight: 600 }}>parsed reads</span> : null}
+                                  {isFastq ? <span title="Parsed reads — add to the project to re-run through Step 1" style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: "var(--badge-warning-bg)", color: "var(--badge-warning-fg)", fontWeight: 600 }}>parsed reads</span> : null}
                                 </td>
                                 <td>{f.type}</td>
                                 <td style={{ textAlign: "right" }}>{formatBytes(f.size)}</td>
@@ -5775,8 +5779,8 @@ export default function App() {
                       style={{
                         padding: "2px 8px",
                         borderRadius: "10px",
-                        background: "#e8f5e9",
-                        color: "#1b5e20",
+                        background: "var(--badge-success-bg)",
+                        color: "var(--badge-success-fg)",
                         fontWeight: 600,
                         fontSize: "0.85em",
                       }}
@@ -6246,8 +6250,8 @@ export default function App() {
                       style={{
                         padding: "2px 8px",
                         borderRadius: "10px",
-                        background: "#e8f5e9",
-                        color: "#1b5e20",
+                        background: "var(--badge-success-bg)",
+                        color: "var(--badge-success-fg)",
                         fontWeight: 600,
                         fontSize: "0.85em",
                       }}

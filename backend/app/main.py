@@ -2681,11 +2681,32 @@ def _step1_dispatch(
             # ont (nanopore alignment — auto-detected or forced), else single.
             "  if [ -n \"$R2\" ]; then echo paired > .provenance/read_type; elif [ -n \"$NP\" ]; then echo ont > .provenance/read_type; else echo single > .provenance/read_type; fi",
             "  date -u +%s.%N > .provenance/started_at",
+            # Build the exact command as a shell variable so we can BOTH record it
+            # verbatim to .provenance AND run it (via eval) — guaranteeing the
+            # recorded line is literally what executed. This is the per-sample
+            # "what ran on the command line" provenance the sample folder shows.
             f"  if [ -n \"$R2\" ]; then",
-            f"    vsnp3_step1.py -r1 \"$R1\" -r2 \"$R2\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP >> \"$LOG\" 2>&1",
+            f"    RUN_CMD=\"vsnp3_step1.py -r1 \\\"$R1\\\" -r2 \\\"$R2\\\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP\"",
             "  else",
-            f"    vsnp3_step1.py -r1 \"$R1\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP >> \"$LOG\" 2>&1",
+            f"    RUN_CMD=\"vsnp3_step1.py -r1 \\\"$R1\\\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP\"",
             "  fi",
+            "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
+            "  PROV_SAMPLE=$(basename \"$d\")",
+            "  PROV_CWD=$(pwd)",
+            "  PROV_VSNP3=$(command -v vsnp3_step1.py 2>/dev/null || echo vsnp3_step1.py)",
+            "  {",
+            "    echo \"# ================================================================\"",
+            "    echo \"# vsnp_gui - Step 1 (per-sample alignment)\"",
+            "    echo \"# run at:      $PROV_TS\"",
+            "    echo \"# sample:      $PROV_SAMPLE\"",
+            "    echo \"# working dir: $PROV_CWD\"",
+            "    echo \"# tool:        $PROV_VSNP3\"",
+            "    echo \"# ----------------------------------------------------------------\"",
+            "    echo \"# Command executed (copy/paste to reproduce):\"",
+            "    echo \"$RUN_CMD\"",
+            "    echo \"\"",
+            "  } >> .provenance/vsnp_gui_step1_run_cmd.txt 2>/dev/null || true",
+            "  eval \"$RUN_CMD\" >> \"$LOG\" 2>&1",
             "  STATUS=$?",
             "  echo $STATUS > .provenance/exit_code",
             "  date -u +%s.%N > .provenance/finished_at",
@@ -3608,6 +3629,18 @@ def step2_run(project: str, payload: Step2Request):
             pgid_path.write_text(str(os.getpgid(pid)), encoding="utf-8")
         except OSError:
             pass
+
+    # Provenance: drop a plain-text record of the exact step2 command into the
+    # comparison folder (step2/<timestamp>/.provenance/), so the run folder
+    # plainly shows what was executed — the companion to step1's per-sample file.
+    provenance_writer.append_run_command(
+        run_dir, "vsnp_gui_step2_run_cmd.txt",
+        title="vsnp_gui - Step 2 (comparison / phylogeny)",
+        command=cmd,
+        working_dir=str(run_dir),
+        tool="vsnp3_step2.py",
+        extra_lines=[("reference", payload.reference)],
+    )
 
     job_id = job_manager.start_job(
         name="step2",

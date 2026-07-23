@@ -82,6 +82,50 @@ _reference_cache: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
+# Human-readable "what was run on the command line" provenance
+# ---------------------------------------------------------------------------
+
+
+def append_run_command(output_dir, filename, *, title, command,
+                       sample=None, working_dir=None, tool=None, extra_lines=None):
+    """Append a plain-text, timestamped record of the exact command that was run
+    to ``<output_dir>/.provenance/<filename>``.
+
+    This is the copy/paste-friendly companion to the structured run_metadata.json:
+    it is meant for a human opening a sample/comparison folder who just wants to
+    see what was executed on the command line to produce these results. Each call
+    appends one headered entry (a re-run adds another, newest at the bottom), so
+    the file keeps a short history rather than being overwritten.
+
+    Best-effort by design: provenance must never break or fail an analysis run,
+    so all errors are swallowed.
+    """
+    try:
+        prov = Path(output_dir) / ".provenance"
+        prov.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+        bar = "# " + "=" * 64
+        lines = [bar, f"# {title}", f"# run at:      {ts}"]
+        if sample:
+            lines.append(f"# sample:      {sample}")
+        if working_dir:
+            lines.append(f"# working dir: {working_dir}")
+        if tool:
+            lines.append(f"# tool:        {tool}")
+        for label, value in (extra_lines or []):
+            lines.append(f"# {label}: {value}")
+        lines.append("# " + "-" * 64)
+        lines.append("# Command executed (copy/paste to reproduce):")
+        lines.append(str(command))
+        lines.append("")
+        with open(prov / filename, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except Exception:
+        logger.debug("append_run_command failed for %s/%s", output_dir, filename,
+                     exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 

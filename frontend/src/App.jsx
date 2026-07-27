@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import igv from "igv";
 import { APP_VERSION } from "./version";
 import ThemeToggle from "./ThemeToggle";
+import CitationFooter from "./Citations";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -6599,6 +6600,8 @@ export default function App() {
           </section>
         ) : null}
       </main>
+
+      <CitationFooter tool="vsnp_gui" />
 
       {folderBrowser.open && (
         <div

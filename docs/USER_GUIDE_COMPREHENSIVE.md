@@ -1158,4 +1158,4 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to:
 *For questions or issues not covered here, please consult the troubleshooting guide or create a GitHub issue.*
 
 **Citation:**
-Hicks, Stuber, Lantz, Torchetti, Robbe-Austerman. vSNP: a SNP pipeline for the generation of transparent SNP matrices and phylogenetic trees from whole genome sequencing data sets. BMC Genomics. 2024 Jun 1;25(1):548. PMID: 38822271
+Hicks, Stuber, Lantz, Torchetti, Robbe-Austerman. vSNP: a SNP pipeline for the generation of transparent SNP matrices and phylogenetic trees from whole genome sequencing data sets. BMC Genomics. 2024 Jun 1;25(1):545. PMID: 38822271

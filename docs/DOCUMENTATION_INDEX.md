@@ -297,7 +297,7 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
 
 ### vSNP3 Official Resources
 - **Publication:** [vSNP: a SNP pipeline for the generation of transparent SNP matrices and phylogenetic trees from whole genome sequencing data sets](https://pmc.ncbi.nlm.nih.gov/articles/PMC11143592/)
-  - Stuber TP, et al. BMC Genomics. 2024 Jun 1;25(1):548
+  - Hicks J, Stuber T, Lantz K, Torchetti M, Robbe-Austerman S. BMC Genomics. 2024 Jun 1;25(1):545. PMID: 38822271. doi:10.1186/s12864-024-10437-5
 - **GitHub:** [USDA-VS/vSNP3](https://github.com/USDA-VS/vSNP3)
 - **vSNP v2:** [Detailed Usage Guide](https://github.com/USDA-VS/vSNP/blob/master/docs/detailed_usage.md)
 

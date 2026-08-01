@@ -39,6 +39,39 @@ if [ -f "${STEP1_PY}" ] && grep -qF "float(fastq_stats.R1.passQ20)" "${STEP1_PY}
   echo "applied passQ comma fix to ${STEP1_PY}"
 fi
 
+# Minus-strand amino acid calls: vsnp3_annotation.py translates the plus-strand
+# codon as-is, so every minus-strand ref/alt AA is wrong and the silent vs
+# nonsynonymous call is close to a coin flip (~half of MTBC genes are minus
+# strand). Reported by Vivek Kapur 2026-08-01. v3.16 and v3.35 restructured this
+# function completely, so this is a small content-anchored rewriter rather than
+# a sed one-liner or a line-context .patch — see strandfix.py. Idempotent, and
+# it refuses rather than guesses on an unrecognised release.
+ANNOT_PY="${PREFIX}/bin/vsnp3_annotation.py"
+if [ -f "${ANNOT_PY}" ]; then
+  PYBIN="${PREFIX}/bin/python3"
+  [ -x "${PYBIN}" ] || PYBIN="${PREFIX}/bin/python"
+  [ -x "${PYBIN}" ] || PYBIN="$(command -v python3)"
+  "${PYBIN}" "${SCRIPT_DIR}/strandfix.py" "${ANNOT_PY}"
+fi
+
+# The .patch set below is unified-diff against v3.16 and does not apply to any
+# other release — v3.35 restructured all four target files, so every hunk fails.
+# We deploy both (/srv carries v3.16, the bdtools checkout env carries v3.35),
+# so bail out cleanly here instead of dumping a wall of FAILED hunks and .rej
+# files. The content fixes above are version-agnostic and have already run.
+VSNP3_VER="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']\([^"'"'"']*\)["'"'"'].*/\1/p' \
+  "${PREFIX}/bin/vsnp3_step1.py" 2>/dev/null | head -1)"
+case "${VSNP3_VER}" in
+  3.16*) ;;
+  "")
+    echo "warning: cannot read vsnp3 version from ${PREFIX}/bin/vsnp3_step1.py; attempting the v3.16 patch set anyway" >&2
+    ;;
+  *)
+    echo "vsnp3 ${VSNP3_VER} at ${PREFIX}: content fixes applied; skipping the v3.16-only .patch set"
+    exit 0
+    ;;
+esac
+
 # Detect "fully applied" via a sentinel unique to the NEWEST .patch (the last one
 # in the list) — the isolate-each-group marker in group_on_defining_snps. If it's
 # present, the .patch set is applied. Bump this marker whenever a newer patch is

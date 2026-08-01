@@ -6,11 +6,83 @@ import CitationFooter from "./Citations";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
+// Kept in step with _FASTQ_SUFFIXES in backend/app/main.py — the suffixes the
+// server-side file picker offers and link-local accepts.
+const FASTQ_EXTS = [".fastq.gz", ".fq.gz"];
+
 function parseAccessions(text) {
   return text
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function formatBytes(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let v = Number(n);
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// Free / total for a filesystem, with a low-space warning. Rendered wherever a
+// directory is chosen so a project root is never picked blind — a Step 1 batch
+// of a few thousand samples runs to several TB of intermediates.
+function DiskSpace({ disk, style }) {
+  if (!disk || !disk.total) return null;
+  const pctFree = disk.free / disk.total;
+  const low = pctFree < 0.1;
+  return (
+    <span
+      className="muted"
+      style={{ fontSize: "12px", color: low ? "var(--danger, #c00)" : undefined, ...(style || {}) }}
+      title={`${formatBytes(disk.free)} free of ${formatBytes(disk.total)} (${Math.round(pctFree * 100)}% free)`}
+    >
+      {formatBytes(disk.free)} free of {formatBytes(disk.total)}
+      {low ? " — low space" : ""}
+    </span>
+  );
+}
+
+/**
+ * A button that acknowledges the click immediately.
+ *
+ * Long server actions (staging a few thousand FASTQs, collecting 2000+ VCFs)
+ * used to leave the plain <button> looking inert for tens of seconds, so users
+ * could not tell a click had registered and clicked again. BusyButton disables
+ * itself and swaps in `busyLabel` on the first click, and stays that way until
+ * the async onClick settles — including on error, which it surfaces rather than
+ * swallowing.
+ */
+function BusyButton({ onClick, busyLabel, children, disabled, onError, ...rest }) {
+  const [busy, setBusy] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  return (
+    <button
+      {...rest}
+      disabled={disabled || busy}
+      aria-busy={busy ? "true" : undefined}
+      onClick={async (e) => {
+        if (busy) return;
+        setBusy(true);
+        try {
+          await onClick(e);
+        } catch (err) {
+          if (onError) onError(err);
+          else window.alert(err?.message || String(err));
+        } finally {
+          if (mounted.current) setBusy(false);
+        }
+      }}
+    >
+      {busy ? (busyLabel || "Working…") : children}
+    </button>
+  );
 }
 
 export default function App() {
@@ -26,8 +98,14 @@ export default function App() {
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
   });
-  // Server-side folder browser for picking the projects root.
-  const [folderBrowser, setFolderBrowser] = useState({ open: false, path: "", parent: null, entries: [], loading: false, error: "" });
+  // Server-side path browser. mode "folder" picks the projects root; mode
+  // "files" multi-selects FASTQs already on the server (see openFileBrowser).
+  const [folderBrowser, setFolderBrowser] = useState({
+    open: false, mode: "folder", path: "", parent: null, entries: [], files: [],
+    disk: null, selected: [], loading: false, error: ""
+  });
+  // Free/total for the current Projects root, shown next to the field.
+  const [projectsRootDisk, setProjectsRootDisk] = useState(null);
   const [sraText, setSraText] = useState("");
   const [sraFolder, setSraFolder] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -293,6 +371,9 @@ export default function App() {
   const [vcfsFolderName, setVcfsFolderName] = useState("");
   const [vcfsFolderSamples, setVcfsFolderSamples] = useState([]);
   const [vcfsCollectResult, setVcfsCollectResult] = useState(null);
+  const [vcfsCollectError, setVcfsCollectError] = useState("");
+  const [step1SetupMsg, setStep1SetupMsg] = useState("");
+  const [linkLocalMsg, setLinkLocalMsg] = useState("");
   const [vcfsForceSet, setVcfsForceSet] = useState(new Set());
   // Off by default: this is the project's OWN vcf_database, which already holds
   // the same Step 1 samples that "Include current project Step 1 ZC VCFs" adds.
@@ -871,17 +952,33 @@ export default function App() {
 
   async function collectVcfs(forceSamples) {
     if (!selectedProject) return;
+    setVcfsCollectError("");
     const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/vcfs/collect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ force_samples: forceSamples || [] })
     });
-    if (res.ok) {
-      const data = await res.json();
-      setVcfsCollectResult(data);
-      await loadVcfsFolder(selectedProject);
-      await refreshProjects(selectedProject);
+    if (!res.ok) {
+      // Previously a failed collect was swallowed silently, so the button
+      // looked like it did nothing at all.
+      let detail = `Collect failed (HTTP ${res.status})`;
+      try {
+        const msg = await res.json();
+        if (msg?.detail) detail = msg.detail;
+      } catch (_) { /* non-JSON error body */ }
+      setVcfsCollectError(detail);
+      return;
     }
+    const data = await res.json();
+    setVcfsCollectResult(data);
+    await loadVcfsFolder(selectedProject);
+    await refreshProjects(selectedProject);
+    // The "N samples not in vcf_database" list is derived from step1Status,
+    // whose poll only runs while a Step 1 batch is running. Without this
+    // refresh the list stayed frozen at its pre-collect value on an idle
+    // project, which read as "the button did nothing" even though the VCFs
+    // had been copied.
+    await loadStep1Status();
   }
 
   async function loadAll() {
@@ -922,6 +1019,24 @@ export default function App() {
   useEffect(() => {
     document.title = `vSNP GUI ${APP_VERSION}`;
   }, []);
+
+  // Headroom on the volume holding the Projects root. Debounced because the
+  // field is a free-text input — we only stat once the user stops typing.
+  useEffect(() => {
+    const root = (settings.projects_root || "").trim();
+    if (!root) {
+      setProjectsRootDisk(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      fetch(`${API_BASE}/api/disk-usage?path=${encodeURIComponent(root)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (!cancelled) setProjectsRootDisk(d?.disk || null); })
+        .catch(() => { if (!cancelled) setProjectsRootDisk(null); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [settings.projects_root]);
 
   // Load the shared taxon search names (kraken repo's config/taxa.yaml).
   useEffect(() => {
@@ -1253,21 +1368,82 @@ export default function App() {
     await refreshProjects(selectedProject === name ? "" : selectedProject);
   }
 
-  // --- Project-root folder browser ---------------------------------------
-  function browseDirs(path) {
+  // --- Server-side path browser ------------------------------------------
+  // One modal, two modes:
+  //   "folder" — pick a directory (Projects root). Directories only.
+  //   "files"  — pick FASTQs that already live on the server, multi-select, so
+  //              server-side inputs are chosen in place instead of being
+  //              round-tripped through a browser upload.
+  // Both modes show the free/total space on the filesystem being browsed.
+  function browseDirs(path, modeOverride) {
+    const mode = modeOverride || folderBrowser.mode || "folder";
+    const wantFiles = mode === "files";
+    const qs = new URLSearchParams({ path: path || "" });
+    if (wantFiles) {
+      qs.set("include_files", "1");
+      qs.set("exts", FASTQ_EXTS.join(","));
+    }
     setFolderBrowser((s) => ({ ...s, loading: true, error: "" }));
-    fetch(`${API_BASE}/api/browse-dirs?path=${encodeURIComponent(path || "")}`)
+    fetch(`${API_BASE}/api/browse-dirs?${qs.toString()}`)
       .then((r) => (r.ok ? r.json() : r.json().then((e) => { throw new Error(e.detail || "Cannot open folder"); })))
-      .then((d) => setFolderBrowser((s) => ({ ...s, path: d.path, parent: d.parent, entries: d.entries, loading: false })))
-      .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message })));
+      .then((d) => setFolderBrowser((s) => ({
+        ...s,
+        path: d.path,
+        parent: d.parent,
+        entries: d.entries,
+        files: d.files || [],
+        disk: d.disk || null,
+        loading: false
+      })))
+      .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message, files: [], disk: null })));
   }
   function openFolderBrowser() {
-    setFolderBrowser({ open: true, path: "", parent: null, entries: [], loading: true, error: "" });
-    browseDirs(settings.projects_root || "");
+    setFolderBrowser({
+      open: true, mode: "folder", path: "", parent: null, entries: [], files: [],
+      disk: null, selected: [], loading: true, error: ""
+    });
+    browseDirs(settings.projects_root || "", "folder");
+  }
+  function openFileBrowser() {
+    // Start where the user most recently worked: the last linked path, else the
+    // current project's download/, else the projects root.
+    const start = localPath
+      || (settings.projects_root && selectedProject ? `${settings.projects_root}/${selectedProject}/download` : "")
+      || settings.projects_root
+      || "";
+    setFolderBrowser({
+      open: true, mode: "files", path: "", parent: null, entries: [], files: [],
+      disk: null, selected: [], loading: true, error: ""
+    });
+    browseDirs(start, "files");
   }
   function chooseFolder() {
     setSettings((s) => ({ ...s, projects_root: folderBrowser.path }));
     setFolderBrowser((s) => ({ ...s, open: false }));
+  }
+  function toggleBrowserFile(path) {
+    setFolderBrowser((s) => {
+      const sel = new Set(s.selected || []);
+      if (sel.has(path)) sel.delete(path);
+      else sel.add(path);
+      return { ...s, selected: Array.from(sel) };
+    });
+  }
+  // Link the checked files, or — with nothing checked — every FASTQ in the
+  // folder being viewed, which is the common case.
+  async function linkBrowserSelection() {
+    const chosen = (folderBrowser.selected || []).length
+      ? folderBrowser.selected
+      : (folderBrowser.files || []).map((f) => f.path);
+    if (!chosen.length) {
+      setFolderBrowser((s) => ({ ...s, error: "No FASTQ files selected." }));
+      return;
+    }
+    const result = await linkLocalPaths(chosen);
+    if (result) {
+      setLocalPath(folderBrowser.path);
+      setFolderBrowser((s) => ({ ...s, open: false, selected: [] }));
+    }
   }
 
   async function saveSettings() {
@@ -1928,17 +2104,39 @@ export default function App() {
   async function linkLocal(pathOverride = "") {
     const pathToUse = pathOverride || localPath;
     if (!selectedProject || !settingsReady || !pathToUse) return;
+    return linkLocalPaths([pathToUse]);
+  }
+
+  // Symlink one or more server-side paths (files and/or directories) into the
+  // project's download/. Returns the server's result, or null on failure.
+  async function linkLocalPaths(paths) {
+    if (!selectedProject || !settingsReady || !paths?.length) return null;
+    setLinkLocalMsg(`Linking ${paths.length} item${paths.length !== 1 ? "s" : ""}…`);
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/link-local`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathToUse })
+      body: JSON.stringify({ paths })
     });
     if (!res.ok) {
-      const msg = await res.json();
-      window.alert(msg.detail || "Link local failed");
-      return;
+      let detail = `Link local failed (HTTP ${res.status})`;
+      try {
+        const msg = await res.json();
+        if (msg?.detail) detail = msg.detail;
+      } catch (_) { /* non-JSON error body */ }
+      setLinkLocalMsg(detail);
+      return null;
     }
+    const data = await res.json();
     await loadAll();
+    setLinkLocalMsg(
+      [
+        `${data.linked || 0} file${(data.linked || 0) !== 1 ? "s" : ""} linked into download/`,
+        data.already_present?.length ? `${data.already_present.length} already there` : null,
+        data.skipped_not_fastq?.length ? `${data.skipped_not_fastq.length} skipped (not FASTQ)` : null,
+        data.missing?.length ? `${data.missing.length} not found` : null
+      ].filter(Boolean).join(" • ")
+    );
+    return data;
   }
 
   async function loadInputs(project) {
@@ -2514,9 +2712,34 @@ export default function App() {
 
   async function step1Setup() {
     if (!selectedProject || !settingsReady) return;
-    await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, { method: "POST" });
-    await loadAll();
-    await loadStep1Status();
+    // Staging copies the reads into step1/, so a few thousand samples is a long
+    // synchronous request. Say so up front rather than leaving the panel blank.
+    setStep1SetupMsg("Staging FASTQs into Step 1 — this can take several minutes on a large batch…");
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, { method: "POST" });
+      if (!res.ok) {
+        let detail = `Grab failed (HTTP ${res.status})`;
+        try {
+          const msg = await res.json();
+          if (msg?.detail) detail = msg.detail;
+        } catch (_) { /* non-JSON error body */ }
+        setStep1SetupMsg(detail);
+        return;
+      }
+      const data = await res.json();
+      await loadAll();
+      await loadStep1Status();
+      setStep1SetupMsg(
+        data.message
+          ? data.message
+          : [
+              `${data.created || 0} file${(data.created || 0) !== 1 ? "s" : ""} staged`,
+              data.renamed ? `${data.renamed} renamed` : null
+            ].filter(Boolean).join(" • ")
+      );
+    } catch (err) {
+      setStep1SetupMsg(err?.message || "Grab failed");
+    }
   }
 
   async function step1Run() {
@@ -3641,6 +3864,7 @@ export default function App() {
                     ) : (
                       <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
                     )}
+                    <DiskSpace disk={projectsRootDisk} />
                   </span>
                 </div>
                 <div className="settings-row">
@@ -3940,6 +4164,18 @@ export default function App() {
                   </button>
                 ) : (
                   <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+                    {/* Browse the server filesystem and pick the FASTQs directly.
+                        The dropdown below only knows about other projects'
+                        download/ folders, and the custom-path box requires the
+                        user to already know the path. */}
+                    <button
+                      type="button"
+                      disabled={!selectedProject || !settingsReady}
+                      onClick={openFileBrowser}
+                      title="Browse the server filesystem and select FASTQ files or a folder to link into this project"
+                    >
+                      Browse server files…
+                    </button>
                     <select
                       value={folderPickerMode === "custom" ? "__custom__" : ""}
                       disabled={!selectedProject || !settingsReady}
@@ -3982,15 +4218,16 @@ export default function App() {
                             }
                           }}
                         />
-                        <button
+                        <BusyButton
                           className="ghost"
+                          busyLabel="Linking…"
                           onClick={async () => {
                             if (localPath.trim()) await linkLocal(localPath.trim());
                           }}
                           disabled={!localPath.trim() || !selectedProject || !settingsReady}
                         >
                           Link
-                        </button>
+                        </BusyButton>
                         <button
                           className="ghost"
                           onClick={() => { setFolderPickerMode("dropdown"); setLocalPath(""); }}
@@ -4003,6 +4240,19 @@ export default function App() {
                   </div>
                 )}
                 {localPath ? <div className="note">Selected: {localPath}</div> : null}
+                {linkLocalMsg ? (
+                  <div className="note" style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                    <span style={{flex:1}}>{linkLocalMsg}</span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      style={{fontSize:"11px", padding:"2px 8px"}}
+                      onClick={() => setLinkLocalMsg("")}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                ) : null}
                 <div className="block">
                   <div className="muted" style={{fontSize:"12px", margin:"4px 0 6px"}}>…or upload / drag & drop</div>
                   <div
@@ -4065,7 +4315,7 @@ export default function App() {
                   value={sraFolder}
                   onChange={(e) => setSraFolder(e.target.value)}
                 />
-                <button onClick={sraDownload} disabled={!selectedProject || !settingsReady}>Download</button>
+                <BusyButton onClick={sraDownload} disabled={!selectedProject || !settingsReady} busyLabel="Starting…">Download</BusyButton>
                 {sraStatus ? (
                   <div className={`note${sraStatus.toLowerCase().includes("fail") ? " error" : ""}`}>
                     {sraStatus.includes("Downloading") ? (
@@ -4790,7 +5040,14 @@ export default function App() {
                 Force re-run (re-align samples already Complete)
               </label>
               <div className="step1-actions">
-                <button onClick={step1Setup} disabled={!selectedProject || !settingsReady} title="Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run).">Grab ready-to-run samples</button>
+                <BusyButton
+                  onClick={step1Setup}
+                  disabled={!selectedProject || !settingsReady}
+                  busyLabel="Grabbing…"
+                  title="Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run)."
+                >
+                  Grab ready-to-run samples
+                </BusyButton>
                 <button
                   onClick={step1Run}
                   disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}
@@ -4809,11 +5066,24 @@ export default function App() {
                   </button>
                 ) : null}
               </div>
+              {step1SetupMsg ? (
+                <div className="note" style={{marginTop:"0.4em"}}>
+                  <span style={{flex:1}}>{step1SetupMsg}</span>
+                  <button
+                    type="button"
+                    className="ghost"
+                    style={{fontSize:"11px", padding:"2px 8px", marginLeft:"8px"}}
+                    onClick={() => setStep1SetupMsg("")}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ) : null}
             </div>
             <div className="step1-status">
               <div className="step1-status-header">
                 <span>Samples</span>
-                <button onClick={loadStep1Status} disabled={!selectedProject}>Refresh</button>
+                <BusyButton onClick={loadStep1Status} disabled={!selectedProject} busyLabel="Refreshing…">Refresh</BusyButton>
               </div>
               {step1Status.length ? (
                 <input
@@ -4866,14 +5136,27 @@ export default function App() {
                 <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
                     <span><strong>{vcfsFolderName || "vcf_database"}</strong>: {vcfsFolderCount} VCF{vcfsFolderCount !== 1 ? "s" : ""}</span>
-                    <button className="ghost" style={{fontSize:"0.8em"}} onClick={() => collectVcfs([])}>Collect Step 1 VCFs</button>
+                    <BusyButton
+                      className="ghost"
+                      style={{fontSize:"0.8em"}}
+                      busyLabel="Collecting…"
+                      title="Copy every passing Step 1 VCF into the cumulative vcf_database. Large projects can take a minute."
+                      onClick={() => collectVcfs([])}
+                      onError={(err) => setVcfsCollectError(err?.message || String(err))}
+                    >
+                      Collect Step 1 VCFs
+                    </BusyButton>
                   </div>
-                  {vcfsCollectResult ? (
+                  {vcfsCollectError ? (
+                    <div className="note warning" style={{fontSize:"0.82em", marginTop:"0.2em"}}>{vcfsCollectError}</div>
+                  ) : vcfsCollectResult ? (
                     <div className="note" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
                       {[
                         vcfsCollectResult.auto_added.length ? `+${vcfsCollectResult.auto_added.length} added` : null,
                         vcfsCollectResult.force_added.length ? `+${vcfsCollectResult.force_added.length} force-added` : null,
                         vcfsCollectResult.already_present.length ? `${vcfsCollectResult.already_present.length} already present` : null,
+                        vcfsCollectResult.excluded_skipped?.length ? `${vcfsCollectResult.excluded_skipped.length} excluded (skipped)` : null,
+                        vcfsCollectResult.no_vcf?.length ? `${vcfsCollectResult.no_vcf.length} with no VCF` : null,
                       ].filter(Boolean).join(" • ") || "Up to date"}
                     </div>
                   ) : null}
@@ -4915,16 +5198,21 @@ export default function App() {
                           ))}
                         </ul>
                         {hasAnyVcf ? (
-                          <button
+                          <BusyButton
                             style={{fontSize:"0.82em"}}
                             disabled={vcfsForceSet.size === 0}
-                            onClick={() => {
-                              collectVcfs(Array.from(vcfsForceSet));
+                            busyLabel="Adding…"
+                            onClick={async () => {
+                              // Await before clearing the selection: the old
+                              // code cleared it on the same tick, so a failed
+                              // add lost the user's checkboxes too.
+                              await collectVcfs(Array.from(vcfsForceSet));
                               setVcfsForceSet(new Set());
                             }}
+                            onError={(err) => setVcfsCollectError(err?.message || String(err))}
                           >
                             Add {vcfsForceSet.size > 0 ? `${vcfsForceSet.size} ` : ""}checked to vcf_database
-                          </button>
+                          </BusyButton>
                         ) : null}
                       </details>
                     );
@@ -5997,7 +6285,7 @@ export default function App() {
                   </select>
                 </div>
                 <div className="row">
-                  <button onClick={importVcfs} disabled={!selectedProject || !settingsReady} title="Add the selected reference / external VCFs into this project's Step 2 comparison set (step2/vcf_database)">Build comparison set</button>
+                  <BusyButton onClick={importVcfs} disabled={!selectedProject || !settingsReady} busyLabel="Building…" title="Add the selected reference / external VCFs into this project's Step 2 comparison set (step2/vcf_database)">Build comparison set</BusyButton>
                   <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 comparison set">Clear comparison set</button>
                   <button
                     className="ghost action"
@@ -6242,7 +6530,7 @@ export default function App() {
 
             <div className="block">
               {step2Mode === "step1" ? (
-                <button onClick={step2Setup} disabled={!selectedProject || !settingsReady} title="Collect this project's Step 1 VCFs into the Step 2 set">Setup (build set from Step 1)</button>
+                <BusyButton onClick={step2Setup} disabled={!selectedProject || !settingsReady} busyLabel="Building…" title="Collect this project's Step 1 VCFs into the Step 2 set">Setup (build set from Step 1)</BusyButton>
               ) : null}
                 {(reference || projectReference) ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
@@ -6612,8 +6900,9 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
           >
-            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700 }}>
-              Select a projects root
+            <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+              <span>{folderBrowser.mode === "files" ? "Select FASTQ files on the server" : "Select a projects root"}</span>
+              <DiskSpace disk={folderBrowser.disk} style={{ fontWeight: 400 }} />
             </div>
             <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
               <button type="button" className="ghost" disabled={!folderBrowser.parent || folderBrowser.loading} onClick={() => browseDirs(folderBrowser.parent)}>↑ Up</button>
@@ -6630,25 +6919,83 @@ export default function App() {
                 <div className="muted" style={{ padding: 12 }}>Loading…</div>
               ) : folderBrowser.error ? (
                 <div className="muted" style={{ padding: 12, color: "var(--danger, #c00)" }}>{folderBrowser.error}</div>
-              ) : folderBrowser.entries.length === 0 ? (
-                <div className="muted" style={{ padding: 12 }}>No sub-folders here.</div>
+              ) : folderBrowser.entries.length === 0 && !(folderBrowser.files || []).length ? (
+                <div className="muted" style={{ padding: 12 }}>
+                  {folderBrowser.mode === "files" ? "No sub-folders or FASTQ files here." : "No sub-folders here."}
+                </div>
               ) : (
-                folderBrowser.entries.map((e) => (
-                  <div
-                    key={e.path}
-                    onClick={() => browseDirs(e.path)}
-                    style={{ padding: "7px 8px", cursor: "pointer", borderRadius: 6, display: "flex", gap: 8, alignItems: "center" }}
-                    onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--panel-2, #f0f0f0)")}
-                    onMouseLeave={(ev) => (ev.currentTarget.style.background = "transparent")}
-                  >
-                    <span>📁</span><span>{e.name}</span>
-                  </div>
-                ))
+                <>
+                  {folderBrowser.entries.map((e) => (
+                    <div
+                      key={e.path}
+                      onClick={() => browseDirs(e.path)}
+                      style={{ padding: "7px 8px", cursor: "pointer", borderRadius: 6, display: "flex", gap: 8, alignItems: "center" }}
+                      onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--panel-2, #f0f0f0)")}
+                      onMouseLeave={(ev) => (ev.currentTarget.style.background = "transparent")}
+                    >
+                      <span>📁</span><span>{e.name}</span>
+                    </div>
+                  ))}
+                  {(folderBrowser.files || []).map((f) => (
+                    <label
+                      key={f.path}
+                      style={{ padding: "7px 8px", cursor: "pointer", borderRadius: 6, display: "flex", gap: 8, alignItems: "center" }}
+                      onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--panel-2, #f0f0f0)")}
+                      onMouseLeave={(ev) => (ev.currentTarget.style.background = "transparent")}
+                    >
+                      <input
+                        type="checkbox"
+                        style={{ width: "auto", margin: 0 }}
+                        checked={(folderBrowser.selected || []).includes(f.path)}
+                        onChange={() => toggleBrowserFile(f.path)}
+                      />
+                      <span>🧬</span>
+                      <span style={{ flex: 1 }}>{f.name}</span>
+                      <span className="muted" style={{ fontSize: "12px" }}>{formatBytes(f.size)}</span>
+                    </label>
+                  ))}
+                </>
               )}
             </div>
+            {folderBrowser.mode === "files" && (folderBrowser.files || []).length ? (
+              <div style={{ padding: "6px 16px", display: "flex", gap: 8, alignItems: "center", fontSize: "12px" }}>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ fontSize: "12px", padding: "2px 8px" }}
+                  onClick={() => setFolderBrowser((s) => ({ ...s, selected: (s.files || []).map((f) => f.path) }))}
+                >
+                  Select all {folderBrowser.files.length}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ fontSize: "12px", padding: "2px 8px" }}
+                  disabled={!(folderBrowser.selected || []).length}
+                  onClick={() => setFolderBrowser((s) => ({ ...s, selected: [] }))}
+                >
+                  Clear
+                </button>
+                <span className="muted">{(folderBrowser.selected || []).length} selected</span>
+              </div>
+            ) : null}
             <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border, #ddd)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button type="button" className="ghost" onClick={() => setFolderBrowser((s) => ({ ...s, open: false }))}>Cancel</button>
-              <button type="button" onClick={chooseFolder} disabled={folderBrowser.loading || !folderBrowser.path}>Select this folder</button>
+              {folderBrowser.mode === "files" ? (
+                <BusyButton
+                  busyLabel="Linking…"
+                  onClick={linkBrowserSelection}
+                  disabled={folderBrowser.loading || !folderBrowser.path}
+                  onError={(err) => setFolderBrowser((s) => ({ ...s, error: err?.message || String(err) }))}
+                  title="Symlink the selection into this project's download/ folder"
+                >
+                  {(folderBrowser.selected || []).length
+                    ? `Link ${folderBrowser.selected.length} selected`
+                    : `Link all FASTQs in this folder`}
+                </BusyButton>
+              ) : (
+                <button type="button" onClick={chooseFolder} disabled={folderBrowser.loading || !folderBrowser.path}>Select this folder</button>
+              )}
             </div>
           </div>
         </div>

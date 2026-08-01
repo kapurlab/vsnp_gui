@@ -925,8 +925,18 @@ class SraRequest(BaseModel):
     folder: Optional[str] = None
 
 
+# FASTQ names the server-side picker offers and link-local accepts. Step 1
+# pairs on _1/_2 (or _R1/_R2) of gzipped reads, so uncompressed .fastq is
+# deliberately not in this list.
+_FASTQ_SUFFIXES = (".fastq.gz", ".fq.gz")
+
+
 class LinkLocalRequest(BaseModel):
-    path: str
+    path: str = ""
+    # Multi-select from the server-side file picker. Each entry is an absolute
+    # path to a FASTQ (or a directory, treated the same as `path`). Kept
+    # separate from `path` so existing single-path callers are unchanged.
+    paths: List[str] = []
 
 
 class ImportVcfRequest(BaseModel):
@@ -1064,14 +1074,35 @@ def update_config(update: ConfigUpdate):
     return cfg
 
 
+def _disk_usage_for(p: Path) -> Optional[Dict[str, int]]:
+    """Free/total bytes for the filesystem holding `p`, or None if unavailable.
+
+    Shown in the folder picker so a project root is not chosen on a volume that
+    cannot hold the run — a Step 1 batch of a few thousand samples is easily
+    several TB of intermediates.
+    """
+    try:
+        usage = shutil.disk_usage(p)
+    except OSError:
+        return None
+    return {"total": usage.total, "free": usage.free, "used": usage.used}
+
+
 @app.get("/api/browse-dirs")
-def browse_dirs(path: str = ""):
+def browse_dirs(path: str = "", include_files: bool = False, exts: str = ""):
     """List sub-directories of `path` for the project-root folder picker.
 
     Runs as the OOD session user, so the OS filesystem permissions are the only
     limit on what can be browsed (no artificial base restriction). Defaults to
     the user's home when no path is given. Returns the resolved path, its parent
-    (null at the filesystem root), and the immediate sub-directories.
+    (null at the filesystem root), the immediate sub-directories, and the free /
+    total bytes on the filesystem holding it.
+
+    With ?include_files=1 the response also carries the immediate regular files,
+    optionally narrowed to a comma-separated ?exts= suffix list (case
+    insensitive, e.g. ".fastq.gz,.fq.gz"). This backs the server-side file
+    picker for "Add local FASTQ", so files that already live on the server are
+    selected in place rather than round-tripped through a browser upload.
     """
     try:
         p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
@@ -1079,7 +1110,11 @@ def browse_dirs(path: str = ""):
         raise HTTPException(status_code=400, detail="Invalid path")
     if not p.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {p}")
+    suffixes = tuple(
+        s.strip().lower() for s in exts.split(",") if s.strip()
+    )
     entries: List[Dict[str, str]] = []
+    files: List[Dict] = []
     try:
         for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
             if child.name.startswith("."):
@@ -1087,12 +1122,42 @@ def browse_dirs(path: str = ""):
             try:
                 if child.is_dir():
                     entries.append({"name": child.name, "path": str(child)})
+                elif include_files and child.is_file():
+                    if suffixes and not child.name.lower().endswith(suffixes):
+                        continue
+                    try:
+                        size = child.stat().st_size
+                    except OSError:
+                        size = 0
+                    files.append(
+                        {"name": child.name, "path": str(child), "size": size}
+                    )
             except OSError:
                 continue
     except PermissionError:
         raise HTTPException(status_code=403, detail=f"Permission denied: {p}")
     parent = str(p.parent) if p.parent != p else None
-    return {"path": str(p), "parent": parent, "entries": entries}
+    return {
+        "path": str(p),
+        "parent": parent,
+        "entries": entries,
+        "files": files,
+        "disk": _disk_usage_for(p),
+    }
+
+
+@app.get("/api/disk-usage")
+def disk_usage(path: str = ""):
+    """Free/total bytes for the filesystem holding `path` (blank -> home).
+
+    Used by the Settings panel to show headroom for the current Projects root
+    without re-listing its contents.
+    """
+    try:
+        p = (Path(path).expanduser() if path.strip() else Path.home()).resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return {"path": str(p), "disk": _disk_usage_for(p)}
 
 
 class VcfDbFolderAction(BaseModel):
@@ -2028,27 +2093,61 @@ def project_link_local(project: str, payload: LinkLocalRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
-    raw_path = payload.path or ""
-    src = Path(raw_path.strip()).expanduser()
-    if not src.exists():
-        print(f"Link-local failed. Raw path: {raw_path!r} Resolved: {src}")
-        raise HTTPException(status_code=400, detail=f"Input path not found: {src}")
+    raw_paths = [str(payload.path or "")] + list(payload.paths or [])
+    raw_paths = [r.strip() for r in raw_paths if r and r.strip()]
+    if not raw_paths:
+        raise HTTPException(status_code=400, detail="No input path given")
+
     download_dir = project_dir / "download"
-    # Accept either a directory of fastqs, or a single .fastq.gz file (used to
-    # pull a Kraken parsed-read file into download/ so it can be re-run through
-    # Step 1). For a single file, symlink it to its real target so the link
-    # keeps working even if the original is itself a symlink.
-    if src.is_file():
-        candidates = [src] if src.name.endswith(".fastq.gz") else []
-    else:
-        candidates = sorted(src.glob("*.fastq.gz"))
+    # Accept either a directory of fastqs, or individual FASTQ files (a Kraken
+    # parsed-read file pulled in so it can be re-run through Step 1, or a
+    # multi-select from the server-side file picker). Files are symlinked to
+    # their real target so the link keeps working even if the original is
+    # itself a symlink.
+    candidates: List[Path] = []
+    missing: List[str] = []
+    skipped_not_fastq: List[str] = []
+    for raw_path in raw_paths:
+        src = Path(raw_path).expanduser()
+        if not src.exists():
+            print(f"Link-local failed. Raw path: {raw_path!r} Resolved: {src}")
+            missing.append(str(src))
+            continue
+        if src.is_file():
+            if src.name.lower().endswith(_FASTQ_SUFFIXES):
+                candidates.append(src)
+            else:
+                skipped_not_fastq.append(src.name)
+        else:
+            candidates.extend(sorted(src.glob("*.fastq.gz")))
+            candidates.extend(sorted(src.glob("*.fq.gz")))
+
+    # A single bad path used to abort the whole request. With multi-select that
+    # would throw away every good file in the selection, so only fail when
+    # nothing at all resolved.
+    if missing and not candidates:
+        raise HTTPException(
+            status_code=400, detail=f"Input path not found: {missing[0]}"
+        )
+
     count = 0
-    for f in candidates:
+    already: List[str] = []
+    for f in sorted(set(candidates)):
         target = download_dir / f.name
-        if not target.exists():
-            target.symlink_to(f.resolve())
-            count += 1
-    return {"linked": count}
+        # is_symlink() as well as exists(): a dangling symlink (source moved or
+        # deleted) reports exists() == False but still occupies the name, so
+        # symlink_to would raise FileExistsError and abort the whole batch.
+        if target.exists() or target.is_symlink():
+            already.append(f.name)
+            continue
+        target.symlink_to(f.resolve())
+        count += 1
+    return {
+        "linked": count,
+        "already_present": already,
+        "missing": missing,
+        "skipped_not_fastq": skipped_not_fastq,
+    }
 
 
 @app.post("/api/projects/{project}/import-vcfs")

@@ -39,6 +39,33 @@ if [ -f "${STEP1_PY}" ] && grep -qF "float(fastq_stats.R1.passQ20)" "${STEP1_PY}
   echo "applied passQ comma fix to ${STEP1_PY}"
 fi
 
+# CPU cap. vsnp3 sizes its worker pools at int(cpu_count()/1.2) — 106 on the
+# 128-core shared box — which hammers everyone else on the machine. This started
+# life inside the v3.16-only .patch set, but the expression is character-for-
+# character identical in v3.16 and v3.35, and the .patch set does not apply to
+# v3.35 at all. Promoted to a content fix so the cap survives the move to a
+# newer vsnp3 instead of silently disappearing with it. Override with
+# VSNP3_MAX_CPUS; never bites on a laptop (8/1.2 = 6 < 32).
+for CPU_FILE in vsnp3_step2.py vsnp3_group_on_defining_snps.py vsnp3_fasta_to_snps_table.py; do
+  TARGET="${PREFIX}/bin/${CPU_FILE}"
+  # The capped expression still CONTAINS the uncapped one as a substring, so the
+  # VSNP3_MAX_CPUS check is what makes this idempotent — without it a re-run
+  # nests min(min(x, c), c) one level deeper each time. Installs that got the cap
+  # from the old .patch already carry the marker and are skipped here.
+  if [ -f "${TARGET}" ] \
+     && grep -qF "int(multiprocessing.cpu_count() / 1.2)" "${TARGET}" \
+     && ! grep -qF "VSNP3_MAX_CPUS" "${TARGET}"; then
+    if ! grep -q "^import os" "${TARGET}"; then
+      echo "warning: ${CPU_FILE} has no 'import os'; skipping CPU cap there" >&2
+      continue
+    fi
+    sed -i \
+      "s|int(multiprocessing\.cpu_count() / 1\.2)|max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))|g" \
+      "${TARGET}"
+    echo "applied CPU cap to ${TARGET}"
+  fi
+done
+
 # Minus-strand amino acid calls: vsnp3_annotation.py translates the plus-strand
 # codon as-is, so every minus-strand ref/alt AA is wrong and the silent vs
 # nonsynonymous call is close to a coin flip (~half of MTBC genes are minus

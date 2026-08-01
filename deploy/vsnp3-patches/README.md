@@ -20,6 +20,8 @@ Local patches we apply on top of the bioconda vsnp3 v3.16 install. These belong 
 
 Applied by `apply.sh` before the `.patch` loop, against expressions that are identical across point releases but sit at different line numbers. A line-context diff is too fragile for these; a content match is version-proof.
 
+- **CPU cap** (`vsnp3_step2.py`, `vsnp3_group_on_defining_snps.py`, `vsnp3_fasta_to_snps_table.py`). vsnp3 sizes its worker pools at `int(cpu_count()/1.2)` — 106 on the 128-core shared box. Capped at `min(cpu_count()/1.2, VSNP3_MAX_CPUS or 32)`. This started inside the v3.16-only `.patch` set; it was promoted here because the expression is character-for-character identical in v3.16 and v3.35, and the `.patch` set does not apply to v3.35 at all — so moving to a newer vsnp3 would otherwise have dropped the cap silently. Guarded on `VSNP3_MAX_CPUS` being absent, not on the uncapped expression: the capped form still *contains* the uncapped one, so a presence-only check nests `min(min(x, c), c)` one level deeper per run.
+
 - **passQ comma fix** (`bin/vsnp3_step1.py`). `float(fastq_stats.R1.passQ20)` raises `ValueError` on comma-formatted counts (`'9,177'`), failing the whole sample — and it looks like a bcftools error, because the traceback lands after the mpileup log. Strips the thousands separator first.
 
 - **Minus-strand amino acid calls** (`bin/vsnp3_annotation.py`, via `strandfix.py`). Reported by Vivek Kapur, 2026-08-01. There is no `reverse_complement()` anywhere in the module in either v3.16 or v3.35: the codon is sliced from the plus strand and translated as-is, and the variant base is substituted at the plus-strand index within the codon. For a gene on the minus strand that yields the wrong reference and variant amino acid, and the silent/nonsynonymous call lands near chance. Roughly half of MTBC genes are minus strand, so this touches about half of all coding SNPs in every TB run, with no signature that anything is wrong.
@@ -53,6 +55,14 @@ Applied by `apply.sh` before the `.patch` loop, against expressions that are ide
 The `.patch` set is v3.16-only. `apply.sh` reads `__version__` from `vsnp3_step1.py` and skips the whole set on any other release rather than emitting a wall of FAILED hunks and `.rej` files — the content fixes above still run. We deploy two different releases: `/srv/kapurlab/tools/vsnp3` is v3.16, and the bdtools checkout env is v3.35.
 
 **Which install actually runs matters.** `build_env()` in `backend/app/main.py` prepends `dirname(bcftools_path)` to `PATH`, and the Step 1 script invokes bare `vsnp3_step1.py` — so the install selected by `bcftools_path` is the one that runs, *not* the one named by `vsnp3_path`. Patch both.
+
+**OOD sessions ignore both.** `ood/apps/vsnp_gui/template/script.sh.erb` hardcodes `SHARED_VSNP3=/srv/kapurlab/tools/vsnp3` and prepends it to `PATH`, so every OOD-launched session runs whatever is in `/srv` regardless of any user's `config.json`. Upgrading the vsnp3 release for OOD users means upgrading that shared install or editing the template — a config change is not enough.
+
+## Version notes
+
+bioconda's latest is **3.35**; `/srv/kapurlab/tools/vsnp3` is **3.16**. 3.35 does *not* fix the minus-strand bug — it corrects the residue *number* on the minus strand (katG reports 315 where 3.16 said 427) while still translating the plus-strand codon, so a spot check on the residue passes and the amino acids are still wrong. It also still ships the uncapped `cpu_count()/1.2` pools and the uncomma'd `passQ` compare, so both content fixes above are needed on 3.35 too.
+
+Verified on SRR33585211 against mtbc0_v1.1: 3.16 and 3.35 produce **identical** variant calls (98,916 records, zero differences in POS/REF/ALT) and the same output layout, so the upgrade is call-neutral — it changes annotation, not calls.
 
 ## Apply
 

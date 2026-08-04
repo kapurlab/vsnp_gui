@@ -1478,6 +1478,44 @@ button:hover:not(:disabled) {
   font-size: 0.95em;
   padding: 0 0.2em;
 }
+/* A rule the user has to know before pressing Run — stronger than .step2-src-hint
+   (which is background colour), because getting these two wrong is what makes the
+   pane feel unpredictable: (a) ticking decides what a RUN compares, it never
+   deletes files; (b) sample names match on the part left of the first underscore. */
+.step2-callout {
+  margin-top: 0.4em;
+  padding: 0.45em 0.6em;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 0.82em;
+  line-height: 1.45;
+}
+.step2-callout p {
+  margin: 0 0 0.4em 0;
+}
+.step2-callout p:last-child {
+  margin-bottom: 0;
+}
+.step2-callout code {
+  font-size: 0.95em;
+  padding: 0 0.2em;
+}
+.step2-callout table {
+  border-collapse: collapse;
+  margin: 0.2em 0 0.4em 0;
+  font-size: 0.95em;
+}
+.step2-callout td {
+  padding: 1px 0.7em 1px 0;
+  vertical-align: top;
+}
+.step2-callout td.mono {
+  font-family: monospace;
+  white-space: nowrap;
+}
+
 .step2-advanced {
   margin-top: 0.45em;
   border-top: 1px dashed var(--border);

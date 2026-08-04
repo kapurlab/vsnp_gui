@@ -635,14 +635,28 @@ your own folder of VCFs, choose copy vs link, set duplicate handling, clear the
 set, or copy the `vcf_database` path.
 
 **3. Build the comparison set** — one button. It collects the ticks from boxes 1
-and 2 into `step2/vcf_database/`. Safe to press again at any time: it adds what is
-missing and never deletes anything. Afterwards the pane reports the set's
-composition by source, and **▼ Browse N samples** lists everything in the set (with
-per-sample exclude checkboxes).
+and 2 into `step2/vcf_database/`. Afterwards the pane reports the set's composition
+by source, and **▼ Browse N samples** lists everything in the set (with per-sample
+exclude checkboxes).
 
-`vcf_database` is cumulative — it is never pruned. Unticking a source therefore
-does not delete files; those samples are dropped from the run itself (the same
-`-remove_by_name` mechanism the exclusion lists use), and the pane says how many.
+##### What the tick boxes do — and what they don't do
+
+This is the one thing to be clear about:
+
+- **The ticks decide what a Run compares.** Nothing more.
+- **Build only ever adds files.** `step2/vcf_database/` is a permanent, growing
+  collection of the project's VCFs. Build copies in whatever is missing; it never
+  deletes. Pressing it twice is safe.
+- **So unticking a source deletes nothing.** Its VCFs stay in the folder and are
+  simply skipped by the next Run — dropped from the comparison via the same
+  `-remove_by_name` mechanism the exclusion lists use. The pane tells you how many
+  are being skipped. Tick the source again and they are back.
+- The one exception is **Clear comparison set** (under *More options*), which does
+  empty the folder.
+
+Only samples that can be attributed to an unticked source are skipped, so a VCF you
+copied into `vcf_database` by hand is never dropped behind your back. With
+everything ticked, nothing is skipped.
 
 #### Tab 2 — “Compare a list of samples”
 
@@ -654,28 +668,40 @@ re-analysis of specific accessions.
    separated. Lines starting with `#` are ignored, tab-delimited spreadsheet
    pastes use the first column, and pasted file names (`…_zc.vcf.gz`) are accepted.
 2. Optionally tick **Also include the reference databases ticked on the Build tab**.
-3. Check the summary — how many samples matched, which names matched nothing, and
-   which matched more than one sample.
+3. Read the summary in box 3 — how many samples matched, which names matched
+   nothing, and which matched more than one sample.
 4. Press **Run**.
 
-Names only have to be close, not exact. They are matched against this project's
-samples in three tiers, best match first:
+##### How a name is matched: only the part left of the first underscore counts
 
-| Pasted | Matches | Why |
-|---|---|---|
-| `ERR036186` | `ERR036186` | exact |
-| `ERR036186` | `ERR036186_parsed_reads` | the sample name starts with it |
-| `ERR036186_Malawi_human_L2` | `ERR036186` | the pasted name starts with the sample name |
-| `ERR036186_Malawi_human_L2` | `ERR036186_parsed_reads` | same leading accession |
+That leading part — the accession or lab ID — is the whole of what gets compared.
+Everything after the first underscore is treated as a label (host, country,
+lineage, `parsed_reads`) and is ignored, on your list **and** on the project's
+sample names. All three of these mean the sample `ERR036186`:
 
-The leading-accession tier only applies to tokens of 4+ characters containing a
-digit, so a shared word (`Mycobacterium_…`) cannot match everything. A name that
-matches several samples includes all of them and is reported as ambiguous. Only
-samples that are **in this project** and already collected into `vcf_database` can
-match — build the set on tab 1 first.
+| Pasted | |
+|---|---|
+| `ERR036186` | the ID on its own |
+| `ERR036186_parsed_reads` | ID + a pipeline suffix |
+| `ERR036186_Malawi_human_L2` | ID + a descriptive label |
 
-The list applies to that run only; nothing is added to or removed from
-`vcf_database`.
+**What you need:** one name per line, and the part before the first underscore
+spelled correctly (at least 4 characters). The rest of the line does not matter.
+
+An ID with no underscore at all — a dashed lab ID such as `13-1941-6-S4-L001` —
+has to be given in full, or as a leading piece of it (`13-1941`).
+
+**Watch for this:** if two samples share a leading ID (the same accession sequenced
+twice, say `ERR036186_run1` and `ERR036186_run2`), one pasted name matches **both**
+and both are included. Every such case is listed in box 3 as “matched more than one
+sample”. Read it before pressing Run.
+
+Only samples that are **in this project** and already collected into
+`vcf_database` can match — build the set on tab 1 first. Names that match nothing
+are listed and ignored.
+
+The list decides what that one run compares and nothing else: `vcf_database` is not
+changed, and the samples left out are not deleted.
 
 **Reference Lock Check:**
 

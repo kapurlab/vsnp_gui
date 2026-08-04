@@ -601,36 +601,43 @@ export default function App() {
     [step2SetSamples, step2ProjectSamples]
   );
 
-  // Greedy sample-name matching for the "compare a list" tab.
+  // Sample-name matching for the "compare a list" tab.
   //
-  // A pasted name rarely matches a VCF stem exactly: the user has `ERR036186`
-  // (or `ERR036186_Malawi_human_L2`, copied out of a spreadsheet) and the
-  // project holds `ERR036186_parsed_reads`. Three tiers, best match wins:
-  //   1 exact       — same name.
-  //   2 prefix      — one name is the other's prefix at a `_ - .` boundary
-  //                   (`ERR036186` -> `ERR036186_parsed_reads`).
-  //   3 accession   — the leading `_`/`-` token is the same on both sides
-  //                   (`ERR036186_Malawi_human_L2` -> `ERR036186_parsed_reads`).
-  //                   Guarded to tokens of 4+ characters containing a digit so a
-  //                   shared word (`Mycobacterium_...`) can't match everything.
-  // Tier 3 can legitimately hit more than one sample (the same accession run
-  // twice); all hits are kept — the list is meant to be greedy — and reported as
-  // ambiguous so the user sees it happened.
-  function step2CoreToken(name) {
-    const tok = String(name).split(/[_\-]/)[0] || "";
-    return /\d/.test(tok) && tok.length >= 4 ? tok.toLowerCase() : "";
+  // ONE RULE: the part of a name that identifies the sample is everything LEFT
+  // OF THE FIRST UNDERSCORE — the accession or lab ID. Whatever follows is a
+  // label (source, host, lineage, "parsed_reads") and is ignored on BOTH sides.
+  // So `ERR036186`, `ERR036186_parsed_reads` and `ERR036186_Malawi_human_L2` are
+  // all the sample `ERR036186`.
+  //
+  // That is the rule stated in the pane, so it is the rule implemented here —
+  // no extra heuristics that would make the matching behave differently from
+  // what the user was told. Consequence, stated in the pane too: a leading ID
+  // shared by several samples matches every one of them. All of them are kept
+  // (the list is meant to be greedy) and the pane reports it as ambiguous so it
+  // is never a silent surprise.
+  //
+  // Tiers, best match first:
+  //   1 exact      — the names are identical.
+  //   2 leading ID — same text left of the first underscore (4+ characters, so a
+  //                  stray fragment can't sweep up the project).
+  //   3 prefix     — for IDs with no underscore at all (dashed lab IDs), one
+  //                  name is the other's prefix at a `-` or `.` boundary:
+  //                  `13-1941` finds `13-1941-6-S4-L001`.
+  function step2LeadingId(name) {
+    const head = String(name).split("_")[0].trim();
+    return head.length >= 4 ? head.toLowerCase() : "";
   }
 
   function step2MatchTier(sample, token) {
     const s = sample.toLowerCase();
     const t = token.toLowerCase();
     if (s === t) return 1;
+    const ls = step2LeadingId(sample);
+    const lt = step2LeadingId(token);
+    if (ls && ls === lt) return 2;
     const boundary = (long, short) =>
-      long.length > short.length && long.startsWith(short) && /[_\-.]/.test(long[short.length]);
-    if (boundary(s, t) || boundary(t, s)) return 2;
-    const cs = step2CoreToken(sample);
-    const ct = step2CoreToken(token);
-    if (cs && cs === ct) return 3;
+      long.length > short.length && long.startsWith(short) && /[-.]/.test(long[short.length]);
+    if (boundary(s, t) || boundary(t, s)) return 3;
     return 0;
   }
 
@@ -6413,8 +6420,7 @@ export default function App() {
                       })}
                       <div className="step2-src-hint">
                         A ticked database is added to the comparison, so your samples are placed against a known
-                        panel. Unticking one leaves its samples out of the run — including any it contributed to
-                        an earlier build.
+                        panel.
                       </div>
                     </>
                   )}
@@ -6548,8 +6554,26 @@ export default function App() {
                     </BusyButton>
                   </div>
                   <div className="step2-src-hint">
-                    Collects the ticks above into <strong>step2/vcf_database</strong>. Safe to click again any
-                    time — it adds what is missing and never deletes anything. Then press <strong>Run</strong>.
+                    Collects the ticks above into <strong>step2/vcf_database</strong>, then press
+                    {" "}<strong>Run</strong>.
+                  </div>
+                  <div className="step2-callout">
+                    <p><strong>What the tick boxes do — and what they don't do.</strong></p>
+                    <p>
+                      <strong>They decide what this run compares.</strong> Nothing more.
+                    </p>
+                    <p>
+                      <strong>Build only ever adds files.</strong> The{" "}
+                      <strong>{vcfsFolderName || "vcf_database"}</strong> folder is a permanent, growing
+                      collection of this project's VCFs: Build copies in whatever is missing and never deletes
+                      anything. Pressing it twice is safe.
+                    </p>
+                    <p>
+                      <strong>So unticking a source deletes nothing.</strong> Its VCFs stay in the folder — they
+                      are simply skipped by the next Run. Tick it again and they are back in the comparison. The
+                      one exception is <em>Clear comparison set</em> under More options, which really does empty
+                      the folder.
+                    </p>
                   </div>
                   {step2Composition.length > 0 && (
                     <div
@@ -6576,9 +6600,11 @@ export default function App() {
                   )}
                   {step2RunSelection.leaveOut.length > 0 ? (
                     <div className="note warning" style={{fontSize:"0.82em"}}>
-                      {step2RunSelection.leaveOut.length} sample{step2RunSelection.leaveOut.length === 1 ? "" : "s"} already
-                      in <strong>vcf_database</strong> will be left out of this run, because the source they came from is
-                      unticked above. They stay in the database — retick the source to bring them back.
+                      <strong>This run will skip {step2RunSelection.leaveOut.length} sample
+                      {step2RunSelection.leaveOut.length === 1 ? "" : "s"}.</strong> {step2RunSelection.leaveOut.length === 1 ? "It is" : "They are"} in{" "}
+                      <strong>{vcfsFolderName || "vcf_database"}</strong>, but the source {step2RunSelection.leaveOut.length === 1 ? "it came" : "they came"} from is
+                      unticked above, so {step2RunSelection.leaveOut.length === 1 ? "it is" : "they are"} left out of the comparison. The files are not deleted —
+                      tick the source again to include {step2RunSelection.leaveOut.length === 1 ? "it" : "them"}.
                     </div>
                   ) : null}
                 </div>
@@ -6592,7 +6618,7 @@ export default function App() {
                     <span
                       className="help-icon"
                       style={{marginLeft:"6px"}}
-                      data-tooltip="One name per line (commas, spaces and tabs also work). Names are matched loosely against this project's samples: an accession on its own (ERR036186) finds ERR036186_parsed_reads, and a longer label (ERR036186_Malawi_human_L2) is matched on its leading accession. Lines starting with # are ignored, and a pasted file name (…_zc.vcf.gz) is accepted."
+                      data-tooltip="One name per line; spaces and commas also separate names. A line starting with # is ignored, a tab-delimited spreadsheet paste uses the first column, and a pasted file name (…_zc.vcf.gz) is accepted. Only samples in this project that have been collected into vcf_database can match."
                     >
                       ?
                     </span>
@@ -6605,13 +6631,40 @@ export default function App() {
                     spellCheck={false}
                     style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em"}}
                   />
-                  <div className="step2-src-hint">
-                    Only samples that are in <strong>this project</strong> and already collected into{" "}
-                    <strong>{vcfsFolderName || "vcf_database"}</strong> can be matched — build the set on the
-                    Build tab first. Matching is deliberately loose: <code>ERR036186</code> finds{" "}
-                    <code>ERR036186_parsed_reads</code>, and <code>ERR036186_Malawi_human_L2</code> is matched on
-                    its leading accession. Nothing is deleted; the samples you don't list are simply left out of
-                    this run.
+                  <div className="step2-callout">
+                    <p>
+                      <strong>How a name is matched: only the part left of the first underscore counts.</strong>
+                    </p>
+                    <p>
+                      That leading part — the accession or lab ID — is the whole of what gets compared. Everything
+                      after the first underscore is treated as a label (host, country, lineage,{" "}
+                      <code>parsed_reads</code>) and is ignored, on your list <em>and</em> on the project's sample
+                      names. All three of these mean the sample <code>ERR036186</code>:
+                    </p>
+                    <table>
+                      <tbody>
+                        <tr><td className="mono">ERR036186</td><td className="muted">the ID on its own</td></tr>
+                        <tr><td className="mono">ERR036186_parsed_reads</td><td className="muted">ID + a pipeline suffix</td></tr>
+                        <tr><td className="mono">ERR036186_Malawi_human_L2</td><td className="muted">ID + a descriptive label</td></tr>
+                      </tbody>
+                    </table>
+                    <p>
+                      <strong>What you need:</strong> one name per line, and the part before the first underscore
+                      spelled correctly (at least 4 characters). The rest of the line does not matter. An ID with
+                      no underscore at all (a dashed lab ID such as <code>13-1941-6-S4-L001</code>) has to be
+                      given in full, or as a leading piece of it (<code>13-1941</code>).
+                    </p>
+                    <p>
+                      <strong>Watch for this:</strong> if two samples share a leading ID — say the same accession
+                      sequenced twice — one pasted name matches <em>both</em>, and both are included. Box 3 lists
+                      every case of that as “matched more than one sample”. Read it before you press Run.
+                    </p>
+                    <p>
+                      Only samples that are in <strong>this project</strong> and already collected into{" "}
+                      <strong>{vcfsFolderName || "vcf_database"}</strong> can match — build the set on the Build
+                      tab first. Names that match nothing are listed in box 3 and ignored. Nothing is added to or
+                      removed from the folder; the samples you don't list are simply left out of this run.
+                    </p>
                   </div>
                 </div>
 
@@ -6670,14 +6723,19 @@ export default function App() {
                         </div>
                       ) : null}
                       {step2ListResolution.ambiguous.length ? (
-                        <div className="note" style={{fontSize:"0.82em"}}>
+                        <div className="note warning" style={{fontSize:"0.82em"}}>
                           <strong>{step2ListResolution.ambiguous.length} name
                           {step2ListResolution.ambiguous.length === 1 ? "" : "s"} matched more than one sample</strong>
-                          {" "}— every match is included:{" "}
-                          <span style={{fontFamily:"monospace"}}>
-                            {step2ListResolution.ambiguous.slice(0, 8).map((a) => `${a.token} → ${a.matches.join(" / ")}`).join("; ")}
-                            {step2ListResolution.ambiguous.length > 8 ? " …" : ""}
-                          </span>
+                          {" "}— they share a leading ID, and <strong>every match is included</strong>. Check these
+                          are all wanted before you Run:
+                          <div style={{fontFamily:"monospace", marginTop:"3px"}}>
+                            {step2ListResolution.ambiguous.slice(0, 8).map((a) => (
+                              <div key={a.token}>{a.token} → {a.matches.join(", ")}</div>
+                            ))}
+                            {step2ListResolution.ambiguous.length > 8
+                              ? <div className="muted">… and {step2ListResolution.ambiguous.length - 8} more</div>
+                              : null}
+                          </div>
                         </div>
                       ) : null}
                       {step2ListResolution.rows.length ? (
@@ -6694,7 +6752,7 @@ export default function App() {
                                 {r.matches.join(", ")}
                                 {r.tier > 1 ? (
                                   <span className="muted" style={{fontFamily:"sans-serif", fontStyle:"italic"}}>
-                                    {r.tier === 2 ? " (name prefix)" : " (leading accession)"}
+                                    {r.tier === 2 ? " (same leading ID)" : " (leading piece of the name)"}
                                   </span>
                                 ) : null}
                               </div>
@@ -6705,8 +6763,9 @@ export default function App() {
                     </>
                   )}
                   <div className="step2-src-hint">
-                    Then press <strong>Run</strong>. This does not change{" "}
-                    <strong>{vcfsFolderName || "vcf_database"}</strong> — the list applies to this run only.
+                    Then press <strong>Run</strong>. The list decides what <em>this run</em> compares and nothing
+                    else: <strong>{vcfsFolderName || "vcf_database"}</strong> is not changed, and the samples left
+                    out are not deleted.
                   </div>
                 </div>
               </div>

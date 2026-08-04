@@ -613,34 +613,69 @@ Step 2 performs **multi-sample comparative analysis**:
 - Filter problematic SNP positions
 - No need to re-align reads
 
-### Step 2a: Setup
+### Step 2a: Build the comparison set
 
-**Purpose:** Link VCF files from Step 1 to Step 2 workspace (Step 1 only mode)
+The Step 2 pane has two tabs. Both end the same way — press **Run**.
 
-### Step 2a (Alternative): Build a Custom VCF Set
+#### Tab 1 — “Build the comparison set” (the normal path)
 
-Use this when you want to compare against external VCFs (e.g., reference panels).
+Three numbered boxes, read top to bottom:
+
+**1. This project's samples** — ticked by default. Every finished Step 1 sample's
+`*_zc.vcf` is collected into `step2/vcf_database/`, which is the folder Step 2
+reads. Samples you excluded in Step 1 Results are kept out of the comparison
+automatically. Untick this only to compare the reference databases on their own.
+
+**2. Reference databases to compare against** (optional) — one checkbox per
+curated VCF folder that matches the project's reference (e.g. `minimum_tree`,
+`representative`), with its sample count. Tick one to place your samples against
+that panel. Unticking one leaves its samples out of the run, even if an earlier
+build already copied them into `vcf_database`. Under **More options** you can add
+your own folder of VCFs, choose copy vs link, set duplicate handling, clear the
+set, or copy the `vcf_database` path.
+
+**3. Build the comparison set** — one button. It collects the ticks from boxes 1
+and 2 into `step2/vcf_database/`. Safe to press again at any time: it adds what is
+missing and never deletes anything. Afterwards the pane reports the set's
+composition by source, and **▼ Browse N samples** lists everything in the set (with
+per-sample exclude checkboxes).
+
+`vcf_database` is cumulative — it is never pruned. Unticking a source therefore
+does not delete files; those samples are dropped from the run itself (the same
+`-remove_by_name` mechanism the exclusion lists use), and the pane says how many.
+
+#### Tab 2 — “Compare a list of samples”
+
+For comparing a named subset of the project — a cluster, an outbreak, a
+re-analysis of specific accessions.
 
 **Steps:**
-1. In **VCF Sources**, paste one or more folders (one per line)
-2. Choose a reference (must match VCFs)
-3. Click **Build VCF set**
-4. Then **Run** Step 2
+1. Paste the sample names into the text box — one per line, or space/comma
+   separated. Lines starting with `#` are ignored, tab-delimited spreadsheet
+   pastes use the first column, and pasted file names (`…_zc.vcf.gz`) are accepted.
+2. Optionally tick **Also include the reference databases ticked on the Build tab**.
+3. Check the summary — how many samples matched, which names matched nothing, and
+   which matched more than one sample.
+4. Press **Run**.
 
-#### VCF Lite Pack (built‑in)
-A small demo pack is included at `sample_data/vcf_lite/`.
-Use preset **“VCF Lite Pack (repo)”** to auto‑fill sources and reference.
+Names only have to be close, not exact. They are matched against this project's
+samples in three tiers, best match first:
 
-**Steps:**
-1. Click **Setup** button in Step 2 panel
-2. GUI links `*_zc.vcf` files to `step2/vcf_source/`:
-   ```
-   step2/vcf_source/
-   ├── Sample1_zc.vcf (symlink)
-   ├── Sample2_zc.vcf (symlink)
-   └── Sample3_zc.vcf (symlink)
-   ```
-3. Status message shows: `VCFs ready for Step 2: N (linked M)`
+| Pasted | Matches | Why |
+|---|---|---|
+| `ERR036186` | `ERR036186` | exact |
+| `ERR036186` | `ERR036186_parsed_reads` | the sample name starts with it |
+| `ERR036186_Malawi_human_L2` | `ERR036186` | the pasted name starts with the sample name |
+| `ERR036186_Malawi_human_L2` | `ERR036186_parsed_reads` | same leading accession |
+
+The leading-accession tier only applies to tokens of 4+ characters containing a
+digit, so a shared word (`Mycobacterium_…`) cannot match everything. A name that
+matches several samples includes all of them and is reported as ambiguous. Only
+samples that are **in this project** and already collected into `vcf_database` can
+match — build the set on tab 1 first.
+
+The list applies to that run only; nothing is added to or removed from
+`vcf_database`.
 
 **Reference Lock Check:**
 
@@ -663,6 +698,17 @@ vSNP Step 2 requires all samples use the **same reference genome**.
 1. Verify reference matches Step 1 (auto-populated)
 2. Click **Run** button
 3. Monitor progress in **Live Logs**
+
+**Step 2 Options — `-hash` ("Also run hashed (#) groups")**
+
+A reference's defining-SNP file (`<reference>_define_filter.xlsx`) lists one
+defining SNP position per group. A group can be held back by putting a `#` in
+front of its position — e.g. `#MTBC0:2096350`. Such a position never matches
+anything on a normal run, so the group is silently skipped; that is how
+provisional / under-review lineages stay in the file without being reported.
+Tick **Also run hashed (#) groups** and vsnp3 strips the `#` and analyses them
+too, so you get a table and tree for every group in the file. Nothing else about
+the run changes. (`mtbc0_v1.1` currently holds 20 such groups.)
 
 **Processing Steps:**
 ```

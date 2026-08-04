@@ -4613,6 +4613,49 @@ def step2_panel_accessions_get(project: str):
     return {"reference": ref, "samples": sorted(_reference_panel_accessions(cfg, ref))}
 
 
+@app.get("/api/projects/{project}/step2/panels")
+def step2_panels_get(project: str):
+    """Every reference VCF-db panel that applies to this project's reference —
+    checked AND unchecked — each with its full sample list.
+
+    The Step 2 setup pane drives the comparison off these checkboxes: a checked
+    panel's VCFs are added to the set, and an unchecked panel's samples are left
+    OUT of the comparison even when an earlier build already copied them into
+    vcf_database (the cumulative store is never pruned). Deciding what to leave
+    out needs the sample list of a panel the user just unchecked, so — unlike
+    _reference_panel_accessions / _reference_panels_by_name — this deliberately
+    does not filter on `enabled`; the flag is returned instead."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    ref = _project_reference(project_dir) or ""
+    panels = []
+    if ref:
+        for folder in _resolved_vcf_db_folders(cfg):
+            fref = folder.get("reference", "") or ""
+            # A folder tagged for another reference doesn't apply; an untagged
+            # (legacy) folder is treated as applicable, same as the run-time
+            # helpers above.
+            if fref and not _refs_match(fref, ref, True):
+                continue
+            p = Path(folder.get("path", ""))
+            if not p.is_dir():
+                continue
+            samples = sorted(
+                f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+                for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
+            )
+            panels.append({
+                "name": folder.get("name", p.name),
+                "path": str(p),
+                "reference": fref,
+                "scope": folder.get("scope", ""),
+                "enabled": bool(folder.get("enabled")),
+                "sample_count": len(samples),
+                "samples": samples,
+            })
+    return {"reference": ref, "panels": panels}
+
+
 # --- Exclusion tiers --------------------------------------------------------
 # Step 2 filters samples out of the comparison at run time via vsnp3
 # -remove_by_name (vcf_database stays the cumulative store). Three independent

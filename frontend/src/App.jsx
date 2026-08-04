@@ -227,9 +227,25 @@ export default function App() {
   const [posthocStatus, setPosthocStatus] = useState({});
   const [posthocRunError, setPosthocRunError] = useState("");
   const [posthocScopeByGroup, setPosthocScopeByGroup] = useState({});
-  // Default to the common path: run Step 2 on this project's own Step 1 samples.
-  // "custom" is the advanced path for adding external / reference-DB VCFs.
-  const [step2Mode, setStep2Mode] = useState("step1");
+  // Step 2 setup has two tabs:
+  //   "build" — the whole comparison set in one flow: this project's samples
+  //             (vcf_database) plus any reference databases you tick.
+  //   "list"  — paste a list of sample names and compare just those (optionally
+  //             on top of the reference databases ticked on the Build tab).
+  const [step2Mode, setStep2Mode] = useState("build");
+  // Build tab, box 1: include this project's own Step 1 samples. On by default —
+  // this is what nearly every comparison is built on. Unticking it compares the
+  // ticked reference databases alone.
+  const [step2UseVcfDb, setStep2UseVcfDb] = useState(true);
+  // List tab: the pasted sample names, and whether the ticked reference
+  // databases ride along with them.
+  const [step2ListText, setStep2ListText] = useState("");
+  const [step2ListIncludeDbs, setStep2ListIncludeDbs] = useState(false);
+  // {panelPath: [sample, ...]} for every reference DB matching this project's
+  // reference, ticked or not (GET step2/panels). Needed to leave an unticked
+  // panel's samples out of the comparison — vcf_database keeps VCFs a previous
+  // build copied in, so "unticked" has to be enforced at run time.
+  const [step2PanelSamples, setStep2PanelSamples] = useState({});
   // Step 2 run options
   const [s2NoFilters, setS2NoFilters] = useState(false);
   const [s2QualThreshold, setS2QualThreshold] = useState(150);
@@ -300,7 +316,6 @@ export default function App() {
   const [step2Groupings, setStep2Groupings] = useState({});
   const [step2GroupSearch, setStep2GroupSearch] = useState("");
   const [vcfDbFolders, setVcfDbFolders] = useState([]);
-  const [vcfDbDropdownOpen, setVcfDbDropdownOpen] = useState(false);
   const [manualVcfFolderPath, setManualVcfFolderPath] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
@@ -378,7 +393,6 @@ export default function App() {
   // Off by default: this is the project's OWN vcf_database, which already holds
   // the same Step 1 samples that "Include current project Step 1 ZC VCFs" adds.
   // Including both double-counted the set (the "Large import (1981)" surprise).
-  const [vcfsIncludeFolder, setVcfsIncludeFolder] = useState(false);
 
   const canPickPath = typeof window !== "undefined" && window.vsnp?.selectPath;
 
@@ -545,6 +559,180 @@ export default function App() {
     if (!q) return step1StatusSorted;
     return step1StatusSorted.filter((s) => String(s.sample || "").toLowerCase().includes(q));
   }, [step1StatusSorted, step1SampleFilter]);
+
+  // --- Step 2 setup: sources, sample-name matching, run-time keep set --------
+
+  // The reference databases that apply to this project, with their sample lists.
+  // Display + tick state come from vcfDbFolders (toggled optimistically, so the
+  // checkbox responds instantly); the sample lists come from step2/panels.
+  const step2AvailablePanels = useMemo(() => {
+    if (!importReference) return [];
+    return vcfDbFolders
+      .filter((f) => (f.reference || "") === importReference)
+      .map((f) => ({
+        ...f,
+        enabled: f.enabled !== false,
+        samples: step2PanelSamples[f.path] || [],
+      }));
+  }, [vcfDbFolders, importReference, step2PanelSamples]);
+
+  // Every sample name currently sitting in step2/vcf_database.
+  const step2SetSamples = useMemo(
+    () => vcfSourceSamples.map((s) => s.sample),
+    [vcfSourceSamples]
+  );
+
+  // "In the Project" = this project's own Step 1 samples. The manifest's
+  // source_type is authoritative when present; step1Status covers VCFs copied
+  // straight into vcf_database (or a manifest rebuilt at the destination), so
+  // union both rather than trusting either alone.
+  const step2ProjectSamples = useMemo(() => {
+    const names = new Set(step1Status.map((s) => s.sample));
+    vcfSourceSamples.forEach((s) => {
+      if (s.source_type === "step1") names.add(s.sample);
+    });
+    return names;
+  }, [step1Status, vcfSourceSamples]);
+
+  // Samples in vcf_database that belong to this project (the intersection —
+  // a Step 1 sample that was never collected can't be compared).
+  const step2ProjectSamplesInSet = useMemo(
+    () => step2SetSamples.filter((s) => step2ProjectSamples.has(s)),
+    [step2SetSamples, step2ProjectSamples]
+  );
+
+  // Greedy sample-name matching for the "compare a list" tab.
+  //
+  // A pasted name rarely matches a VCF stem exactly: the user has `ERR036186`
+  // (or `ERR036186_Malawi_human_L2`, copied out of a spreadsheet) and the
+  // project holds `ERR036186_parsed_reads`. Three tiers, best match wins:
+  //   1 exact       — same name.
+  //   2 prefix      — one name is the other's prefix at a `_ - .` boundary
+  //                   (`ERR036186` -> `ERR036186_parsed_reads`).
+  //   3 accession   — the leading `_`/`-` token is the same on both sides
+  //                   (`ERR036186_Malawi_human_L2` -> `ERR036186_parsed_reads`).
+  //                   Guarded to tokens of 4+ characters containing a digit so a
+  //                   shared word (`Mycobacterium_...`) can't match everything.
+  // Tier 3 can legitimately hit more than one sample (the same accession run
+  // twice); all hits are kept — the list is meant to be greedy — and reported as
+  // ambiguous so the user sees it happened.
+  function step2CoreToken(name) {
+    const tok = String(name).split(/[_\-]/)[0] || "";
+    return /\d/.test(tok) && tok.length >= 4 ? tok.toLowerCase() : "";
+  }
+
+  function step2MatchTier(sample, token) {
+    const s = sample.toLowerCase();
+    const t = token.toLowerCase();
+    if (s === t) return 1;
+    const boundary = (long, short) =>
+      long.length > short.length && long.startsWith(short) && /[_\-.]/.test(long[short.length]);
+    if (boundary(s, t) || boundary(t, s)) return 2;
+    const cs = step2CoreToken(sample);
+    const ct = step2CoreToken(token);
+    if (cs && cs === ct) return 3;
+    return 0;
+  }
+
+  const step2ListResolution = useMemo(() => {
+    // Line-by-line, because the two ways people paste a sample list need
+    // different splitting. A spreadsheet column arrives TAB-delimited with the
+    // label in later columns, so on a tabbed line only the first column is a
+    // name; otherwise every space/comma/semicolon-separated word on the line is
+    // one. A `#` line is a comment, and a pasted file name (…_zc.vcf.gz) is
+    // accepted as the name.
+    const tokens = [];
+    step2ListText.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return;
+      const head = trimmed.includes("\t") ? trimmed.split("\t")[0] : trimmed;
+      head.split(/[\s,;]+/).forEach((f) => {
+        const t = f.trim().replace(/^["']|["']$/g, "").replace(/(_zc)?\.vcf(\.gz)?$/i, "");
+        if (t && !t.startsWith("#")) tokens.push(t);
+      });
+    });
+    const candidates = step2ProjectSamplesInSet;
+    const keep = new Set();
+    const rows = [];
+    const unmatched = [];
+    const ambiguous = [];
+    const seenTokens = new Set();
+    tokens.forEach((token) => {
+      const key = token.toLowerCase();
+      if (seenTokens.has(key)) return;
+      seenTokens.add(key);
+      let bestTier = 0;
+      let matches = [];
+      candidates.forEach((sample) => {
+        const tier = step2MatchTier(sample, token);
+        if (!tier) return;
+        if (!bestTier || tier < bestTier) { bestTier = tier; matches = [sample]; }
+        else if (tier === bestTier) matches.push(sample);
+      });
+      if (!matches.length) { unmatched.push(token); return; }
+      if (matches.length > 1) ambiguous.push({ token, matches });
+      matches.forEach((m) => keep.add(m));
+      rows.push({ token, matches, tier: bestTier });
+    });
+    return { tokens, rows, keep, unmatched, ambiguous };
+  }, [step2ListText, step2ProjectSamplesInSet]);
+
+  // What this run will actually compare, and what it leaves behind.
+  //
+  // vcf_database is cumulative and never pruned, so the tick boxes can't be
+  // enforced by adding files alone — an unticked source whose VCFs are already
+  // in the database has to be dropped at run time (vsnp3 -remove_by_name, the
+  // same mechanism as the exclusion tiers). Only samples we can positively
+  // attribute to an unticked source are dropped on the Build tab, so a VCF from
+  // a hand-added folder is never silently lost. The List tab is an explicit
+  // allow-list, so there everything unlisted is dropped.
+  const step2RunSelection = useMemo(() => {
+    const inSet = new Set(step2SetSamples);
+    // Panel membership, restricted to what is physically in the database.
+    const enabledPanelSamples = new Set();
+    const anyPanelSamples = new Set();
+    step2AvailablePanels.forEach((p) => {
+      p.samples.forEach((s) => {
+        if (!inSet.has(s)) return;
+        anyPanelSamples.add(s);
+        if (p.enabled) enabledPanelSamples.add(s);
+      });
+    });
+    if (step2Mode === "list") {
+      const keep = new Set(step2ListResolution.keep);
+      const fromList = keep.size;
+      if (step2ListIncludeDbs) enabledPanelSamples.forEach((s) => keep.add(s));
+      return {
+        keep,
+        leaveOut: step2SetSamples.filter((s) => !keep.has(s)),
+        fromList,
+        // What the databases ADD on top of the list, so fromList + fromDbs is
+        // exactly the total (a listed sample that is also a panel accession is
+        // counted once, under the list).
+        fromDbs: keep.size - fromList,
+      };
+    }
+    // Ticked sources decide what is kept; a sample belonging to no source we can
+    // name (a hand-copied VCF, an old import) is attributed to nothing and so is
+    // never dropped. A sample can belong to several sources — a project sample
+    // that is also a panel accession is kept if EITHER source is ticked.
+    const keep = new Set();
+    if (step2UseVcfDb) step2ProjectSamplesInSet.forEach((s) => keep.add(s));
+    enabledPanelSamples.forEach((s) => keep.add(s));
+    const leaveOut = step2SetSamples.filter(
+      (s) => !keep.has(s) && (step2ProjectSamples.has(s) || anyPanelSamples.has(s))
+    );
+    const leftOut = new Set(leaveOut);
+    return {
+      keep: new Set(step2SetSamples.filter((s) => !leftOut.has(s))),
+      leaveOut,
+      fromList: 0,
+      fromDbs: enabledPanelSamples.size,
+    };
+  }, [
+    step2Mode, step2SetSamples, step2AvailablePanels, step2UseVcfDb,
+    step2ProjectSamples, step2ProjectSamplesInSet, step2ListResolution, step2ListIncludeDbs,
+  ]);
 
   // "Files in download" shows only samples not yet run in Step 1 and not in
   // Quarantine — once a sample is run its reads are copied into step1/ (and a
@@ -1196,14 +1384,15 @@ export default function App() {
     setImportSourcesText("");
     setImportStatus("");
     setImportMismatchReport("");
+    setStep2PanelSamples({});
+    setStep2ListText("");
   }, [selectedProject]);
 
   useEffect(() => {
-    if (step2Mode !== "custom") return;
     if (importReference && reference !== importReference) {
       setReference(importReference);
     }
-  }, [step2Mode, importReference, reference]);
+  }, [importReference, reference]);
 
   // Auto-populate importReference from the project-level reference so VCF
   // database filtering and import tagging always use the project's reference
@@ -1770,7 +1959,24 @@ export default function App() {
     loadStep2QcExclusions();
     loadStep2Blocklist();
     loadStep2PanelAccessions();
+    loadStep2Panels();
     loadStep2BuildMeta();
+  }
+
+  // Per-panel sample lists for every reference DB matching this project's
+  // reference — ticked or not. Drives the Build tab's checkbox counts and, for
+  // an unticked panel, the run-time "leave these out" set.
+  async function loadStep2Panels() {
+    if (!selectedProject) { setStep2PanelSamples({}); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/panels`);
+      if (res.ok) {
+        const data = await res.json();
+        const map = {};
+        (data.panels || []).forEach((p) => { map[p.path] = p.samples || []; });
+        setStep2PanelSamples(map);
+      }
+    } catch (e) { /* best-effort; the Build tab falls back to sample_count */ }
   }
 
   // Pull the Step 1 QC exclusions so the build list can pre-check (and lock)
@@ -2612,8 +2818,7 @@ export default function App() {
       .filter((f) => f.enabled && (f.reference || "") === importReference)
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
-    const vcfsFolderPaths = vcfsIncludeFolder && vcfsFolderPath ? [vcfsFolderPath] : [];
-    const allPaths = [...new Set([...vcfsFolderPaths, ...enabledPaths, ...manualPaths])];
+    const allPaths = [...new Set([...enabledPaths, ...manualPaths])];
     // Don't write allPaths back into the textarea. The textarea is
     // reserved for *user-typed* extra paths only; auto-discovered DB
     // selections bleed in here would create a feedback loop where a
@@ -2938,6 +3143,29 @@ export default function App() {
     await loadAll();
   }
 
+  // The Build tab's one button: collect this project's Step 1 VCFs (box 1) and
+  // add the ticked reference databases (box 2), in that order, so the set is
+  // built the way the pane reads top to bottom. Either half can be skipped —
+  // unticking vcf_database compares the reference databases alone, and ticking
+  // no database compares the project alone.
+  async function buildComparisonSet() {
+    if (!selectedProject || !settingsReady) return;
+    const dbPaths = step2AvailablePanels.filter((p) => p.enabled).map((p) => p.path);
+    if (!step2UseVcfDb && !dbPaths.length && !parseAccessions(importSourcesText).length) {
+      setImportStatus("Nothing selected — tick this project's samples, a reference database, or both.");
+      return;
+    }
+    setImportStatus("");
+    if (step2UseVcfDb) await step2Setup();
+    if (dbPaths.length || parseAccessions(importSourcesText).length) {
+      await importVcfs();
+    } else {
+      setStep2BuiltAt(new Date().toISOString());
+      await loadVcfSourceSamples();
+      await loadStep2Outputs();
+    }
+  }
+
   async function step2Clear() {
     if (!selectedProject || !settingsReady) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/clear`, { method: "POST" });
@@ -2961,6 +3189,17 @@ export default function App() {
 
   async function step2Run() {
     if (!selectedProject || !settingsReady || step2Running) return;
+    // The setup pane's source ticks / pasted list decide what this run compares.
+    // Refuse to start on an empty selection rather than quietly comparing the
+    // whole database (or nothing at all).
+    if (step2SetSamples.length && step2RunSelection.keep.size === 0) {
+      window.alert(
+        step2Mode === "list"
+          ? "None of the pasted sample names matched a sample in this project. Nothing to compare."
+          : "No sources are ticked, so there is nothing to compare. Tick this project's samples and/or a reference database."
+      );
+      return;
+    }
     // Instant feedback: flip the button to a disabled "Running…" state and post
     // a starting message BEFORE the async POST so the click clearly registers.
     setStep2Running(true);
@@ -2977,11 +3216,16 @@ export default function App() {
     // Flush tier C (build-list) to disk now so its store is current (the run
     // also sends the set below, so the run is correct even if this save lagged).
     try { await _persistStep2BuildExclusions(step2BuildExcluded); } catch { /* run still sends the set */ }
-    // Authoritative user-chosen removal set = tier B (Step 1) ∪ tier C (build).
-    // Tier A (reference blocklist) is applied server-side regardless.
+    // Authoritative user-chosen removal set = tier B (Step 1) ∪ tier C (build)
+    // ∪ this run's source selection (samples in vcf_database that the ticked
+    // sources / pasted list leave out). The selection is deliberately NOT
+    // persisted into the tier C store: it describes this run only, and the
+    // cumulative database keeps every VCF either way.
+    const selectionExclude = step2RunSelection.leaveOut;
     const uiExclude = Array.from(new Set([
       ...Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
       ...Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
+      ...selectionExclude,
     ]));
     let res;
     try {
@@ -2991,7 +3235,10 @@ export default function App() {
         body: JSON.stringify({
           reference: effectiveRef,
           step1_exclude: Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
-          build_exclude: Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
+          build_exclude: Array.from(new Set([
+            ...Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
+            ...selectionExclude,
+          ])),
           no_filters: s2NoFilters,
           qual_threshold: s2QualThreshold,
           n_threshold: s2NThreshold,
@@ -3633,7 +3880,7 @@ export default function App() {
     if (project === selectedProject) {
       await loadQC();
       setEditVcfCurrent(null);
-      if (step2Mode === "step1") {
+      if (step2Mode === "build" && step2UseVcfDb) {
         await step2Setup();
       } else {
         setStep2SetupMsg("Patched VCF created. Rebuild the Step 2 VCF set to use it.");
@@ -6027,298 +6274,445 @@ export default function App() {
             <h2>Step 2</h2>
             <div className="block">
               <p className="muted" style={{marginTop:0, marginBottom:"0.5em", fontSize:"0.85em"}}>
-                Step 2 compares a set of VCFs to build the SNP matrix and tree. Choose where that set comes from:
+                Step 2 compares a set of VCFs to build the SNP matrix and tree. Tick the sources that go
+                into the comparison, build the set, then Run.
               </p>
               <div className="mode-toggle">
                 <button
-                  className={step2Mode === "step1" ? "active" : ""}
-                  onClick={() => setStep2Mode("step1")}
+                  className={step2Mode === "build" ? "active" : ""}
+                  onClick={() => setStep2Mode("build")}
                 >
-                  This project's Step 1 samples
+                  Build the comparison set
                 </button>
                 <button
-                  className={step2Mode === "custom" ? "active" : ""}
-                  onClick={() => setStep2Mode("custom")}
+                  className={step2Mode === "list" ? "active" : ""}
+                  onClick={() => setStep2Mode("list")}
                 >
-                  Add reference / external VCFs
+                  Compare a list of samples
                 </button>
               </div>
               <p className="muted" style={{marginTop:"0.5em", marginBottom:0, fontSize:"0.8em"}}>
-                {step2Mode === "step1"
-                  ? "Uses only the VCFs from this project's completed Step 1 samples — the typical choice. Click Setup to build the set, then Run."
-                  : "Combines this project's Step 1 samples with VCFs from shared reference databases or other folders. For comparing against an existing panel."}
+                {step2Mode === "build"
+                  ? "The normal path: this project's own samples, plus any reference database you want them compared against."
+                  : "Paste sample names to compare just those samples out of this project — optionally alongside the reference databases ticked on the Build tab."}
               </p>
             </div>
 
-            {step2Mode === "custom" ? (
+            {step2Mode === "build" ? (
               <div className="block">
-                <h3>
-                  VCF Databases (Step 2)
-                  <span
-                    className="help-icon"
-                    data-tooltip="VCF database folders for the project's reference. All subfolders are searched for *_zc.vcf and *_zc.vcf.gz. Folders are saved per-machine."
-                  >
-                    ?
-                  </span>
-                </h3>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "6px" }}>
-                  <span className="muted" style={{ fontSize: "0.85em" }}>Reference:</span>
-                  {importReference ? (
-                    <span
-                      style={{
-                        padding: "2px 8px",
-                        borderRadius: "10px",
-                        background: "var(--badge-success-bg)",
-                        color: "var(--badge-success-fg)",
-                        fontWeight: 600,
-                        fontSize: "0.85em",
-                      }}
-                    >
-                      {importReference}
-                    </span>
-                  ) : (
-                    <span className="muted" style={{ fontSize: "0.85em" }}>
-                      not set — select a reference in the Projects panel
-                    </span>
-                  )}
-                </div>
-                {selectedProject && vcfsFolderPath ? (
-                  <div style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"6px", fontSize:"12px", marginBottom:"6px"}}>
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">1</span>
+                    This project's samples
+                  </div>
+                  <label className="checkbox step2-src-row">
                     <input
                       type="checkbox"
-                      checked={vcfsIncludeFolder}
-                      onChange={(e) => setVcfsIncludeFolder(e.target.checked)}
-                      style={{width:"auto"}}
+                      checked={step2UseVcfDb}
+                      onChange={(e) => setStep2UseVcfDb(e.target.checked)}
                     />
-                    <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontWeight:600}} title={vcfsFolderPath}>
-                      {vcfsFolderName}
+                    <span style={{flex:1}} title={vcfsFolderPath}>
+                      <strong>{vcfsFolderName || "vcf_database"}</strong>
+                      <span className="muted" style={{marginLeft:"6px"}}>
+                        ({step2ProjectSamplesInSet.length} of this project's {step1Status.length} Step 1 sample{step1Status.length === 1 ? "" : "s"} collected)
+                      </span>
                     </span>
-                    <span className="muted" style={{fontSize:"11px", whiteSpace:"nowrap"}}>(n={vcfsFolderCount})</span>
-                    <span style={{fontSize:"10px", padding:"1px 6px", borderRadius:"6px", background:"var(--accent)", color:"#f7faf9", textTransform:"uppercase", letterSpacing:"0.04em"}}>
-                      this project
+                    <span className="step2-src-tag">this project</span>
+                  </label>
+                  <div className="step2-src-hint">
+                    Every Step 1 sample that finished is copied into this project's{" "}
+                    <strong>{vcfsFolderName || "vcf_database"}</strong> folder, which is what Step 2 reads.
+                    <strong> Build</strong> (box 3) does that copying for you, and anything you excluded in
+                    Step 1 Results is kept out of the comparison automatically. Leave this ticked unless you
+                    want to compare the reference databases on their own.
+                  </div>
+                </div>
+
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">2</span>
+                    Reference databases to compare against
+                    <span className="muted" style={{fontWeight:400, marginLeft:"6px"}}>(optional)</span>
+                    <span
+                      className="help-icon"
+                      style={{marginLeft:"6px"}}
+                      data-tooltip="A curated folder of *_zc.vcf / *_zc.vcf.gz files for one reference — e.g. a minimum tree or a representative panel. Shared databases are managed on the server; add your own under More options. Ticking one adds its VCFs to the comparison; unticking one leaves its samples out, even if an earlier build already copied them in."
+                    >
+                      ?
                     </span>
                   </div>
-                ) : null}
-                <div style={{marginTop:"8px"}}>
-                  {(() => {
-                    const visible = importReference
-                      ? vcfDbFolders.filter((f) => (f.reference || "") === importReference)
-                      : [];
-                    if (!importReference) {
-                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>Set the project reference in the Projects panel to see matching VCF databases.</div>;
-                    }
-                    if (!visible.length) {
-                      return <div className="muted" style={{fontSize:"12px", marginBottom:"8px"}}>No VCF databases configured for {importReference} yet.</div>;
-                    }
-                    const enabledList = visible.filter((f) => f.enabled !== false);
-                    const summary = (() => {
-                      if (!enabledList.length) return "None selected";
-                      if (enabledList.length === visible.length) return `All ${visible.length} databases selected`;
-                      const names = enabledList.map((f) => f.name || (f.path || "").split("/").pop());
-                      const joined = names.join(", ");
-                      const truncated = joined.length > 60 ? `${joined.slice(0, 57)}…` : joined;
-                      return `${enabledList.length} of ${visible.length} selected: ${truncated}`;
-                    })();
-                    return (
-                      <div style={{position:"relative", marginBottom:"8px"}}>
-                        <button
-                          type="button"
-                          onClick={() => setVcfDbDropdownOpen(!vcfDbDropdownOpen)}
-                          className="ghost"
-                          style={{width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", gap:"8px", padding:"6px 10px", fontSize:"12px", textAlign:"left"}}
-                          aria-expanded={vcfDbDropdownOpen}
-                        >
-                          <span style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
-                            {summary}
-                          </span>
-                          <span style={{fontSize:"10px"}}>{vcfDbDropdownOpen ? "▲" : "▼"}</span>
-                        </button>
-                        {vcfDbDropdownOpen ? (
-                          <div style={{display:"flex", flexDirection:"column", gap:"4px", marginTop:"6px", padding:"6px", border:"1px solid var(--border)", borderRadius:"8px", background:"var(--panel)"}}>
-                            {visible.map((folder, i) => {
-                              const isShared = folder.scope === "shared";
-                              const lname = (folder.name || "").toLowerCase();
-                              const isSynthetic = lname.includes("synthetic") || lname.includes("from_assembly");
-                              return (
-                                <div key={folder.path || i} style={{display:"flex", alignItems:"center", gap:"6px", padding:"4px 8px", background:"var(--panel-2)", border:"1px solid var(--border)", borderRadius:"6px", fontSize:"12px"}}>
-                                  <input
-                                    type="checkbox"
-                                    checked={folder.enabled !== false}
-                                    onChange={() => toggleVcfDbFolder(folder.path)}
-                                    title={isShared ? "Shared lab DB — toggle to include/exclude for your runs" : "Toggle"}
-                                    style={{width:"auto"}}
-                                  />
-                                  <span
-                                    title={folder.path}
-                                    style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", opacity: folder.enabled !== false ? 1 : 0.5}}
-                                  >
-                                    {folder.name || folder.path.split("/").pop() || folder.path}
-                                    {typeof folder.sample_count === "number" ? <span className="muted" style={{marginLeft:"6px"}}>(n={folder.sample_count})</span> : null}
-                                    {isSynthetic ? <span className="muted" style={{marginLeft:"6px", fontStyle:"italic"}}>[from-assembly]</span> : null}
-                                  </span>
-                                  {isShared ? (
-                                    <span
-                                      title="Shared lab DB — managed via the filesystem; toggle is per-user"
-                                      style={{fontSize:"10px", padding:"1px 6px", borderRadius:"6px", background:"var(--accent)", color:"#f7faf9", textTransform:"uppercase", letterSpacing:"0.04em"}}
-                                    >
-                                      shared
-                                    </span>
-                                  ) : (
-                                    <button
-                                      className="chip-remove"
-                                      onClick={() => removeVcfDbFolder(folder.path)}
-                                      title="Remove folder"
-                                    >
-                                      x
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : null}
+                  <div className="step2-src-row" style={{gap:"0.5rem"}}>
+                    <span className="muted" style={{fontSize:"0.85em"}}>Reference:</span>
+                    {importReference ? (
+                      <span
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: "10px",
+                          background: "var(--badge-success-bg)",
+                          color: "var(--badge-success-fg)",
+                          fontWeight: 600,
+                          fontSize: "0.85em",
+                        }}
+                      >
+                        {importReference}
+                      </span>
+                    ) : (
+                      <span className="muted" style={{fontSize:"0.85em"}}>
+                        not set — select a reference in the Projects panel
+                      </span>
+                    )}
+                  </div>
+                  {!importReference ? (
+                    <div className="step2-src-hint">
+                      Set the project reference in the Projects panel to see the databases available for it.
+                    </div>
+                  ) : !step2AvailablePanels.length ? (
+                    <div className="step2-src-hint">
+                      No reference databases are configured for {importReference} yet — Step 2 will compare this
+                      project's samples on their own. Add a folder of VCFs under <em>More options</em> below if
+                      you have one.
+                    </div>
+                  ) : (
+                    <>
+                      {step2AvailablePanels.map((folder, i) => {
+                        const isShared = folder.scope === "shared";
+                        const lname = (folder.name || "").toLowerCase();
+                        const isSynthetic = lname.includes("synthetic") || lname.includes("from_assembly");
+                        const n = folder.samples.length || folder.sample_count || 0;
+                        return (
+                          <label className="checkbox step2-src-row" key={folder.path || i}>
+                            <input
+                              type="checkbox"
+                              checked={folder.enabled}
+                              onChange={() => toggleVcfDbFolder(folder.path)}
+                              title={isShared ? "Shared lab database — the tick is yours alone" : "Include this folder"}
+                            />
+                            <span
+                              title={folder.path}
+                              style={{flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", opacity: folder.enabled ? 1 : 0.55}}
+                            >
+                              <strong>{folder.name || (folder.path || "").split("/").pop() || folder.path}</strong>
+                              <span className="muted" style={{marginLeft:"6px"}}>({n} sample{n === 1 ? "" : "s"})</span>
+                              {isSynthetic ? <span className="muted" style={{marginLeft:"6px", fontStyle:"italic"}}>[from-assembly]</span> : null}
+                            </span>
+                            {isShared ? (
+                              <span className="step2-src-tag" title="Shared lab database — managed on the server; the tick is per-user">
+                                shared
+                              </span>
+                            ) : (
+                              <button
+                                className="chip-remove"
+                                onClick={(e) => { e.preventDefault(); removeVcfDbFolder(folder.path); }}
+                                title="Remove this folder from your list"
+                              >
+                                x
+                              </button>
+                            )}
+                          </label>
+                        );
+                      })}
+                      <div className="step2-src-hint">
+                        A ticked database is added to the comparison, so your samples are placed against a known
+                        panel. Unticking one leaves its samples out of the run — including any it contributed to
+                        an earlier build.
                       </div>
-                    );
-                  })()}
-                  <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
-                    <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
-                      {canPickPath ? (
-                        <button
-                          className="ghost action"
-                          style={{fontSize:"12px"}}
+                    </>
+                  )}
+                  <details className="step2-advanced">
+                    <summary>More options — add your own folder, copy / link, duplicate handling</summary>
+                    <div style={{display:"flex", flexDirection:"column", gap:"4px", marginTop:"6px"}}>
+                      <div style={{display:"flex", gap:"4px", alignItems:"center"}}>
+                        {canPickPath ? (
+                          <button
+                            className="ghost action"
+                            style={{fontSize:"12px"}}
+                            disabled={!importReference}
+                            title={importReference ? "Browse for a VCF folder" : "Set the project reference first"}
+                            onClick={async () => {
+                              const picked = await window.vsnp.selectPath({
+                                kind: "folder",
+                                title: "Select VCF database folder"
+                              });
+                              if (picked) {
+                                await addVcfDbFolder(picked, importReference);
+                              }
+                            }}
+                          >
+                            Browse
+                          </button>
+                        ) : null}
+                        <input
+                          type="text"
+                          value={manualVcfFolderPath}
+                          onChange={(e) => setManualVcfFolderPath(e.target.value)}
                           disabled={!importReference}
-                          title={importReference ? "Browse for a VCF folder" : "Set the project reference first"}
-                          onClick={async () => {
-                            const picked = await window.vsnp.selectPath({
-                              kind: "folder",
-                              title: "Select VCF database folder"
-                            });
-                            if (picked) {
-                              await addVcfDbFolder(picked, importReference);
+                          placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Set the project reference first"}
+                          title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
+                          style={{flex:1, fontSize:"12px"}}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && manualVcfFolderPath.trim() && importReference) {
+                              addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
+                              setManualVcfFolderPath("");
                             }
                           }}
+                        />
+                        <button
+                          className="ghost action"
+                          onClick={() => {
+                            if (manualVcfFolderPath.trim() && importReference) {
+                              addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
+                              setManualVcfFolderPath("");
+                            }
+                          }}
+                          disabled={!manualVcfFolderPath.trim() || !importReference}
                         >
-                          Browse
+                          Add
                         </button>
-                      ) : null}
+                      </div>
+                      <div className="muted" style={{fontSize:"11px"}}>
+                        {canPickPath
+                          ? "Browse for a folder, or type a path and click Add — it then appears as a tickable database above"
+                          : "Tip: In Finder, right-click folder → Get Info → copy the path from \"Where\". The folder then appears as a tickable database above."}
+                      </div>
+                    </div>
+                    <label className="checkbox" style={{marginTop:"8px"}}>
                       <input
-                        type="text"
-                        value={manualVcfFolderPath}
-                        onChange={(e) => setManualVcfFolderPath(e.target.value)}
-                        disabled={!importReference}
-                        placeholder={importReference ? `/path/to/VCFs (will tag as ${importReference})` : "Set the project reference first"}
-                        title="To find a path: In Finder, right-click a folder → Get Info → copy 'Where' path, then add the folder name"
-                        style={{flex:1, fontSize:"12px"}}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && manualVcfFolderPath.trim() && importReference) {
-                            addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
-                            setManualVcfFolderPath("");
-                          }
-                        }}
+                        type="checkbox"
+                        checked={importPrefixDupes}
+                        onChange={(e) => setImportPrefixDupes(e.target.checked)}
                       />
+                      Prefix duplicates with source folder name
+                    </label>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={importDedupe}
+                        onChange={(e) => setImportDedupe(e.target.checked)}
+                      />
+                      Deduplicate identical sample IDs (keep newest)
+                    </label>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={importFuzzyMatch}
+                        onChange={(e) => setImportFuzzyMatch(e.target.checked)}
+                      />
+                      Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
+                    </label>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={importAllowMismatch}
+                        onChange={(e) => setImportAllowMismatch(e.target.checked)}
+                      />
+                      Allow reference mismatches (not recommended)
+                    </label>
+                    <div className="row" style={{marginTop:"6px"}}>
+                      <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
+                        <option value="copy">Copy files</option>
+                        <option value="link">Link files</option>
+                      </select>
+                      <select value={importConflict} onChange={(e) => setImportConflict(e.target.value)}>
+                        <option value="skip">Skip conflicts</option>
+                        <option value="rename">Rename conflicts</option>
+                        <option value="overwrite">Overwrite conflicts</option>
+                      </select>
+                    </div>
+                    <div className="row">
+                      <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 comparison set (step2/vcf_database). The Step 1 VCFs themselves are untouched.">Clear comparison set</button>
                       <button
                         className="ghost action"
-                        onClick={() => {
-                          if (manualVcfFolderPath.trim() && importReference) {
-                            addVcfDbFolder(manualVcfFolderPath.trim(), importReference);
-                            setManualVcfFolderPath("");
-                          }
-                        }}
-                        disabled={!manualVcfFolderPath.trim() || !importReference}
+                        onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_database`, "vcf_database path")}
+                        disabled={!selectedProject}
+                        title="Copy the absolute server path to clipboard — paste into the OOD Files app or scp"
                       >
-                        Add
+                        Copy vcf_database path
                       </button>
                     </div>
-                    <div className="muted" style={{fontSize:"11px"}}>
-                      {canPickPath
-                        ? "Use Browse to select a folder, or type a path and click Add"
-                        : "Tip: In Finder, right-click folder \u2192 Get Info \u2192 copy the path from \"Where\""}
+                  </details>
+                </div>
+
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">3</span>
+                    Build the comparison set
+                  </div>
+                  <div className="step2-src-row">
+                    <BusyButton
+                      onClick={buildComparisonSet}
+                      disabled={!selectedProject || !settingsReady}
+                      busyLabel="Building…"
+                      title="Collect this project's Step 1 VCFs and add the ticked reference databases into step2/vcf_database"
+                    >
+                      Build comparison set
+                    </BusyButton>
+                  </div>
+                  <div className="step2-src-hint">
+                    Collects the ticks above into <strong>step2/vcf_database</strong>. Safe to click again any
+                    time — it adds what is missing and never deletes anything. Then press <strong>Run</strong>.
+                  </div>
+                  {step2Composition.length > 0 && (
+                    <div
+                      className="note"
+                      title="Where the comparison-set VCFs come from. Each VCF is counted once, under the first database (in order) whose panel contains it; whatever no panel claims is this project's own vcf_database samples. Counts sum to the comparison total. Re-derived on every Build and Refresh."
+                    >
+                      Comparison set by source:
+                      {step2Composition.map((c, i) => (
+                        <span key={c.name}>
+                          {i > 0 ? " | " : " "}
+                          <strong>{c.name}</strong>: {c.count}
+                        </span>
+                      ))}
+                      {step2Composition.length > 1 ? (
+                        <span
+                          className="muted"
+                          title="Comparison samples whose ID appears in more than one selected source (this project's vcf_database and/or a reference panel). Each is still included only once; this is the cross-database overlap."
+                        >
+                          {" "}· duplicates across DBs: <strong>{step2Duplicates}</strong>
+                        </span>
+                      ) : null}
+                      {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
                     </div>
+                  )}
+                  {step2RunSelection.leaveOut.length > 0 ? (
+                    <div className="note warning" style={{fontSize:"0.82em"}}>
+                      {step2RunSelection.leaveOut.length} sample{step2RunSelection.leaveOut.length === 1 ? "" : "s"} already
+                      in <strong>vcf_database</strong> will be left out of this run, because the source they came from is
+                      unticked above. They stay in the database — retick the source to bring them back.
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="block">
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">1</span>
+                    Paste the samples to compare
+                    <span
+                      className="help-icon"
+                      style={{marginLeft:"6px"}}
+                      data-tooltip="One name per line (commas, spaces and tabs also work). Names are matched loosely against this project's samples: an accession on its own (ERR036186) finds ERR036186_parsed_reads, and a longer label (ERR036186_Malawi_human_L2) is matched on its leading accession. Lines starting with # are ignored, and a pasted file name (…_zc.vcf.gz) is accepted."
+                    >
+                      ?
+                    </span>
+                  </div>
+                  <textarea
+                    rows={6}
+                    value={step2ListText}
+                    onChange={(e) => setStep2ListText(e.target.value)}
+                    placeholder={"ERR036186\nERR036186_Malawi_human_L2\nSRR1723693"}
+                    spellCheck={false}
+                    style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em"}}
+                  />
+                  <div className="step2-src-hint">
+                    Only samples that are in <strong>this project</strong> and already collected into{" "}
+                    <strong>{vcfsFolderName || "vcf_database"}</strong> can be matched — build the set on the
+                    Build tab first. Matching is deliberately loose: <code>ERR036186</code> finds{" "}
+                    <code>ERR036186_parsed_reads</code>, and <code>ERR036186_Malawi_human_L2</code> is matched on
+                    its leading accession. Nothing is deleted; the samples you don't list are simply left out of
+                    this run.
                   </div>
                 </div>
-                <div className="note" style={{fontSize:"0.8em"}}>
-                  This project's Step 1 samples go into <strong>{vcfsFolderName || "vcf_database"}</strong> via
-                  the <strong>Collect</strong> button in the Step 1 pane (which respects your Step 1 exclusions).
-                  Build / update set adds reference / external VCFs on top of that.
-                </div>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={importAllowMismatch}
-                    onChange={(e) => setImportAllowMismatch(e.target.checked)}
-                  />
-                  Allow reference mismatches (not recommended)
-                </label>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={importPrefixDupes}
-                    onChange={(e) => setImportPrefixDupes(e.target.checked)}
-                  />
-                  Prefix duplicates with source folder name
-                </label>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={importDedupe}
-                    onChange={(e) => setImportDedupe(e.target.checked)}
-                  />
-                  Deduplicate identical sample IDs (keep newest)
-                </label>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={importFuzzyMatch}
-                    onChange={(e) => setImportFuzzyMatch(e.target.checked)}
-                  />
-                  Allow fuzzy reference match (mtbc0_v1 ≈ mtbc0_v1.1) (TEMP)
-                </label>
-                <div className="row">
-                  <select value={importAction} onChange={(e) => setImportAction(e.target.value)}>
-                    <option value="copy">Copy files</option>
-                    <option value="link">Link files</option>
-                  </select>
-                  <select value={importConflict} onChange={(e) => setImportConflict(e.target.value)}>
-                    <option value="skip">Skip conflicts</option>
-                    <option value="rename">Rename conflicts</option>
-                    <option value="overwrite">Overwrite conflicts</option>
-                  </select>
-                </div>
-                <div className="row">
-                  <BusyButton onClick={importVcfs} disabled={!selectedProject || !settingsReady} busyLabel="Building…" title="Add the selected reference / external VCFs into this project's Step 2 comparison set (step2/vcf_database)">Build comparison set</BusyButton>
-                  <button className="ghost action" onClick={step2Clear} disabled={!selectedProject || !settingsReady} title="Empty this project's Step 2 comparison set">Clear comparison set</button>
-                  <button
-                    className="ghost action"
-                    onClick={() => copyPathToClipboard(`${settings.projects_root}/${selectedProject}/step2/vcf_database`, "vcf_database path")}
-                    disabled={!selectedProject}
-                    title="Copy the absolute server path to clipboard — paste into the OOD Files app or scp"
-                  >
-                    Copy vcf_database path
-                  </button>
-                </div>
-                {step2Composition.length > 0 && (
-                  <div
-                    className="note"
-                    title="Where the comparison-set VCFs come from. Each VCF is counted once, under the first database (in order) whose panel contains it; whatever no panel claims is this project's own vcf_database samples. Counts sum to the comparison total. Re-derived on every Build and Refresh."
-                  >
-                    Comparison set by source:
-                    {step2Composition.map((c, i) => (
-                      <span key={c.name}>
-                        {i > 0 ? " | " : " "}
-                        <strong>{c.name}</strong>: {c.count}
-                      </span>
-                    ))}
-                    {step2Composition.length > 1 ? (
-                      <span
-                        className="muted"
-                        title="Comparison samples whose ID appears in more than one selected source (this project's vcf_database and/or a reference panel). Each is still included only once; this is the cross-database overlap."
-                      >
-                        {" "}· duplicates across DBs: <strong>{step2Duplicates}</strong>
-                      </span>
-                    ) : null}
-                    {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
+
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">2</span>
+                    Compare them against a reference database?
+                    <span className="muted" style={{fontWeight:400, marginLeft:"6px"}}>(optional)</span>
                   </div>
-                )}
+                  <label className="checkbox step2-src-row">
+                    <input
+                      type="checkbox"
+                      checked={step2ListIncludeDbs}
+                      onChange={(e) => setStep2ListIncludeDbs(e.target.checked)}
+                    />
+                    <span style={{flex:1}}>
+                      Also include the reference databases ticked on the Build tab
+                      <span className="muted" style={{marginLeft:"6px"}}>
+                        ({step2AvailablePanels.filter((p) => p.enabled).map((p) => p.name).join(", ") || "none ticked"})
+                      </span>
+                    </span>
+                  </label>
+                  <div className="step2-src-hint">
+                    Leave this off to compare your listed samples on their own. Turn it on to place them in a
+                    known panel — the same databases, ticked in box 2 of the Build tab.
+                  </div>
+                </div>
+
+                <div className="step2-src">
+                  <div className="step2-src-head">
+                    <span className="step2-src-num">3</span>
+                    What this will run
+                  </div>
+                  {!step2ListText.trim() ? (
+                    <div className="step2-src-hint">Paste some sample names above to see what will be compared.</div>
+                  ) : (
+                    <>
+                      <div className="note">
+                        <strong>{step2RunSelection.keep.size}</strong> sample
+                        {step2RunSelection.keep.size === 1 ? "" : "s"} will be compared
+                        {" — "}{step2RunSelection.fromList} matched from your list
+                        {step2ListIncludeDbs ? ` + ${step2RunSelection.fromDbs} added by the ticked databases` : ""}
+                        {step2RunSelection.leaveOut.length
+                          ? ` · ${step2RunSelection.leaveOut.length} other sample${step2RunSelection.leaveOut.length === 1 ? "" : "s"} in vcf_database left out of this run`
+                          : ""}
+                      </div>
+                      {step2ListResolution.unmatched.length ? (
+                        <div className="note warning" style={{fontSize:"0.82em"}}>
+                          <strong>{step2ListResolution.unmatched.length} name
+                          {step2ListResolution.unmatched.length === 1 ? "" : "s"} matched nothing</strong> in this
+                          project and {step2ListResolution.unmatched.length === 1 ? "was" : "were"} ignored:{" "}
+                          <span style={{fontFamily:"monospace"}}>
+                            {step2ListResolution.unmatched.slice(0, 20).join(", ")}
+                            {step2ListResolution.unmatched.length > 20 ? ` … (+${step2ListResolution.unmatched.length - 20})` : ""}
+                          </span>
+                        </div>
+                      ) : null}
+                      {step2ListResolution.ambiguous.length ? (
+                        <div className="note" style={{fontSize:"0.82em"}}>
+                          <strong>{step2ListResolution.ambiguous.length} name
+                          {step2ListResolution.ambiguous.length === 1 ? "" : "s"} matched more than one sample</strong>
+                          {" "}— every match is included:{" "}
+                          <span style={{fontFamily:"monospace"}}>
+                            {step2ListResolution.ambiguous.slice(0, 8).map((a) => `${a.token} → ${a.matches.join(" / ")}`).join("; ")}
+                            {step2ListResolution.ambiguous.length > 8 ? " …" : ""}
+                          </span>
+                        </div>
+                      ) : null}
+                      {step2ListResolution.rows.length ? (
+                        <details style={{marginTop:"4px"}}>
+                          <summary style={{cursor:"pointer", fontSize:"0.85em"}}>
+                            Show the {step2ListResolution.rows.length} matched name
+                            {step2ListResolution.rows.length === 1 ? "" : "s"}
+                          </summary>
+                          <div style={{maxHeight:"220px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace", marginTop:"4px"}}>
+                            {step2ListResolution.rows.map((r) => (
+                              <div key={r.token} style={{padding:"1px 0"}}>
+                                {r.token}
+                                <span className="muted"> → </span>
+                                {r.matches.join(", ")}
+                                {r.tier > 1 ? (
+                                  <span className="muted" style={{fontFamily:"sans-serif", fontStyle:"italic"}}>
+                                    {r.tier === 2 ? " (name prefix)" : " (leading accession)"}
+                                  </span>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      ) : null}
+                    </>
+                  )}
+                  <div className="step2-src-hint">
+                    Then press <strong>Run</strong>. This does not change{" "}
+                    <strong>{vcfsFolderName || "vcf_database"}</strong> — the list applies to this run only.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="block">
                 {importMismatchReport ? (
                   <button
                     className="ghost action"
@@ -6441,16 +6835,7 @@ export default function App() {
                     VCF set built for {importProjectLock}. Switch back to run Step 2 there.
                   </div>
                 ) : null}
-              </div>
-            ) : (
-              <div className="block">
-                <div className="note">
-                  Step 2 will compare this project's Step 1 samples
-                  {typeof step2VcfCount === "number" ? ` — ${step2VcfCount} VCF${step2VcfCount === 1 ? "" : "s"} in the set` : ""}.
-                  Click <strong>Setup</strong> to (re)build the set from Step 1, then <strong>Run</strong>.
-                </div>
-              </div>
-            )}
+            </div>
 
             <details className="step2-options-panel">
               <summary style={{cursor:"pointer", fontWeight:500, fontSize:"0.9em"}}>Step 2 Options</summary>
@@ -6470,8 +6855,19 @@ export default function App() {
                   </label>
                   <label className="checkbox">
                     <input type="checkbox" checked={s2HashGroups} onChange={(e) => setS2HashGroups(e.target.checked)} />
-                    Hash groups (-hash)
+                    Also run hashed (#) groups (-hash)
+                    <span
+                      className="help-icon"
+                      data-tooltip={`In the reference's defining-SNP file (${projectReference || reference || "<reference>"}_define_filter.xlsx) a group can be held back by putting a # in front of its defining SNP position — e.g. #MTBC0:2096350. Those groups are skipped on a normal run: they are the provisional / under-review lineages, kept in the file but not analysed. Tick this and vsnp3 strips the # and runs them too, so you get a table and tree for every group in the file, held-back ones included. Nothing else about the run changes.`}
+                    >
+                      ?
+                    </span>
                   </label>
+                  <div className="option-hint">
+                    Groups whose defining SNP is commented out with a <code>#</code> in the reference's
+                    defining-SNP file are normally skipped (provisional / under-review lineages). Tick this to
+                    analyse those groups as well.
+                  </div>
                   <label className="checkbox">
                     <input type="checkbox" checked={s2ShowGroups} onChange={(e) => setS2ShowGroups(e.target.checked)} />
                     Show groups in table (--show_groups)
@@ -6529,9 +6925,6 @@ export default function App() {
             </details>
 
             <div className="block">
-              {step2Mode === "step1" ? (
-                <BusyButton onClick={step2Setup} disabled={!selectedProject || !settingsReady} busyLabel="Building…" title="Collect this project's Step 1 VCFs into the Step 2 set">Setup (build set from Step 1)</BusyButton>
-              ) : null}
                 {(reference || projectReference) ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
                     <span className="muted" style={{ fontSize: "0.8em" }}>Reference:</span>
@@ -6561,9 +6954,10 @@ export default function App() {
                     !selectedProject ||
                     !settingsReady ||
                     (!reference && !projectReference) ||
-                    (step2Mode === "custom"
-                      ? step2VcfCount === 0
-                      : selected && selected.step2_vcfs === 0) ||
+                    // Nothing in the database, or nothing that the source ticks /
+                    // pasted list actually select out of it.
+                    (step2VcfCount === 0 && !(selected && selected.step2_vcfs > 0)) ||
+                    (step2VcfCount > 0 && step2RunSelection.keep.size === 0) ||
                     (refLock.references && refLock.references.length > 1)
                   }
                 >

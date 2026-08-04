@@ -1398,6 +1398,96 @@ button:hover:not(:disabled) {
   padding: 0.15em 0.3em;
   font-size: 0.95em;
 }
+/* An always-visible one-liner under an option checkbox, for flags whose name
+   doesn't explain them (e.g. -hash). */
+.option-hint {
+  font-size: 0.78em;
+  color: var(--muted);
+  line-height: 1.35;
+  margin: 0 0 0.4em 1.6em;
+}
+.option-hint code {
+  font-size: 0.95em;
+  padding: 0 0.2em;
+}
+
+/* Step 2 setup: the numbered source boxes ("1 This project's samples",
+   "2 Reference databases", "3 Build"). One box per decision, read top to
+   bottom, so the flow is obvious to someone seeing the pane for the first
+   time. */
+.step2-src {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 0.5em 0.7em;
+  margin-bottom: 0.55em;
+}
+.step2-src-head {
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  font-size: 0.92em;
+  margin-bottom: 0.35em;
+}
+.step2-src-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+.step2-src-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  margin-bottom: 3px;
+  font-size: 0.85em;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.step2-src-row input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+}
+.step2-src-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #f7faf9;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.step2-src-hint {
+  font-size: 0.78em;
+  color: var(--muted);
+  line-height: 1.4;
+  margin-top: 0.3em;
+}
+.step2-src-hint code {
+  font-size: 0.95em;
+  padding: 0 0.2em;
+}
+.step2-advanced {
+  margin-top: 0.45em;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.35em;
+}
+.step2-advanced > summary {
+  cursor: pointer;
+  font-size: 0.8em;
+  color: var(--muted);
+}
 
 /* ── Appearance ─────────────────────────────────────────────────────────── */
 .header-actions { display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end; }

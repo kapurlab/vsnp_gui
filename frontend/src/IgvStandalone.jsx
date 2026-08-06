@@ -85,10 +85,20 @@ export default function IgvStandalone() {
   const projectRef = useRef(initialTracks[0] ? initialTracks[0].project : "");
   const refNameRef = useRef("");
   const loadedRef = useRef(new Set());
+  // Launches that arrived before the browser existed, replayed once it does.
+  const pendingRef = useRef([]);
+  const pendingLocusRef = useRef("");
 
   async function addSample(reqProject, sample) {
     if (!browserRef.current) {
-      setStatus("IGV not ready yet — wait for initial load.");
+      // Queue it instead of dropping it. The initial load takes seconds (index
+      // fetches over the serve endpoint), and a click on the cascade table during
+      // that window used to be discarded with a message that then stayed on screen
+      // after the load finished — so the user saw "IGV not ready yet" over a
+      // perfectly loaded viewer, at the wrong locus, with their variant missing,
+      // and no indication that clicking again was what was needed.
+      pendingRef.current.push([reqProject, sample]);
+      setStatus("Loading IGV — your sample will be added when it finishes…");
       return;
     }
     const trackKey = `${reqProject}:${sample}`;
@@ -173,8 +183,15 @@ export default function IgvStandalone() {
         await addSample(t.project, t.sample);
       }
     }
-    if (locusParam && browserRef.current) {
-      try { browserRef.current.search(normalizeLocus(locusParam)); } catch (e) { /* ignore */ }
+    if (locusParam) {
+      if (browserRef.current) {
+        try { browserRef.current.search(normalizeLocus(locusParam)); } catch (e) { /* ignore */ }
+      } else {
+        // Still loading: remember where they wanted to go. Dropping it left the
+        // user at the initial whole-genome view, where an alignment track shows
+        // "Zoom in to see features" and looks broken.
+        pendingLocusRef.current = locusParam;
+      }
     }
     try { window.focus(); } catch (e) { /* ignore */ }
   }
@@ -282,19 +299,22 @@ export default function IgvStandalone() {
         return;
       }
       setMeta({ reference: refName, trackCount: tracks.length });
-      // Reference GFF annotation track (genes/CDS/ORFs). Lives in the
-      // reference options dir; the serve endpoint allows reference paths.
-      // Placed first so it renders at the top, above the BAM tracks.
-      const annotationTrack = referenceGffPath
-        ? [{
+      // Reference GFF annotation track (genes/CDS/ORFs), loaded AFTER the browser
+      // exists — see below. It is not part of the createBrowser config on purpose:
+      // igv.js rejects the whole call if any track's resource fails, so one
+      // unreachable GFF used to leave the user with no viewer at all, just
+      // "IGV failed to load: Error accessing resource … status: 400". The reads
+      // and the calls are what they came for; the annotation is an extra.
+      const annotationConfig = referenceGffPath
+        ? {
             type: "annotation",
             format: referenceGffPath.toLowerCase().endsWith(".gff3") ? "gff3" : "gff",
             name: "Reference annotation",
             url: serveUrl(refProject, referenceGffPath),
             displayMode: "EXPANDED",
             visibilityWindow: -1,
-          }]
-        : [];
+          }
+        : null;
       // For each sample, interleave a "calls" variant track immediately
       // above its BAM track. Prefer the annotated VCF (step1-derived, has
       // gene/product/AA in the ID column → rich on-hover info) over the
@@ -334,7 +354,7 @@ export default function IgvStandalone() {
           indexURL: serveUrl(refProject, referenceFaiPath),
         },
         ...(initialLocus ? { locus: initialLocus } : {}),
-        tracks: [...annotationTrack, ...sampleTracks],
+        tracks: sampleTracks,
       };
       try {
         const browser = await igv.createBrowser(containerRef.current, config);
@@ -347,7 +367,16 @@ export default function IgvStandalone() {
         projectRef.current = refProject;
         for (const t of tracks) loadedRef.current.add(`${t.project}:${t.sample}`);
         setMeta({ reference: refName, trackCount: tracks.length });
-        setStatus(skipped.length ? `Loaded ${tracks.length}; skipped: ${skipped.join("; ")}` : "");
+        // The annotation track, now that a failure can only cost the annotation.
+        const notes = skipped.length ? [`skipped: ${skipped.join("; ")}`] : [];
+        if (annotationConfig) {
+          try {
+            await browser.loadTrack(annotationConfig);
+          } catch (e) {
+            notes.push("reference annotation unavailable (gene track off)");
+          }
+        }
+        setStatus(notes.length ? `Loaded ${tracks.length}; ${notes.join("; ")}` : "");
         // Explicitly navigate to the locus AFTER the browser is fully built.
         // config.locus in createBrowser is unreliable — it gets silently
         // dropped on some genomes (observed on MTBC0 4.4 Mb: page lands at
@@ -357,6 +386,17 @@ export default function IgvStandalone() {
         // config.locus set above.
         if (initialLocus) {
           try { browser.search(initialLocus); } catch (e) { /* ignore */ }
+        }
+        // Replay anything clicked while we were loading (see addSample), then go
+        // where that click asked to go.
+        const queued = pendingRef.current.splice(0);
+        for (const [qProject, qSample] of queued) {
+          await addSample(qProject, qSample);
+        }
+        if (pendingLocusRef.current) {
+          const qLocus = normalizeLocus(pendingLocusRef.current);
+          pendingLocusRef.current = "";
+          try { browser.search(qLocus); } catch (e) { /* ignore */ }
         }
       } catch (err) {
         setStatus(`IGV failed to load: ${err && err.message ? err.message : err}`);

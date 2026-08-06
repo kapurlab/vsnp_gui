@@ -6151,6 +6151,54 @@ def _range_response(target: Path, request: Request, media_type: str):
     return StreamingResponse(_slice(), status_code=206, media_type=media_type, headers=headers)
 
 
+def _under(child: Path, parent: Path) -> bool:
+    """Is `child` inside `parent`? Compared at path boundaries.
+
+    A bare startswith is wrong twice over: "/data/proj2" startswith "/data/proj",
+    so a sibling directory passes; and a root of "" would match everything.
+    """
+    parent_s = os.path.normpath(str(parent))
+    child_s = os.path.normpath(str(child))
+    if not parent_s or parent_s in (".", os.sep):
+        return False
+    return child_s == parent_s or child_s.startswith(parent_s.rstrip(os.sep) + os.sep)
+
+
+def _serve_path_allowed(requested: Path, roots) -> bool:
+    """May this path be served? True when it is inside one of `roots`.
+
+    Both sides are compared in BOTH their as-given and fully-resolved forms,
+    because a reference root can be a directory of SYMLINKS rather than of files.
+    A local install with no shared reference set builds exactly that: each
+    reference under <site>/refs/vsnp3/reference_options is a symlink into
+    ~/.local/share/bdtools/vsnp3-refs/. Resolving only the target then lands it
+    outside every (unresolved) root, and a GFF the UI itself just handed out came
+    back 400 "Path not allowed" — which igv.js turns into a dead viewer.
+
+    Not just a laxer check: the as-given path is normalized first, so ".." cannot
+    walk out of a root, and every accepted path is still confined to a root the
+    operator configured.
+    """
+    candidates = {Path(os.path.normpath(str(requested)))}
+    try:
+        candidates.add(requested.resolve())
+    except OSError:
+        pass
+    for root in roots:
+        if not str(root).strip():
+            continue
+        forms = {Path(os.path.normpath(str(root)))}
+        try:
+            forms.add(root.resolve())
+        except OSError:
+            pass
+        for cand in candidates:
+            for form in forms:
+                if _under(cand, form):
+                    return True
+    return False
+
+
 @app.get("/api/projects/{project}/serve")
 def serve_project_file(project: str, request: Request, path: str = Query(...)):
     """Serve a file from within the project directory with HTTP byte-range support.
@@ -6163,17 +6211,19 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
     """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
-    target = Path(path).resolve()
-    target_str = str(target)
-    allowed = target_str.startswith(str(project_dir.resolve()))
-    if not allowed:
-        vsnp3_path = Path(cfg.get("vsnp3_path", ""))
-        for root in reference_roots(vsnp3_path):
-            if target_str.startswith(str(root.resolve())):
-                allowed = True
-                break
-    if not allowed:
+    roots = [project_dir]
+    roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
+    # The configured reference root is where the UI gets its GFF paths from
+    # (find_gff_for_fasta walks it), so this endpoint must be willing to serve
+    # from it. It is NOT always listed in reference_options_paths.txt: a local
+    # install that finds every reference already available elsewhere deliberately
+    # drops its own managed dir from that file.
+    configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
+    if configured_refs:
+        roots.append(Path(configured_refs))
+    if not _serve_path_allowed(Path(path), roots):
         raise HTTPException(status_code=400, detail="Path not allowed")
+    target = Path(path).resolve()
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     suffix = target.suffix.lower()

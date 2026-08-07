@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# claude-sudo-grant.sh — grant a deploy operator NOPASSWD sudo, scoped to the
+# deploy-sudo-grant.sh — grant a deploy operator NOPASSWD sudo, scoped to the
 # vetted vSNP-GUI install/teardown scripts only (NOT blanket ALL).
 #
-# This replaces the old /etc/sudoers.d/vkapur-temp blanket
-# `vkapur ALL=(ALL) NOPASSWD:ALL` grant with a non-standing, least-privilege
-# grant that an admin re-installs on demand at the start of a deploy session
-# and removes afterwards (claude-sudo-revoke.sh).
+# This replaces a standing blanket `ALL=(ALL) NOPASSWD:ALL` grant with a
+# non-standing, least-privilege one that an admin re-installs on demand at the
+# start of a deploy session and removes afterwards (deploy-sudo-revoke.sh).
 #
 #   Usage:
-#     sudo ./claude-sudo-grant.sh [options]
+#     sudo ./deploy-sudo-grant.sh [options]
 #
 #   Options:
-#     --user NAME      operator to grant (default: $SUDO_USER, else vkapur)
+#     --user NAME      operator to grant (default: $SUDO_USER; required if
+#                      this is not run through sudo)
 #     --deploy-dir DIR vsnp_gui/deploy directory holding the scripts
 #                      (default: auto-detect under /srv/*/tools/vsnp_gui/deploy)
 #     --dry-run        print the sudoers file that would be installed; touch nothing
@@ -28,13 +28,13 @@
 #   listed scripts to root:root 0755 so they can't be edited without sudo. The
 #   containing directory is left as-is; if the operator owns it they could still
 #   swap a script file. For true isolation, stage the scripts under a root-owned
-#   path (e.g. /opt/claude-deploy) and point --deploy-dir there. On a single
+#   path (e.g. /opt/vsnp-deploy) and point --deploy-dir there. On a single
 #   single-admin box this grant's main win is being NON-STANDING, not blanket.
 
 set -euo pipefail
 
-SUDOERS_FILE=/etc/sudoers.d/claude-deploy
-GRANT_USER="${SUDO_USER:-vkapur}"
+SUDOERS_FILE=/etc/sudoers.d/vsnp-deploy
+GRANT_USER="${SUDO_USER:-}"
 DEPLOY_DIR=""
 DRY_RUN=0
 
@@ -50,6 +50,18 @@ done
 
 if [[ $EUID -ne 0 ]]; then
   echo "must run as root (use sudo)" >&2
+  exit 1
+fi
+
+# No default operator: guessing one would grant sudo to an account nobody named.
+# $SUDO_USER covers the normal `sudo ./deploy-sudo-grant.sh` case; a direct root
+# shell has to say who.
+if [[ -z "$GRANT_USER" ]]; then
+  echo "no operator to grant: pass --user NAME (or run this through sudo)" >&2
+  exit 1
+fi
+if ! id -u "$GRANT_USER" >/dev/null 2>&1; then
+  echo "no such user: $GRANT_USER" >&2
   exit 1
 fi
 
@@ -94,13 +106,13 @@ done
 alias_lines="${alias_lines%, \\
 }"   # strip trailing comma+continuation
 
-CONTENT="# Managed by claude-sudo-grant.sh — non-standing, scoped deploy grant.
-# Remove with claude-sudo-revoke.sh. Replaces the old vkapur-temp blanket grant.
-Cmnd_Alias CLAUDE_DEPLOY = \\
+CONTENT="# Managed by deploy-sudo-grant.sh — non-standing, scoped deploy grant.
+# Remove with deploy-sudo-revoke.sh.
+Cmnd_Alias VSNP_DEPLOY = \\
 ${alias_lines}, \\
     /usr/bin/apt-get, \\
     /usr/bin/systemctl reload apache2
-${GRANT_USER} ALL=(root) NOPASSWD: CLAUDE_DEPLOY
+${GRANT_USER} ALL=(root) NOPASSWD: VSNP_DEPLOY
 "
 
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -130,4 +142,4 @@ if [[ -n "$(find "$DEPLOY_DIR" -maxdepth 0 -writable -user "$GRANT_USER" 2>/dev/
   echo "             script file. Acceptable on a single-admin box; for true"
   echo "             isolation stage the scripts under a root-owned path."
 fi
-echo "Revoke when done:  sudo $(dirname "$0")/claude-sudo-revoke.sh"
+echo "Revoke when done:  sudo $(dirname "$0")/deploy-sudo-revoke.sh"

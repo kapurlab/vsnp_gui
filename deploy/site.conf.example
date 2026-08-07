@@ -8,9 +8,8 @@
 # in the repo is replaced from here at install time.
 #
 # This is a TEMPLATE — copy it to site.conf and replace the YOURSITE / empty
-# values with your site's. The wgs3 (Kapur Lab) reference values are shown in
-# comments so you can diff against a known-good install. See
-# docs/deploy/WGS3_AUDIT.md §5 for the full literal→variable map.
+# values with your site's. The reference values are shown in comments so you
+# can diff against a known-good install.
 
 # ---- Site identity ---------------------------------------------------------
 

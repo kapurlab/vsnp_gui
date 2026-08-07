@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # bootstrap_ood_core.sh — install Open OnDemand core on a bare Ubuntu box.
 #
-# This is LAYER 1-2 of the install (see docs/deploy/WGS3_AUDIT.md §0): it
-# reproduces how wgs3's OOD core was built so install_ood.sh has a platform
+# This is LAYER 1-2 of the install: it
+# reproduces how the reference OOD core was built so install_ood.sh has a platform
 # to deploy the vSNP layer onto. Run this FIRST on a fresh box, then run
 # install_ood.sh.
 #

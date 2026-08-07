@@ -114,4 +114,12 @@ echo
 echo "Done."
 echo "  User:    $USER_NAME"
 echo "  Groups:  $(id -nG "$USER_NAME")"
-echo "  Tell the user to access OOD at http://100.68.171.59/ with their password."
+
+# The address to hand out is this deployment's, not one baked into the repo:
+# prefer SERVERNAME from deploy/site.conf, else fall back to this host's name.
+OOD_ADDR="${SERVERNAME:-}"
+if [ -z "$OOD_ADDR" ] && [ -f "$(dirname "$0")/../site.conf" ]; then
+  OOD_ADDR="$(sed -n 's/^SERVERNAME=//p' "$(dirname "$0")/../site.conf" | tr -d '"' | head -1)"
+fi
+[ -n "$OOD_ADDR" ] || OOD_ADDR="$(hostname -f 2>/dev/null || hostname)"
+echo "  Tell the user to access OOD at http://${OOD_ADDR}/ with their password."

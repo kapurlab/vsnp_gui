@@ -54,8 +54,8 @@ buttons inside vSNP to work.
 ## Reference docs
 
 - [`../docs/deploy/INSTALL_OOD.md`](../docs/deploy/INSTALL_OOD.md) — the full runbook.
-- [`../docs/deploy/WGS3_AUDIT.md`](../docs/deploy/WGS3_AUDIT.md) — the reference-install
-  audit + the complete literal→`site.conf` parameterization map.
+- [`site.conf.example`](site.conf.example) — every value a new site sets, with
+  the reference install's values in comments to diff against.
 - `ood/README.md`, `admin/README.md`, `vsnp3-patches/README.md` — per-subsystem detail.
 
 > **Status: DRAFT** — the installers are reconstructed from the wgs3 reference

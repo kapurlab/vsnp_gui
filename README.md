@@ -44,7 +44,7 @@ Notes:
 
 **Browser version:**
 ```bash
-git clone https://github.com/vkapur/vsnp_gui.git
+git clone https://github.com/kapurlab/vsnp_gui.git
 cd vsnp_gui
 ./start_gui.sh
 ```

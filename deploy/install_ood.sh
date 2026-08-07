@@ -6,7 +6,7 @@
 # frontend build, reference registration). It assumes OOD CORE is already
 # installed — run deploy/bootstrap_ood_core.sh first on a bare box. It does
 # NOT provision storage mounts or ship reference data (prerequisites).
-# See docs/deploy/WGS3_AUDIT.md and docs/deploy/INSTALL_OOD.md.
+# See docs/deploy/INSTALL_OOD.md.
 #
 #   Usage:
 #     sudo ./install_ood.sh [options] [phase ...]

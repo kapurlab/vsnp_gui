@@ -2,7 +2,7 @@
 
 1) Clone repo
 ```
-git clone https://github.com/vkapur/vsnp_gui.git
+git clone https://github.com/kapurlab/vsnp_gui.git
 cd vsnp_gui
 ```
 

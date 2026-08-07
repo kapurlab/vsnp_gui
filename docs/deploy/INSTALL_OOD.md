@@ -2,9 +2,7 @@
 
 > The roadmap for taking a **bare Linux box** to a **working multi-user vSNP
 > GUI with a runnable sample project**. Written for a sysadmin. Built and
-> validated against the wgs3 reference install (see
-> [`WGS3_AUDIT.md`](WGS3_AUDIT.md)); first authored for the **NIVEDI** port
-> (T-49 / T-50).
+> validated against the reference install.
 >
 > **Status: DRAFT.** The scripts are reconstructed from wgs3 + the repo and
 > have not yet been run end-to-end on a clean box. Do the **first install on
@@ -28,8 +26,8 @@ top two are "ours"; the bottom two are standard infrastructure.
 
 Everything site-specific (paths, group names, hostnames, branding) lives in
 **one file: `deploy/site.conf`**. Nothing in the repo is edited per-site —
-the installers substitute your values on the way out. The full literal→knob
-map is [`WGS3_AUDIT.md` §5](WGS3_AUDIT.md#5-parameterization-map-the-literals--siteconf-variables).
+the installers substitute your values on the way out. Every knob, with the reference
+install's value beside it, is in [`deploy/site.conf.example`](../../deploy/site.conf.example).
 
 ---
 
@@ -46,7 +44,7 @@ different release means a different repo URL (the bootstrap warns you).
   Local Linux accounts authenticate directly (`pam_unix`).
 - If your network is less trusted, **add TLS** (`ssl:` block in
   `ood_portal.yml`) before go-live. Basic-auth over plain HTTP sends
-  credentials in the clear. See [`WGS3_AUDIT.md` §7](WGS3_AUDIT.md).
+  credentials in the clear.
 
 **Already have OOD?** (e.g. an institutional cluster like PSU Roar.) Then
 **skip layers 1–2** — you don't own them. You'd deploy only layers 3–4, and

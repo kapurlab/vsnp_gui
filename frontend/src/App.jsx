@@ -164,9 +164,12 @@ export default function App() {
   // "full" (classify + parse reads + identify) or "kraken_only" (Kraken2 +
   // Krona graph only). Streams the live pipeline log via /api/jobs/{id}/events.
   const [krakenModal, setKrakenModal] = useState({
-    open: false, project: "", sample: "", mode: "full", taxon: "",
+    open: false, project: "", sample: "", mode: "full", taxon: "", db: "",
     running: false, jobId: null, status: "idle", log: [],
   });
+  // Kraken2 DBs known to the Kraken ID Parse tool (its Settings own the list);
+  // {current, databases} from /api/kraken/dbs, loaded when the modal opens.
+  const [krakenDbInfo, setKrakenDbInfo] = useState({ current: "", databases: [] });
   // Taxon presets are loaded from the shared kraken config/taxa.yaml via
   // /api/kraken/taxa; this list is only a fallback if that fetch fails.
   const [krakenTaxonPresets, setKrakenTaxonPresets] = useState([
@@ -3536,10 +3539,14 @@ export default function App() {
       }
       if (krakenEsRef.current && !m.running) { krakenEsRef.current.close(); krakenEsRef.current = null; }
       return {
-        open: true, project, sample, mode: "full", taxon: "",
+        open: true, project, sample, mode: "full", taxon: "", db: "",
         running: false, jobId: null, status: "idle", log: [],
       };
     });
+    fetch(`${API_BASE}/api/kraken/dbs`)
+      .then((r) => (r.ok ? r.json() : { current: "", databases: [] }))
+      .then((info) => setKrakenDbInfo({ current: info.current || "", databases: info.databases || [] }))
+      .catch(() => setKrakenDbInfo({ current: "", databases: [] }));
   }
 
   // Closing while a run is in progress just hides the modal — the job keeps
@@ -3553,7 +3560,7 @@ export default function App() {
   }
 
   async function runKrakenForSample() {
-    const { project, sample, mode, taxon, running } = krakenModal;
+    const { project, sample, mode, taxon, db, running } = krakenModal;
     if (running || !project || !sample) return;
     if ((mode === "full" || mode === "parse_only") && !taxon.trim()) return;
     setKrakenModal((m) => ({ ...m, running: true, status: "running", log: [] }));
@@ -3563,7 +3570,7 @@ export default function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sample, mode, taxon: taxon.trim() || null }),
+          body: JSON.stringify({ sample, mode, taxon: taxon.trim() || null, kraken_db: (db || "").trim() || null }),
         }
       );
       if (!res.ok) {
@@ -6136,6 +6143,29 @@ export default function App() {
                 </label>
               </div>
 
+              {/* Kraken2 database — owned by the Kraken ID Parse tool's Settings;
+                  shown here so the user sees what a run will use and can switch
+                  among the DBs saved there for just this run. */}
+              <div style={{ marginBottom: 8 }}>
+                <label className="label">Kraken2 database</label>
+                {krakenDbInfo.databases.length ? (
+                  <select
+                    value={krakenModal.db || krakenDbInfo.current}
+                    disabled={krakenModal.running}
+                    onChange={(e) => setKrakenModal((m) => ({ ...m, db: e.target.value }))}
+                  >
+                    {krakenDbInfo.databases.map((p) => (
+                      <option key={p} value={p}>{p}{p === krakenDbInfo.current ? "  (current)" : ""}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="muted" style={{ fontSize: 12, color: "var(--danger)" }}>
+                    No Kraken2 database configured. Open the Kraken ID Parse app's Settings and add one —
+                    vSNP runs Kraken with the database configured there.
+                  </div>
+                )}
+              </div>
+
               {krakenModal.mode === "full" || krakenModal.mode === "parse_only" ? (
                 <div style={{ marginBottom: 8 }}>
                   <label className="label">Target taxon</label>
@@ -6165,7 +6195,7 @@ export default function App() {
                     </button>
                   </div>
                   <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                    New taxa are saved to the shared list (/srv/kapurlab/tools/kraken_id_parse_gui/config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
+                    New taxa are saved to the shared list (the Kraken ID Parse install's config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
                   </div>
                 </div>
               ) : null}

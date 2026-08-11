@@ -111,7 +111,11 @@ log "registering reference-options path -> ${ROP}"
 run mkdir -p "${VSNP3_ENV}/dependencies"
 if [[ ${DRY_RUN} -eq 0 ]]; then
   if [[ ! -f "${ROP}" ]] || ! grep -qxF "${REFS_DIR}" "${ROP}" 2>/dev/null; then
-    printf '%s\n' "${REFS_DIR}" >> "${ROP}"
+    # tmp+mv, NOT >>: the file is a hardlink into the conda package cache;
+    # appending in place would pre-seed every future vsnp3 env with it.
+    _roptmp="$(mktemp "${ROP}.XXXXXX")"
+    { [[ -f "${ROP}" ]] && cat "${ROP}"; printf '%s\n' "${REFS_DIR}"; } > "${_roptmp}"
+    mv -f "${_roptmp}" "${ROP}"
   fi
 fi
 ok "vsnp3 will look for reference sets under ${REFS_DIR}"

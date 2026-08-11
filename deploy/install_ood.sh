@@ -300,8 +300,43 @@ phase_toolchain() {
     if grep -qxF "${REFS_DIR}" "${rop}" 2>/dev/null; then
       ok "reference path already registered"
     else
-      echo "${REFS_DIR}" >> "${rop}"; ok "registered ${REFS_DIR} in ${rop##*/}"
+      # tmp+mv, NOT >>: in a conda env this file is a hardlink into the
+      # package cache, and an in-place append would seed every future vsnp3
+      # env on this machine with this install's paths.
+      _roptmp="$(mktemp "${rop}.XXXXXX")"
+      { [[ -f "${rop}" ]] && cat "${rop}"; echo "${REFS_DIR}"; } > "${_roptmp}"
+      mv -f "${_roptmp}" "${rop}"
+      ok "registered ${REFS_DIR} in ${rop##*/}"
     fi
+  fi
+
+  # 4b. seed the lab's Step 2 VCF comparison databases (one-time). The marker
+  #     means an admin who later removes a DB never has it re-added, and an
+  #     existing entry of the same name is never overwritten. Clone failure is
+  #     a warn — these are an enhancement, not a build dependency.
+  local vcf_seed_marker="${VCF_DB_DIR}/.vcf-db-directories.seeded"
+  if [[ ${DRY_RUN} -eq 1 ]]; then
+    info "[dry-run] seed kapurlab/vcf_db_directories -> ${VCF_DB_DIR} (once)"
+  elif [[ ! -f "${vcf_seed_marker}" ]]; then
+    local vcf_clone="${TOOLS_DIR}/vcf_db_directories"
+    if [[ ! -d "${vcf_clone}" ]]; then
+      git clone --depth 1 https://github.com/kapurlab/vcf_db_directories.git "${vcf_clone}" 2>/dev/null \
+        || warn "could not clone kapurlab/vcf_db_directories (offline?) — Step 2 VCF DBs not seeded"
+    fi
+    if [[ -d "${vcf_clone}" ]]; then
+      mkdir -p "${VCF_DB_DIR}"
+      local _vd _vn _vlinked=0
+      for _vd in "${vcf_clone}"/*/; do
+        [[ -d "${_vd}" ]] || continue
+        _vn="$(basename "${_vd}")"
+        case "${_vn}" in .*) continue;; esac
+        [[ -e "${VCF_DB_DIR}/${_vn}" ]] || { ln -sfn "${_vd%/}" "${VCF_DB_DIR}/${_vn}"; _vlinked=$((_vlinked+1)); }
+      done
+      printf 'when=%s\nclone=%s\nlinked=%s\n' "$(date -u +%FT%TZ)" "${vcf_clone}" "${_vlinked}" > "${vcf_seed_marker}"
+      ok "Step 2 VCF databases seeded (${_vlinked} linked) -> ${VCF_DB_DIR}"
+    fi
+  else
+    ok "Step 2 VCF databases already seeded (marker present)"
   fi
 
   # 5. ensure this repo is materialized at VSNP_GUI_DIR. The OOD card's

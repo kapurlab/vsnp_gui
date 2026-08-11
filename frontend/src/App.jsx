@@ -5251,7 +5251,16 @@ export default function App() {
                   </select>
                   {refLock.references && refLock.references.length > 1 ? (
                     <div className="note error">
-                      Mixed references detected: {refLock.references.join(", ")}. Split into separate runs.
+                      Mixed references detected — split into separate runs:
+                      {refLock.references.map((r) => {
+                        const samples = (refLock.samples_by_reference || {})[r] || [];
+                        const shown = samples.slice(0, 4).join(", ") + (samples.length > 4 ? `, +${samples.length - 4} more` : "");
+                        return (
+                          <div key={r} style={{ marginTop: 2 }}>
+                            <b>{r}</b>{shown ? <span className="muted"> — {shown}</span> : null}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : refLock.references && refLock.references.length === 1 ? (
                     <div className="inline-help">

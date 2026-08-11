@@ -3536,9 +3536,18 @@ def step2_run(project: str, payload: Step2Request):
     # Auto-populate reference: project.json first, then reference_lock inference
     if not payload.reference:
         payload.reference = _project_reference(project_dir)
-    refs = reference_lock(project)["references"]
+    lock = reference_lock(project)
+    refs = lock["references"]
     if len(refs) > 1:
-        raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(refs)}")
+        # Name the samples behind each reference — "which runs do I split out?"
+        # is the question this error creates, so answer it in the error.
+        by_ref = lock.get("samples_by_reference", {})
+        parts = []
+        for r in refs:
+            samples = sorted(by_ref.get(r, []))
+            shown = ", ".join(samples[:4]) + (f", +{len(samples) - 4} more" if len(samples) > 4 else "")
+            parts.append(f"{r} ({shown})" if shown else r)
+        raise HTTPException(status_code=400, detail=f"Mixed references detected: {'; '.join(parts)}")
     if not payload.reference:
         if len(refs) == 1:
             payload.reference = refs[0]
@@ -4372,28 +4381,43 @@ def reference_lock(project: str):
         "    else:\n"
         "        if date > (latest[sample].get('date','') or ''):\n"
         "            latest[sample]=row\n"
-        "refs=set()\n"
+        "refs={}\n"
         "for row in latest.values():\n"
         "    ref=row.get('Reference') or ''\n"
         "    ref=ref.replace(' Forced','').replace(' by Best Reference','').strip()\n"
         "    if ref:\n"
-        "        refs.add(ref)\n"
-        "print(json.dumps(sorted(list(refs))))\n"
+        "        refs.setdefault(ref, []).append(row.get('_sample'))\n"
+        "print(json.dumps(refs))\n"
     )
     cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
     result = subprocess.run(cmd_list, text=True, capture_output=True)
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=f"Reference lock failed: {result.stderr.strip()}")
     try:
-        refs = json.loads(result.stdout.strip())
+        raw_refs = json.loads(result.stdout.strip())
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Reference lock parse failed")
+    # The stats sheet records whatever `-r` the run was given. A GUI run records
+    # the reference NAME, but a command-line run imported into the project may
+    # have recorded a full FASTA path from another machine — which then surfaced
+    # verbatim in "Mixed references detected" as a path that doesn't exist here.
+    # Normalize path-like values to the reference they actually are (same alias
+    # machinery the VCF importer uses: NC_006932-NC_006933.fasta →
+    # Brucella_abortus1); a plain name passes through untouched.
+    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    by_ref: Dict[str, List[str]] = {}
+    for raw, samples in raw_refs.items():
+        looks_pathy = ("/" in raw or "\\" in raw
+                       or raw.lower().endswith((".fasta", ".fa", ".fna", ".fas")))
+        name = _normalize_reference(raw, alias_map) if looks_pathy else raw
+        by_ref.setdefault(name or raw, []).extend(s for s in samples if s)
+    refs = sorted(by_ref)
     if len(refs) == 1:
         update_project_meta(project_dir, {
             "reference": refs[0],
             "display_name": f"{project}_{refs[0]}"
         })
-    return {"references": refs}
+    return {"references": refs, "samples_by_reference": by_ref}
 
 
 class ExcludeRequest(BaseModel):

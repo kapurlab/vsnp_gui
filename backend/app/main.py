@@ -40,7 +40,7 @@ _STEP1_DISPATCH_LOCK = threading.Lock()
 # dict get/set are atomic enough that no extra lock is warranted.
 _STEP1_STATUS_CACHE: Dict[str, tuple] = {}
 
-from app.config import load_config, save_config, SITE_ROOT
+from app.config import load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT
 from app.jobs import JobManager
 from app.request_safety import install_request_safety
 from app import qc_verdict
@@ -64,6 +64,7 @@ from app.refs import (
     remove_reference_path,
     reference_roots,
     find_gff_for_fasta,
+    sanitize_upstream_paths,
 )
 from app.sra import expand_accessions, expand_accessions_with_mapping, build_download_script, SRAExpansionError, write_crosswalk_tsv
 from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
@@ -77,6 +78,18 @@ cfg = load_config()
 projects_root = Path(cfg["projects_root"])
 projects_root.mkdir(parents=True, exist_ok=True)
 job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
+
+# One-time per vsnp3 install: drop the upstream author's shipped reference
+# locations (/Users/todstuber/..., /home/tstuber/...) from
+# dependencies/reference_options_paths.txt — a fresh deployment must start
+# with an empty Reference Locations list, not another machine's.
+try:
+    _removed_upstream = sanitize_upstream_paths(Path(cfg["vsnp3_path"]))
+    if _removed_upstream:
+        logger.info("Removed upstream-shipped reference locations: %s",
+                    ", ".join(_removed_upstream))
+except Exception as _exc:  # never block startup on registry hygiene
+    logger.warning("reference locations sanitize skipped: %s", _exc)
 
 
 def _project_roots(cfg_in: Dict) -> List:
@@ -5321,11 +5334,14 @@ def kraken_samples(project: str):
 # same <project>/kraken/<sample>/ directory the results panel already reads.
 #
 # Crucially this uses the SHARED Kraken install — its own conda env and bin/
-# scripts under /srv/kapurlab/tools/kraken_id_parse_gui — NOT the vSNP env (the
+# scripts in the sibling kraken_id_parse_gui checkout — NOT the vSNP env (the
 # vsnp3 env has neither kraken2, krona, nor SPAdes). The Kraken tool itself is
 # lab-shared functionality; only the project data lives per-user/shared.
+# TOOLS_ROOT (config.py) is the dir containing the sibling checkouts, resolved
+# from BDTOOLS_TOOLS_ROOT / SITE_ROOT / this checkout's own parent — never a
+# baked-in site path, so a fresh deployment finds its OWN Kraken install.
 # ---------------------------------------------------------------------------
-_KRAKEN_GUI_ROOT = SITE_ROOT / "tools" / "kraken_id_parse_gui"
+_KRAKEN_GUI_ROOT = TOOLS_ROOT / "kraken_id_parse_gui"
 
 # Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
 # read and append to this same file so the preset list stays in sync.
@@ -5401,6 +5417,27 @@ def _kraken_gui_config() -> Dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+def _existing_site_kraken_db() -> str:
+    """The reference install's conventional Kraken2 DB — but only when it is
+    really there. hash.k2d is what kraken2 itself requires, so its presence is
+    the honest test. Everywhere else return "" and let the caller error with
+    instructions instead of pointing at a directory this site never had."""
+    cand = DB_ROOT / "kraken2" / "k2_standard_08gb"
+    return str(cand) if (cand / "hash.k2d").is_file() else ""
+
+
+def _existing_site_blast_db() -> str:
+    """Site BLAST DB prefix (files <prefix>.n*), existence-guarded like the
+    Kraken default. "" means: let the pipeline fall back to its own default
+    ("nt", NCBI-remote) rather than a dead local path."""
+    cand = DB_ROOT / "blast" / "ref_prok_rep_genomes"
+    try:
+        has_files = any(cand.parent.glob(cand.name + ".*"))
+    except OSError:
+        has_files = False
+    return str(cand) if has_files else ""
+
 
 # Read-tag stripping identical to Kraken ID Parse's own pairing logic, so the
 # sample name and R1/R2 selection match what that tool would pick on its own.
@@ -5550,6 +5587,27 @@ def kraken_taxa_add(payload: KrakenTaxonPayload):
     return {"taxa": taxa, "added": True}
 
 
+@app.get("/api/kraken/dbs")
+def kraken_dbs():
+    """Kraken2 databases available to a vSNP-launched run, and which one a run
+    would use right now. The Kraken ID Parse tool owns DB configuration (its
+    Settings remember every DB added there); this endpoint just mirrors that
+    tool's list so the vSNP Kraken dialog can show it and switch per-run."""
+    cfg = load_config()
+    _kgui = _kraken_gui_config()
+    current = cfg.get("kraken_db", "") \
+        or str(_kgui.get("kraken_db", "") or "").strip() \
+        or _existing_site_kraken_db()
+    options: List[str] = []
+    for p in [current, str(_kgui.get("kraken_db", "") or "").strip(),
+              *(_kgui.get("saved_kraken_dbs") or []),
+              _existing_site_kraken_db()]:
+        p = str(p or "").strip()
+        if p and p not in options:
+            options.append(p)
+    return {"current": current, "databases": options}
+
+
 def _resolve_kraken_runtime() -> Dict[str, str]:
     """Locate the shared Kraken install's python + bin. Falls back to a
     per-user miniforge env only if the shared env is absent (mirrors the OOD
@@ -5636,18 +5694,25 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     #   3. the Kraken ID Parse GUI's config — inherit whatever DB that tool is
     #      already using, so a working Kraken GUI means a working vSNP Kraken run
     #      (the vSNP GUI has no DB field of its own).
-    #   4. shared site-root default (correct on the /srv reference install).
+    #   4. the site database root — ONLY if that DB actually exists on disk. A
+    #      new deployment must resolve to "" (and get a pointed error below),
+    #      never to another site's layout.
     _kgui = _kraken_gui_config()
     kraken_db = (payload.kraken_db or "").strip() or cfg.get("kraken_db", "") \
         or str(_kgui.get("kraken_db", "") or "").strip() \
-        or str(SITE_ROOT / "databases" / "kraken2" / "k2_standard_08gb")
+        or _existing_site_kraken_db()
     blast_db = (payload.blast_db or "").strip() or cfg.get("blast_db", "") \
         or str(_kgui.get("blast_db", "") or "").strip() \
-        or str(SITE_ROOT / "databases" / "blast" / "ref_prok_rep_genomes")
-    if kraken_only and not kraken_db:
-        raise HTTPException(status_code=400, detail="Kraken-only mode requires a Kraken DB path.")
-    if parse_only and not kraken_db:
-        raise HTTPException(status_code=400, detail="Parse-only (skip BLAST) mode requires a Kraken DB path.")
+        or _existing_site_blast_db()
+    if not kraken_db:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Kraken2 database is configured. Set one in the Kraken ID "
+                "Parse tool's Settings — vSNP runs Kraken with the database "
+                "configured there."
+            ),
+        )
 
     run_dir = project_dir / "kraken" / kraken_sample
     # Guard against two runs racing on the same output dir (they'd clobber each

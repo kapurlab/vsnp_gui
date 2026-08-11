@@ -50,6 +50,19 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+try:  # normal app import layout
+    from app.config import DEFAULTS as _CFG_DEFAULTS
+except Exception:  # pragma: no cover - when app/ is the import root
+    from config import DEFAULTS as _CFG_DEFAULTS
+
+
+def _cfg_path(cfg: dict, key: str) -> str:
+    """cfg value with the config module's own (site-resolved) default — never a
+    baked-in /srv/kapurlab literal, which is only right on the machine it was
+    written for and silently wrong everywhere else."""
+    return cfg.get(key) or str(_CFG_DEFAULTS.get(key, ""))
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -479,7 +492,7 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
     Cached for uvicorn lifetime, keyed by the conda prefix (or vsnp3
     install path if no conda env is active).
     """
-    vsnp3_path = Path(cfg.get("vsnp3_path", "/srv/kapurlab/tools/vsnp3"))
+    vsnp3_path = Path(_cfg_path(cfg, "vsnp3_path"))
     conda_prefix = os.environ.get("CONDA_PREFIX", "") or str(vsnp3_path)
     cache_key = conda_prefix
 
@@ -492,7 +505,7 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
         if cached is not None:
             return dict(cached)
 
-        audit_root = Path(cfg.get("audit_root", "/srv/kapurlab/audit"))
+        audit_root = Path(_cfg_path(cfg, "audit_root"))
         snapshots_dir = audit_root / "env_snapshots"
         try:
             snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -819,12 +832,11 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
             roots = [Path(p) for p in _refs.get_reference_paths(Path(vsnp3_path))]
         except Exception:
             roots = []
-    cfg_root = Path(cfg.get(
-        "vsnp3_reference_options_root",
-        "/srv/kapurlab/refs/vsnp3/reference_options",
-    ))
-    if cfg_root not in roots:
-        roots.append(cfg_root)
+    cfg_root_val = _cfg_path(cfg, "vsnp3_reference_options_root")
+    if cfg_root_val:
+        cfg_root = Path(cfg_root_val)
+        if cfg_root not in roots:
+            roots.append(cfg_root)
     folder = next((r / reference_name for r in roots
                    if (r / reference_name).is_dir()), None)
     if folder is None:
@@ -1023,7 +1035,7 @@ def _build_step1_per_sample_cli(
     sample_dir: Path,
 ) -> dict[str, Any]:
     """Reconstruct the per-sample vsnp3_step1.py invocation."""
-    vsnp3_path = Path(cfg.get("vsnp3_path", "/srv/kapurlab/tools/vsnp3"))
+    vsnp3_path = Path(_cfg_path(cfg, "vsnp3_path"))
     cmd = (
         f"{vsnp3_path}/bin/vsnp3_step1.py "
         f"-r1 {sample}_R1.fastq.gz -r2 {sample}_R2.fastq.gz "
@@ -1181,8 +1193,8 @@ def dispatch_step1_batch(
         raise DispatchFailed(f"step1 dir does not exist: {step1_dir}")
 
     # Capture shared state once
-    deploy_path = Path(cfg.get("vsnp_gui_deploy_path", "/srv/kapurlab/tools/vsnp_gui"))
-    vsnp3_path = Path(cfg.get("vsnp3_path", "/srv/kapurlab/tools/vsnp3"))
+    deploy_path = Path(_cfg_path(cfg, "vsnp_gui_deploy_path"))
+    vsnp3_path = Path(_cfg_path(cfg, "vsnp3_path"))
     threshold = int(
         cfg.get("provenance", {}).get("hash_max_bytes", DEFAULT_HASH_THRESHOLD_BYTES)
     )
@@ -1486,8 +1498,8 @@ def dispatch_step2(
         raise Step2DispatchBlocked(running_samples)
 
     # Capture shared state
-    deploy_path = Path(cfg.get("vsnp_gui_deploy_path", "/srv/kapurlab/tools/vsnp_gui"))
-    vsnp3_path = Path(cfg.get("vsnp3_path", "/srv/kapurlab/tools/vsnp3"))
+    deploy_path = Path(_cfg_path(cfg, "vsnp_gui_deploy_path"))
+    vsnp3_path = Path(_cfg_path(cfg, "vsnp3_path"))
 
     vsnp_gui_state = capture_vsnp_gui_state(deploy_path)
     vsnp3_state = capture_vsnp3_state(vsnp3_path)

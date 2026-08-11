@@ -24,17 +24,69 @@ _LEGACY_CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.
 HOME_DIR = Path.home()
 
 # Shared lab tools live under <SITE_ROOT>/tools/ (see docs/dev/MULTIUSER.md).
-# SITE_ROOT is /srv/kapurlab on the reference install (wgs3); other sites (e.g.
-# NIVEDI -> /srv/nivedi) set VSNP_GUI_SITE_ROOT. The OOD launcher
-# (template/script.sh.erb) exports it; it defaults to /srv/kapurlab so the
-# reference install is unchanged. Falls back to a per-user $HOME path if the
-# shared install doesn't exist (single-user dev box, or pre-T-11 systems).
-_SITE_ROOT = Path(os.environ.get("VSNP_GUI_SITE_ROOT", "/srv/kapurlab").strip() or "/srv/kapurlab")
+# A path literal here is only ever right on the machine it was written for and
+# fails silently everywhere else (a fresh HPC deployment 503'd "Kraken ID Parse
+# is not installed at /srv/kapurlab/..." because the old unconditional
+# /srv/kapurlab default won over reality). Resolution order — nothing baked-in
+# ever decides a NEW deployment:
+#   1. VSNP_GUI_SITE_ROOT — the launcher's explicit word (OOD script, bdtools)
+#   2. BDTOOLS_SITE_ROOT  — the umbrella's site.conf, exported by tool_launch
+#   3. the grandparent dir when this checkout sits at <root>/tools/vsnp_gui
+#   4. /srv/kapurlab ONLY if it exists — reference-install (wgs3) compat for
+#      dev checkouts launched outside bdtools on that machine
+#   5. a per-user placeholder that exists nowhere, so every shared-tree feature
+#      degrades honestly instead of pointing at another site's layout
+def _resolve_site_root() -> Path:
+    for var in ("VSNP_GUI_SITE_ROOT", "BDTOOLS_SITE_ROOT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return Path(val)
+    checkout = Path(__file__).resolve().parents[2]   # .../vsnp_gui
+    if checkout.parent.name == "tools":
+        return checkout.parent.parent
+    legacy = Path("/srv/kapurlab")
+    if legacy.is_dir():
+        return legacy
+    return HOME_DIR / ".local" / "share" / "vsnp_gui" / "site"
+
+
+_SITE_ROOT = _resolve_site_root()
 # Public: other modules (jobs.py, main.py, provenance_writer.py) derive their
 # shared-tree paths (audit logs, deploy dir, refs) from this instead of
 # hard-coding /srv/kapurlab. Driven by VSNP_GUI_SITE_ROOT (see above).
 SITE_ROOT = _SITE_ROOT
-_SHARED_VSNP3 = _SITE_ROOT / "tools" / "vsnp3"
+
+# Where the SIBLING tool checkouts live (kraken_id_parse_gui, vsnp3, ...).
+# BDTOOLS_TOOLS_ROOT is exported by every bdtools launch and names the dir that
+# actually CONTAINS the checkouts, whatever the site called it (_github/ on the
+# ICDS cluster, tools/ on wgs3). Fall back to <SITE_ROOT>/tools, then to this
+# checkout's own parent — a sibling install is a sibling wherever the tree sits.
+def _resolve_tools_root() -> Path:
+    val = os.environ.get("BDTOOLS_TOOLS_ROOT", "").strip()
+    if val:
+        return Path(val)
+    site_tools = _SITE_ROOT / "tools"
+    if site_tools.is_dir():
+        return site_tools
+    return Path(__file__).resolve().parents[3]
+
+
+TOOLS_ROOT = _resolve_tools_root()
+
+# Site database root (kraken2/, blast/ subdirs). BDTOOLS_DB_ROOT is exported by
+# bdtools launches when the site recorded one; otherwise derive from SITE_ROOT.
+# Consumers must existence-guard anything built from this — on a machine with
+# no site databases the correct default is "", not a path that cannot exist.
+def _resolve_db_root() -> Path:
+    val = os.environ.get("BDTOOLS_DB_ROOT", "").strip()
+    if val:
+        return Path(val)
+    return _SITE_ROOT / "databases"
+
+
+DB_ROOT = _resolve_db_root()
+
+_SHARED_VSNP3 = TOOLS_ROOT / "vsnp3"
 _PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
 _DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
 _DEFAULT_BCFTOOLS = str(_DEFAULT_VSNP3_PATH / "bin" / "bcftools")
@@ -85,7 +137,7 @@ DEFAULTS: Dict[str, Any] = {
     # Shared-tree paths the provenance writer (T-07) reads. Derived from
     # SITE_ROOT so they're correct at any site; were previously hard-coded to
     # /srv/kapurlab inside provenance_writer.py, which 500'd Step 1 elsewhere.
-    "vsnp_gui_deploy_path": str(_SITE_ROOT / "tools" / "vsnp_gui"),
+    "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
     "audit_root": str(_SITE_ROOT / "audit"),
     "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
     # Per-user opt-out for shared DBs: paths the user has chosen to skip in

@@ -264,7 +264,21 @@ phase_toolchain() {
   elif [[ -z "${conda}" ]]; then
     warn "no conda found; skipping vsnp3 env creation. Install miniforge then re-run."
   else
-    local spec="vsnp3"; [[ -n "${VSNP3_VERSION:-}" ]] && spec="vsnp3=${VSNP3_VERSION}"
+    # An UNPINNED create is not "take the newest vsnp3" — it is "take the newest
+    # python, then whatever vsnp3 still fits it", and the oldest release has the
+    # loosest python bound. That is how this site built vsnp3 3.16 (python >=3.8)
+    # on python 3.14 while the manifest pinned 3.35 (python <=3.12), reported
+    # success, and served the old analysis code until someone read the version on
+    # a dashboard card. Refuse to repeat it silently.
+    local spec="vsnp3"
+    if [[ -n "${VSNP3_VERSION:-}" ]]; then
+      spec="vsnp3=${VSNP3_VERSION}"
+    else
+      warn "VSNP3_VERSION is not set in ${SITE_CONF}."
+      warn "  Creating the env unpinned lets conda pick the newest python and then"
+      warn "  fall back to whatever vsnp3 still supports it — typically 3.16 (2023)."
+      warn "  Set VSNP3_VERSION to the suite manifest's pin and re-run this phase."
+    fi
     # snp-dists is NOT a vsnp3 dependency but the Step 2 SNP-distance analysis
     # needs it (wgs3's env has it); install it alongside or Step 2 fails with
     # "SNP Analysis unavailable: missing snp-dists".

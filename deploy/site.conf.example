@@ -77,8 +77,20 @@ CONDA_BASE=${SITE_ROOT}/tools/miniforge3
 # Where the vsnp3 conda env lives (also the prefix the OOD script.sh prefers).
 VSNP3_PREFIX=${SITE_ROOT}/tools/vsnp3
 
-# Pin the vsnp3 bioconda build. wgs3 runs 3.16. Empty = latest (then re-pin).
-VSNP3_VERSION=3.16
+# Pin the vsnp3 bioconda build. Keep this in step with the suite manifest
+# (bioinformatic_diagnostic_tools/tools.yml `packages: bioconda::vsnp3=…`).
+#
+# NEVER leave it empty. "Empty = latest" is what the comment used to promise and
+# is not what conda does: with no version asked for, the solver takes the newest
+# python and then back-solves vsnp3 to whatever still fits it. vsnp3 3.35 needs
+# python <=3.12 and 3.36 needs <3.14, but 3.16 declares only python >=3.8 — so on
+# a machine where python 3.14 is current, an unpinned create silently produced a
+# 2023-era vsnp3 3.16 and reported success. That is how wgs3 ended up serving
+# 3.16 against a manifest pin of 3.35, invisibly, for months.
+#
+# Asking for the version makes the package's own python constraint drive the
+# solve, so the env lands on a python that can actually host it.
+VSNP3_VERSION=3.35
 
 # Where this repo is checked out on the server (the OOD card + cron read it).
 VSNP_GUI_DIR=${SITE_ROOT}/tools/vsnp_gui

@@ -305,7 +305,12 @@ def _project_counts(project_dir: Path) -> Dict:
                 d for d in step1_dir.iterdir()
                 if d.is_dir() and not d.name.startswith(("_", "."))
             ]) if step1_dir.exists() else 0,
-            "step1_vcfs": len(list(step1_dir.glob("*/alignment_*/*_zc.vcf"))) if step1_dir.exists() else 0,
+            # alignment_<ref>/ plus the legacy suffix-less alignment/ of pre-GUI
+            # runs, so old projects' badges count their existing VCFs.
+            "step1_vcfs": (
+                len(list(step1_dir.glob("*/alignment_*/*_zc.vcf")))
+                + len(list(step1_dir.glob("*/alignment/*_zc.vcf")))
+            ) if step1_dir.exists() else 0,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
             "step2_vcfs": len(list(vcfs_dir.glob("*.vcf"))) if vcfs_dir.exists() else 0,
             "vcfs_count": (

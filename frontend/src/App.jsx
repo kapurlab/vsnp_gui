@@ -6,6 +6,11 @@ import CitationFooter from "./Citations";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
+// Step 1 Results rows are rendered in chunks: mounting one <tr> per sample
+// (with its Files buttons) for an 8000-sample project locks the browser for
+// many seconds, while the filters/exclusions still act on the full set.
+const QC_RENDER_CHUNK = 400;
+
 // Kept in step with _FASTQ_SUFFIXES in backend/app/main.py — the suffixes the
 // server-side file picker offers and link-local accepts.
 const FASTQ_EXTS = [".fastq.gz", ".fq.gz"];
@@ -135,6 +140,9 @@ export default function App() {
   const [krakenDirsByProject, setKrakenDirsByProject] = useState({});
   const [qcLoading, setQcLoading] = useState(false);
   const [qcError, setQcError] = useState("");
+  const [qcScan, setQcScan] = useState(null);                     // {done,total} while the server-side stats scan runs
+  const [qcRenderCap, setQcRenderCap] = useState(QC_RENDER_CHUNK); // how many Results rows are mounted (chunked rendering)
+  const qcLoadSeq = useRef(0);                                    // drops stale qc_summary polls on project switch
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [qcFilter, setQcFilter] = useState("");                   // as-you-type sample filter for Step 1 Results
   const [qcDateStart, setQcDateStart] = useState("");             // YYYY-MM-DD; filter Step 1 Results by run date (inclusive)
@@ -459,13 +467,19 @@ export default function App() {
       });
   }
 
+  // The filtered Results rows, computed once per render (the table body, the
+  // header checkbox and the counts all read this same array — recomputing it
+  // per call site cost four full passes over 8000+ rows every render).
+  const visibleQcRows = computeVisibleQcRows();
+
   // Aggregate state for the header "exclude all in current view" checkbox.
   function excludeAllState() {
-    const vis = computeVisibleQcRows();
+    const vis = visibleQcRows;
     const total = vis.length;
     const on = vis.reduce((n, r) => n + (excluded[excludeKey(r)] ? 1 : 0), 0);
     return { total, on, checked: total > 0 && on === total, indeterminate: on > 0 && on < total };
   }
+  const excludeAllInfo = excludeAllState();
 
   // Compact "last activity" label for the projects list (today / 3d ago / date).
   function _formatActivity(iso) {
@@ -501,7 +515,7 @@ export default function App() {
   // active flagged/name/date filters). Reuses the same debounced save as the
   // per-row toggle so a bulk change still POSTs once.
   function toggleExcludeAllVisible(checked) {
-    const vis = computeVisibleQcRows();
+    const vis = visibleQcRows;
     setExcluded((prev) => {
       const next = { ...prev };
       vis.forEach((row) => { next[excludeKey(row)] = checked; });
@@ -1312,7 +1326,7 @@ export default function App() {
         // before the stop.
         if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed" || status === "cancelled")) {
           loadStep1Status();
-          loadQC();
+          loadQC({ refresh: true });
           refreshProjects(selectedProject);
           collectVcfs([]);
         }
@@ -1432,7 +1446,7 @@ export default function App() {
     if (!selectedProject || !settingsReady) return;
     if (!step1AutoRefreshPending) return;
     if (jobStatus !== "succeeded" && jobStatus !== "failed") return;
-    loadQC();
+    loadQC({ refresh: true });
     setStep1AutoRefreshPending(false);
   }, [jobStatus, selectedProject, step1AutoRefreshPending]);
 
@@ -1451,7 +1465,7 @@ export default function App() {
     const prev = step1JobStatusRef.current;
     step1JobStatusRef.current = step1JobStatus;
     if (prev === "running" && step1JobStatus !== "running" && step1JobStatus !== "") {
-      loadQC();
+      loadQC({ refresh: true });
       refreshProjects(selectedProject);
     }
   }, [step1JobStatus]);
@@ -1819,44 +1833,83 @@ export default function App() {
       .trim();
   }
 
-  async function loadQC() {
+  // Load the Step 1 Results rows. The server scans in the background and this
+  // polls its progress ({status:"scanning", done, total}) until the rows are
+  // ready — a big project shows a moving count instead of a silent request the
+  // OOD proxy would kill. Pass {refresh:true} to force a rescan (new/changed
+  // stats parse in seconds thanks to the server's per-file cache); without it,
+  // a project already scanned this session comes back instantly.
+  async function loadQC(opts = {}) {
     if (!selectedProject || !settingsReady) return;
+    const refresh = opts && opts.refresh === true;
+    const project = selectedProject;
+    const seq = ++qcLoadSeq.current; // any newer call supersedes this one
+    const superseded = () => qcLoadSeq.current !== seq;
     setQcLoading(true);
     setQcError("");
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_summary`);
-    if (!res.ok) {
-      const msg = await res.json();
-      setQcError(msg.detail || "QC summary failed");
+    setQcScan(null);
+    let data;
+    try {
+      let url = `${API_BASE}/api/projects/${project}/qc_summary${refresh ? "?refresh=1" : ""}`;
+      for (;;) {
+        const res = await fetch(url);
+        if (superseded()) return;
+        if (!res.ok) {
+          const msg = await res.json().catch(() => ({}));
+          setQcError(msg.detail || "QC summary failed");
+          setQcScan(null);
+          setQcLoading(false);
+          return;
+        }
+        data = await res.json();
+        if (superseded()) return;
+        if (data && data.status === "scanning") {
+          setQcScan({ done: data.done || 0, total: data.total });
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          if (superseded()) return;
+          url = `${API_BASE}/api/projects/${project}/qc_summary`;
+          continue;
+        }
+        break;
+      }
+    } catch (err) {
+      if (superseded()) return;
+      setQcError(String(err?.message || err));
+      setQcScan(null);
       setQcLoading(false);
       return;
     }
-    const data = await res.json();
-    setQcRows(data);
+    setQcScan(null);
+    const rows = Array.isArray(data) ? data : (data && data.rows) || [];
+    setQcRows(rows);
+    setQcRenderCap(QC_RENDER_CHUNK);
     // Surface which of these samples already have a Kraken run, so the table
     // can offer a "Krona" button alongside the "Kraken ID" (run) button.
-    loadProjectKrakenDirs(selectedProject);
-    // Hydrate the exclusion checkboxes from the persisted xlsx so re-opening
+    loadProjectKrakenDirs(project);
+    // Hydrate the exclusion checkboxes from the persisted list so re-opening
     // a project shows what's actually saved on disk (no more silent drift
     // between the GUI's checkbox state and what Step 2 will honor).
     try {
-      const exRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`);
+      const exRes = await fetch(`${API_BASE}/api/projects/${project}/qc_exclude`);
+      if (superseded()) return;
       if (exRes.ok) {
         const exData = await exRes.json();
         const samples = new Set(exData.samples || []);
         const map = {};
-        data.forEach((row) => {
+        rows.forEach((row) => {
           const sample = sampleKey(row);
           if (sample && samples.has(sample)) {
             map[excludeKey(row)] = true;
           }
         });
+        if (superseded()) return;
         setExcluded(map);
       }
     } catch (_) {
       // Non-fatal — the table just shows everything unchecked.
     }
     if (!reference) {
-      const refCandidate = data
+      const refCandidate = rows
         .map((r) => normalizeReferenceName(r.Reference))
         .find((r) => r && references.some((ref) => ref.name === r));
       if (refCandidate) {
@@ -1864,7 +1917,8 @@ export default function App() {
       }
     }
     try {
-      const lockRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/reference_lock`);
+      const lockRes = await fetch(`${API_BASE}/api/projects/${project}/reference_lock`);
+      if (superseded()) return;
       if (lockRes.ok) {
         const lock = await lockRes.json();
         setRefLock(lock);
@@ -1879,7 +1933,8 @@ export default function App() {
       setRefLock({ references: [] });
     }
     try {
-      const editsRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/edits`);
+      const editsRes = await fetch(`${API_BASE}/api/projects/${project}/step1/edits`);
+      if (superseded()) return;
       if (editsRes.ok) {
         const edits = await editsRes.json();
         setStep1Edits(edits || {});
@@ -5523,7 +5578,7 @@ export default function App() {
                 </div>
                 {step1ResultsTab === "results" ? (
                   <>
-                    <button onClick={loadQC} disabled={!selectedProject || qcLoading}>
+                    <button onClick={() => loadQC({ refresh: true })} disabled={!selectedProject || qcLoading}>
                       {qcLoading ? "Loading..." : "Refresh"}
                     </button>
                     <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
@@ -5556,13 +5611,29 @@ export default function App() {
             </div>
             {step1ResultsTab === "results" ? (
               <>
-                <div className="note">
-                  {qcRows.length
-                    ? (qcDateStart || qcDateEnd || qcFilter.trim() || showFlaggedOnly
-                        ? `Showing ${computeVisibleQcRows().length} of ${qcRows.length} sample(s) for ${selectedProject}.`
-                        : `Loaded ${qcRows.length} sample(s) for ${selectedProject}.`)
-                    : "No stats loaded yet."}
-                </div>
+                {qcScan ? (
+                  <div className="note" style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                    <progress
+                      value={qcScan.total ? qcScan.done : undefined}
+                      max={qcScan.total || undefined}
+                      style={{ minWidth: "10rem" }}
+                    />
+                    <span>
+                      Reading sample stats… {qcScan.total ? `${qcScan.done} of ${qcScan.total}` : "starting"}
+                      {" "}— the first load of a big project builds a cache; loading it again is fast.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="note">
+                    {qcRows.length
+                      ? (qcDateStart || qcDateEnd || qcFilter.trim() || showFlaggedOnly
+                          ? `Showing ${visibleQcRows.length} of ${qcRows.length} sample(s) for ${selectedProject}.`
+                          : `Loaded ${qcRows.length} sample(s) for ${selectedProject}.`)
+                      : qcLoading
+                        ? "Loading sample stats…"
+                        : "No stats loaded yet."}
+                  </div>
+                )}
                 <div className="row" style={{ alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
                   <label className="checkbox">
                     <input
@@ -5615,9 +5686,9 @@ export default function App() {
                           <div className="cell-inline" style={{ gap: "4px", justifyContent: "center" }}>
                             <input
                               type="checkbox"
-                              ref={(el) => { if (el) el.indeterminate = excludeAllState().indeterminate; }}
-                              checked={excludeAllState().checked}
-                              disabled={!computeVisibleQcRows().length}
+                              ref={(el) => { if (el) el.indeterminate = excludeAllInfo.indeterminate; }}
+                              checked={excludeAllInfo.checked}
+                              disabled={!visibleQcRows.length}
                               onChange={(e) => toggleExcludeAllVisible(e.target.checked)}
                               title="Select / deselect Exclude for all samples in the current view"
                             />
@@ -5641,7 +5712,8 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {computeVisibleQcRows()
+                      {visibleQcRows
+                        .slice(0, qcRenderCap)
                         .map((row) => {
                           const key = sampleKey(row);
                           const editInfo = step1Edits[key];
@@ -5742,6 +5814,16 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+                {visibleQcRows.length > qcRenderCap ? (
+                  <div className="note" style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
+                    <span>
+                      Showing the first {qcRenderCap} of {visibleQcRows.length} rows (filters, downloads and
+                      “exclude all” still act on every row).
+                    </span>
+                    <button className="ghost" onClick={() => setQcRenderCap((c) => c + 2000)}>Show 2000 more</button>
+                    <button className="ghost" onClick={() => setQcRenderCap(visibleQcRows.length)}>Show all</button>
+                  </div>
+                ) : null}
                 {qcRows.length > 8 ? <div className="scroll-note">Scroll for more samples.</div> : null}
               </>
             ) : (

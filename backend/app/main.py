@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import zipfile
 import csv
+import io
 import socket
 import json
 import os
@@ -174,7 +175,7 @@ def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str,
         for d in sorted(step1_dir.iterdir()):
             if not d.is_dir():
                 continue
-            fastas = sorted(d.glob("alignment_*/*.fasta"))
+            fastas = _align_glob(d, "*.fasta")
             if fastas:
                 gff = find_gff_for_fasta(fastas[0], vsnp3_path)
                 return str(fastas[0]), (str(gff) if gff else "")
@@ -419,6 +420,29 @@ def _safe_stat_size(p: Path) -> Optional[int]:
         return None
 
 
+def _align_glob(sample_dir: Path, pattern: str) -> List[Path]:
+    """Match a Step-1 output under alignment_<reference>/, falling back to the
+    suffix-less alignment/ that pre-GUI runs (vSNP2-era pipelines, external
+    Slurm batches) left behind — those samples must read as Complete and their
+    VCFs must collect, instead of sitting at 'Not Started' forever. The GUI
+    layout wins when both exist (a re-run supersedes the legacy dir). READ side
+    only: the re-run cleanup keeps its strict alignment_* glob, so a dispatch
+    can never delete a legacy alignment/."""
+    return sorted(sample_dir.glob(f"alignment_*/{pattern}")) or sorted(
+        sample_dir.glob(f"alignment/{pattern}")
+    )
+
+
+def _legacy_step1_complete(sample_dir: Path) -> bool:
+    """vSNP2-era completion: no exit_code sentinel and different inner file
+    names, but a zero-coverage VCF under plain alignment/ is the completion
+    artifact everything downstream (VCF collection, step2) actually consumes."""
+    return bool(
+        next(sample_dir.glob("alignment/*_zc.vcf"), None)
+        or next(sample_dir.glob("alignment/*_zc.vcf.gz"), None)
+    )
+
+
 def _step1_is_complete(sample_dir: Path) -> bool:
     """True if a sample already finished Step 1 successfully — same signal the
     status endpoint uses: a `.provenance/exit_code` of 0, or (legacy) the
@@ -431,9 +455,9 @@ def _step1_is_complete(sample_dir: Path) -> bool:
             return ec.read_text(encoding="utf-8").strip() == "0"
         except OSError:
             return False
-    vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
-    nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
-    return bool(vcf and nodup)
+    vcf = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
+    nodup = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
+    return bool(vcf and nodup) or _legacy_step1_complete(sample_dir)
 
 
 def _step1_errored(sample_dir: Path) -> bool:
@@ -792,6 +816,7 @@ def _build_tree_label_script(step2_dir: Path, cfg: Dict[str, str], label_style: 
     script_path = step2_dir / "_label_trees.py"
     script = """\
 import csv
+import io
 import re
 from pathlib import Path
 
@@ -2967,13 +2992,16 @@ def step1_status(project: str):
                 statuses.append(entry)
                 continue
 
-        vcf = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
-        nodup = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
+        vcf = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
+        nodup = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
         # Non-recursive: the per-sample zc VCF is always written under
-        # alignment_*/. A recursive **/*_zc.vcf glob walked each sample's entire
-        # output subtree (unmapped_reads/, sourmash/, spoligo/, …) on every poll
-        # — the dominant cost that made the endpoint time out at ~1000 samples.
-        zc_vcf = next(sample_dir.glob("alignment_*/*_zc.vcf"), None) or next(sample_dir.glob("alignment_*/*_zc.vcf.gz"), None)
+        # alignment_*/ (or the legacy plain alignment/). A recursive **/*_zc.vcf
+        # glob walked each sample's entire output subtree (unmapped_reads/,
+        # sourmash/, spoligo/, …) on every poll — the dominant cost that made
+        # the endpoint time out at ~1000 samples.
+        zc_vcf = next(iter(_align_glob(sample_dir, "*_zc.vcf")), None) or next(
+            iter(_align_glob(sample_dir, "*_zc.vcf.gz")), None
+        )
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
@@ -2990,6 +3018,7 @@ def step1_status(project: str):
         # output (deprecation warnings, etc) and made every sample flicker into
         # "Error" before transitioning to "Complete" once the VCF landed.
         status = "not_started"
+        legacy_complete = False
         exit_code_str = ""
         if exit_code_path.exists():
             try:
@@ -3000,6 +3029,12 @@ def step1_status(project: str):
             status = "complete" if exit_code_str == "0" else "error"
         elif vcf and nodup:
             status = "complete"
+        elif zc_vcf is not None and zc_vcf.parent.name == "alignment":
+            # vSNP2-era run (plain alignment/, no sentinel, different inner file
+            # names): the zero-coverage VCF is the artifact step2 consumes, so
+            # the sample is Complete, not 'Not Started' with a fastq complaint.
+            status = "complete"
+            legacy_complete = True
         elif log_path.exists():
             status = "running" if job_status == "running" else "unknown"
         entry = {
@@ -3007,10 +3042,14 @@ def step1_status(project: str):
             "status": status,
             "log_path": str(log_path),
             "has_log": log_path.exists(),
-            "has_outputs": bool(vcf and nodup),
+            "has_outputs": bool(vcf and nodup) or legacy_complete,
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
-            "reason": _step1_status_reason(status, sample_dir, min_bytes),
+            "reason": (
+                "aligned before this GUI (legacy alignment/ layout)"
+                if legacy_complete
+                else _step1_status_reason(status, sample_dir, min_bytes)
+            ),
         }
         # Cache terminal samples (exit_code written) so later polls take the
         # fast path above. Store everything except in_vcfs_folder and reason,
@@ -3315,19 +3354,20 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
             except OSError:
                 pass
         else:
-            vcf_out = next(sample_dir.glob("alignment_*/*_filtered_hapall_annotated.vcf"), None)
-            nodup_out = next(sample_dir.glob("alignment_*/*_nodup.bam"), None)
-            passed = bool(vcf_out and nodup_out)
+            vcf_out = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
+            nodup_out = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
+            passed = bool(vcf_out and nodup_out) or _legacy_step1_complete(sample_dir)
 
         if not passed and sample not in force_set:
             continue
 
         # Find the latest _zc.vcf under alignment_*/ (non-recursive to avoid
-        # walking the whole sample tree). Prefer an edited/patched VCF if one
+        # walking the whole sample tree; falls back to the legacy plain
+        # alignment/ for pre-GUI runs). Prefer an edited/patched VCF if one
         # exists, and use the same target-name rule as step2_setup so both
         # writers agree on filenames in the shared database.
         all_candidates = sorted(
-            sample_dir.glob("alignment_*/*_zc.vcf*"), key=lambda p: p.stat().st_mtime
+            _align_glob(sample_dir, "*_zc.vcf*"), key=lambda p: p.stat().st_mtime
         )
         if not all_candidates:
             if sample in force_set:
@@ -3401,8 +3441,9 @@ def step2_setup(project: str):
         sample = sample_dir.name
         step1_samples.add(sample)
         # Every step1 sample goes into the cumulative DB, including QC-excluded
-        # ones — they're filtered out at run time, not deleted here.
-        vcf_candidates = sorted(sample_dir.glob("alignment_*/*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
+        # ones — they're filtered out at run time, not deleted here. Legacy
+        # plain-alignment/ samples (pre-GUI runs) contribute their VCFs too.
+        vcf_candidates = sorted(_align_glob(sample_dir, "*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
         if not vcf_candidates:
             continue
         source_vcf = vcf_candidates[-1]
@@ -3979,131 +4020,210 @@ def preflight(debug: bool = Query(False)):
         raise HTTPException(status_code=500, detail=f"Preflight output parse failed: {result.stdout.strip()}")
 
 
-# Shared embedded-Python prelude for the QC summary endpoints (JSON / CSV /
-# XLSX). It scans step1/*/*_stats.xlsx, attaches a per-sample run date and the
-# source file, de-dupes to the most-recent run per sample, then applies an
-# optional date-range / name filter driven by the QC_START / QC_END / QC_Q
-# environment variables. The authoritative run date is run_metadata.json's
-# started_at (provenance); we fall back to the xlsx 'date' column, the
-# timestamp embedded in the _stats.xlsx filename, and finally the file mtime.
-# After this prelude runs, `vals` holds the filtered list[dict] of rows.
-_QC_SCAN_AND_FILTER = (
-    "import pandas as pd, glob, json, os, sys, re, datetime, gzip\n"
-    "step1=sys.argv[1]\n"
-    "start=os.environ.get('QC_START','').strip()\n"
-    "end=os.environ.get('QC_END','').strip()\n"
-    "q=os.environ.get('QC_Q','').strip().lower()\n"
-    "def _run_date(f,row):\n"
-    "    d=os.path.dirname(f)\n"
-    "    try:\n"
-    "        with open(os.path.join(d,'run_metadata.json')) as fh:\n"
-    "            meta=json.load(fh)\n"
-    "        ts=meta.get('started_at') or meta.get('finished_at')\n"
-    "        if ts: return str(ts)\n"
-    "    except Exception:\n"
-    "        pass\n"
-    "    dt=row.get('date')\n"
-    "    if dt not in (None,'') and not (isinstance(dt,float) and pd.isna(dt)):\n"
-    "        return str(dt)\n"
-    "    m=re.search(r'(\\d{4}-\\d{2}-\\d{2})_(\\d{2}-\\d{2}-\\d{2})', os.path.basename(f))\n"
-    "    if m: return m.group(1)+'T'+m.group(2).replace('-',':')\n"
-    "    try:\n"
-    "        return datetime.datetime.fromtimestamp(os.path.getmtime(f)).isoformat()\n"
-    "    except Exception:\n"
-    "        return ''\n"
-    "def _read_type(d):\n"
-    "    mk=os.path.join(d,'.provenance','read_type')\n"
-    "    try:\n"
-    "        v=open(mk).read().strip()\n"
-    "        if v in ('paired','single','ont'): return v\n"
-    "    except Exception:\n"
-    "        pass\n"
-    "    fqs=[x for x in glob.glob(os.path.join(d,'*.fastq.gz')) if '_unmapped_' not in os.path.basename(x)]\n"
-    "    r2=[x for x in fqs if re.search(r'(_R2[_.]|_2\\.)', os.path.basename(x))]\n"
-    "    if r2:\n"
-    "        rt='paired'\n"
-    "    else:\n"
-    "        rt='single'\n"
-    "        tgt=fqs[0] if fqs else None\n"
-    "        try:\n"
-    "            if tgt:\n"
-    "                n=0; s=0\n"
-    "                with gzip.open(tgt,'rt') as gh:\n"
-    "                    for i,line in enumerate(gh):\n"
-    "                        if i>=1600: break\n"
-    "                        if i%4==1:\n"
-    "                            n+=1; s+=len(line.rstrip())\n"
-    "                if n and s/float(n)>600: rt='ont'\n"
-    "        except Exception:\n"
-    "            pass\n"
-    "    try:\n"
-    "        os.makedirs(os.path.join(d,'.provenance'), exist_ok=True)\n"
-    "        open(mk,'w').write(rt)\n"
-    "    except Exception:\n"
-    "        pass\n"
-    "    return rt\n"
-    "rows=[]\n"
-    "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
-    "    try:\n"
-    "        df=pd.read_excel(f)\n"
-    "    except Exception:\n"
-    "        continue\n"
-    "    if df.empty:\n"
-    "        continue\n"
-    "    row=df.iloc[0].to_dict()\n"
-    "    row['_file']=f\n"
-    "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-    "    row['_sample']=sample\n"
-    "    row['read_type']=_read_type(os.path.dirname(f))\n"
-    "    row['_run_date']=_run_date(f,row)\n"
-    "    rows.append(row)\n"
-    "latest={}\n"
-    "for row in rows:\n"
-    "    sample=row.get('_sample')\n"
-    "    rd=row.get('_run_date','') or ''\n"
-    "    if sample not in latest or rd > (latest[sample].get('_run_date','') or ''):\n"
-    "        latest[sample]=row\n"
-    "def _keep(row):\n"
-    "    rd=str(row.get('_run_date') or '')[:10]\n"
-    "    if start and (not rd or rd < start): return False\n"
-    "    if end and (not rd or rd > end): return False\n"
-    "    if q and q not in str(row.get('_sample','')).lower(): return False\n"
-    "    return True\n"
-    "vals=[r for r in latest.values() if _keep(r)]\n"
-)
+# ---------------------------------------------------------------------------
+# Step 1 Results (QC summary) scan orchestration.
+#
+# The scan itself lives in app/qc_scan.py and runs as a subprocess: it parses
+# every <sample>/*_stats.xlsx (openpyxl, in parallel), keeps a per-file cache
+# in <step1>/.qc_stats_cache.json so a revisit parses only what changed, and
+# streams "P <done> <total>" progress lines. Here one background thread owns
+# the scan per step1 dir, and /qc_summary answers instantly with either the
+# finished rows (kept in memory per backend process) or a progress snapshot
+# the frontend polls. The previous design — one blocking request that
+# pd.read_excel'd every workbook, sequentially, on every visit — took 15+
+# minutes on an 8000-sample project and died in the OOD proxy's ~60 s read
+# timeout, so the pane showed "Loading..." forever with nothing arriving.
+_QC_SCANNER = Path(__file__).resolve().parent / "qc_scan.py"
+_QC_STATE_LOCK = threading.Lock()
+_QC_SCANS: Dict[str, Dict[str, Any]] = {}  # str(step1_dir) -> scan state
+# Finished row sets are tens of MB for the biggest projects; keep only the
+# most recently used ones in memory. The on-disk cache makes a re-scan of an
+# evicted project a matter of seconds, not minutes.
+_QC_KEEP_READY = 4
 
 
-def _qc_filter_env(start: Optional[str], end: Optional[str], q: Optional[str]) -> Dict[str, str]:
-    """Environment overlay carrying the QC date-range / name filters into the
-    embedded scan script. Empty strings mean 'no filter' (the prelude skips
-    them), so the JSON endpoint passes nothing and returns the full set."""
-    return {
-        **os.environ,
-        "QC_START": (start or "").strip(),
-        "QC_END": (end or "").strip(),
-        "QC_Q": (q or "").strip(),
-    }
+def _qc_run_scanner(scan_dir: Path, direct: bool = False, progress_cb=None) -> List[Dict[str, Any]]:
+    """Run one qc_scan.py subprocess to completion and return its rows.
+    progress_cb (if given) receives (done, total) as the scan advances."""
+    out_fd, out_path = tempfile.mkstemp(prefix="qc_scan_", suffix=".json")
+    os.close(out_fd)
+    cmd = [sys.executable, str(_QC_SCANNER), str(scan_dir), "--out", out_path]
+    if direct:
+        cmd.append("--direct")
+    err_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    try:
+        # stderr goes to a file, not a pipe: we block reading stdout for the
+        # progress stream, and a stderr pipe filling up (openpyxl warns per
+        # workbook) would deadlock the scan.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=err_file, text=True
+        )
+        for line in proc.stdout:
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == "P" and progress_cb is not None:
+                try:
+                    progress_cb(int(parts[1]), int(parts[2]))
+                except ValueError:
+                    pass
+        rc = proc.wait()
+        if rc != 0:
+            err_file.seek(0)
+            tail = "\n".join(err_file.read().strip().splitlines()[-8:])
+            raise RuntimeError(tail or f"scanner exited {rc}")
+        with open(out_path, encoding="utf-8") as fh:
+            return json.load(fh).get("rows", [])
+    finally:
+        err_file.close()
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def _qc_evict_lru() -> None:
+    """Drop finished row sets beyond the LRU budget. Call under the lock."""
+    ready = [(k, s) for k, s in _QC_SCANS.items() if s.get("status") == "ready"]
+    ready.sort(key=lambda kv: kv[1].get("used_at", 0.0))
+    for k, _ in ready[: max(0, len(ready) - _QC_KEEP_READY)]:
+        _QC_SCANS.pop(k, None)
+
+
+def _qc_start_scan(step1_dir: Path) -> Dict[str, Any]:
+    """Start the background scan for one step1 dir, or join the running one."""
+    key = str(step1_dir)
+    with _QC_STATE_LOCK:
+        state = _QC_SCANS.get(key)
+        if state is not None and state["status"] == "scanning":
+            return state
+        state = {
+            "status": "scanning",
+            "done": 0,
+            "total": None,
+            "rows": None,
+            "error": "",
+            "scanned_at": None,
+            "used_at": time.time(),
+        }
+        _QC_SCANS[key] = state
+
+    def _progress(done: int, total: int) -> None:
+        state["done"], state["total"] = done, total
+
+    def _worker() -> None:
+        try:
+            rows = _qc_run_scanner(step1_dir, progress_cb=_progress)
+        except Exception as exc:
+            state["error"] = str(exc)
+            state["status"] = "error"
+            return
+        state["rows"] = rows
+        state["scanned_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        state["status"] = "ready"
+        with _QC_STATE_LOCK:
+            state["used_at"] = time.time()
+            _qc_evict_lru()
+
+    threading.Thread(
+        target=_worker, daemon=True, name=f"qc-scan:{step1_dir.parent.name}"
+    ).start()
+    return state
+
+
+def _qc_rows_blocking(step1_dir: Path) -> List[Dict[str, Any]]:
+    """Rows for endpoints that need the finished set within one request
+    (reference_lock, CSV/XLSX downloads). Instant when a scan has already
+    completed; otherwise waits on one (fast when the on-disk cache is warm)."""
+    key = str(step1_dir)
+    state = _QC_SCANS.get(key)
+    if state is None or state["status"] == "error":
+        state = _qc_start_scan(step1_dir)
+    while state["status"] == "scanning":
+        time.sleep(0.3)
+    if state["status"] == "error":
+        detail = state["error"]
+        with _QC_STATE_LOCK:
+            _QC_SCANS.pop(key, None)  # next request retries
+        raise HTTPException(status_code=500, detail=f"QC summary failed: {detail}")
+    with _QC_STATE_LOCK:
+        state["used_at"] = time.time()
+    return state["rows"] or []
+
+
+def _qc_apply_filters(
+    rows: List[Dict[str, Any]],
+    start: Optional[str],
+    end: Optional[str],
+    q: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Date-range / name filter for the download endpoints — the same rule the
+    old embedded scan applied via the QC_START / QC_END / QC_Q env vars."""
+    start = (start or "").strip()
+    end = (end or "").strip()
+    q = (q or "").strip().lower()
+
+    def _keep(row: Dict[str, Any]) -> bool:
+        rd = str(row.get("_run_date") or "")[:10]
+        if start and (not rd or rd < start):
+            return False
+        if end and (not rd or rd > end):
+            return False
+        if q and q not in str(row.get("_sample", "")).lower():
+            return False
+        return True
+
+    return [r for r in rows if _keep(r)]
+
+
+def _qc_table(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
+    """Rows as a rectangular table for the CSV/XLSX exports: columns in
+    first-seen order (what pandas.DataFrame produced), _file dropped,
+    _run_date renamed run_date."""
+    cols: List[str] = []
+    for row in rows:
+        for k in row:
+            if k != "_file" and k not in cols:
+                cols.append(k)
+    header = ["run_date" if c == "_run_date" else c for c in cols]
+    data = [[row.get(c) for c in cols] for row in rows]
+    return header, data
 
 
 @app.get("/api/projects/{project}/qc_summary")
-def qc_summary(project: str):
+def qc_summary(project: str, refresh: int = 0):
+    """Step 1 Results rows. Non-blocking: while a scan runs this returns
+    {"status": "scanning", "done", "total"} for the frontend to poll; when
+    finished, {"status": "ready", "rows": [...]}. Pass refresh=1 to rescan a
+    project whose rows are already in memory — new/changed stats files are
+    parsed, everything unchanged comes from the per-file cache in seconds."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    # JSON endpoint returns every sample; the frontend filters live so the date
-    # picker is responsive. Server-side filtering is reserved for the downloads.
-    code = _QC_SCAN_AND_FILTER + "print(json.dumps(vals, default=str))\n"
-    cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"QC summary failed: {result.stderr.strip()}")
-    try:
-        rows = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="QC summary parse failed")
-    return _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
+    key = str(step1_dir)
+    state = _QC_SCANS.get(key)
+    if state is None or state["status"] == "error" or (refresh and state["status"] == "ready"):
+        if state is not None and state["status"] == "error":
+            with _QC_STATE_LOCK:
+                if _QC_SCANS.get(key) is state:
+                    _QC_SCANS.pop(key, None)
+        state = _qc_start_scan(step1_dir)
+    if state["status"] == "scanning":
+        return {"status": "scanning", "done": state["done"], "total": state["total"]}
+    if state["status"] == "error":
+        raise HTTPException(status_code=500, detail=f"QC summary failed: {state['error']}")
+    with _QC_STATE_LOCK:
+        state["used_at"] = time.time()
+    # Annotate a copy: verdicts depend on thresholds the user can edit, and
+    # the cached rows must stay pristine for the CSV/XLSX exports.
+    rows = [dict(r) for r in state["rows"] or []]
+    _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
+    return {
+        "status": "ready",
+        "rows": rows,
+        "scanned_at": state["scanned_at"],
+        "count": len(rows),
+    }
 
 
 @app.get("/api/projects/{project}/qc_summary.csv")
@@ -4118,20 +4238,16 @@ def qc_summary_csv(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    code = _QC_SCAN_AND_FILTER + (
-        "if not vals:\n"
-        "    print('')\n"
-        "else:\n"
-        "    df=pd.DataFrame(vals).drop(columns=['_file'], errors='ignore').rename(columns={'_run_date':'run_date'})\n"
-        "    print(df.to_csv(index=False))\n"
-    )
-    cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
-    result = subprocess.run(
-        cmd_list, text=True, capture_output=True, env=_qc_filter_env(start, end, q)
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"QC summary CSV failed: {result.stderr.strip()}")
-    return Response(content=result.stdout, media_type="text/csv")
+    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q)
+    if not rows:
+        return Response(content="", media_type="text/csv")
+    header, data = _qc_table(rows)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(header)
+    for row in data:
+        writer.writerow(["" if v is None else v for v in row])
+    return Response(content=buf.getvalue(), media_type="text/csv")
 
 
 @app.get("/api/projects/{project}/qc_summary.xlsx")
@@ -4146,87 +4262,80 @@ def qc_summary_xlsx(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    output_path = step1_dir / "combined_excelworksheets.xlsx"
-    code = _QC_SCAN_AND_FILTER + (
-        "out=sys.argv[2]\n"
-        "pd.DataFrame(vals).drop(columns=['_file'], errors='ignore').rename(columns={'_run_date':'run_date'}).to_excel(out, index=False)\n"
-    )
-    cmd_list = conda_python_cmd(cfg, code, [str(step1_dir), str(output_path)])
-    result = subprocess.run(
-        cmd_list, text=True, capture_output=True, env=_qc_filter_env(start, end, q)
-    )
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"QC summary XLSX failed: {result.stderr.strip()}")
-    content = output_path.read_bytes()
+    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q)
+    header, data = _qc_table(rows)
+    from openpyxl import Workbook  # ships with the env's pandas
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet()
+    ws.append(header)
+    for row in data:
+        ws.append(
+            [v if v is None or isinstance(v, (int, float, str, bool)) else str(v) for v in row]
+        )
+    buf = io.BytesIO()
+    wb.save(buf)
+    content = buf.getvalue()
+    # Kept alongside the project like before; best-effort on read-only trees.
+    try:
+        (step1_dir / "combined_excelworksheets.xlsx").write_bytes(content)
+    except OSError:
+        pass
     return Response(
         content=content,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 
 @app.post("/api/posthoc/step1/scan")
 def posthoc_step1_scan(payload: PosthocScanRequest):
+    """Scan arbitrary Step-1-style folders for stats rows. Uses the same
+    scanner (and per-folder .qc_stats_cache.json) as the Results pane, so
+    re-loading a folder parses only new/changed workbooks."""
     cfg = load_config()
-    folders = [str(Path(p).expanduser()) for p in payload.folders]
+    folders = [Path(p).expanduser() for p in payload.folders]
     if not folders:
         return []
-    code = (
-        "import pandas as pd, glob, json, os, sys\n"
-        "folders=sys.argv[1:]\n"
-        "rows=[]\n"
-        "for step1 in folders:\n"
-        "    direct=glob.glob(os.path.join(step1,'*_stats.xlsx'))\n"
-        "    nested=glob.glob(os.path.join(step1,'*','*_stats.xlsx'))\n"
-        "    for f in direct + nested:\n"
-        "        try:\n"
-        "            df=pd.read_excel(f)\n"
-        "        except Exception:\n"
-        "            continue\n"
-        "        if df.empty:\n"
-        "            continue\n"
-        "        row=df.iloc[0].to_dict()\n"
-        "        row['_file']=f\n"
-        "        sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-        "        row['_sample']=sample\n"
-        "        sample_dir=os.path.dirname(f)\n"
-        "        row['_sample_dir']=sample_dir\n"
-        "        step1_dir=os.path.dirname(sample_dir)\n"
-        "        row['_step1_dir']=step1_dir\n"
-        "        row['_project']=os.path.basename(os.path.dirname(step1_dir))\n"
-        "        edits_dir=os.path.join(sample_dir,'vcf_edits')\n"
-        "        patched=''\n"
-        "        if os.path.isdir(edits_dir):\n"
-        "            candidates=[c for c in glob.glob(os.path.join(edits_dir,'*.vcf*')) if not c.endswith('.tbi')]\n"
-        "            if candidates:\n"
-        "                candidates=sorted(candidates, key=os.path.getmtime)\n"
-        "                patched=candidates[-1]\n"
-        "        edit_log=os.path.join(edits_dir, f\"{sample}_patchlog.jsonl\")\n"
-        "        row['_patched_vcf']=patched\n"
-        "        row['_edit_log']=edit_log if os.path.exists(edit_log) else ''\n"
-        "        row['_edited']=bool(patched) and os.path.exists(edit_log)\n"
-        "        rows.append(row)\n"
-        "latest={}\n"
-        "for row in rows:\n"
-        "    key=(row.get('_project'), row.get('_sample'))\n"
-        "    date=row.get('date','') or ''\n"
-        "    if key not in latest:\n"
-        "        latest[key]=row\n"
-        "    else:\n"
-        "        if date > (latest[key].get('date','') or ''):\n"
-        "            latest[key]=row\n"
-        "print(json.dumps(list(latest.values())))\n"
-    )
-    cmd_list = conda_python_cmd(cfg, code, folders)
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"Post-hoc scan failed: {result.stderr.strip()}")
-    try:
-        rows = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Post-hoc scan parse failed")
+    rows: List[Dict[str, Any]] = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        try:
+            folder_rows = _qc_run_scanner(folder, direct=True)
+        except (RuntimeError, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=500, detail=f"Post-hoc scan failed for {folder}: {exc}")
+        for row in folder_rows:
+            f = str(row.get("_file") or "")
+            sample_dir = os.path.dirname(f)
+            step1_dir = os.path.dirname(sample_dir)
+            row["_sample_dir"] = sample_dir
+            row["_step1_dir"] = step1_dir
+            row["_project"] = os.path.basename(os.path.dirname(step1_dir))
+            sample = row.get("_sample") or ""
+            edits_dir = Path(sample_dir) / "vcf_edits"
+            patched = ""
+            if edits_dir.is_dir():
+                candidates = sorted(
+                    (c for c in edits_dir.glob("*.vcf*") if not c.name.endswith(".tbi")),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                if candidates:
+                    patched = str(candidates[-1])
+            edit_log = edits_dir / f"{sample}_patchlog.jsonl"
+            row["_patched_vcf"] = patched
+            row["_edit_log"] = str(edit_log) if edit_log.exists() else ""
+            row["_edited"] = bool(patched) and edit_log.exists()
+            rows.append(row)
+    # Newest run per (project, sample) across every folder scanned.
+    latest: Dict[tuple, Dict[str, Any]] = {}
+    for row in rows:
+        key = (row.get("_project"), row.get("_sample"))
+        rd = row.get("_run_date", "") or ""
+        if key not in latest or rd > (latest[key].get("_run_date", "") or ""):
+            latest[key] = row
     # Post-hoc rows aggregate across many projects, so per-project overrides
     # don't apply cleanly here — annotate with cfg-resolved thresholds only.
-    return _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg))
+    return _annotate_qc_rows(list(latest.values()), _resolve_qc_thresholds(cfg))
 
 
 @app.post("/api/posthoc/step1/resolve_samples")
@@ -4357,46 +4466,15 @@ def reference_lock(project: str):
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    code = (
-        "import pandas as pd, glob, os, sys, json\n"
-        "step1=sys.argv[1]\n"
-        "rows=[]\n"
-        "for f in glob.glob(os.path.join(step1,'*','*_stats.xlsx')):\n"
-        "    try:\n"
-        "        df=pd.read_excel(f)\n"
-        "    except Exception:\n"
-        "        continue\n"
-        "    if df.empty:\n"
-        "        continue\n"
-        "    row=df.iloc[0].to_dict()\n"
-        "    sample=row.get('sample') or os.path.basename(f).split('_')[0]\n"
-        "    row['_sample']=sample\n"
-        "    rows.append(row)\n"
-        "latest={}\n"
-        "for row in rows:\n"
-        "    sample=row.get('_sample')\n"
-        "    date=row.get('date','') or ''\n"
-        "    if sample not in latest:\n"
-        "        latest[sample]=row\n"
-        "    else:\n"
-        "        if date > (latest[sample].get('date','') or ''):\n"
-        "            latest[sample]=row\n"
-        "refs={}\n"
-        "for row in latest.values():\n"
-        "    ref=row.get('Reference') or ''\n"
-        "    ref=ref.replace(' Forced','').replace(' by Best Reference','').strip()\n"
-        "    if ref:\n"
-        "        refs.setdefault(ref, []).append(row.get('_sample'))\n"
-        "print(json.dumps(refs))\n"
-    )
-    cmd_list = conda_python_cmd(cfg, code, [str(step1_dir)])
-    result = subprocess.run(cmd_list, text=True, capture_output=True)
-    if result.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"Reference lock failed: {result.stderr.strip()}")
-    try:
-        raw_refs = json.loads(result.stdout.strip())
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Reference lock parse failed")
+    # Same rows the Results pane shows (newest run per sample), served from the
+    # shared scan state/cache — this endpoint used to re-read every stats
+    # workbook in a second full pass, doubling the pane's load time.
+    raw_refs: Dict[str, List[str]] = {}
+    for row in _qc_rows_blocking(step1_dir):
+        ref = str(row.get("Reference") or "")
+        ref = ref.replace(" Forced", "").replace(" by Best Reference", "").strip()
+        if ref:
+            raw_refs.setdefault(ref, []).append(row.get("_sample"))
     # The stats sheet records whatever `-r` the run was given. A GUI run records
     # the reference NAME, but a command-line run imported into the project may
     # have recorded a full FASTA path from another machine — which then surfaced
@@ -5825,7 +5903,13 @@ def step1_edits(project: str):
         if not sample_dir.is_dir():
             continue
         sample = sample_dir.name
-        vcf_candidates = sorted(sample_dir.glob(f"**/{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime)
+        # Non-recursive on purpose: a **/ glob here walked every sample's whole
+        # output subtree per request — the same class of cost that made the
+        # status endpoint time out at ~1000 samples. The zc VCF only ever
+        # lives under alignment_*/ (or the legacy plain alignment/).
+        vcf_candidates = sorted(
+            _align_glob(sample_dir, f"{sample}*zc.vcf*"), key=lambda p: p.stat().st_mtime
+        )
         source_vcf = vcf_candidates[-1] if vcf_candidates else None
         patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
         edit_log = _edit_log_path(sample_dir, sample)

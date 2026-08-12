@@ -10,6 +10,20 @@
 # is genuinely declarative: pipeline cards, footer copy, onboarding links.
 
 pipelines:
+  # First on purpose: the consolidated dashboard is the recommended front door
+  # — one authenticated session for the whole suite, every tool on one page.
+  # The per-tool cards below remain for dedicated single-tool sessions.
+  - id: bdtools_dashboard
+    icon: b
+    title: Diagnostic Tools Dashboard
+    description: >-
+      Every tool in one place. Allocates one session for the whole suite and
+      launches each tool on it behind a single authenticated proxy — the
+      recommended way to open the tools.
+    status: available
+    runtime: "one session, all tools"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/bdtools_dashboard/session_contexts/new
+
   - id: vsnp3
     icon: v
     title: vSNP3

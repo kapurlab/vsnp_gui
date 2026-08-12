@@ -32,7 +32,7 @@ pipelines:
 
   - id: kraken
     icon: k
-    title: Kraken ID Parse
+    title: Kraken
     description: >-
       Read-level taxonomic classification against custom databases. For
       contamination screening and metagenomic profiling.
@@ -108,8 +108,9 @@ pipelines:
     title: MHC Typer
     description: >-
       BoLA typing from WGS reads. Optimized for bovine reference panels.
-    status: coming
-    runtime: "in development"
+    status: available
+    runtime: "GUI-based interactive sessions (dev/beta)"
+    launch_url: /pun/sys/dashboard/batch_connect/sys/mhc_gui/session_contexts/new
 
 footer:
   left: "Kapur Lab · Penn State · WGS3 node"

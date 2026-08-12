@@ -45,6 +45,12 @@ ANCHOR_SLICE_335 = "rbc_list = list(str(rbc))"
 ANCHOR_RESIDUE_316 = "zero_index_residue = aa_residue_pos - 1"
 SHAPE_335 = "self.aa_residue_pos = total_codons - codon_number"
 
+# vsnp3 3.36's own minus-strand correction. Both anchors are required: the
+# strand test alone appears in unrelated code, and it is the complement of the
+# substitution that actually fixes the codon.
+UPSTREAM_FIXED_ANCHOR = "feature.location.strand == -1"
+UPSTREAM_FIXED_COMPLEMENT = "Seq(substitution).complement()"
+
 _COMPLEMENT = (
     '{"A": "T", "T": "A", "G": "C", "C": "G", '
     '"a": "t", "t": "a", "g": "c", "c": "g", "N": "N", "n": "n"}'
@@ -144,6 +150,17 @@ def main(argv: list[str]) -> int:
 
     if MARKER in src or "kl.strandfix" in version:
         print(f"strandfix: already applied ({version}) at {path}")
+        return 0
+
+    # FIXED UPSTREAM. vsnp3 3.36 corrects the minus-strand codon itself — it
+    # complements the ALT before placing it in a gene-oriented codon, which is
+    # the same correction this script injects into 3.16/3.35. Recognise that and
+    # stand down: without this, 3.36 matched no known anchor, strandfix returned
+    # 1, and apply.sh (set -e) aborted the whole patch step — so moving to the
+    # release that fixes the bug looked like a broken install.
+    if UPSTREAM_FIXED_ANCHOR in src and UPSTREAM_FIXED_COMPLEMENT in src:
+        print(f"strandfix: minus-strand codon already correct upstream in "
+              f"vsnp3 {version} at {path}; nothing to patch")
         return 0
 
     if "reverse_complement" in src:

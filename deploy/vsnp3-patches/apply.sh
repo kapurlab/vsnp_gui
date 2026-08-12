@@ -86,12 +86,31 @@ fi
 # We deploy both (/srv carries v3.16, the bdtools checkout env carries v3.35),
 # so bail out cleanly here instead of dumping a wall of FAILED hunks and .rej
 # files. The content fixes above are version-agnostic and have already run.
-VSNP3_VER="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']\([^"'"'"']*\)["'"'"'].*/\1/p' \
-  "${PREFIX}/bin/vsnp3_step1.py" 2>/dev/null | head -1)"
+# Which release is this? conda-meta FIRST: it is the package manager's own
+# record, it is right for every release, and it does not move. Reading the
+# source was fragile and broke exactly as you would expect — 3.36 moved the
+# string into vsnp3_version.py ("from vsnp3_version import __version__"), so
+# the old regex found nothing.
+VSNP3_VER="$(ls "${PREFIX}"/conda-meta/vsnp3-*.json 2>/dev/null | head -1 \
+  | sed 's|.*/vsnp3-||; s|-[^-]*\.json$||')"
+if [ -z "${VSNP3_VER}" ]; then
+  for VER_SRC in vsnp3_version.py vsnp3_step1.py; do
+    [ -f "${PREFIX}/bin/${VER_SRC}" ] || continue
+    VSNP3_VER="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*["'"'"']\([^"'"'"']*\)["'"'"'].*/\1/p' \
+      "${PREFIX}/bin/${VER_SRC}" 2>/dev/null | head -1)"
+    [ -n "${VSNP3_VER}" ] && break
+  done
+fi
 case "${VSNP3_VER}" in
   3.16*) ;;
   "")
-    echo "warning: cannot read vsnp3 version from ${PREFIX}/bin/vsnp3_step1.py; attempting the v3.16 patch set anyway" >&2
+    # Unknown version: do NOT try the v3.16 diffs regardless. That fallback
+    # turned an unreadable version into six FAILED hunks and a litter of
+    # .orig/.rej files in a perfectly good 3.36 install. The content fixes
+    # above are version-agnostic and have already run.
+    echo "warning: cannot determine the vsnp3 version at ${PREFIX};" >&2
+    echo "         content fixes applied; skipping the v3.16-only .patch set." >&2
+    exit 0
     ;;
   *)
     echo "vsnp3 ${VSNP3_VER} at ${PREFIX}: content fixes applied; skipping the v3.16-only .patch set"

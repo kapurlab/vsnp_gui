@@ -90,7 +90,7 @@ VSNP3_PREFIX=${SITE_ROOT}/tools/vsnp3
 #
 # Asking for the version makes the package's own python constraint drive the
 # solve, so the env lands on a python that can actually host it.
-VSNP3_VERSION=3.35
+VSNP3_VERSION=3.36
 
 # Where this repo is checked out on the server (the OOD card + cron read it).
 VSNP_GUI_DIR=${SITE_ROOT}/tools/vsnp_gui

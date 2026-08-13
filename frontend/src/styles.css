@@ -364,6 +364,28 @@ p {
   grid-template-columns: 140px 1fr auto;
 }
 
+/* Settings pane: one full-width column instead of two.
+   The paths here are long (HPC project paths run past 60 characters), and in
+   a half-width column the input showed roughly the first third of the value —
+   you could not see which directory you had actually selected. Stacking the
+   groups gives every path field the full panel width, and puts Optional
+   below Saved locations rather than beside it. */
+.input-columns.settings-stack {
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+.input-columns.settings-stack .settings-row {
+  grid-template-columns: 140px minmax(0, 1fr) auto;
+}
+
+.input-columns.settings-stack .settings-row input[type="text"],
+.input-columns.settings-stack .settings-row input:not([type]),
+.input-columns.settings-stack .settings-row select {
+  width: 100%;
+  min-width: 0;
+}
+
 .run-panel {
   position: static;
 }

@@ -52,7 +52,8 @@ from app.projects import (
     list_projects,
     ensure_project_dirs,
     archive_project,
-    delete_project,
+    # delete_project is deliberately NOT imported — see the note where the
+    # delete route used to be. Nothing served over HTTP may remove a project.
     update_project_meta,
     resolve_project_dir,
     vcf_db_dir,
@@ -2115,16 +2116,20 @@ def project_archive(project: str):
     return {"archived_to": str(target)}
 
 
-@app.delete("/api/projects/{project}")
-def project_delete(project: str):
-    cfg = load_config()
-    try:
-        deleted = delete_project(_project_roots(cfg), project)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if deleted is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return {"deleted": project}
+# There is deliberately NO route that deletes a project.
+#
+# It used to be DELETE /api/projects/{project} -> shutil.rmtree(project_dir),
+# reachable from a Delete button next to Archive. A project holds every read,
+# alignment and result of a run — the 9,000-sample datasets here are months of
+# sequencing — and the per-tool OOD cards answer on an unauthenticated port, so
+# the entire store was one stray request (or one mis-click past a browser
+# confirm) from being gone with no undo and no record of who did it.
+#
+# Archiving stays in the GUI: POST /api/projects/{project}/archive moves the
+# directory into projects_archive/ and is reversible with a move back.
+# Permanently removing a project is a shell action, where it is explicit and
+# attributable:  rm -rf <projects_root>/<project>
+# projects.delete_project() is retained for any future audited CLI use.
 
 
 class SetReferenceRequest(BaseModel):
@@ -6175,6 +6180,48 @@ def bootstrap():
     return {"job_id": job_id}
 
 
+# Bumped whenever the rendered HTML changes, so old cache entries are ignored
+# rather than served as a stale preview.
+_XLSX_RENDER_VERSION = "2"
+
+
+def _xlsx_cache_path(
+    target: Path,
+    project: str,
+    samples_with_bams: set,
+    samples_with_vcfs: set,
+) -> Optional[Path]:
+    """Where this file's rendered preview lives, or None if it can't be cached.
+
+    The key covers the spreadsheet's identity (path, size, mtime) and every
+    input that changes the OUTPUT — the project, the renderer version, and the
+    sample sets that decide which cells become IGV links (a sample gaining a
+    BAM must not keep serving a preview that says it has none).
+
+    Lives under the user's cache dir, not in the project: a Step 2 run folder
+    is something people zip up and share, and a shared project may well be
+    read-only to the person previewing it.
+    """
+    try:
+        st = target.stat()
+        key = hashlib.sha256(
+            "\x1e".join([
+                _XLSX_RENDER_VERSION,
+                str(target.resolve()),
+                str(st.st_size),
+                str(st.st_mtime_ns),
+                project,
+                ",".join(sorted(samples_with_bams)),
+                ",".join(sorted(samples_with_vcfs)),
+            ]).encode("utf-8")
+        ).hexdigest()
+    except OSError:
+        return None
+    base = os.environ.get("XDG_CACHE_HOME", "").strip()
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "vsnp_gui" / "xlsx_preview" / f"{key}.html"
+
+
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
@@ -6206,9 +6253,14 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     step1_dir = project_dir / "step1"
     if step1_dir.is_dir():
         for d in step1_dir.iterdir():
-            if not d.is_dir():
+            if not d.is_dir() or d.name.startswith(("_", ".")):
                 continue
-            if any(d.glob(f"**/{d.name}_nodup.bam")):
+            # BAMs live in alignment_<ref>/ (or the legacy alignment/), so
+            # _align_glob is enough. This used to be `d.glob("**/...")` —
+            # a full RECURSIVE walk of every sample directory, twice, on
+            # every preview: thousands of directory trees walked before the
+            # spreadsheet was even opened.
+            if _align_glob(d, f"{d.name}_nodup.bam"):
                 samples_with_bams.add(d.name)
             # _resolve_sample_dir accepts a bare sample name even when the
             # step1 dir carries lane suffixes (e.g. dir `13-1941-6_S4_L001`
@@ -6216,7 +6268,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             # cascade stems match.
             if "_" in d.name:
                 prefix = d.name.split("_")[0]
-                if prefix and any(d.glob(f"**/{prefix}_nodup.bam")):
+                if prefix and _align_glob(d, f"{prefix}_nodup.bam"):
                     samples_with_bams.add(prefix)
     vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if vcf_source_dir.is_dir():
@@ -6231,6 +6283,17 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
                     break
 
     from app import xlsx_html
+    # Rendered previews are cached on disk. A finished Step 2 table never
+    # changes, and the big ones take tens of seconds to parse (openpyxl has to
+    # read every cell of the sheet XML even to render the leading columns), so
+    # without this every revisit pays the full cost again. Keyed on the file's
+    # identity AND the renderer version, so a code change invalidates the lot.
+    cached = _xlsx_cache_path(target, project, samples_with_bams, samples_with_vcfs)
+    if cached is not None and cached.exists():
+        try:
+            return HTMLResponse(content=cached.read_text(encoding="utf-8"))
+        except OSError:
+            pass  # unreadable cache entry: fall through and re-render
     try:
         html_page = xlsx_html.xlsx_to_html(
             target,
@@ -6238,8 +6301,25 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             samples_with_bams=samples_with_bams,
             samples_with_vcfs=samples_with_vcfs,
         )
+    except MemoryError:
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                "This spreadsheet is too large to render in the memory available "
+                "to this session. Use the Download xlsx link and open it in Excel "
+                "or LibreOffice."
+            ),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
+    if cached is not None:
+        try:
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cached.with_suffix(".part")
+            tmp.write_text(html_page, encoding="utf-8")
+            os.replace(tmp, cached)
+        except OSError:
+            pass  # read-only cache location: serve it, just don't remember it
     return HTMLResponse(content=html_page)
 
 

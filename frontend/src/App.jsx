@@ -111,6 +111,11 @@ export default function App() {
   // finishes later still (minutes on a cold HPC filesystem).
   const [configLoaded, setConfigLoaded] = useState(false);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
+  // Live state of the project scan: the root being scanned (or true) while it
+  // runs, and the reason it stopped if it failed. Without these the pane was
+  // indistinguishable from a working one that simply hadn't updated.
+  const [projectsScanning, setProjectsScanning] = useState(false);
+  const [projectsError, setProjectsError] = useState("");
   // Server-side path browser. mode "folder" picks the projects root; mode
   // "files" multi-selects FASTQs already on the server (see openFileBrowser).
   const [folderBrowser, setFolderBrowser] = useState({
@@ -1224,21 +1229,54 @@ export default function App() {
       setPathValidation(cfg._validation);
     }
     setConfigLoaded(true);
-    const [proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
-      fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/references`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
-      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
-      fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
-    ]);
-    setRefPaths(paths.paths || []);
-    setProjects(proj);
-    setReferences(refs);
-    setVcfDbFolders(dbFolders || []);
-    setPosthocTools(posthocToolsResp || []);
-    setProjectsLoaded(true);
-    if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
-      setSelectedProject("");
+    await loadProjectsAndRefs(cfg.projects_root || "");
+  }
+
+  // The project scan, separated out and made failure-visible.
+  //
+  // Scanning a Projects root walks every sample directory of every project, so
+  // on an HPC filesystem with 9,000-sample projects it can run for a long time
+  // — long enough to be cut off by the OnDemand proxy's read timeout. When
+  // that happened inside the old combined Promise.all, the rejection aborted
+  // loadAll() before it set anything: the pane kept displaying the PREVIOUS
+  // root's projects, with no spinner, no error, and no way to tell whether it
+  // was still working. The only fix was to close the app and reopen it. Now
+  // the scan announces itself while it runs, says so when it fails, and can be
+  // retried in place.
+  async function loadProjectsAndRefs(rootLabel) {
+    setProjectsScanning(rootLabel || true);
+    setProjectsError("");
+    try {
+      const [proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
+        fetch(`${API_BASE}/api/projects`).then((r) => {
+          if (!r.ok) throw new Error(`projects scan failed (HTTP ${r.status})`);
+          return r.json();
+        }),
+        fetch(`${API_BASE}/api/references`).then((r) => (r.ok ? r.json() : [])),
+        fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
+        fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
+      ]);
+      setRefPaths(paths.paths || []);
+      setProjects(proj);
+      setReferences(refs);
+      setVcfDbFolders(dbFolders || []);
+      setPosthocTools(posthocToolsResp || []);
+      setProjectsLoaded(true);
+      if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
+        setSelectedProject("");
+      }
+    } catch (e) {
+      // Do NOT leave the previous root's projects sitting there looking current.
+      setProjects([]);
+      setProjectsLoaded(true);
+      setProjectsError(
+        `${e.message || "the projects scan did not finish"}. `
+        + "Large projects can take a while to scan the first time; the connection "
+        + "may also have dropped. Retry — nothing on disk was changed."
+      );
+    } finally {
+      setProjectsScanning(false);
     }
   }
 
@@ -1593,11 +1631,9 @@ export default function App() {
     await refreshProjects(selectedProject === name ? "" : selectedProject);
   }
 
-  async function deleteProject(name) {
-    if (!window.confirm(`Delete project "${name}" permanently?`)) return;
-    await fetch(`${API_BASE}/api/projects/${name}`, { method: "DELETE" });
-    await refreshProjects(selectedProject === name ? "" : selectedProject);
-  }
+  // deleteProject() deliberately does not exist. Archiving is the reversible
+  // action the GUI offers; permanently removing a project is done from a
+  // shell, where it is an explicit, attributable act.
 
   // --- Server-side path browser ------------------------------------------
   // One modal, two modes:
@@ -4154,7 +4190,7 @@ export default function App() {
             <div className="panel-header">
               <h2>Settings</h2>
             </div>
-            <div className="input-columns">
+            <div className="input-columns settings-stack">
               <div className="input-column">
                 <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Required</label>
                 <div className="settings-row">
@@ -4221,9 +4257,10 @@ export default function App() {
                 </div>
                 <div className="settings-row">
                   <label className="label">Saved locations</label>
-                  <span style={{display:"inline-flex", alignItems:"center", gap:"6px", flexWrap:"wrap"}}>
+                  <span style={{display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap", minWidth:0}}>
                     <select
                       value=""
+                      style={{flex:"1 1 240px", minWidth:0}}
                       onChange={(e) => jumpToLocation(e.target.value)}
                       disabled={!(settings.saved_project_roots && settings.saved_project_roots.length)}
                       title="Jump the Projects root to a saved location"
@@ -4251,16 +4288,6 @@ export default function App() {
                     >Remove</button>
                   </span>
                 </div>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={settings.sra_allow_insecure_https}
-                    onChange={(e) =>
-                      setSettings({ ...settings, sra_allow_insecure_https: e.target.checked })
-                    }
-                  />
-                  Allow insecure HTTPS for ENA
-                </label>
               </div>
               <div className="input-column">
                 <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Optional</label>
@@ -4280,6 +4307,16 @@ export default function App() {
                   />
                   <span />
                 </div>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={settings.sra_allow_insecure_https}
+                    onChange={(e) =>
+                      setSettings({ ...settings, sra_allow_insecure_https: e.target.checked })
+                    }
+                  />
+                  Allow insecure HTTPS for ENA
+                </label>
               </div>
             </div>
             <div style={{display:"flex", justifyContent:"flex-end", marginTop:"12px"}}>
@@ -4333,10 +4370,31 @@ export default function App() {
                 <button className="ghost-btn" onClick={() => setProjSampleFilter("")} title="Clear filter">Clear</button>
               ) : null}
             </div>
+            {projectsScanning ? (
+              <div className="note" style={{display:"flex", alignItems:"center", gap:"8px"}}>
+                <span className="pulse-dot" />
+                <span>
+                  <strong>Scanning projects…</strong>{" "}
+                  {typeof projectsScanning === "string" && projectsScanning
+                    ? <code>{projectsScanning}</code> : null}{" "}
+                  Counting samples and VCFs. Large projects take a while the first
+                  time; this pane updates as soon as it finishes.
+                </span>
+              </div>
+            ) : null}
+            {projectsError ? (
+              <div className="note warning" style={{display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap"}}>
+                <span><strong>Projects could not be listed:</strong> {projectsError}</span>
+                <button
+                  className="ghost-btn"
+                  onClick={() => loadProjectsAndRefs(settings.projects_root || "")}
+                >Retry scan</button>
+              </div>
+            ) : null}
             <div className="list">
-              {!projectsLoaded && projects.length === 0 ? (
+              {!projectsScanning && !projectsError && projectsLoaded && projects.length === 0 ? (
                 <div className="muted" style={{ padding: "6px 4px" }}>
-                  Scanning projects… (large projects can take a while on a fresh session)
+                  No projects in this Projects root yet.
                 </div>
               ) : null}
               {projects.map((p) => (
@@ -4413,15 +4471,12 @@ export default function App() {
                     >
                       Archive
                     </button>
-                    <button
-                      className="ghost-btn danger"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteProject(p.name);
-                      }}
-                    >
-                      Delete
-                    </button>
+                    {/* No Delete. Archive moves a project into
+                        projects_archive/ and is reversible; deleting one is
+                        an irreversible rmtree of every read, alignment and
+                        result it holds, and this pane is reachable without
+                        authentication behind the OOD proxy. Deleting a
+                        project is a deliberate command-line act. */}
                   </div>
                 </div>
                 {/* Samples listed beneath the project name (Kraken-GUI layout).

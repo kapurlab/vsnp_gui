@@ -50,6 +50,27 @@ _DEFAULT_FONT_SIZE = 11
 _DEFAULT_FONT_COLOR = "FF000000"
 
 _LOCUS_RE = re.compile(r"^[A-Za-z0-9_.\-]+:\d+$")
+
+# --- Very large sheets -------------------------------------------------------
+#
+# vSNP3 cascade tables on a big group are enormous: a real one here is 1,047
+# samples x 10,001 positions = 10.4 MILLION populated cells in a 35 MB file.
+# openpyxl's normal (read_write) load builds a full object graph with per-cell
+# style objects, which for that file took 47 seconds and 3.6 GB of RAM before a
+# single row was rendered — on a memory-capped HPC session that is the
+# "Internal Server Error after ten minutes" users were hitting.
+#
+# Above STREAM_ABOVE_CELLS we switch to openpyxl's read-only streaming mode
+# (the same file opens in 0.09 s), and we render a bounded window of the sheet.
+# The window is not a preference — no browser can lay out ten million table
+# cells, and each variant cell additionally carries an IGV launch anchor of
+# ~450 bytes, so the full grid would be a multi-gigabyte page. The page says
+# plainly how much it is showing and links the xlsx for the rest.
+STREAM_ABOVE_CELLS = 200_000
+# Rendered-cell budget for the streaming path. ~120k cells keeps the page in
+# the low tens of MB (measured), which browsers open in a few seconds.
+DEFAULT_MAX_CELLS = 120_000
+DEFAULT_MAX_ROWS = 5_000
 _NON_SAMPLE_LABELS = {
     "root", "mq", "annotation", "position not annotated",
     "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
@@ -92,6 +113,73 @@ def _canonical_stem(label: str, *stem_sets) -> str:
         if label.startswith(s + "_") and (best is None or len(s) > len(best)):
             best = s
     return best if best is not None else label
+
+
+def sheet_extent(xlsx_path: Path) -> tuple[int, int]:
+    """(rows, cols) of the active sheet, without loading its cells.
+
+    Read-only mode reads only the sheet's declared dimension, so this is
+    effectively free even on a 35 MB workbook — it is what lets the caller
+    decide between the full-fidelity and streaming renderers before paying
+    for either.
+    """
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        return int(ws.max_row or 0), int(ws.max_column or 0)
+    finally:
+        wb.close()
+
+
+def _sheet_layout(xlsx_path: Path) -> dict:
+    """Column widths and frozen panes, straight from the sheet XML.
+
+    Read-only worksheets expose neither `column_dimensions` nor
+    `freeze_panes`, but both live in the sheet XML's header — before
+    `<sheetData>` — so they can be read from the first few KB of the entry
+    without touching the millions of cells that follow. Returns
+    {"widths": {col_index: width_units}, "default_width": float|None,
+     "freeze_row": int, "freeze_col": int}; empty/zero values on any problem,
+    since layout is cosmetic and must never break a preview.
+    """
+    out = {"widths": {}, "default_width": None, "freeze_row": 0, "freeze_col": 0}
+    try:
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        with zipfile.ZipFile(xlsx_path) as zf:
+            name = next((n for n in zf.namelist()
+                         if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")),
+                        None)
+            if not name:
+                return out
+            with zf.open(name) as fh:
+                for event, el in ET.iterparse(fh, events=("start", "end")):
+                    tag = el.tag.split("}")[-1]
+                    if event == "start" and tag == "sheetData":
+                        break                      # everything we want precedes the cells
+                    if event != "end":
+                        continue
+                    if tag == "sheetFormatPr":
+                        w = el.get("defaultColWidth")
+                        if w:
+                            out["default_width"] = float(w)
+                    elif tag == "col":
+                        w = el.get("width")
+                        if w:
+                            lo = int(el.get("min", 1))
+                            hi = int(el.get("max", lo))
+                            # Guard against the "col span to 16384" idiom that
+                            # would otherwise build a dict of every column.
+                            for ci in range(lo, min(hi, lo + 20_000) + 1):
+                                out["widths"][ci] = float(w)
+                    elif tag == "pane":
+                        out["freeze_row"] = int(float(el.get("ySplit") or 0))
+                        out["freeze_col"] = int(float(el.get("xSplit") or 0))
+                    el.clear()
+    except Exception:
+        return {"widths": {}, "default_width": None, "freeze_row": 0, "freeze_col": 0}
+    return out
 
 
 def _detect_variant_table(ws) -> dict | None:
@@ -483,12 +571,152 @@ def _build_cf_extras(ws, dxfs) -> dict[str, list[str]]:
     return extras
 
 
+def _render_streaming(
+    xlsx_path: Path,
+    total_rows: int,
+    total_cols: int,
+    title: str | None,
+    project: str | None,
+    samples_with_bams: set[str] | None,
+    samples_with_vcfs: set[str] | None,
+    max_cells: int,
+    max_rows: int,
+) -> str:
+    """Render a bounded window of a very large sheet in one streaming pass.
+
+    Same per-cell appearance and same IGV behaviour as the full renderer — it
+    reuses the identical style/value/link helpers, which all work on
+    read-only cells. What it cannot do is random access, so the
+    variant-table detection (row 1 = loci, column 1 = samples) is built up
+    during the pass instead of probed up front.
+
+    Conditional-formatting overlays are skipped: the rules are not readable
+    in read-only mode. vSNP3 cascade tables colour their variant cells with
+    direct fills, which ARE read, so what a user actually looks at survives.
+    """
+    render_rows = min(total_rows, max_rows)
+    render_cols = max(1, min(total_cols, max_cells // max(1, render_rows)))
+    truncated = render_rows < total_rows or render_cols < total_cols
+
+    layout = _sheet_layout(xlsx_path)
+    default_width_units = layout["default_width"] or 8.43
+    colgroup_parts = [
+        f'<col style="width: '
+        f'{max(int(round(layout["widths"].get(ci, default_width_units) * 7)), 16)}px">'
+        for ci in range(1, render_cols + 1)
+    ]
+    freeze_row, freeze_col = layout["freeze_row"], layout["freeze_col"]
+
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        sheet_title = ws.title or "Sheet1"
+        positions: dict[int, str] = {}
+        rows_html: list[str] = []
+
+        # Row/column indices are tracked by position, not read off the cell:
+        # a read-only sheet yields `EmptyCell` for gaps, and those carry no
+        # coordinates at all (nor styles) — reading cell.row on one is an
+        # AttributeError, not a missing value.
+        for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=render_rows,
+                             min_col=1, max_col=render_cols), start=1):
+            if not row:
+                continue
+            # Row 1 carries the locus headers; capture them before any data row
+            # needs them (they arrive first, so a single pass is enough).
+            if row_idx == 1 and project:
+                for col_idx, cell in enumerate(row, start=1):
+                    v = getattr(cell, "value", None)
+                    if v is not None and _LOCUS_RE.match(str(v).strip()):
+                        positions[col_idx] = str(v).strip()
+
+            # Column 1 of a data row is the sample label.
+            row_stem = ""
+            if project and positions and row_idx > 1:
+                first = getattr(row[0], "value", None)
+                raw = str(first).strip() if first is not None else ""
+                if raw and raw.lower() not in _NON_SAMPLE_LABELS:
+                    stem = _strip_vcf_suffix(raw)
+                    if stem:
+                        row_stem = _canonical_stem(
+                            stem, samples_with_bams, samples_with_vcfs)
+
+            rows_html.append("<tr>")
+            for col_idx, cell in enumerate(row, start=1):
+                if not hasattr(cell, "column"):     # EmptyCell: no value, no style
+                    rows_html.append("<td></td>")
+                    continue
+                inline = _cell_inline_style(cell)
+                classes = []
+                if row_idx <= freeze_row:
+                    classes.append("xlsx-sticky-top")
+                if col_idx <= freeze_col:
+                    classes.append("xlsx-sticky-left")
+                rot_class = _cell_rotation_class(cell)
+                if rot_class:
+                    classes.append(rot_class)
+                value = _format_cell_value(cell)
+                cell_inner = value
+                if (row_stem and col_idx in positions
+                        and "background-color" in inline):
+                    has_bam = samples_with_bams is None or row_stem in samples_with_bams
+                    has_vcf = (samples_with_vcfs is not None
+                               and row_stem in samples_with_vcfs)
+                    this_loadable = (
+                        samples_with_bams is None and samples_with_vcfs is None
+                    ) or has_bam or has_vcf
+                    cell_inner = _igv_cell_html(
+                        value,
+                        project=project,
+                        this_stem=row_stem,
+                        locus=positions[col_idx],
+                        this_loadable=this_loadable,
+                        this_calls_only=(not has_bam) and has_vcf,
+                    )
+                    classes.append("xlsx-variant")
+                attrs = f' class="{" ".join(classes)}"' if classes else ""
+                style_attr = f' style="{inline}"' if inline else ""
+                rows_html.append(f"<td{attrs}{style_attr}>{cell_inner}</td>")
+            rows_html.append("</tr>")
+    finally:
+        wb.close()
+
+    notice = ""
+    if truncated:
+        notice = (
+            '<div class="xlsx-truncated">'
+            f'<strong>Showing the first {render_rows:,} of {total_rows:,} rows '
+            f'and {render_cols:,} of {total_cols:,} columns.</strong> '
+            f'This sheet holds about {total_rows * total_cols:,} cells — far more '
+            'than a browser can lay out, so the preview renders the leading '
+            'block, which for a cascade table is the most informative end. '
+            'Use <em>Download xlsx</em> above for the complete table, and open '
+            'it in Excel or LibreOffice.'
+            '</div>'
+        )
+
+    table_html = ('<table class="xlsx"><colgroup>' + "".join(colgroup_parts)
+                  + "</colgroup>" + "".join(rows_html) + "</table>")
+    return _PAGE_TEMPLATE.format(
+        title=html.escape(title or xlsx_path.name),
+        filename=html.escape(xlsx_path.name),
+        sheet=html.escape(sheet_title),
+        rows=total_rows,
+        cols=total_cols,
+        notice=notice,
+        table=table_html,
+    )
+
+
 def xlsx_to_html(
     xlsx_path: Path,
     title: str | None = None,
     project: str | None = None,
     samples_with_bams: set[str] | None = None,
     samples_with_vcfs: set[str] | None = None,
+    max_cells: int = DEFAULT_MAX_CELLS,
+    max_rows: int = DEFAULT_MAX_ROWS,
 ) -> str:
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
@@ -510,6 +738,20 @@ def xlsx_to_html(
     neither set (genuinely nothing to load).
     """
     xlsx_path = Path(xlsx_path)
+    # Decide the renderer from the sheet's declared size, which read-only mode
+    # answers without reading any cells. Anything of ordinary size keeps the
+    # full-fidelity path below, byte for byte as before; only sheets that the
+    # old path could not open at all take the streaming route.
+    try:
+        total_rows, total_cols = sheet_extent(xlsx_path)
+    except Exception:
+        total_rows = total_cols = 0
+    if total_rows * total_cols > STREAM_ABOVE_CELLS:
+        return _render_streaming(
+            xlsx_path, total_rows, total_cols, title, project,
+            samples_with_bams, samples_with_vcfs, max_cells, max_rows,
+        )
+
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
     ws = wb.active
     dxfs = list(wb._differential_styles.styles) if hasattr(wb, "_differential_styles") else []
@@ -659,6 +901,7 @@ def xlsx_to_html(
         sheet=html.escape(ws.title or "Sheet1"),
         rows=ws.max_row,
         cols=ws.max_column,
+        notice="",
         table=table_html,
     )
     return page
@@ -684,6 +927,11 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     border-bottom: 1px solid var(--xlsx-border);
     padding: 10px 20px;
     display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+  }}
+  .xlsx-truncated {{
+    margin: 0; padding: 10px 20px;
+    background: #fff5e0; border-bottom: 1px solid #e6c98a;
+    color: #4a3a12; font-size: 13px; line-height: 1.5;
   }}
   .xlsx-bar .filename {{ font-weight: 600; font-size: 14px; }}
   .xlsx-bar .meta {{ color: var(--xlsx-muted); font-size: 12px; font-family: 'IBM Plex Mono', monospace; }}
@@ -760,6 +1008,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
   <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');window.location.href=u.toString();return false;">Download xlsx</a></span>
 </div>
+{notice}
 <div class="xlsx-wrap">
 {table}
 </div>

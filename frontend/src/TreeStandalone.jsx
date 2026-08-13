@@ -41,12 +41,55 @@ export default function TreeStandalone() {
   const rerootModeRef = useRef(false);
   const cladePickRef = useRef(false);
   const selectedSetRef = useRef(new Set());
+  const searchTermRef = useRef("");
+  // The delegated click listener is bound ONCE, so anything it calls must be
+  // reached through a ref. Calling `render` directly from it captured the
+  // mount-time closure: a reroot then re-rendered with the ORIGINAL Bootstrap,
+  // Search and Strip-suffix values, silently undoing all three while their
+  // checkboxes still showed the user's choices.
+  const renderRef = useRef(() => {});
 
   useEffect(() => { rerootModeRef.current = rerootMode; }, [rerootMode]);
   useEffect(() => { cladePickRef.current = cladePick; }, [cladePick]);
+
+  // Repaint tip labels for the current selection and search, IN PLACE.
+  //
+  // Selecting a clade used to be in the render effect's dependencies, so every
+  // click rebuilt the whole SVG — which throws away the user's zoom and pan,
+  // because phylotree keeps the zoom transform on the TreeRender object and
+  // `tree.render()` constructs a new one. On the 1,044-tip tree zooming in is
+  // the only way to read tip labels, so clicking the clade you had just found
+  // snapped the tree back to fit-to-size. Colour is all that changes here, and
+  // colour can be set on the nodes that are already on screen.
+  function paintTips() {
+    const el = containerRef.current;
+    if (!el) return;
+    const selected = selectedSetRef.current;
+    const term = (searchTermRef.current || "").toLowerCase();
+    for (const g of el.querySelectorAll("g.node")) {
+      const d = g.__data__;
+      const name = (d && d.data && d.data.name) || "";
+      const text = g.querySelector("text");
+      if (!text) continue;
+      const isSelected = selected.has(stripZc(name));
+      const isHit = term && name.toLowerCase().includes(term);
+      // Search wins, so a hit inside the selected clade stays findable.
+      text.style.fill = isHit ? "#d62728" : (isSelected ? "#1d5fbf" : "");
+      text.style.fontWeight = isHit || isSelected ? "bold" : "";
+    }
+  }
+
   useEffect(() => {
     selectedSetRef.current = new Set(selectedTips.map((t) => stripZc(t)));
+    paintTips();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTips]);
+
+  useEffect(() => {
+    searchTermRef.current = searchTerm;
+    paintTips();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm]);
 
   function render(tree) {
     if (!containerRef.current) return;
@@ -90,16 +133,8 @@ export default function TreeStandalone() {
         } else if (stripSuffix && name.toLowerCase().endsWith("_zc.vcf.gz")) {
           element.select("text").text(name.slice(0, -("_zc.vcf.gz".length)));
         }
-        // Clade selection paints its tips; an active search still wins so a
-        // hit inside the selected clade stays findable.
-        if (selectedSetRef.current.has(stripZc(name))) {
-          element.select("text").style("fill", "#1d5fbf").style("font-weight", "bold");
-        }
-        if (searchTerm && name.toLowerCase().includes(searchTerm.toLowerCase())) {
-          element.select("text").style("fill", "#d62728").style("font-weight", "bold");
-        }
       },
-      "edge-styler": (element, edge) => {
+      "edge-styler": (element) => {
         if (!styleable(element)) return;
         if (rerootModeRef.current || cladePickRef.current) element.style("cursor", "pointer");
       },
@@ -109,6 +144,9 @@ export default function TreeStandalone() {
       svgNode.style.width = "100%";
       svgNode.style.height = "100%";
       containerRef.current.appendChild(svgNode);
+      // Selection and search highlighting is applied after the SVG is in the
+      // DOM, by paintTips, so that changing either does not require a rebuild.
+      paintTips();
     } else {
       setStatus("phylotree returned no SVG node");
     }
@@ -142,7 +180,9 @@ export default function TreeStandalone() {
         if (hit.kind !== "edge" || !treeRef.current) return;
         try {
           treeRef.current.reroot(hit.node);
-          render(treeRef.current);
+          // Through the ref: a direct call would use the closure this listener
+          // was bound with, which is the mount-time one.
+          renderRef.current(treeRef.current);
         } catch (e) {
           setStatus(`Reroot failed: ${e && e.message ? e.message : e}`);
         }
@@ -150,7 +190,16 @@ export default function TreeStandalone() {
       }
       if (!cladePickRef.current) return;
       const s = cladeSamples(hit.node);
-      if (s.length) setSelectedTips(s);
+      if (s.length) {
+        setStatus("");
+        setSelectedTips(s);
+      } else {
+        // The reference tip is the one thing on the tree that is not a sample.
+        // Silence here is indistinguishable from a missed click, which is the
+        // symptom this whole feature was reported for.
+        setStatus("That is the reference (root) tip, not a sample — "
+                  + "click a branch or node within the tree.");
+      }
     }
     el.addEventListener("click", onClick, true);
     return () => el.removeEventListener("click", onClick, true);
@@ -179,7 +228,16 @@ export default function TreeStandalone() {
         }
         treeRef.current = tree;
         const tips = tree.getTips ? tree.getTips() : [];
-        setCounts({ leaves: tips.length || 0 });
+        // Two counts, because they differ by the reference tip: `leaves` is what
+        // the header reports about the tree, `samples` is how many of them a
+        // clade selection can ever contain. Comparing a selection against
+        // `leaves` was always off by one on a rooted tree, so the "(the whole
+        // tree)" note never appeared on a real vSNP3 tree.
+        const sampleTips = tips.filter((t) => {
+          const n = (t && t.data && t.data.name) || "";
+          return n && n.toLowerCase() !== "root";
+        });
+        setCounts({ leaves: tips.length || 0, samples: sampleTips.length || 0 });
         render(tree);
         setStatus("");
       } catch (err) {
@@ -200,24 +258,45 @@ export default function TreeStandalone() {
         const res = await fetch(
           `${API_BASE}/api/projects/${encodeURIComponent(project)}/tree-tables?path=${encodeURIComponent(path)}`
         );
-        if (!res.ok) return;
+        if (cancelled) return;
+        if (!res.ok) {
+          // Do NOT fail silently. Clade picking is gated on this list, so an
+          // unreachable or refusing endpoint disables the feature entirely —
+          // and a swallowed error looked exactly like "this group has no SNP
+          // tables": no bar, no pointer, clicking the tree does nothing, no
+          // explanation. That is the original bug report, reconstituted.
+          setStatus(`Could not list this tree's SNP tables (HTTP ${res.status}) — `
+                    + "clade selection is unavailable.");
+          return;
+        }
         const data = await res.json();
         if (cancelled) return;
         const list = (data && data.tables) || [];
         setTables(list);
         if (list.length) setTableChoice(list[0].path);
-      } catch {
-        /* endpoint missing or unreachable: leave the clade UI hidden */
+      } catch (err) {
+        if (!cancelled) {
+          setStatus("Could not list this tree's SNP tables "
+                    + `(${err && err.message ? err.message : err}) — `
+                    + "clade selection is unavailable.");
+        }
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep the ref pointing at the CURRENT render closure, for the once-bound
+  // click listener.
+  useEffect(() => { renderRef.current = render; });
+
+  // Only settings that change what is DRAWN force a rebuild. Selection and
+  // search changed colour only and used to be in here, which is what made every
+  // clade click discard the user's zoom and pan; they are painted in place now.
   useEffect(() => {
     if (treeRef.current) render(treeRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showBootstrap, searchTerm, rerootMode, cladePick, stripSuffix, selectedTips]);
+  }, [showBootstrap, rerootMode, cladePick, stripSuffix]);
 
   function midpointRoot() {
     if (!treeRef.current) return;
@@ -278,13 +357,28 @@ export default function TreeStandalone() {
           }),
         }
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // The backend's own words, not just a status code: "Selection is too
+        // large" and "No sample names given" both arrive this way and both say
+        // what to do about it.
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = body.detail;
+        } catch { /* not JSON — the status is all there is */ }
+        throw new Error(detail);
+      }
       const data = await res.json();
       const url = `${API_BASE}/api/projects/${encodeURIComponent(project)}/preview-xlsx?path=${encodeURIComponent(tableChoice)}&selection=${encodeURIComponent(data.token)}`;
       if (win) {
         win.location = url;
       } else {
-        window.open(url, "_blank");
+        // The tab was blocked. A second window.open here is outside the click
+        // gesture and gets blocked too, so say so instead of doing nothing —
+        // silence after pressing a button is the failure users report as "it
+        // doesn't work".
+        setStatus("Your browser blocked the new tab. Allow pop-ups for this "
+                  + "site, then press the button again.");
       }
     } catch (err) {
       if (win) win.close();
@@ -325,7 +419,18 @@ export default function TreeStandalone() {
           {selectedTips.length ? (
             <>
               <strong>Clade: {selectedTips.length} sample{selectedTips.length === 1 ? "" : "s"}</strong>
-              {selectedTips.length === counts.leaves ? <span style={{ color: "#666" }}>(the whole tree)</span> : null}
+              {/* Against the SAMPLE count, not the leaf count: every vSNP3 tree
+                  carries a `root` reference tip that a clade never includes, so
+                  comparing with `leaves` was off by one and this never showed. */}
+              {counts.samples && selectedTips.length >= counts.samples
+                ? <span style={{ color: "#666" }}>(the whole tree)</span> : null}
+              {/* The mode cue has to be visible here too. It used to live only
+                  in the no-selection branch, so ticking Reroot mode with a clade
+                  selected changed nothing on screen and the next branch click
+                  quietly rerooted instead of selecting. */}
+              {rerootMode
+                ? <span style={{ color: "#8a5a10" }}>Reroot mode is on — a branch click reroots.</span>
+                : null}
               <select value={tableChoice} onChange={(e) => setTableChoice(e.target.value)} style={{ maxWidth: 340 }}>
                 {tables.map((t) => (
                   <option key={t.path} value={t.path}>

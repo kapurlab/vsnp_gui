@@ -6314,6 +6314,7 @@ def _xlsx_cache_path(
 
 _SNP_SELECTIONS: Dict[str, Dict[str, Any]] = {}
 _SNP_SELECTIONS_MAX_FILES = 500
+_SNP_SELECTIONS_MAX_MEMORY = 200
 
 
 class SnpSelectionRequest(BaseModel):
@@ -6331,6 +6332,14 @@ def _snp_selection_token(samples: List[str]) -> str:
 
 
 def _store_snp_selection(token: str, payload: Dict[str, Any]) -> None:
+    # Cap the in-memory copy. Each entry can hold 20,000 names (~600 KB) and
+    # _load_snp_selection re-populates this dict from the disk mirror on every
+    # cache miss, so in a long-lived backend it only grows. This app has been
+    # bitten by memory growth in exactly this endpoint's neighbourhood before.
+    if len(_SNP_SELECTIONS) >= _SNP_SELECTIONS_MAX_MEMORY:
+        for stale in list(_SNP_SELECTIONS)[:len(_SNP_SELECTIONS)
+                                           - _SNP_SELECTIONS_MAX_MEMORY + 1]:
+            _SNP_SELECTIONS.pop(stale, None)
     _SNP_SELECTIONS[token] = payload
     try:
         d = _snp_selection_dir()
@@ -6451,8 +6460,13 @@ def tree_tables(project: str, path: str = Query(...)):
     ones to make the common choice the default."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
-    target = Path(path).resolve()
-    if not str(target).startswith(str(project_dir.resolve())):
+    target = Path(path)
+    # The same check the /serve endpoint uses, for the same reason: it compares
+    # as-given AND resolved forms, so a project root reached through a symlink
+    # still matches. A stricter resolve-only check here would refuse to list the
+    # tables for a tree that the viewer had just loaded successfully — the
+    # feature would go dark with no explanation of why.
+    if not _serve_path_allowed(target, [project_dir]):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -6507,6 +6521,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
         )
+    from app import xlsx_html
     # A clade filter (posted by the tree viewer, named by token). Resolved
     # before anything is rendered: a dangling token must say so plainly, not
     # quietly serve the unfiltered table as if the filter had applied.
@@ -6514,13 +6529,36 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
     if selection:
         sel_data = _load_snp_selection(selection)
         if sel_data is None:
-            raise HTTPException(
-                status_code=410,
-                detail=(
-                    "This clade selection has expired (the token is no longer "
-                    "known to the server). Re-open the table from the tree "
-                    "viewer to make a fresh selection."
+            # A PAGE, not JSON. This endpoint is navigated to in a fresh tab, so
+            # an HTTPException here lands as a bare line of `{"detail": …}` on
+            # white with no way back.
+            return HTMLResponse(
+                content=xlsx_html.message_page(
+                    heading="This clade selection has expired",
+                    body=("The server no longer holds the sample list for this "
+                          "selection. Nothing is wrong with the table or the "
+                          "tree — selections are not kept indefinitely."),
+                    filename=target.name,
+                    back_hint="Re-open the tree and click the branch again to "
+                              "make a fresh selection.",
                 ),
+                status_code=410,
+            )
+        # A token records the project it was minted for; honour it. Names from
+        # another project would simply fail to match and 422, but a wrong-project
+        # token is a mistake worth naming rather than a mystery to debug.
+        sel_project = sel_data.get("project")
+        if sel_project and sel_project != project:
+            return HTMLResponse(
+                content=xlsx_html.message_page(
+                    heading="This clade selection belongs to another project",
+                    body=(f"It was made in project '{sel_project}', but this "
+                          f"table is in '{project}'."),
+                    filename=target.name,
+                    back_hint="Open the tree for this project's group and select "
+                              "the clade there.",
+                ),
+                status_code=400,
             )
         selection_samples = list(sel_data.get("samples") or [])
     # Build sets of samples loadable in IGV so the cascade-table render
@@ -6563,7 +6601,6 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                     samples_with_vcfs.add(name[: -len(suffix)])
                     break
 
-    from app import xlsx_html
     # Rendered previews are cached on disk. A finished Step 2 table never
     # changes, and the big ones take tens of seconds to parse (openpyxl has to
     # read every cell of the sheet XML even to render the leading columns), so
@@ -6586,23 +6623,20 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
         except (OSError, ValueError):
             window = None  # unreadable or stale entry: re-render below
 
-    # Too large to show at all? Decided from the sheet's DECLARED dimensions, so
-    # the answer costs 0.13 s on the 35 MB cascade table where rendering a
-    # truncated window cost 42 s — and no partial table is ever produced to be
-    # mistaken for the whole one. Only for unfiltered views: a clade selection
-    # is precisely the way to get into a table this size, so it is allowed to
-    # try (and gets the same page, worded for a clade, if it still cannot fit).
-    if selection_samples is None:
-        try:
-            pre_rows, pre_cols = xlsx_html.sheet_extent(target)
-        except Exception:
-            pre_rows = pre_cols = 0
-        if pre_rows and pre_cols and not xlsx_html.fits_full_view(pre_rows, pre_cols):
-            return _too_large_response(project, target, path, pre_rows, pre_cols)
-
     if window is None:
         try:
             rows, cols = xlsx_html.sheet_extent(target)
+            # Too large to show at all? Taken from the sheet's DECLARED
+            # dimensions, so the answer costs 0.34 s on the 35 MB cascade table
+            # where rendering a truncated window cost 42 s — and no partial table
+            # is built to be mistaken for the whole one. A clade selection is
+            # exempt: filtering is precisely how you get into a table this size,
+            # and it gets this same page (worded for a clade) if it still cannot
+            # fit. Inside the cache branch because a table that is too large
+            # never produced a cache entry to hit.
+            if (selection_samples is None and rows and cols
+                    and not xlsx_html.fits_full_view(rows, cols)):
+                return _too_large_response(project, target, path, rows, cols)
             if selection_samples is not None:
                 # Filtered previews always take the streaming renderer — the
                 # filter is implemented there, and it handles small sheets
@@ -6632,7 +6666,19 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                     xlsx_html.FULL_VIEW_MAX_CELLS, rows,
                 )
         except xlsx_html.FilterMatchError as e:
-            raise HTTPException(status_code=422, detail=str(e))
+            # Also a page: this is the one a real name mismatch between the tree
+            # and the table produces, so it is the error most likely to be seen.
+            return HTMLResponse(
+                content=xlsx_html.message_page(
+                    heading="None of the selected samples are in this table",
+                    body=str(e),
+                    filename=target.name,
+                    back_hint="Check that the tree and the table belong to the "
+                              "same Step 2 group — the tree viewer lists the "
+                              "tables that sit beside it.",
+                ),
+                status_code=422,
+            )
         except MemoryError:
             raise HTTPException(
                 status_code=507,

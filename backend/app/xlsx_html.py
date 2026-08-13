@@ -114,6 +114,11 @@ FULL_VIEW_MAX_CELLS = 1_000_000
 FILTER_BUFFER_MAX_CELLS = 2_000_000
 _NON_SAMPLE_LABELS = {
     "root", "mq", "annotation", "position not annotated",
+    # vsnp3 names the annotation row "no annotations" when the group has no GBK
+    # (vsnp3_fasta_to_snps_table.py). Without this it was read as a SAMPLE:
+    # dropped from every filtered view — losing the gene / amino-acid annotation
+    # for the very positions being inspected — and counted in the denominator.
+    "no annotations",
     "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
 }
 
@@ -199,7 +204,8 @@ def fits_full_view(total_rows: int, total_cols: int,
 def too_large_page(filename: str, total_rows: int, total_cols: int,
                    tree_url: str | None = None, tree_name: str | None = None,
                    clade_samples: int | None = None,
-                   download_url: str | None = None) -> str:
+                   download_url: str | None = None,
+                   clade_positions: int | None = None) -> str:
     """The page shown instead of a table that cannot be shown in full.
 
     Two routes, because both are real: the file itself in a spreadsheet
@@ -218,11 +224,18 @@ def too_large_page(filename: str, total_rows: int, total_cols: int,
         size_words = f"{cells:,} cells"
 
     if clade_samples is not None:
+        # The clade's OWN matching positions when the filter got far enough to
+        # count them; the sheet's position count otherwise (which is the case
+        # where the selection was too large to filter by position at all).
+        shown_positions = clade_positions if clade_positions else positions
+        cells = max(1, clade_samples) * max(1, shown_positions)
+        size_words = (f"{cells / 1_000_000:.1f} million cells" if cells >= 1_000_000
+                      else f"{cells:,} cells")
         heading = "This clade is still too large to display"
         lede = (
             f"The selected clade has <strong>{clade_samples:,} samples</strong> across "
-            f"<strong>{positions:,} positions</strong> — {size_words} once laid out, "
-            "more than a browser can render."
+            f"<strong>{shown_positions:,} positions</strong> — {size_words} once laid "
+            "out, more than a browser can render."
         )
         tree_lead = "Select a smaller clade"
         tree_body = (
@@ -287,6 +300,27 @@ def window_is_partial(window: dict) -> bool:
                     or not filt.get("column_filter"))
     return (window["shown_rows"] < window["total_rows"]
             or window["shown_cols"] < window["total_cols"])
+
+
+def message_page(heading: str, body: str, filename: str = "",
+                 back_hint: str = "") -> str:
+    """A plain, styled page for a preview that cannot be produced.
+
+    These endpoints are opened as PAGES — a user clicks a button and a tab
+    navigates to them — so an error has to arrive as something a person can
+    read. FastAPI's default handler answers HTTPException with JSON, which in a
+    fresh tab is a line of raw `{"detail": …}` on white with no way back; the
+    two cases that reach it (an expired clade selection, and a selection that
+    matches no row in this table) are precisely the ones needing an explanation.
+    """
+    return _MESSAGE_TEMPLATE.format(
+        title=html.escape(filename or heading),
+        bar=(f'<div class="tl-bar">{html.escape(filename)}</div>' if filename else ""),
+        heading=html.escape(heading),
+        body=html.escape(body),
+        hint=(f'<div class="tl-note">{html.escape(back_hint)}</div>'
+              if back_hint else ""),
+    )
 
 
 def sheet_extent(xlsx_path: Path) -> tuple[int, int]:
@@ -1215,10 +1249,21 @@ def render_filtered_window(
     # would keep every column. Missing data ('-'/'N'/empty) is not a call —
     # a low-coverage sample must not drag thousands of columns into the view.
     col_snp = bytearray(total_cols + 1)
-    root_vals: dict[int, str] | None = None      # reference row's calls
-    clade_first_call: dict[int, str] = {}        # fallback baseline, no-root sheets
+    col_called = bytearray(total_cols + 1)   # a selected sample called ANYTHING here
+    # Columns contributed by rows that matched only through canonicalisation, kept
+    # per row so that dropping such a row in the ambiguity pass also withdraws
+    # its columns. Without this a look-alike row was excluded from the table while
+    # its private SNP stayed on as a column of the clade's own. Only non-exact
+    # matches are tracked, because only they can be dropped; exact matches go
+    # straight into the bitmaps above.
+    nonexact_cols: dict[int, tuple[set, set]] = {}
+    root_vals: dict[int, str] | None = None  # the reference row's calls
     kept_frags: list[list[str]] = []     # per kept row, one fragment per column
     kept_samples: list[str] = []         # per kept row, IGV stem ('' = structural)
+    kept_meta: list[dict] = []           # per kept row: how it matched, for the
+                                         # ambiguity pass below
+    key_stems: dict[str, set] = {}       # canonical key -> the distinct label
+                                         # stems that resolved to it
     style_classes: dict[str, str] = {}
     matched_rows = 0                     # sample rows that matched the clade
     shown_sample_rows = 0                # ...and were actually buffered
@@ -1262,6 +1307,7 @@ def render_filtered_window(
                     not_variant_table = True
                     break
                 keep, row_stem, is_matched_sample = True, "", False
+                meta = {"sample": False}
             else:
                 first = getattr(row[0], "value", None) if row else None
                 raw = str(first).strip() if first is not None else ""
@@ -1279,12 +1325,23 @@ def render_filtered_window(
                     if keep:
                         structural_kept += 1
                     row_stem, is_matched_sample = "", False
+                    meta = {"sample": False}
                 else:
                     total_sample_rows += 1
                     stem = _strip_vcf_suffix(raw)
                     key = _canonical_stem(
                         stem, samples_with_bams, samples_with_vcfs)
-                    is_matched_sample = key in sel_keys or stem in raw_sel
+                    key_stems.setdefault(key, set()).add(stem)
+                    # EXACT beats canonical. Canonicalisation exists so a tree
+                    # tip and a table row that decorate the same sample
+                    # differently still match, but its "longest known stem that
+                    # prefixes this label" rule can also alias one specimen onto
+                    # another: with only `19-1234` known on disk, the row
+                    # `19-1234_2_Bovine_USA` (a different isolate) resolves to
+                    # `19-1234` too. Recording how each row matched lets the
+                    # ambiguity pass after the loop throw those back out.
+                    exact = stem in raw_sel
+                    is_matched_sample = exact or key in sel_keys
                     if is_matched_sample:
                         matched_rows += 1
                     keep = is_matched_sample and shown_sample_rows < max_sample_rows
@@ -1293,6 +1350,7 @@ def render_filtered_window(
                         row_stem = key
                     else:
                         row_stem = ""
+                    meta = {"sample": True, "exact": exact, "key": key, "stem": stem}
             if not keep:
                 continue
 
@@ -1312,19 +1370,22 @@ def render_filtered_window(
                 if is_matched_sample and row_stem and col_idx in positions:
                     call = _call_of(cell)
                     if call:
+                        # Any call at all keeps the column when there is no
+                        # reference to compare against (see below) — over-keeping
+                        # is the recoverable direction.
                         base = (root_vals or {}).get(col_idx)
-                        if base is not None:
-                            if call != base:
+                        is_snp = base is not None and call != base
+                        if meta.get("exact"):
+                            col_called[col_idx] = 1
+                            if is_snp:
                                 col_snp[col_idx] = 1
                         else:
-                            # No reference call for this column (or no root
-                            # row at all): fall back to variation within the
-                            # clade itself.
-                            seen = clade_first_call.get(col_idx)
-                            if seen is None:
-                                clade_first_call[col_idx] = call
-                            elif call != seen:
-                                col_snp[col_idx] = 1
+                            slot = len(kept_frags)   # the index this row will take
+                            snp_set, called_set = nonexact_cols.setdefault(
+                                slot, (set(), set()))
+                            called_set.add(col_idx)
+                            if is_snp:
+                                snp_set.add(col_idx)
                 classes = []
                 if inline:
                     cls = style_classes.get(inline)
@@ -1358,6 +1419,7 @@ def render_filtered_window(
                 cells.append(f"<td{attrs}>{value}</td>")
             kept_frags.append(cells)
             kept_samples.append(row_stem)
+            kept_meta.append(meta)
             bytes_so_far += sum(len(c) for c in cells)
 
             # Row-filter-only mode has no post-pass column choice, so it must
@@ -1387,12 +1449,74 @@ def render_filtered_window(
         }
         return win
 
+    # Ambiguity pass. A row that matched ONLY through canonicalisation, onto a
+    # key that more than one distinct label resolves to, is not this clade's
+    # row — it is a different specimen whose name happens to extend a known
+    # stem. Keeping it would add its private SNPs as columns and, worse, label
+    # it with the other sample's stem, so a click would open the WRONG sample
+    # in IGV. Dropped, and counted so the page can say so.
+    ambiguous_keys = {k for k, stems in key_stems.items() if len(stems) > 1}
+    dropped_ambiguous = 0
+    surviving_slots = set(range(len(kept_frags)))
+    if ambiguous_keys:
+        keep_idx = []
+        for i, meta in enumerate(kept_meta):
+            if (meta.get("sample") and not meta.get("exact")
+                    and meta.get("key") in ambiguous_keys):
+                dropped_ambiguous += 1
+                continue
+            keep_idx.append(i)
+        if dropped_ambiguous:
+            surviving_slots = set(keep_idx)
+            kept_frags = [kept_frags[i] for i in keep_idx]
+            kept_samples = [kept_samples[i] for i in keep_idx]
+            kept_meta = [kept_meta[i] for i in keep_idx]
+            matched_rows -= dropped_ambiguous
+            shown_sample_rows -= dropped_ambiguous
+    # Fold in the columns of the non-exact rows that SURVIVED. A dropped row's
+    # columns are simply never added, so a look-alike cannot leave its private
+    # SNP behind as a column of this clade.
+    for slot, (snp_set, called_set) in nonexact_cols.items():
+        if slot not in surviving_slots:
+            continue
+        for c in snp_set:
+            col_snp[c] = 1
+        for c in called_set:
+            col_called[c] = 1
+    # A row kept on an ambiguous key must not carry that key as its IGV target
+    # either: better a cell that is not clickable than one that opens another
+    # sample's alignment. The cells were rendered before the ambiguity was known
+    # (it takes the whole sheet to establish), so the classes are rewritten here
+    # as well — a cell left looking clickable would resolve to a name with no
+    # data behind it, which is a dead end dressed as a link.
+    for i, meta in enumerate(kept_meta):
+        if meta.get("sample") and meta.get("key") in ambiguous_keys:
+            kept_samples[i] = meta.get("stem") or kept_samples[i]
+            kept_frags[i] = [
+                c.replace("xlsx-variant xlsx-igv-calls-only", "xlsx-igv-none")
+                 .replace("xlsx-variant", "xlsx-igv-none")
+                for c in kept_frags[i]
+            ]
+
     if matched_rows == 0:
         raise FilterMatchError(
             f"None of the {len(sel_keys)} selected samples appear in this "
             f"table (it has {total_sample_rows} sample rows). The tree and "
             "the table may not belong to the same Step 2 group."
         )
+
+    # No reference row means no baseline, and the honest response is to keep
+    # every position the clade has a call at rather than invent one.
+    #
+    # The previous fallback compared the selected samples against EACH OTHER,
+    # which drops any position where the clade agrees internally but differs
+    # from the reference — that is, precisely the clade-defining SNPs. On a real
+    # 4-sample clade, relabelling the reference row alone lost 30 of 85
+    # positions, every one of them monomorphic within the clade, while the page
+    # went on stating that the hidden positions had no SNP in these samples.
+    reference_found = root_vals is not None
+    if not reference_found:
+        col_snp = col_called
 
     locus_total = len(positions)
     truncated_cols = 0
@@ -1457,6 +1581,11 @@ def render_filtered_window(
             "column_filter": column_filter,
             "truncated_cols": truncated_cols,
             "truncated_rows": matched_rows - shown_sample_rows,
+            # Everything the page has to admit to. Each of these was a way for
+            # the old banner to state something untrue.
+            "reference_found": reference_found,
+            "unmatched": max(0, len(sel_keys) - matched_rows),
+            "dropped_ambiguous": dropped_ambiguous,
             "ignored": None,
         },
     }
@@ -1495,20 +1624,27 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
     if filt:
         bits = (f'<strong>Filtered to a tree clade:</strong> '
                 f'{filt["shown_samples"]:,} of {filt["total_samples"]:,} samples')
-        if filt["column_filter"]:
+        # What the position count MEANS depends on whether a reference row was
+        # found; claiming "no SNP in these samples" without one is the sentence
+        # that made a lost clade-defining SNP invisible.
+        if filt.get("reference_found", True):
             bits += (f' and {filt["locus_shown"]:,} of {filt["locus_total"]:,} '
-                     'SNP positions — positions with no SNP in these samples '
-                     'are hidden')
-            if filt["truncated_cols"]:
-                bits += (f' ({filt["truncated_cols"]:,} matching positions '
-                         'were dropped to fit the size budget)')
+                     'SNP positions — positions where every selected sample '
+                     'matches the reference are hidden')
         else:
-            bits += (f'. The selection is too large for per-SNP filtering, so '
-                     f'the first {filt["locus_shown"]:,} of '
-                     f'{filt["locus_total"]:,} positions are shown')
-        if filt["truncated_rows"]:
-            bits += (f'; only the first {filt["shown_samples"]:,} of '
-                     f'{filt["matched"]:,} matching samples are rendered')
+            bits += (f' and {filt["locus_shown"]:,} of {filt["locus_total"]:,} '
+                     'positions — this sheet has no <code>root</code> reference '
+                     'row, so positions are kept wherever a selected sample has '
+                     'a call, NOT by difference from the reference')
+        # A tip that resolved to no row takes its positions with it, so an
+        # unmatched count is a statement about missing DATA, not just names.
+        if filt.get("unmatched"):
+            bits += (f'. <strong>{filt["unmatched"]:,} of the '
+                     f'{filt["selected"]:,} selected samples were not found in '
+                     'this table</strong> and are not represented here')
+        if filt.get("dropped_ambiguous"):
+            bits += (f'. {filt["dropped_ambiguous"]:,} row(s) whose name could '
+                     'not be told apart from another sample were excluded')
         notice += f'<div class="xlsx-filter">{bits}. {_clear_filter_link}</div>'
     elif shown_rows < total_rows or shown_cols < total_cols:
         bits = []
@@ -1749,6 +1885,46 @@ def xlsx_to_html(
         samples_json="[]",
     )
     return page
+
+
+_MESSAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{
+    --ink: #1a2536; --muted: #6a7585; --line: #d4ccb8;
+    --bg: #f6f3ec; --panel: #fbf9f3;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; min-height: 100%; background: var(--bg);
+    color: var(--ink); font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    line-height: 1.55; }}
+  .tl-bar {{ background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 20px; font-size: 13px; color: var(--muted);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; }}
+  .tl-wrap {{ max-width: 640px; margin: 0 auto; padding: 48px 24px; }}
+  h1 {{ font-size: 19px; font-weight: 650; margin: 0 0 12px; }}
+  p {{ font-size: 15px; margin: 0; }}
+  .tl-note {{ font-size: 13px; color: var(--muted); margin-top: 18px; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --ink: #e8edf2; --muted: #98a4b3; --line: #2d3d47;
+      --bg: #0f171d; --panel: #17222b; }}
+  }}
+</style>
+</head>
+<body>
+{bar}
+<div class="tl-wrap">
+  <h1>{heading}</h1>
+  <p>{body}</p>
+  {hint}
+</div>
+</body>
+</html>
+"""
 
 
 _TOO_LARGE_TEMPLATE = """<!DOCTYPE html>

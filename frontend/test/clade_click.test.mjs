@@ -266,6 +266,40 @@ if (firstInternal) {
     "a click still selects after the tree is redrawn (delegation survives it)");
 }
 
+// Selecting a clade must NOT rebuild the tree.
+//
+// Highlighting used to be a dependency of the render effect, so every click
+// re-ran tree.render() — and phylotree keeps the zoom transform on the
+// TreeRender instance it builds per render, so the user's zoom and pan were
+// discarded. On a 1,000-tip tree zooming in is the only way to read tip labels,
+// so clicking the clade you had just found threw you back to fit-to-size.
+const svgBefore = container.querySelector("svg");
+const gBefore = container.querySelector("g.phylotree-container");
+const fakeTransform = "translate(120,40) scale(2.5)";
+if (gBefore) gBefore.setAttribute("transform", fakeTransform);
+const branchNow = container.querySelector("path.branch");
+selected = null;
+branchNow.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+assert(selected !== null, "the click selected a clade");
+assert(container.querySelector("svg") === svgBefore,
+  "the SVG was NOT replaced by selecting a clade");
+assert(!gBefore || gBefore.getAttribute("transform") === fakeTransform,
+  "…so an existing zoom/pan transform survives the selection");
+
+// The pick-mode CSS has to target elements that actually exist. `g.node circle`
+// matched NOTHING: phylotree classes leaves `node` and internal nodes
+// `internal-node`, and leaves carry no circle with size bubbles off — so the
+// "easier target" was styled on a selector that never applied.
+const cssPath = path.join(FRONTEND, "src/styles.css");
+const css = readFileSync(cssPath, "utf8");
+assert(css.includes(".tree-pick g.internal-node circle"),
+  "the CSS targets internal-node markers");
+assert(!/\.tree-pick path\.branch:hover\s*\{[^}]*stroke-width/.test(css),
+  "pick mode does not shrink phylotree's own 10px hover target");
+const markerCount = container.querySelectorAll("g.internal-node circle").length;
+assert(markerCount > 0,
+  `internal-node markers exist to be styled (${markerCount})`);
+
 // Reroot mode takes the branch click while it is on — never both at once.
 rerootMode = true;
 const before = rerooted;

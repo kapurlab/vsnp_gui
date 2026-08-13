@@ -169,6 +169,105 @@ def main() -> int:
         assert_eq(w["row_samples"], ["", "", "S5", "", ""],
                   "row resolved to the canonical stem")
 
+        print("\n[no recognisable reference row: over-keep, and SAY so]")
+        # The severe case. The column filter needs the `root` row as its
+        # baseline. When it cannot find one, the old code compared the selected
+        # samples against EACH OTHER — which drops every position where the clade
+        # agrees internally but differs from the reference, i.e. exactly the
+        # clade-defining SNPs. On a real 4-sample clade, relabelling that one row
+        # lost 30 of 85 positions, all of them monomorphic within the clade,
+        # while the banner went on saying the hidden positions had no SNP.
+        noref = tmp / "noref.xlsx"
+        make_group_table(
+            noref, [f"S{i}_meta" for i in range(1, 4)], 6,
+            # Every selected sample carries the SAME variant call at col 2 (a
+            # clade-defining SNP) and matches the reference elsewhere.
+            call_at=lambda i, c: "A" if c == 2 else "C")
+        # Rename the reference row so it is not recognised as one.
+        wb = openpyxl.load_workbook(noref)
+        wb.active.cell(row=2, column=1, value="MTBC0ref")
+        wb.save(noref)
+        wb.close()
+        w = xlsx_html.render_filtered_window(
+            noref, 7, 6, None, "p", {"S1", "S2", "S3"}, set(),
+            ["S1_meta", "S2_meta"],
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        f = w["filter"]
+        assert_true(not f["reference_found"], "the missing reference row is noticed")
+        assert_true("MTBC0:1002" in w["loci"].values(),
+                    "the clade-defining SNP survives (it is monomorphic in-clade)")
+        page = xlsx_html.compose_page(w)
+        assert_true("no <code>root</code> reference row" in page,
+                    "the page says there is no reference row")
+        assert_true("matches the reference are hidden" not in page,
+                    "…and does NOT claim positions were hidden for having no SNP")
+
+        print("\n[selected samples that match no row are disclosed]")
+        # Tips that resolve to nothing take their positions with them, so this is
+        # missing DATA, not just missing names. It used to be computed and never
+        # rendered, leaving the page reading like a deliberately small clade.
+        w = xlsx_html.render_filtered_window(
+            book, total_rows, total_cols, None, "p", bams, set(),
+            ["S1_meta_country", "NOT_IN_TABLE_A", "NOT_IN_TABLE_B"],
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        assert_eq(w["filter"]["matched"], 1, "one of three selected tips matched")
+        assert_eq(w["filter"]["unmatched"], 2, "the other two are counted")
+        page = xlsx_html.compose_page(w)
+        assert_true("2 of the 3 selected samples were not found" in page,
+                    "the page states how many selected samples are missing")
+
+        print("\n[a name that cannot be told from another sample is excluded]")
+        # _canonical_stem maps a label onto the longest KNOWN stem that prefixes
+        # it. With only `19-1234` on disk, the row `19-1234_2_Bovine_USA` — a
+        # different isolate — resolves to `19-1234` as well. Keeping it added its
+        # private SNPs as columns AND labelled it `19-1234`, so a click opened the
+        # wrong sample's alignment in IGV.
+        alias = tmp / "alias.xlsx"
+        make_group_table(
+            alias, ["19-1234_Bovine_USA", "19-1234_2_Bovine_USA", "20-9999_Bovine_USA"],
+            6, call_at=lambda i, c: "A" if c == i + 1 else "C")
+        w = xlsx_html.render_filtered_window(
+            alias, 7, 6, None, "p", {"19-1234"}, set(),
+            ["19-1234_Bovine_USA"],          # ONE tip selected
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        f = w["filter"]
+        assert_eq(f["matched"], 1, "only the selected isolate matched")
+        assert_eq(f["dropped_ambiguous"], 1, "the look-alike row was excluded")
+        assert_eq(w["filter"]["locus_shown"], 1,
+                  "…and the intruder's private SNP is not a column")
+        # The surviving row does NOT claim the ambiguous stem. Deliberately
+        # conservative: a stem two different labels resolve to is not a reliable
+        # identity for either of them, so it is not used as an IGV target at all
+        # — including for the exactly-matched row. The cost is one lost link in a
+        # rare naming situation; the alternative is a cell that opens a different
+        # specimen's reads while looking entirely normal.
+        assert_true("19-1234" not in [s for s in w["row_samples"] if s],
+                    "no row carries the ambiguous stem as its IGV target")
+        assert_true(sum(r.count("xlsx-variant") for r in w["rows"]) == 0,
+                    "…so no cell in it is clickable")
+        assert_true(sum(r.count("xlsx-igv-none") for r in w["rows"]) > 0,
+                    "…and the cells say why (tooltip: no data for this name)")
+        page = xlsx_html.compose_page(w)
+        assert_true("could not be told apart" in page, "the exclusion is disclosed")
+
+        print("\n[the annotation row is structural even when named differently]")
+        # vsnp3 writes "no annotations" when the group has no GBK. Read as a
+        # sample, it was dropped from every filtered view — losing the gene and
+        # amino-acid annotation for the positions being inspected.
+        annot = tmp / "annot.xlsx"
+        make_group_table(annot, ["S1", "S2"], 6, call_at=lambda i, c: "A")
+        wb = openpyxl.load_workbook(annot)
+        wb.active.cell(row=6, column=1, value="no annotations")
+        wb.save(annot)
+        wb.close()
+        w = xlsx_html.render_filtered_window(
+            annot, 6, 6, None, "p", {"S1", "S2"}, set(), ["S1"],
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        assert_eq(w["filter"]["total_samples"], 2,
+                  "'no annotations' is not counted as a sample")
+        assert_eq(w["row_samples"], ["", "", "S1", "", ""],
+                  "…and the annotation row is kept in the filtered view")
+
         print("\n[a selection that matches nothing is an error, not a table]")
         try:
             xlsx_html.render_filtered_window(
@@ -206,7 +305,14 @@ def main() -> int:
         assert_true("Clade filter not applied" in page,
                     "the page says the filter did not apply")
 
-        print("\n[too-large selections fall back to row filtering only]")
+        # A filtered window that had to give something up is NOT shown as a
+        # table. It is reported as partial, and the endpoint replaces it with the
+        # "this clade is still too large" page. That matters more than a banner:
+        # the truncation always takes the column TAIL, and in cascade order the
+        # tail is the private SNPs — on a real 149-sample clade that silently
+        # dropped 3,478 of its 10,000 matching positions while the banner's
+        # leading clause still read "positions with no SNP … are hidden".
+        print("\n[a clade too large to filter by position is reported partial]")
         saved = xlsx_html.FILTER_BUFFER_MAX_CELLS
         xlsx_html.FILTER_BUFFER_MAX_CELLS = 10   # force the fallback
         try:
@@ -217,15 +323,12 @@ def main() -> int:
         finally:
             xlsx_html.FILTER_BUFFER_MAX_CELLS = saved
         f = w["filter"]
-        assert_true(not f["column_filter"], "column filter skipped")
-        assert_eq(f["matched"], 2, "rows still filtered")
-        assert_eq(w["shown_cols"], total_cols,
-                  "columns are the leading ones, not the clade's")
-        page = xlsx_html.compose_page(w)
-        assert_true("too large for per-SNP filtering" in page,
-                    "the fallback is disclosed on the page")
+        assert_true(not f["column_filter"], "the per-position filter was skipped")
+        assert_eq(f["matched"], 2, "rows were still filtered")
+        assert_true(xlsx_html.window_is_partial(w),
+                    "the window reports itself partial, so no table is served")
 
-        print("\n[budgets truncate the column tail and say so]")
+        print("\n[a budget-truncated clade is reported partial too]")
         wide = tmp / "wide.xlsx"
         make_group_table(
             wide, [f"S{i}" for i in range(1, 4)], 400,
@@ -236,14 +339,12 @@ def main() -> int:
             xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
             max_table_bytes=4096)
         assert_true(w["filter"]["truncated_cols"] > 0, "columns were dropped")
-        assert_true(w["shown_cols"] < 400, "the window narrowed")
         rendered = sum(len(r) for r in w["rows"])
         assert_true(rendered < 4096 * 1.6,
                     f"output ({rendered} B) respects the byte budget")
-        page = xlsx_html.compose_page(w)
-        assert_true("size budget" in page, "the truncation is disclosed")
+        assert_true(xlsx_html.window_is_partial(w), "…and it reports partial")
 
-        print("\n[the row cap keeps the first matches and says so]")
+        print("\n[a clade past the row cap is reported partial]")
         w = xlsx_html.render_filtered_window(
             book, total_rows, total_cols, None, "p", bams, set(),
             [f"S{i}_meta_country" for i in range(1, 5)],
@@ -251,8 +352,7 @@ def main() -> int:
         assert_eq(w["filter"]["shown_samples"], 2,
                   "max_rows=10 leaves room for 2 sample rows")
         assert_eq(w["filter"]["truncated_rows"], 2, "the rest are counted")
-        page = xlsx_html.compose_page(w)
-        assert_true("only the first" in page, "the row cap is disclosed")
+        assert_true(xlsx_html.window_is_partial(w), "…and it reports partial")
 
         print("\n[selection tokens: deterministic, stored, recoverable]")
         os.environ["VSNP_GUI_PREVIEW_CACHE_DIR"] = str(tmp / "cache")

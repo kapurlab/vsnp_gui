@@ -1622,6 +1622,16 @@ html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
    and highlight under the cursor, and the node markers — a much easier target
    for the same clade — grow enough to aim at. */
 .tree-pick path.branch { stroke-width:3px;cursor:pointer; }
-.tree-pick path.branch:hover { stroke:#1d5fbf;stroke-width:5px; }
-.tree-pick g.node circle,.tree-pick circle.node-marker { cursor:pointer;r:4px; }
-.tree-pick g.node:hover circle,.tree-pick circle.node-marker:hover { fill:#1d5fbf;r:6px; }
+/* Deliberately NO stroke-width on hover: phylotree.css already widens
+   .branch:hover to 10px for exactly this purpose, and any value set here wins on
+   specificity — a 5px rule made pick mode's sticky area HALF that of normal
+   mode, the opposite of the intent. */
+.tree-pick path.branch:hover { stroke:#1d5fbf; }
+/* The fork markers are `g.internal-node`, not `g.node`: phylotree classes leaves
+   `node` and internal nodes `internal-node`, and `.node` matches neither token of
+   the other. Targeting `g.node circle` styled nothing whatsoever (leaves carry no
+   circle with draw-size-bubbles off), so the "easier target" was never easier.
+   These are also the elements that need it most — phylotree sizes them
+   min(font*0.75, 3), which measures r=0.476 on a 1,000-tip tree. */
+.tree-pick g.internal-node circle,.tree-pick g.node circle { cursor:pointer;r:4px; }
+.tree-pick g.internal-node:hover circle,.tree-pick g.node:hover circle { fill:#1d5fbf;r:6px; }

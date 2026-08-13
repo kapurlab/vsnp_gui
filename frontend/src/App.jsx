@@ -106,6 +106,11 @@ export default function App() {
   // Version of the deployed checkout as reported by the backend (git
   // describe — the same string the Diagnostic Tools Dashboard shows).
   const [serverVersion, setServerVersion] = useState("");
+  // Startup phases, so the banners can be honest: before the config arrives
+  // the app is STARTING (say so), not "Setup required"; the projects scan
+  // finishes later still (minutes on a cold HPC filesystem).
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   // Server-side path browser. mode "folder" picks the projects root; mode
   // "files" multi-selects FASTQs already on the server (see openFileBrowser).
   const [folderBrowser, setFolderBrowser] = useState({
@@ -1197,20 +1202,12 @@ export default function App() {
   }
 
   async function loadAll() {
-    const [cfg, proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
-      fetch(`${API_BASE}/api/config`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/references`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
-      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
-      fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
-    ]);
-    setRefPaths(paths.paths || []);
+    // Config FIRST and alone: it is a quick file read, while the project scan
+    // below stats thousands of sample dirs and can take minutes on a cold HPC
+    // filesystem. Awaiting them together held the Settings paths — and left
+    // the "Setup required" banner up — hostage to the slowest scan.
+    const cfg = await fetch(`${API_BASE}/api/config`).then((r) => r.json());
     setConfig(cfg);
-    setProjects(proj);
-    setReferences(refs);
-    setVcfDbFolders(dbFolders || []);
-    setPosthocTools(posthocToolsResp || []);
     setSettings({
       vsnp3_path: cfg.vsnp3_path || "",
       projects_root: cfg.projects_root || "",
@@ -1226,6 +1223,20 @@ export default function App() {
     if (cfg._validation) {
       setPathValidation(cfg._validation);
     }
+    setConfigLoaded(true);
+    const [proj, refs, dbFolders, posthocToolsResp, paths] = await Promise.all([
+      fetch(`${API_BASE}/api/projects`).then((r) => r.json()),
+      fetch(`${API_BASE}/api/references`).then((r) => r.json()),
+      fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
+      fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
+    ]);
+    setRefPaths(paths.paths || []);
+    setProjects(proj);
+    setReferences(refs);
+    setVcfDbFolders(dbFolders || []);
+    setPosthocTools(posthocToolsResp || []);
+    setProjectsLoaded(true);
     if (selectedProject && !proj.find((p) => p.name === selectedProject)) {
       setSelectedProject("");
     }
@@ -4095,7 +4106,13 @@ export default function App() {
             <option key={ref.name} value={ref.name} />
           ))}
         </datalist>
-        {!settingsReady ? (
+        {!configLoaded ? (
+          <div className="panel alert-banner">
+            <strong>Starting up…</strong> Gathering saved settings and this session's resources.
+            The first load of a fresh session can take a few minutes on an HPC filesystem —
+            nothing is wrong, and this message clears by itself.
+          </div>
+        ) : !settingsReady ? (
           <div className="panel alert-banner">
             <strong>Setup required:</strong> Set vSNP3 path, projects root, and conda env in Settings,
             then click Save + Preflight.
@@ -4317,6 +4334,11 @@ export default function App() {
               ) : null}
             </div>
             <div className="list">
+              {!projectsLoaded && projects.length === 0 ? (
+                <div className="muted" style={{ padding: "6px 4px" }}>
+                  Scanning projects… (large projects can take a while on a fresh session)
+                </div>
+              ) : null}
               {projects.map((p) => (
                 <div key={p.name} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                 <div

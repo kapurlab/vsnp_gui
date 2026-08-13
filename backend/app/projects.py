@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -202,10 +203,12 @@ def list_projects(roots: RootsLike) -> List[Dict]:
             # reference without a name field; the directory is the source of
             # truth for the project's identity.
             meta["name"] = p.name
-            meta.update(_project_counts(p))
+            # Activity first: it is a handful of stats and doubles as the
+            # cache signature for the (much more expensive) counts below.
+            activity = _project_last_activity(p)
+            meta.update(_project_counts(p, activity))
             meta["scope"] = scope
             meta["_root"] = str(root)
-            activity = _project_last_activity(p)
             meta["_mtime"] = activity
             # ISO string for display; the frontend sorts/labels by recency.
             from datetime import datetime
@@ -261,34 +264,179 @@ def _resolve_project_dir(projects_root: Path, name: str) -> Path:
     return projects_root / name
 
 
-def _count_project_reads(download_dir: Path, step1_dir: Path) -> int:
-    """Count a project's input read files (``*.fastq.gz``).
+def _is_read_file(name: str) -> bool:
+    """A project input read: ``*.fastq.gz``, excluding vSNP3's unmapped subset."""
+    return name.endswith(".fastq.gz") and "_unmapped_" not in name
 
-    Native projects keep reads in ``download/``; Roar-imported projects keep
-    them in ``step1/<sample>/`` (and may also symlink them into ``download/``).
-    Count the union of both, deduped by resolved path so a ``download/`` symlink
-    pointing at a ``step1`` read isn't double-counted. Skip ``*_unmapped_*``
-    (the unmapped-read subset vSNP3 emits alongside the real reads — not an
-    input read set). ``step1`` is globbed one level deep (reads live directly
-    under each sample dir) to avoid walking the per-sample alignment subtrees."""
-    seen: set = set()
-    candidates = []
-    if download_dir.is_dir():
-        candidates += download_dir.rglob("*.fastq.gz")
-    if step1_dir.is_dir():
-        candidates += step1_dir.glob("*/*.fastq.gz")
-    for f in candidates:
-        if "_unmapped_" in f.name:
-            continue
+
+def _add_read_identity(entry: "os.DirEntry", dir_dev: Optional[int], seen: set) -> None:
+    """Record a read file's identity so the same file is never counted twice.
+
+    Reads live in ``download/`` on native projects and in ``step1/<sample>/``
+    on imported ones, and one is often a symlink to the other — so the count
+    is of DISTINCT files, not dirents. Identity is (device, inode):
+
+      - plain file: the inode comes from the directory entry itself, so this
+        costs nothing at all;
+      - symlink: one stat that follows the link, giving the target's identity,
+        which is what makes a download/ -> step1/ link collapse to one file.
+
+    The previous implementation called ``Path.resolve()`` on EVERY read; on a
+    9,000-sample project over a network filesystem that was ~18,000 extra
+    path-walk round-trips every time the project list was fetched. (dev, ino)
+    is also strictly more accurate — it catches hard links, which resolve()
+    reports as two different files.
+    """
+    try:
+        if entry.is_symlink():
+            st = entry.stat()                     # follows -> target identity
+            seen.add((st.st_dev, st.st_ino))
+        elif dir_dev is not None:
+            seen.add((dir_dev, entry.inode()))    # free: straight from the dirent
+        else:
+            st = entry.stat(follow_symlinks=False)
+            seen.add((st.st_dev, st.st_ino))
+    except OSError:
+        # Unreadable/vanished mid-scan: fall back to the path so it still
+        # counts once rather than disappearing from the badge.
+        seen.add(entry.path)
+
+
+def _dir_device(path: Path) -> Optional[int]:
+    try:
+        return path.stat().st_dev
+    except OSError:
+        return None
+
+
+def _scan_download_reads(download_dir: Path, seen: set) -> None:
+    """Add every read under ``download/`` (recursively) to the identity set."""
+    if not download_dir.is_dir():
+        return
+    stack = [download_dir]
+    while stack:
+        current = stack.pop()
+        dev = _dir_device(current)
         try:
-            key = f.resolve()
+            with os.scandir(current) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                    elif _is_read_file(entry.name):
+                        _add_read_identity(entry, dev, seen)
         except OSError:
-            key = f
-        seen.add(key)
-    return len(seen)
+            continue
 
 
-def _project_counts(project_dir: Path) -> Dict:
+def _scan_step1(step1_dir: Path, seen: set) -> Tuple[int, int]:
+    """One pass over step1/ for every number the project card needs.
+
+    Returns (sample_count, zc_vcf_count) and adds each sample's reads to the
+    shared identity set.
+
+    Previously this cost FOUR separate traversals of every sample directory —
+    an ``iterdir`` for the sample count, a ``*/*.fastq.gz`` glob, an
+    ``*/alignment_*/*_zc.vcf`` glob and a legacy ``*/alignment/*_zc.vcf``
+    glob. On the 9,364-sample Ames project that is tens of thousands of
+    directory reads for one project listing, and the GUI re-fetches
+    /api/projects after most actions, so the whole app stalled for minutes
+    each time. Identical numbers, one traversal.
+    """
+    if not step1_dir.is_dir():
+        return 0, 0
+    sample_dirs = []
+    try:
+        with os.scandir(step1_dir) as it:
+            for entry in it:
+                # Real sample dirs only — the writer's _provenance/ sibling and
+                # dot-dirs are excluded, matching the inline sample browser.
+                if entry.name.startswith(("_", ".")):
+                    continue
+                if entry.is_dir():
+                    sample_dirs.append(entry.path)
+    except OSError:
+        return 0, 0
+
+    vcfs = 0
+    for sample_path in sample_dirs:
+        align_dirs = []
+        dev = _dir_device(Path(sample_path))
+        try:
+            with os.scandir(sample_path) as it:
+                for entry in it:
+                    name = entry.name
+                    # Reads live directly under the sample dir.
+                    if _is_read_file(name):
+                        _add_read_identity(entry, dev, seen)
+                    # alignment_<ref>/ plus the legacy suffix-less alignment/
+                    # of pre-GUI runs, so old projects' badges count too.
+                    elif (name == "alignment" or name.startswith("alignment_")) \
+                            and entry.is_dir():
+                        align_dirs.append(entry.path)
+        except OSError:
+            continue
+        for align_path in align_dirs:
+            try:
+                with os.scandir(align_path) as it:
+                    for entry in it:
+                        if entry.name.endswith("_zc.vcf"):
+                            vcfs += 1
+            except OSError:
+                continue
+    return len(sample_dirs), vcfs
+
+
+def _count_vcf_database(vcfs_dir: Path) -> Tuple[int, int]:
+    """(step2_vcfs, vcfs_count) from ONE scan of the cumulative VCF store.
+
+    Was three globs over the same directory; on a 9k-VCF database that is
+    three full directory reads for two numbers.
+    """
+    if not vcfs_dir.is_dir():
+        return 0, 0
+    plain = collected = 0
+    try:
+        with os.scandir(vcfs_dir) as it:
+            for entry in it:
+                name = entry.name
+                if name.endswith(".vcf"):
+                    plain += 1
+                if name.endswith("_zc.vcf") or name.endswith("_zc.vcf.gz"):
+                    collected += 1
+    except OSError:
+        return 0, 0
+    return plain, collected
+
+
+# Per-project count cache — deliberately a BURST COALESCER, not a real cache.
+#
+# /api/projects is re-fetched from 13 places in the GUI, several of which fire
+# within the same moment (mount, then again after the first action completes),
+# and on a big project this scan is the most expensive thing the backend does.
+# Repeating it twice in one second is pure waste.
+#
+# The TTL is a few seconds ON PURPOSE. These counts cannot be cached safely for
+# longer: a VCF written deep inside step1/<sample>/alignment_<ref>/ bumps no
+# parent directory's mtime, so no cheap signature can notice it, and mtime
+# resolution is coarse enough that several changes can share one tick. A window
+# this short cannot show anyone a meaningfully stale badge, while still
+# collapsing the duplicate scans that made the GUI feel frozen.
+_COUNTS_CACHE: Dict[str, Tuple[float, float, Dict]] = {}
+_COUNTS_TTL_SECONDS = 3.0
+
+
+def _project_counts(project_dir: Path, activity: Optional[float] = None) -> Dict:
+    import time as _time
+
+    key = str(project_dir)
+    sig = activity if activity is not None else _project_last_activity(project_dir)
+    cached = _COUNTS_CACHE.get(key)
+    now = _time.time()
+    if cached is not None:
+        cached_sig, cached_at, counts = cached
+        if cached_sig == sig and (now - cached_at) < _COUNTS_TTL_SECONDS:
+            return dict(counts)
+
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
     step2_dir = project_dir / "step2"
@@ -296,30 +444,22 @@ def _project_counts(project_dir: Path) -> Dict:
     # "collected VCFs" badge) and step2_vcfs both read from it.
     vcfs_dir = vcf_db_dir(step2_dir)
     try:
-        return {
-            "fastq_count": _count_project_reads(download_dir, step1_dir),
-            # Count real sample dirs only — exclude the writer's _provenance/
-            # sibling and any dot-dirs so the badge matches the inline sample
-            # browser (which lists the same non-hidden step1 subdirs).
-            "step1_samples": len([
-                d for d in step1_dir.iterdir()
-                if d.is_dir() and not d.name.startswith(("_", "."))
-            ]) if step1_dir.exists() else 0,
-            # alignment_<ref>/ plus the legacy suffix-less alignment/ of pre-GUI
-            # runs, so old projects' badges count their existing VCFs.
-            "step1_vcfs": (
-                len(list(step1_dir.glob("*/alignment_*/*_zc.vcf")))
-                + len(list(step1_dir.glob("*/alignment/*_zc.vcf")))
-            ) if step1_dir.exists() else 0,
+        # One shared identity set across both read locations, so a download/
+        # symlink pointing at a step1 read (or the reverse) counts once.
+        reads: set = set()
+        _scan_download_reads(download_dir, reads)
+        step1_samples, step1_vcfs = _scan_step1(step1_dir, reads)
+        step2_vcfs, vcfs_count = _count_vcf_database(vcfs_dir)
+        counts = {
+            "fastq_count": len(reads),
+            "step1_samples": step1_samples,
+            "step1_vcfs": step1_vcfs,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
-            "step2_vcfs": len(list(vcfs_dir.glob("*.vcf"))) if vcfs_dir.exists() else 0,
-            "vcfs_count": (
-                len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
-                if vcfs_dir.exists() else 0
-            ),
+            "step2_vcfs": step2_vcfs,
+            "vcfs_count": vcfs_count,
         }
     except PermissionError:
-        return {
+        counts = {
             "fastq_count": 0,
             "step1_samples": 0,
             "step1_vcfs": 0,
@@ -327,6 +467,13 @@ def _project_counts(project_dir: Path) -> Dict:
             "step2_vcfs": 0,
             "vcfs_count": 0,
         }
+    _COUNTS_CACHE[key] = (sig, now, counts)
+    # Bound the cache: projects come and go (create/archive/delete), and this
+    # process is long-lived.
+    if len(_COUNTS_CACHE) > 256:
+        for stale_key in sorted(_COUNTS_CACHE, key=lambda k: _COUNTS_CACHE[k][1])[:64]:
+            _COUNTS_CACHE.pop(stale_key, None)
+    return dict(counts)
 
 
 def _now_iso() -> str:

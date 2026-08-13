@@ -4290,9 +4290,10 @@ export default function App() {
                 </div>
               </div>
               <div className="input-column">
-                <label className="label" style={{fontWeight:600, color:"var(--text)", fontSize:"13px", marginBottom:0}}>Optional</label>
-                {/* bcftools is provided by the vsnp3 conda env (resolved from PATH
-                    by the backend), so there's no path to configure or check here. */}
+                {/* No "Optional" heading: it labelled a group of one, and a
+                    setting that is plainly not required needs no announcing.
+                    bcftools is provided by the vsnp3 conda env (resolved from
+                    PATH by the backend), so there's no path to configure. */}
                 <div className="settings-row">
                   <label className="label">Max parallel</label>
                   <input

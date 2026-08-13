@@ -1104,6 +1104,35 @@ button:hover:not(:disabled) {
   position: relative;
 }
 
+/* Step 2 group search. Deliberately a sibling of .results-list, never a child:
+   that element is the scroll container, so a search box inside it scrolled away
+   exactly when it was being used. Sits under the Comparison picker and holds
+   still while the groups it filters scroll beneath it. */
+.step2-group-search {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 8px;
+}
+
+.step2-group-search input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9em;
+  padding: 3px 6px;
+  box-sizing: border-box;
+}
+
+.step2-group-search-count {
+  font-size: 0.85em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.step2-group-search .ghost.action {
+  font-size: 0.85em;
+}
+
 .results-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

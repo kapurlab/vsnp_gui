@@ -7276,6 +7276,30 @@ export default function App() {
                 : sortedStep2Groups;
               return (
                 <>
+                  {/* Group search sits ABOVE .results-list on purpose. That div is
+                      the scroll container (max-height + overflow:auto), so a search
+                      box inside it scrolled out of view the moment you started
+                      looking through the groups it filters — the one control you
+                      need while scrolling was the first thing to leave. Here it is
+                      directly under the Comparison picker and stays put. */}
+                  {sortedStep2Groups.length && groupSearchAvailable ? (
+                    <div className="step2-group-search">
+                      <input
+                        type="text"
+                        placeholder="Search groups by sample (e.g. TX)…"
+                        value={step2GroupSearch}
+                        onChange={(e) => setStep2GroupSearch(e.target.value)}
+                      />
+                      {groupQuery ? (
+                        <span className="step2-group-search-count">
+                          {searchedStep2Groups.length} of {sortedStep2Groups.length}
+                        </span>
+                      ) : null}
+                      {step2GroupSearch ? (
+                        <button className="ghost action" onClick={() => setStep2GroupSearch("")}>Clear</button>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {snpToolMissing ? (
                     <div className="note warning">
                       SNP distances unavailable: missing {snpTool.missing?.join(", ") || "dependencies"}.
@@ -7304,25 +7328,6 @@ export default function App() {
                     </div>
                   </div>
                 ))
-              ) : null}
-              {sortedStep2Groups.length && groupSearchAvailable ? (
-                <div style={{display:"flex", alignItems:"center", gap:"0.5rem", margin:"0.4rem 0"}}>
-                  <input
-                    type="text"
-                    placeholder="Search groups by sample (e.g. TX)…"
-                    value={step2GroupSearch}
-                    onChange={(e) => setStep2GroupSearch(e.target.value)}
-                    style={{flex:1, fontSize:"0.9em", padding:"3px 6px", boxSizing:"border-box"}}
-                  />
-                  {groupQuery ? (
-                    <span style={{fontSize:"0.85em", color:"var(--muted)", whiteSpace:"nowrap"}}>
-                      {searchedStep2Groups.length} of {sortedStep2Groups.length}
-                    </span>
-                  ) : null}
-                  {step2GroupSearch ? (
-                    <button className="ghost action" style={{fontSize:"0.85em"}} onClick={() => setStep2GroupSearch("")}>Clear</button>
-                  ) : null}
-                </div>
               ) : null}
               {sortedStep2Groups.length ? (
                 <div className="results-groups">

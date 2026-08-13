@@ -37,6 +37,7 @@ What we don't try to preserve:
 from __future__ import annotations
 
 import html
+import json
 import re
 from pathlib import Path
 from urllib.parse import quote
@@ -72,16 +73,20 @@ _LOCUS_RE = re.compile(r"^[A-Za-z0-9_.\-]+:\d+$")
 # cells and CF rules that reference other cells, neither of which vSNP3 emits,
 # and it is the path with no size bound at all.
 STREAM_ABOVE_CELLS = 20_000
-# Rendered-cell budget for the streaming path. ~120k cells keeps the page in
-# the low tens of MB (measured), which browsers open in a few seconds.
-DEFAULT_MAX_CELLS = 120_000
-DEFAULT_MAX_ROWS = 5_000
+# The window held on the server. Cells are cheap enough now (~25 bytes, see the
+# style palette and delegated IGV handler) that a 1,000 x 1,000 window is a
+# ~25 MB document — held server-side and streamed to the page in row batches,
+# never sent in one piece.
+DEFAULT_MAX_CELLS = 1_000_000
+DEFAULT_MAX_ROWS = 1_000
+# Rows in the first response. The rest arrive as the user scrolls.
+DEFAULT_INITIAL_ROWS = 200
 # …and a cap on the RENDERED BYTES, which is what actually decides whether a
 # page opens and how much disk a cached preview costs. A cell budget alone
 # bounds neither: bytes per cell range from ~30 (a plain cell) to ~450 (a
 # variant cell carrying an IGV launch anchor), so a 480 KB sheet of mostly
 # variant cells rendered to 48 MB while a 35 MB sheet rendered to 1.4 MB.
-DEFAULT_MAX_TABLE_BYTES = 12 * 1024 * 1024
+DEFAULT_MAX_TABLE_BYTES = 64 * 1024 * 1024
 _NON_SAMPLE_LABELS = {
     "root", "mq", "annotation", "position not annotated",
     "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
@@ -709,7 +714,7 @@ def _cf_fragments_for(cell, row_idx: int, col_idx: int,
     return []
 
 
-def _render_streaming(
+def render_window(
     xlsx_path: Path,
     total_rows: int,
     total_cols: int,
@@ -767,6 +772,13 @@ def _render_streaming(
         rows_cells: list[list[str]] = []
         effective_cols = render_cols
         bytes_so_far = 0
+        # Style palette: identical inline styles repeat across tens of
+        # thousands of cells in these tables, so each distinct one becomes a
+        # class emitted once in a <style> block. Together with dropping the
+        # per-cell IGV anchor (see below) this takes a cell from ~450 bytes to
+        # ~25, which is the difference between showing 24 columns and 1,000.
+        style_classes: dict[str, str] = {}
+        row_samples: list[str] = []
 
         # Row/column indices are tracked by position, not read off the cell:
         # a read-only sheet yields `EmptyCell` for gaps, and those carry no
@@ -796,6 +808,7 @@ def _render_streaming(
                         row_stem = _canonical_stem(
                             stem, samples_with_bams, samples_with_vcfs)
 
+            row_samples.append(row_stem)
             cells: list[str] = []
             for col_idx, cell in enumerate(row, start=1):
                 if col_idx > effective_cols:
@@ -811,6 +824,12 @@ def _render_streaming(
                 if cf_frags:
                     inline = "; ".join([p for p in (inline,) if p] + cf_frags)
                 classes = []
+                if inline:
+                    cls = style_classes.get(inline)
+                    if cls is None:
+                        cls = f"k{len(style_classes)}"
+                        style_classes[inline] = cls
+                    classes.append(cls)
                 if row_idx <= freeze_row:
                     classes.append("xlsx-sticky-top")
                 if col_idx <= freeze_col:
@@ -819,27 +838,29 @@ def _render_streaming(
                 if rot_class:
                     classes.append(rot_class)
                 value = _format_cell_value(cell)
-                cell_inner = value
+                # A variant cell is marked with a class and NOTHING else. The
+                # sample is already in the row's first cell and the locus in
+                # the header row, so a delegated click handler can work both
+                # out from the cell's position — which removes an anchor
+                # carrying a duplicated href, onclick, title and target from
+                # every one of tens of thousands of cells.
                 if (row_stem and col_idx in positions
                         and "background-color" in inline):
                     has_bam = samples_with_bams is None or row_stem in samples_with_bams
                     has_vcf = (samples_with_vcfs is not None
                                and row_stem in samples_with_vcfs)
-                    this_loadable = (
+                    loadable = (
                         samples_with_bams is None and samples_with_vcfs is None
                     ) or has_bam or has_vcf
-                    cell_inner = _igv_cell_html(
-                        value,
-                        project=project,
-                        this_stem=row_stem,
-                        locus=positions[col_idx],
-                        this_loadable=this_loadable,
-                        this_calls_only=(not has_bam) and has_vcf,
-                    )
-                    classes.append("xlsx-variant")
+                    if not loadable:
+                        classes.append("xlsx-igv-none")
+                    elif (not has_bam) and has_vcf:
+                        classes.append("xlsx-variant")
+                        classes.append("xlsx-igv-calls-only")
+                    else:
+                        classes.append("xlsx-variant")
                 attrs = f' class="{" ".join(classes)}"' if classes else ""
-                style_attr = f' style="{inline}"' if inline else ""
-                cells.append(f"<td{attrs}{style_attr}>{cell_inner}</td>")
+                cells.append(f"<td{attrs}>{value}</td>")
             rows_cells.append(cells)
             bytes_so_far += sum(len(c) for c in cells)
 
@@ -875,33 +896,74 @@ def _render_streaming(
         rows_cells = [r[:effective_cols] for r in rows_cells]
         colgroup_parts = colgroup_parts[:effective_cols]
     render_cols = min(render_cols, effective_cols)
-    truncated = render_rows < total_rows or render_cols < total_cols
-    rows_html = ["<tr>" + "".join(r) + "</tr>" for r in rows_cells]
+    render_rows = len(rows_cells)
+
+    style_css = "".join(f".{cls}{{{style}}}" for style, cls in style_classes.items())
+    return {
+        "title": title or xlsx_path.name,
+        "filename": xlsx_path.name,
+        "sheet": sheet_title,
+        "total_rows": total_rows,
+        "total_cols": total_cols,
+        "shown_rows": render_rows,
+        "shown_cols": render_cols,
+        "style_css": style_css,
+        "colgroup": "".join(colgroup_parts),
+        # One entry per rendered row, so the page can ship a prefix and fetch
+        # the rest as the user scrolls instead of sending everything at once.
+        "rows": ["<tr>" + "".join(r) + "</tr>" for r in rows_cells],
+        # Per-row sample stem and per-column locus, so the delegated IGV click
+        # handler can resolve a cell without any per-cell markup.
+        "row_samples": row_samples,
+        "loci": {str(k): v for k, v in positions.items()},
+        "project": project or "",
+    }
+
+
+def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
+    """Build the preview page from a rendered window.
+
+    Only the first `initial_rows` rows are inlined; the rest are fetched by the
+    page as it is scrolled. A 1,000 x 1,000 window is a million cells — fine to
+    hold on the server, far too much to hand a browser in one document.
+    """
+    rows = window["rows"]
+    head = "".join(rows[:initial_rows])
+    total_rows, total_cols = window["total_rows"], window["total_cols"]
+    shown_rows, shown_cols = window["shown_rows"], window["shown_cols"]
 
     notice = ""
-    if truncated:
+    if shown_rows < total_rows or shown_cols < total_cols:
+        bits = []
+        if shown_rows < total_rows:
+            bits.append(f"the first {shown_rows:,} of {total_rows:,} rows")
+        if shown_cols < total_cols:
+            bits.append(f"the first {shown_cols:,} of {total_cols:,} columns")
         notice = (
             '<div class="xlsx-truncated">'
-            f'<strong>Showing the first {render_rows:,} of {total_rows:,} rows '
-            f'and {render_cols:,} of {total_cols:,} columns.</strong> '
-            f'This sheet holds about {total_rows * total_cols:,} cells — far more '
-            'than a browser can lay out, so the preview renders the leading '
-            'block, which for a cascade table is the most informative end. '
-            'Use <em>Download xlsx</em> above for the complete table, and open '
-            'it in Excel or LibreOffice.'
+            f'<strong>Showing {" and ".join(bits)}.</strong> '
+            f'The full sheet is {total_rows:,} x {total_cols:,} '
+            f'({total_rows * total_cols:,} cells), more than a browser can lay '
+            'out. Use <em>Download xlsx</em> above for the complete table.'
             '</div>'
         )
 
-    table_html = ('<table class="xlsx"><colgroup>' + "".join(colgroup_parts)
-                  + "</colgroup>" + "".join(rows_html) + "</table>")
+    table_html = (f'<table class="xlsx" id="xlsxTable"><colgroup>{window["colgroup"]}'
+                  f'</colgroup><tbody id="xlsxBody">{head}</tbody></table>')
     return _PAGE_TEMPLATE.format(
-        title=html.escape(title or xlsx_path.name),
-        filename=html.escape(xlsx_path.name),
-        sheet=html.escape(sheet_title),
+        title=html.escape(window["title"]),
+        filename=html.escape(window["filename"]),
+        sheet=html.escape(window["sheet"]),
         rows=total_rows,
         cols=total_cols,
         notice=notice,
+        style_css=window["style_css"],
         table=table_html,
+        loaded=len(rows[:initial_rows]),
+        available=len(rows),
+        project=html.escape(window["project"], quote=True),
+        loci_json=json.dumps(window["loci"]),
+        samples_json=json.dumps(window["row_samples"]),
     )
 
 
@@ -943,10 +1005,10 @@ def xlsx_to_html(
     except Exception:
         total_rows = total_cols = 0
     if total_rows * total_cols > STREAM_ABOVE_CELLS:
-        return _render_streaming(
+        return compose_page(render_window(
             xlsx_path, total_rows, total_cols, title, project,
             samples_with_bams, samples_with_vcfs, max_cells, max_rows,
-        )
+        ))
 
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
     ws = wb.active
@@ -1091,6 +1153,9 @@ def xlsx_to_html(
     colgroup = "<colgroup>" + "".join(colgroup_parts) + "</colgroup>"
     table_html = '<table class="xlsx">' + colgroup + "".join(rows_html) + "</table>"
 
+    # The full-fidelity path styles every cell inline and gives each variant
+    # cell its own anchor, so it needs no style palette and has nothing to page
+    # through — the lazy-loading and delegated-click machinery simply sits idle.
     page = _PAGE_TEMPLATE.format(
         title=display_title,
         filename=html.escape(xlsx_path.name),
@@ -1098,7 +1163,13 @@ def xlsx_to_html(
         rows=ws.max_row,
         cols=ws.max_column,
         notice="",
+        style_css="",
         table=table_html,
+        loaded=0,
+        available=0,
+        project=html.escape(project or "", quote=True),
+        loci_json="{}",
+        samples_json="[]",
     )
     return page
 
@@ -1196,6 +1267,26 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 2px 4px;
     cursor: default;
   }}
+  /* Cheap variant cells (streaming renderer): the whole <td> is the launch
+     target, so it needs no inner anchor at all. The sample comes from the
+     row's first cell and the locus from the header row, both resolved by the
+     delegated click handler below. */
+  td.xlsx-variant {{ cursor: pointer; }}
+  td.xlsx-variant:hover {{
+    outline: 2px solid rgba(15, 22, 33, 0.6);
+    outline-offset: -2px;
+  }}
+  td.xlsx-igv-calls-only {{ font-style: italic; }}
+  td.xlsx-igv-none {{ cursor: default; }}
+  #xlsxMore {{
+    padding: 10px 20px; font-size: 13px; color: var(--xlsx-muted);
+  }}
+  #xlsxMore button {{
+    font: inherit; padding: 4px 10px; cursor: pointer;
+  }}
+  /* Per-cell styles, deduplicated into classes — the same handful of fills and
+     fonts repeat across every cell of these tables. */
+  {style_css}
 </style>
 </head>
 <body>
@@ -1205,9 +1296,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');window.location.href=u.toString();return false;">Download xlsx</a></span>
 </div>
 {notice}
-<div class="xlsx-wrap">
+<div class="xlsx-wrap" id="xlsxWrap">
 {table}
 </div>
+<div id="xlsxMore"></div>
 <script>
 // IGV launcher for cascade-table variant cells. First click opens a new
 // IGV tab; subsequent clicks reuse that tab additively (postMessage tells
@@ -1227,6 +1319,90 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     }}
     window.__vsnpIgvWin = window.open(url, "vsnp_igv");
   }};
+}})();
+
+// ---------------------------------------------------------------------------
+// Delegated variant-cell clicks + load-as-you-scroll.
+//
+// Both exist for the same reason: a cascade table is far too big to hand the
+// browser at once. Giving every variant cell its own <a href onclick title
+// target> cost ~450 bytes a cell, which capped the preview at ~24 columns of a
+// 10,001-column table. A cell now carries only a class; the sample is read from
+// its row's first cell and the locus from the header row, so one listener on
+// the table resolves any cell from its position.
+(function() {{
+  var LOCI = {loci_json};        // column index (1-based) -> "contig:pos"
+  var SAMPLES = {samples_json};  // row index (0-based, incl. header) -> stem
+  var PROJECT = "{project}";
+  var loaded = {loaded}, available = {available};
+  var body = document.getElementById("xlsxBody");
+  var more = document.getElementById("xlsxMore");
+  var table = document.getElementById("xlsxTable");
+  if (!body || !table) return;
+
+  table.addEventListener("click", function(ev) {{
+    var td = ev.target.closest ? ev.target.closest("td") : null;
+    if (!td || !td.classList.contains("xlsx-variant")) return;
+    var tr = td.parentNode;
+    // Row index within the whole table, so SAMPLES lines up after lazy loads.
+    var rowIdx = tr.rowIndex;
+    var colIdx = td.cellIndex + 1;
+    var sample = SAMPLES[rowIdx];
+    var locus = LOCI[String(colIdx)];
+    if (!sample || !locus) return;
+    var url = "../../../?view=igv&tracks=" + encodeURIComponent(PROJECT + ":" + sample)
+            + "&locus=" + encodeURIComponent(locus);
+    // Modifier-click keeps the browser's own "open in a new tab" behaviour.
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey) {{ window.open(url, "_blank"); return; }}
+    window.__vsnpLaunchIgv(url);
+  }});
+
+  if (loaded >= available) {{ if (more) more.remove(); return; }}
+
+  var busy = false, done = false;
+  function status() {{
+    more.innerHTML = done
+      ? ""
+      : "Showing " + loaded + " of " + available + " rows. "
+        + "<button type=\\"button\\" id=\\"xlsxMoreBtn\\">Load more</button>";
+    var b = document.getElementById("xlsxMoreBtn");
+    if (b) b.addEventListener("click", function() {{ fetchMore(); }});
+  }}
+  function fetchMore() {{
+    if (busy || done) return;
+    busy = true;
+    more.textContent = "Loading rows " + (loaded + 1) + "-"
+                     + Math.min(loaded + 200, available) + "…";
+    var u = new URL(window.location.href);
+    u.searchParams.set("rows_from", loaded);
+    u.searchParams.set("rows_count", 200);
+    fetch(u.toString(), {{ headers: {{ "Accept": "text/html" }} }})
+      .then(function(r) {{ if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }})
+      .then(function(htmlText) {{
+        if (!htmlText.trim()) {{ done = true; status(); return; }}
+        body.insertAdjacentHTML("beforeend", htmlText);
+        loaded = body.rows.length;
+        if (loaded >= available) done = true;
+        busy = false;
+        status();
+      }})
+      .catch(function(e) {{
+        busy = false;
+        more.textContent = "Could not load more rows (" + e.message + "). ";
+        var b = document.createElement("button");
+        b.textContent = "Retry";
+        b.addEventListener("click", function() {{ more.textContent = ""; fetchMore(); }});
+        more.appendChild(b);
+      }});
+  }}
+  // Load the next batch as the bottom of the table comes into view, and keep
+  // the button as the manual fallback (and for browsers without the observer).
+  status();
+  if (window.IntersectionObserver) {{
+    new IntersectionObserver(function(entries) {{
+      if (entries.some(function(e) {{ return e.isIntersecting; }})) fetchMore();
+    }}, {{ rootMargin: "600px" }}).observe(more);
+  }}
 }})();
 </script>
 </body>

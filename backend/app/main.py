@@ -6182,7 +6182,7 @@ def bootstrap():
 
 # Bumped whenever the rendered HTML changes, so old cache entries are ignored
 # rather than served as a stale preview.
-_XLSX_RENDER_VERSION = "3"
+_XLSX_RENDER_VERSION = "4"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6294,7 +6294,8 @@ def _xlsx_cache_path(
 
 
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
-def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
+def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
+                 rows_from: Optional[int] = None, rows_count: int = 200):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
     via openpyxl). With ?download=1, returns the raw xlsx (for the "Download
     xlsx" link inside the preview page)."""
@@ -6360,48 +6361,68 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     # without this every revisit pays the full cost again. Keyed on the file's
     # identity AND the renderer version, so a code change invalidates the lot.
     cached = _xlsx_cache_path(target, project, samples_with_bams, samples_with_vcfs)
+    window = None
     if cached is not None and cached.exists():
         try:
-            body = cached.read_text(encoding="utf-8")
+            window = json.loads(cached.read_text(encoding="utf-8"))
             # Mark it recently used so pruning drops the tables nobody opens,
             # not the one being read right now.
             try:
                 os.utime(cached, None)
             except OSError:
                 pass
-            return HTMLResponse(content=body)
-        except OSError:
-            pass  # unreadable cache entry: fall through and re-render
-    try:
-        html_page = xlsx_html.xlsx_to_html(
-            target,
-            project=project,
-            samples_with_bams=samples_with_bams,
-            samples_with_vcfs=samples_with_vcfs,
-        )
-    except MemoryError:
-        raise HTTPException(
-            status_code=507,
-            detail=(
-                "This spreadsheet is too large to render in the memory available "
-                "to this session. Use the Download xlsx link and open it in Excel "
-                "or LibreOffice."
-            ),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
-    if cached is not None:
+        except (OSError, ValueError):
+            window = None  # unreadable or stale entry: re-render below
+
+    if window is None:
         try:
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            tmp = cached.with_suffix(".part")
-            tmp.write_text(html_page, encoding="utf-8")
-            os.replace(tmp, cached)
-            # Keep the cache inside its budget. Done after the write so the
-            # entry just produced is the newest and survives.
-            _xlsx_cache_prune(cached.parent, _xlsx_cache_budget_bytes())
-        except OSError:
-            pass  # read-only cache location: serve it, just don't remember it
-    return HTMLResponse(content=html_page)
+            rows, cols = xlsx_html.sheet_extent(target)
+            if rows * cols <= xlsx_html.STREAM_ABOVE_CELLS:
+                # Small sheet: the original full-fidelity renderer, unchanged,
+                # and nothing to page through.
+                return HTMLResponse(content=xlsx_html.xlsx_to_html(
+                    target, project=project,
+                    samples_with_bams=samples_with_bams,
+                    samples_with_vcfs=samples_with_vcfs,
+                ))
+            window = xlsx_html.render_window(
+                target, rows, cols, None, project,
+                samples_with_bams, samples_with_vcfs,
+                xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
+            )
+        except MemoryError:
+            raise HTTPException(
+                status_code=507,
+                detail=(
+                    "This spreadsheet is too large to render in the memory available "
+                    "to this session. Use the Download xlsx link and open it in Excel "
+                    "or LibreOffice."
+                ),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500,
+                                detail=f"xlsx render failed: {type(e).__name__}: {e}")
+        if cached is not None:
+            try:
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cached.with_suffix(".part")
+                tmp.write_text(json.dumps(window), encoding="utf-8")
+                os.replace(tmp, cached)
+                # Keep the cache inside its budget. Done after the write so the
+                # entry just produced is the newest and survives.
+                _xlsx_cache_prune(cached.parent, _xlsx_cache_budget_bytes())
+            except OSError:
+                pass  # read-only cache location: serve it, just don't remember it
+
+    # A scroll request: return just the requested <tr> block. The window is
+    # rendered once and cached, so paging through a 1,000-row table costs one
+    # parse in total rather than one per batch.
+    if rows_from is not None:
+        start = max(0, int(rows_from))
+        count = max(1, min(int(rows_count or 200), 1000))
+        return HTMLResponse(content="".join(window["rows"][start:start + count]))
+
+    return HTMLResponse(content=xlsx_html.compose_page(window))
 
 
 @app.get("/api/projects/{project}/download-file")

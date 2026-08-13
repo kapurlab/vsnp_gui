@@ -52,11 +52,22 @@ pip install -r requirements.txt
 
 ## Configuration Issues
 
+### Issue: a big SNP table only shows part of itself
+
+A cascade table on a large group can be thousands of samples by ten thousand
+positions — tens of millions of cells, which no browser can lay out. The
+preview renders a **window of up to 1,000 rows × 1,000 columns**, ships the
+first 200 rows immediately, and loads the rest as you scroll (there is also a
+**Load more** button under the table). The banner at the top says exactly how
+much of the sheet you are seeing, and *Download xlsx* always gives the
+complete file.
+
 ### Issue: the SNP-table preview cache is using space in my home directory
 
 Opening a Step 2 SNP table renders it to HTML, which for the large ones takes
 tens of seconds — so the result is cached and every later visit is instant. The
-cache lives in `~/.cache/vsnp_gui/xlsx_preview/`.
+cache lives in `~/.cache/vsnp_gui/xlsx_preview/`. A cached window for one of
+the biggest tables is around 35 MB; most are far smaller.
 
 It is capped at **400 MB** by default and drops the least-recently-used entries
 once it is full, so it cannot grow without limit. A dropped entry costs one

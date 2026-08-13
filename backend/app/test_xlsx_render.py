@@ -77,18 +77,28 @@ def main() -> int:
         print("\n[the two renderers agree — colour comes from conditional formatting]")
         full = xlsx_html.xlsx_to_html(
             book, project="p", samples_with_bams=samples, samples_with_vcfs=set())
-        stream = xlsx_html._render_streaming(
+        window = xlsx_html.render_window(
             book, 30, 40, None, "p", samples, set(),
             xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        stream = xlsx_html.compose_page(window)
 
+        # The renderers express colour differently — the full one inline per
+        # cell, the streaming one as a class per distinct style — so compare
+        # what is actually equivalent: how many cells are coloured, and how
+        # many are clickable IGV targets.
         full_colour = full.count("background-color")
         assert_true(full_colour > 0, "the full renderer finds CF colour at all")
-        assert_eq(stream.count("background-color"), full_colour,
-                  "streaming finds the same number of coloured cells")
-        assert_eq(stream.count("xlsx-igv-cell"), full.count("xlsx-igv-cell"),
-                  "streaming produces the same number of IGV links")
-        assert_true(full.count("xlsx-igv-cell") > 0,
-                    "IGV links are produced (they hang off the CF colour)")
+        assert_true(window["style_css"].count("background-color") > 0,
+                    "streaming emits background colours in its style palette")
+        # Count the anchors themselves — the class name also appears in the
+        # stylesheet, which silently inflated a whole-page count by 3.
+        full_clickable = full.count('<a class="xlsx-igv-cell"')
+        stream_coloured = sum(r.count("xlsx-variant") for r in window["rows"])
+        assert_eq(stream_coloured, full_clickable,
+                  "streaming marks the same cells clickable as the full renderer")
+        assert_true(stream_coloured > 0,
+                    "variant cells are produced (they hang off the CF colour)")
+        assert_true("xlsxTable" in stream, "the page carries the delegated-click table")
 
         print("\n[a dense sheet is bounded in BYTES, not just cells]")
         # 120 x 900 = 108,000 cells, under the cell cap, but nearly all of them
@@ -97,16 +107,35 @@ def main() -> int:
         dense = tmp / "dense.xlsx"
         make_cascade_like(dense, rows=120, cols=900)
         many = {f"SAMPLE{i}" for i in range(1, 120)}
-        budget = 2 * 1024 * 1024
-        page = xlsx_html._render_streaming(
+        budget = 512 * 1024
+        w = xlsx_html.render_window(
             dense, 120, 900, None, "p", many, set(),
             xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
             max_table_bytes=budget)
-        assert_true(len(page) < budget * 1.6,
-                    f"page ({len(page)/1e6:.2f} MB) respects a {budget/1e6:.0f} MB budget")
-        assert_true("Showing the first" in page, "the trim is disclosed on the page")
-        assert_true(page.count("background-color") > 0,
+        rendered = sum(len(r) for r in w["rows"])
+        assert_true(rendered < budget * 1.6,
+                    f"window ({rendered/1024:.0f} KB) respects a {budget/1024:.0f} KB budget")
+        assert_true(w["shown_cols"] < 900, "the window was narrowed to fit")
+        page = xlsx_html.compose_page(w)
+        assert_true("Showing" in page, "the trim is disclosed on the page")
+        assert_true(sum(r.count("xlsx-variant") for r in w["rows"]) > 0,
                     "trimming did not cost the colour")
+
+        print("\n[the page ships a prefix and can serve the rest in batches]")
+        tall = tmp / "tall.xlsx"
+        make_cascade_like(tall, rows=500, cols=30)
+        w2 = xlsx_html.render_window(
+            tall, 500, 30, None, "p", {f"SAMPLE{i}" for i in range(1, 500)}, set(),
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        assert_eq(len(w2["rows"]), 500, "every row of the window is rendered")
+        first = xlsx_html.compose_page(w2, initial_rows=200)
+        assert_eq(first.count("<tr>"), 200, "only the first 200 rows are inlined")
+        assert_true("rows_from" in first, "the page knows how to ask for the rest")
+        # What the rows endpoint slices out — the same strings, no re-render.
+        batch = "".join(w2["rows"][200:400])
+        assert_eq(batch.count("<tr>"), 200, "a scroll batch is 200 rows")
+        assert_true(len(w2["row_samples"]) == 500,
+                    "a sample name per row, for resolving clicks after lazy loads")
 
         print("\n[a small sheet keeps the untouched full-fidelity path]")
         small = tmp / "small.xlsx"

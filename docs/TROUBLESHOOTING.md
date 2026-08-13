@@ -52,36 +52,57 @@ pip install -r requirements.txt
 
 ## Configuration Issues
 
-### Issue: a big SNP table only shows part of itself
+### Issue: a SNP table says it is too large to display
 
-A cascade table on a large group can be thousands of samples by ten thousand
-positions — tens of millions of cells, which no browser can lay out. The
-preview renders a **window of up to 1,000 rows × 1,000 columns**, ships the
-first 200 rows immediately, and loads the rest as you scroll (there is also a
-**Load more** button under the table). The banner at the top says exactly how
-much of the sheet you are seeing, and *Download xlsx* always gives the
-complete file.
+A cascade table on a large group can be a thousand samples by ten thousand
+positions — over ten million cells, which no browser can lay out. Such a table
+is **not** rendered in part: *View* answers immediately with a page that states
+the size and offers the two routes that work.
 
-**The better way into a big table is through its tree.** Open the group's
-`.tre` from Step 2 Results (*View tree*) and click the branch — or the node
-marker at the fork — leading into the clade you care about. No mode to switch
-on: clicking the tree selects clades by default whenever SNP tables sit beside
-it, and the green bar above the tree says so. The selected tips highlight, and
-*Open SNP table for clade* opens the group's table showing **only those samples
-and only the SNP positions they actually use** — positions where every selected
-sample matches the reference are hidden.
+1. **Download the spreadsheet** and open it in Excel, LibreOffice Calc or
+   OpenOffice Calc, which handle sheets this size with the colouring intact.
+2. **Open the group's tree and click a branch.** The table then opens showing
+   only that clade's samples and only the positions where they differ — usually
+   the comparison you wanted, and it opens in about a second.
 
-The node markers are the easier target: a branch is a hairline, so it only
-answers a click within a pixel or two of the line itself (they thicken and
-highlight under the cursor to help). If clicking does nothing at all, check
-whether **Reroot mode** is ticked — while it is, a branch click reroots the
-tree instead of selecting a clade, and the green bar says which mode has the
-click. On a 1,000 × 10,000 table a 30-sample clade typically comes back as
-a few-thousand-cell table with all the colour and the click-to-IGV cells
-intact, and a banner saying exactly what was filtered (with a *Show the full
-table* link back). Missing data (`-`/`N`) does not count as a SNP for the
-column choice, so one low-coverage sample cannot drag thousands of columns
-into the view.
+The cut-off is **one million cells** (`FULL_VIEW_MAX_CELLS` in
+`backend/app/xlsx_html.py`). Anything at or under it renders in full — every row
+and every column, the first 200 rows immediately and the rest as you scroll,
+with a **Load more** button as the fallback. There is no row cap: a tall narrow
+sheet renders entirely.
+
+Earlier releases showed the first 1,000 × 1,000 corner of an oversized table
+behind a "showing the first …" banner. That was withdrawn deliberately: a SNP
+table missing most of its positions still reads like a SNP table, and the
+banner was the only thing distinguishing the two.
+
+### Issue: how do I view part of a large table? (clade selection)
+
+Open the group's `.tre` from Step 2 Results (*View tree*) and click the branch —
+or the node marker at the fork — leading into the clade you want. There is no
+mode to switch on: clicking the tree selects clades by default whenever SNP
+tables sit beside it, and the bar above the tree says so. The selected tips
+highlight, and *Open SNP table for clade* opens the group's table showing **only
+those samples and only the positions where they differ from the reference**.
+
+On a 1,000 × 10,000 table a 30-sample clade comes back as a few-thousand-cell
+table in about a second, with the colouring and the click-to-IGV cells intact,
+and a banner stating exactly what was filtered (plus a link back to the full
+table). Missing data (`-`/`N`) does not count as a SNP for the column choice, so
+one low-coverage sample cannot drag thousands of positions into view.
+
+Two things to know if a click seems to do nothing:
+
+- **The node markers are the easier target.** A branch is a hairline, so it only
+  answers a click within a pixel or two of the line itself. Branches thicken and
+  highlight under the cursor to help; the round marker at a fork selects the
+  same clade.
+- **Check whether *Reroot mode* is ticked.** While it is, a branch click reroots
+  the tree instead of selecting a clade. The bar above the tree says which mode
+  has the click.
+
+If even the selected clade is too large to lay out, the same too-large page
+appears, and the advice becomes to select a smaller clade.
 
 ### Issue: the SNP-table preview cache is using space in my home directory
 

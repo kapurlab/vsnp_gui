@@ -3,6 +3,7 @@ from fastapi.responses import Response, FileResponse, HTMLResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
+from urllib.parse import quote
 from typing import List, Optional, Dict, Any, Tuple
 import zipfile
 import csv
@@ -6182,7 +6183,7 @@ def bootstrap():
 
 # Bumped whenever the rendered HTML changes, so old cache entries are ignored
 # rather than served as a stale preview.
-_XLSX_RENDER_VERSION = "5"
+_XLSX_RENDER_VERSION = "6"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6389,6 +6390,58 @@ def create_snp_selection(project: str, payload: SnpSelectionRequest):
     return {"token": token, "count": len(samples)}
 
 
+def _sibling_tree(target: Path) -> Optional[Path]:
+    """The tree file that belongs beside a SNP table, or None.
+
+    Same pairing rule as /tree-tables in reverse: vSNP3 writes each group's
+    tree and tables into one directory. The GUI's re-labeled tree is preferred
+    when present because its tips carry the descriptive names, which is what
+    someone reading a tree wants to see.
+    """
+    try:
+        trees = [p for p in target.parent.glob("*.tre")
+                 if p.is_file() and not p.name.startswith("~$")]
+    except OSError:
+        return None
+    if not trees:
+        return None
+    labeled = sorted(p for p in trees if p.name.endswith("_labeled.tre"))
+    plain = sorted(p for p in trees if not p.name.endswith("_labeled.tre"))
+    return (labeled or plain)[0]
+
+
+def _too_large_response(project: str, target: Path, path: str,
+                        rows: int, cols: int,
+                        clade_samples: Optional[int] = None) -> HTMLResponse:
+    """The page shown in place of a table that cannot be shown in full.
+
+    Both links are built relative to this endpoint so they survive the OOD
+    proxy prefix: the preview is served at
+    /api/projects/{p}/preview-xlsx, so `?path=...&download=1` re-enters this
+    same route, and `../../../` climbs back to the SPA root for the tree
+    viewer (the identical climb the variant cells' IGV links use).
+    """
+    from app import xlsx_html
+    tree = _sibling_tree(target)
+    tree_url = tree_name = None
+    if tree is not None:
+        tree_url = (f"../../../?view=tree&project={quote(project, safe='')}"
+                    f"&path={quote(str(tree), safe='')}")
+        tree_name = tree.name
+    return HTMLResponse(
+        content=xlsx_html.too_large_page(
+            filename=target.name, total_rows=rows, total_cols=cols,
+            tree_url=tree_url, tree_name=tree_name,
+            clade_samples=clade_samples,
+            download_url=f"?path={quote(path, safe='')}&download=1",
+        ),
+        # 200, not an error status: nothing failed. The file is intact and the
+        # page is a working answer with two routes on it. A 4xx/5xx here would
+        # also stop the browser rendering it in some proxy configurations.
+        status_code=200,
+    )
+
+
 @app.get("/api/projects/{project}/tree-tables")
 def tree_tables(project: str, path: str = Query(...)):
     """SNP tables that belong to a tree file — the xlsx siblings in its
@@ -6533,6 +6586,20 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
         except (OSError, ValueError):
             window = None  # unreadable or stale entry: re-render below
 
+    # Too large to show at all? Decided from the sheet's DECLARED dimensions, so
+    # the answer costs 0.13 s on the 35 MB cascade table where rendering a
+    # truncated window cost 42 s — and no partial table is ever produced to be
+    # mistaken for the whole one. Only for unfiltered views: a clade selection
+    # is precisely the way to get into a table this size, so it is allowed to
+    # try (and gets the same page, worded for a clade, if it still cannot fit).
+    if selection_samples is None:
+        try:
+            pre_rows, pre_cols = xlsx_html.sheet_extent(target)
+        except Exception:
+            pre_rows = pre_cols = 0
+        if pre_rows and pre_cols and not xlsx_html.fits_full_view(pre_rows, pre_cols):
+            return _too_large_response(project, target, path, pre_rows, pre_cols)
+
     if window is None:
         try:
             rows, cols = xlsx_html.sheet_extent(target)
@@ -6554,10 +6621,15 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                     samples_with_vcfs=samples_with_vcfs,
                 ))
             else:
+                # It fits, so render ALL of it — every row and every column.
+                # max_rows is the sheet's own row count rather than a policy cap:
+                # the cap existed to bound the page, and that is what the cell
+                # and byte budgets already do. A tall narrow sheet is no longer
+                # cut off at row 1,000.
                 window = xlsx_html.render_window(
                     target, rows, cols, None, project,
                     samples_with_bams, samples_with_vcfs,
-                    xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
+                    xlsx_html.FULL_VIEW_MAX_CELLS, rows,
                 )
         except xlsx_html.FilterMatchError as e:
             raise HTTPException(status_code=422, detail=str(e))
@@ -6585,9 +6657,22 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             except OSError:
                 pass  # read-only cache location: serve it, just don't remember it
 
+    # Anything that came back partial is not served as a table. The extent check
+    # above catches the big cases without rendering, but two paths only reveal
+    # themselves once the work is done: a dense sheet trimmed by the BYTE budget,
+    # and a clade selection too large to filter by position. Evaluated here so it
+    # applies to cached windows as well as fresh ones.
+    if xlsx_html.window_is_partial(window):
+        filt = window.get("filter") or {}
+        return _too_large_response(
+            project, target, path,
+            window["total_rows"], window["total_cols"],
+            clade_samples=filt.get("matched") if selection_samples is not None else None,
+        )
+
     # A scroll request: return just the requested <tr> block. The window is
-    # rendered once and cached, so paging through a 1,000-row table costs one
-    # parse in total rather than one per batch.
+    # rendered once and cached, so paging through a big table costs one parse in
+    # total rather than one per batch.
     if rows_from is not None:
         start = max(0, int(rows_from))
         count = max(1, min(int(rows_count or 200), 1000))

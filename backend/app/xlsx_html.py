@@ -87,6 +87,22 @@ DEFAULT_INITIAL_ROWS = 200
 # variant cell carrying an IGV launch anchor), so a 480 KB sheet of mostly
 # variant cells rendered to 48 MB while a 35 MB sheet rendered to 1.4 MB.
 DEFAULT_MAX_TABLE_BYTES = 64 * 1024 * 1024
+# The largest sheet that is shown AT ALL.
+#
+# Above this the preview does not render a slice of the table — it says the table
+# is too large and offers the two routes that work (the file in a spreadsheet
+# application, or the group's tree with a clade selected). Showing the leading
+# corner of a SNP table behind a "showing the first ..." banner produces
+# something that reads as complete and is not: a table missing 90% of its
+# positions, unannounced in every way that matters to the person reading the
+# calls. A slow answer is recoverable; a plausible wrong one is not.
+#
+# Measured here (2026-08-13): ~34 bytes of HTML per rendered cell, so a
+# 1,000,000-cell sheet is a ~34 MB document — the outer edge of what is worth
+# handing a browser, and about 10% of the 2,316 real tables on this machine are
+# above it. Note this is a CELL budget with no row cap: a tall narrow sheet
+# (5,000 x 12) is not "too large" and renders in full.
+FULL_VIEW_MAX_CELLS = 1_000_000
 # Clade-filtered previews (render_filtered_window) must see every column of a
 # kept row before they can decide which SNP columns the clade actually uses,
 # so kept rows are buffered at full sheet width during the single streaming
@@ -162,6 +178,115 @@ def _selection_key(label: str, *stem_sets) -> str:
     label itself."""
     stem = _strip_vcf_suffix(str(label).strip())
     return _canonical_stem(stem, *stem_sets)
+
+
+def fits_full_view(total_rows: int, total_cols: int,
+                   max_cells: int = FULL_VIEW_MAX_CELLS) -> bool:
+    """Can this sheet be shown in its entirety?
+
+    Answered from the declared dimensions alone, so the caller can decide
+    before paying to open anything — on the 35 MB cascade table the verdict
+    costs 0.13 s where rendering the old truncated window cost 42.
+
+    A zero/unknown extent returns False: nothing is claimed to fit on the
+    strength of an extent that could not be read.
+    """
+    if total_rows < 1 or total_cols < 1:
+        return False
+    return total_rows * total_cols <= max_cells
+
+
+def too_large_page(filename: str, total_rows: int, total_cols: int,
+                   tree_url: str | None = None, tree_name: str | None = None,
+                   clade_samples: int | None = None,
+                   download_url: str | None = None) -> str:
+    """The page shown instead of a table that cannot be shown in full.
+
+    Two routes, because both are real: the file itself in a spreadsheet
+    application, and the group's tree with one clade selected (which is what
+    makes a table this size legible in the browser at all).
+
+    ``clade_samples`` set means this was ALREADY filtered to a clade and is
+    still too large — the advice becomes "select a smaller clade", not "select
+    a clade".
+    """
+    cells = total_rows * total_cols
+    positions = max(0, total_cols - 1)      # column 1 holds the sample names
+    if cells >= 1_000_000:
+        size_words = f"{cells / 1_000_000:.1f} million cells"
+    else:
+        size_words = f"{cells:,} cells"
+
+    if clade_samples is not None:
+        heading = "This clade is still too large to display"
+        lede = (
+            f"The selected clade has <strong>{clade_samples:,} samples</strong> across "
+            f"<strong>{positions:,} positions</strong> — {size_words} once laid out, "
+            "more than a browser can render."
+        )
+        tree_lead = "Select a smaller clade"
+        tree_body = (
+            "Go back to the tree and click a branch further out. A clade of a few "
+            "dozen samples typically opens in under a second, showing only the "
+            "positions where those samples differ."
+        )
+    else:
+        heading = "This table is too large to display"
+        lede = (
+            f"<strong>{total_rows:,} rows × {total_cols:,} columns</strong> — "
+            f"{size_words}, and {cells:,} exactly. A browser cannot lay out a table "
+            "of that size, and showing only its first corner would read as the whole "
+            "table while leaving most of the positions out of view."
+        )
+        tree_lead = "View one clade at a time"
+        tree_body = (
+            "Open the group's tree and click a branch. The table then opens showing "
+            "only that clade's samples and only the positions where they differ — "
+            "which is usually the comparison you were after."
+        )
+
+    dl = html.escape(download_url or "?download=1", quote=True)
+    tree_block = ""
+    if tree_url:
+        tree_block = (
+            f'<a class="tl-btn" href="{html.escape(tree_url, quote=True)}" '
+            f'target="_blank" rel="noopener">Open the tree</a>'
+            + (f'<div class="tl-note">{html.escape(tree_name)}</div>' if tree_name else "")
+        )
+    else:
+        tree_block = ('<div class="tl-note">The group\'s tree files (<code>.tre</code>) '
+                      'are listed beside this table in Step 2 Results.</div>')
+
+    return _TOO_LARGE_TEMPLATE.format(
+        title=html.escape(filename),
+        filename=html.escape(filename),
+        heading=html.escape(heading),
+        lede=lede,
+        dims=f"{total_rows:,} × {total_cols:,}",
+        download_url=dl,
+        tree_lead=html.escape(tree_lead),
+        tree_body=html.escape(tree_body),
+        tree_block=tree_block,
+    )
+
+
+def window_is_partial(window: dict) -> bool:
+    """Does this rendered window show less than it set out to show?
+
+    For a clade-filtered window, showing fewer rows than the sheet has is the
+    whole point — so what counts as partial there is the filter having had to
+    give something up: columns or rows dropped for budget, or the per-position
+    filter skipped entirely because the selection was too large to buffer.
+
+    Callers use this to replace a partial table with the too-large page, so it
+    has to be evaluated on cached windows too, not just freshly rendered ones.
+    """
+    filt = window.get("filter")
+    if filt and not filt.get("ignored"):
+        return bool(filt.get("truncated_cols") or filt.get("truncated_rows")
+                    or not filt.get("column_filter"))
+    return (window["shown_rows"] < window["total_rows"]
+            or window["shown_cols"] < window["total_cols"])
 
 
 def sheet_extent(xlsx_path: Path) -> tuple[int, int]:
@@ -1624,6 +1749,72 @@ def xlsx_to_html(
         samples_json="[]",
     )
     return page
+
+
+_TOO_LARGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  :root {{
+    --ink: #1a2536; --muted: #6a7585; --line: #d4ccb8;
+    --bg: #f6f3ec; --panel: #fbf9f3; --accent: #b85a3e;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; min-height: 100%; background: var(--bg);
+    color: var(--ink); font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    line-height: 1.55; }}
+  .tl-bar {{ background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 20px; font-size: 13px; color: var(--muted);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; }}
+  .tl-wrap {{ max-width: 760px; margin: 0 auto; padding: 40px 24px 64px; }}
+  h1 {{ font-size: 21px; font-weight: 650; margin: 0 0 12px; letter-spacing: -0.01em; }}
+  .tl-lede {{ font-size: 15px; margin: 0 0 6px; }}
+  .tl-dims {{ font-size: 13px; color: var(--muted);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; margin: 0 0 28px; }}
+  .tl-route {{ background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 20px; margin: 0 0 14px; }}
+  .tl-route h2 {{ font-size: 15px; font-weight: 650; margin: 0 0 6px; }}
+  .tl-route p {{ font-size: 14px; margin: 0 0 14px; color: #2c3a4d; }}
+  .tl-btn {{ display: inline-block; background: var(--accent); color: #fff;
+    text-decoration: none; font-size: 14px; font-weight: 600;
+    padding: 8px 16px; border-radius: 7px; }}
+  .tl-btn:hover {{ filter: brightness(1.07); }}
+  .tl-note {{ font-size: 12.5px; color: var(--muted); margin-top: 10px;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace; }}
+  .tl-note code {{ font-size: 12px; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --ink: #e8edf2; --muted: #98a4b3; --line: #2d3d47;
+      --bg: #0f171d; --panel: #17222b; --accent: #d4744f; }}
+    .tl-route p {{ color: #cbd5df; }}
+  }}
+</style>
+</head>
+<body>
+<div class="tl-bar">{filename}</div>
+<div class="tl-wrap">
+  <h1>{heading}</h1>
+  <p class="tl-lede">{lede}</p>
+  <p class="tl-dims">{dims}</p>
+
+  <div class="tl-route">
+    <h2>Open it in a spreadsheet application</h2>
+    <p>Excel, LibreOffice Calc and OpenOffice Calc all handle sheets this size,
+       with the conditional formatting intact.</p>
+    <a class="tl-btn" href="{download_url}">Download the spreadsheet</a>
+  </div>
+
+  <div class="tl-route">
+    <h2>{tree_lead}</h2>
+    <p>{tree_body}</p>
+    {tree_block}
+  </div>
+</div>
+</body>
+</html>
+"""
 
 
 _PAGE_TEMPLATE = """<!DOCTYPE html>

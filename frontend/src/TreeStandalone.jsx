@@ -339,10 +339,22 @@ export default function TreeStandalone() {
               <button onClick={() => setSelectedTips([])}>Clear</button>
             </>
           ) : (
-            <span style={{ color: "#3a5a3a" }}>
-              {rerootMode
-                ? "Reroot mode is on — a branch click reroots the tree. Untick it to select clades again."
-                : "Click any branch or node to select that clade, then open its SNP table filtered to those samples."}
+            // Stated before the first click, because the alternative is a user
+            // clicking a tree that appears to do nothing. Kept to one line: what
+            // to click, and what it gets you.
+            <span style={{ color: "#2f4a2f" }}>
+              {rerootMode ? (
+                <>
+                  <strong>Reroot mode is on.</strong> A branch click reroots the tree.
+                  Untick it to select clades.
+                </>
+              ) : (
+                <>
+                  <strong>Select a clade:</strong> click any branch or node. This group's
+                  SNP table can then be opened for those samples alone, showing only the
+                  positions where they differ.
+                </>
+              )}
             </span>
           )}
         </div>

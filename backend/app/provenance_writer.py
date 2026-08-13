@@ -817,8 +817,9 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
     signal is cheaper than always re-hashing. Service restart force-refreshes.
     """
     # Resolve the reference across EVERY registered reference location — the
-    # configured root PLUS any the user added via "Reference Locations" in the
-    # GUI (stored in reference_options_paths.txt). Previously this looked only in
+    # same roots the Reference Locations editor shows (reference_options_paths.txt,
+    # falling back to <vsnp3>/dependencies when no registry file exists), plus
+    # the configured root. Previously this looked only in
     # vsnp3_reference_options_root, so a reference that lives in an added
     # location could never dispatch ("reference folder not found").
     roots: list = []
@@ -829,7 +830,7 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
         except Exception:  # pragma: no cover - when app/ is the import root
             import refs as _refs
         try:
-            roots = [Path(p) for p in _refs.get_reference_paths(Path(vsnp3_path))]
+            roots = list(_refs.reference_roots(Path(vsnp3_path)))
         except Exception:
             roots = []
     cfg_root_val = _cfg_path(cfg, "vsnp3_reference_options_root")
@@ -840,10 +841,24 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
     folder = next((r / reference_name for r in roots
                    if (r / reference_name).is_dir()), None)
     if folder is None:
-        searched = ", ".join(str(r) for r in roots) or "(no reference locations)"
-        raise DispatchFailed(
-            f"reference folder '{reference_name}' not found in any reference "
-            f"location (searched: {searched})")
+        # Not being able to HASH the reference must not decide whether the
+        # run happens — vsnp3 resolves -t on its own, and a registry that is
+        # momentarily wrong (unmounted share, stale path from another
+        # machine) would otherwise hard-fail every run at dispatch. Record
+        # an honest degraded block instead; annotate which searched roots
+        # don't even exist on this machine so the message diagnoses itself.
+        searched = [
+            str(r) if r.is_dir() else f"{r} (does not exist on this machine)"
+            for r in roots
+        ] or ["(no reference locations registered)"]
+        return {
+            "name": reference_name,
+            "path": None,
+            "capture_error": (
+                "reference folder not found in any registered reference "
+                "location; folder hash and file manifest not recorded"),
+            "searched_locations": searched,
+        }
 
     folder_resolved = folder.resolve()
     resolved_via_symlink = (folder_resolved != folder)

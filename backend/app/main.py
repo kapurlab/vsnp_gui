@@ -93,6 +93,26 @@ except Exception as _exc:  # never block startup on registry hygiene
     logger.warning("reference locations sanitize skipped: %s", _exc)
 
 
+def _resolve_app_version() -> str:
+    """Version of the deployed checkout — the exact string the Diagnostic
+    Tools Dashboard shows for this tool (`git describe --tags --always`,
+    the same command bdtools runs). Resolved once at startup; empty when
+    git or the .git dir is unavailable, in which case the frontend falls
+    back to its built-in constant."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[2]),
+             "describe", "--tags", "--always"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+APP_VERSION = _resolve_app_version()
+
+
 def _project_roots(cfg_in: Dict) -> List:
     """Build the list of (scope, root) pairs from config. Personal first
     (so it wins on name collisions), then shared if present."""
@@ -1073,6 +1093,8 @@ def get_config():
     cfg = load_config()
     root_dir = Path(__file__).resolve().parent.parent.parent
     cfg["gui_root"] = str(root_dir)
+    # Deployed checkout's version (git describe) — what the dashboard shows.
+    cfg["app_version"] = APP_VERSION
     shared_root = cfg.get("shared_projects_root", "").strip()
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
@@ -2890,8 +2912,13 @@ def _step1_dispatch(
     # sample metadata as terminal once the batch exits. Skip provenance if
     # no reference is set (legacy/unconfigured runs) — the bash still runs.
     prov_finalize_cb = None
+    provenance_warning = ""
     if payload.reference:
         if samples:
+            # A capture failure must NOT stop the batch — the record describes
+            # the run, it is not a precondition for it (this used to 500 the
+            # whole Run click over metadata). Warn loudly and run anyway.
+            prov_batch_run_id = None
             try:
                 prov_batch_run_id, _sample_run_ids = provenance_writer.dispatch_step1_batch(
                     cfg, project_dir, samples, payload.reference,
@@ -2899,15 +2926,17 @@ def _step1_dispatch(
                     ood_session_id=_ood_session_id(),
                 )
             except provenance_writer.DispatchFailed as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Provenance dispatch failed (step1): {e}",
+                provenance_warning = (
+                    f"Run-metadata (provenance) was not recorded for this run: {e}"
                 )
+                logger.warning("Step 1 provenance dispatch failed; batch proceeds "
+                               "without run_metadata.json: %s", e)
 
-            def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
-                provenance_writer.finalize_step1_batch(
-                    project_dir, prov_batch_run_id, exit_code, started_at, finished_at,
-                )
+            if prov_batch_run_id is not None:
+                def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
+                    provenance_writer.finalize_step1_batch(
+                        project_dir, prov_batch_run_id, exit_code, started_at, finished_at,
+                    )
 
     job_id = job_manager.start_job(
         name="step1",
@@ -2928,7 +2957,13 @@ def _step1_dispatch(
         s for s in skipped_samples
         if not str(s.get("reason", "")).startswith("already completed")
     ]
-    return {"job_id": job_id, "skipped_samples": noteworthy_skips}
+    return {
+        "job_id": job_id,
+        "skipped_samples": noteworthy_skips,
+        # Non-empty when the batch started WITHOUT a provenance record (T-07
+        # dispatch failed). The analysis is unaffected; UI shows it as a note.
+        "provenance_warning": provenance_warning,
+    }
 
 
 @app.get("/api/projects/{project}/step1/status")
@@ -3744,6 +3779,13 @@ def step2_run(project: str, payload: Step2Request):
     # On shared projects, refuses to dispatch if any step1 sample is still
     # running (HTTP 409). On personal projects, warn-and-proceed via
     # consumed_step1_run_ids_complete: false in the pipeline_run record.
+    #
+    # A capture failure (DispatchFailed) must NOT stop the analysis: the
+    # record describes the run, it is not a precondition for it. Failing here
+    # used to 500 before the job even started — no Live Logs, nothing to
+    # debug — over metadata. Warn loudly, tell the frontend, run anyway.
+    prov_step2_run_id = None
+    provenance_warning = ""
     try:
         prov_step2_run_id, _prov_pipeline_run_id = provenance_writer.dispatch_step2(
             cfg, project_dir, payload.reference,
@@ -3757,10 +3799,11 @@ def step2_run(project: str, payload: Step2Request):
     except provenance_writer.Step2DispatchBlocked as e:
         raise HTTPException(status_code=409, detail=str(e))
     except provenance_writer.DispatchFailed as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Provenance dispatch failed (step2): {e}",
+        provenance_warning = (
+            f"Run-metadata (provenance) was not recorded for this run: {e}"
         )
+        logger.warning("Step 2 provenance dispatch failed; run proceeds without "
+                       "run_metadata.json: %s", e)
 
     pgid_path = step2_dir / ".step2_pgid"
 
@@ -3773,10 +3816,14 @@ def step2_run(project: str, payload: Step2Request):
                 p.unlink()
             except OSError:
                 pass
-        provenance_writer.finalize_step2(
-            project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
-            step2_run_dir=run_dir,
-        )
+        # No dispatch record to finalize when dispatch itself failed (the run
+        # was allowed to proceed provenance-less) — the lock release above
+        # must still happen either way.
+        if prov_step2_run_id is not None:
+            provenance_writer.finalize_step2(
+                project_dir, prov_step2_run_id, exit_code, started_at, finished_at,
+                step2_run_dir=run_dir,
+            )
 
     def on_start_cb(job_id, pid):
         # Record the OS process-group id (== pid, via start_new_session) so the
@@ -3838,6 +3885,10 @@ def step2_run(project: str, payload: Step2Request):
         "panel_exempt_count": panel_exempt_count,
         "vcf_total": vcf_total,
         "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
+        # Non-empty when the run started WITHOUT a provenance record (T-07
+        # dispatch failed). The run itself is unaffected; the UI shows this
+        # as a warning note, never as a blocking error.
+        "provenance_warning": provenance_warning,
     }
 
 

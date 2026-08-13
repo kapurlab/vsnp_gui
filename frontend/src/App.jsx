@@ -103,6 +103,9 @@ export default function App() {
     step1_max_parallel: 3,
     sra_allow_insecure_https: false
   });
+  // Version of the deployed checkout as reported by the backend (git
+  // describe — the same string the Diagnostic Tools Dashboard shows).
+  const [serverVersion, setServerVersion] = useState("");
   // Server-side path browser. mode "folder" picks the projects root; mode
   // "files" multi-selects FASTQs already on the server (see openFileBrowser).
   const [folderBrowser, setFolderBrowser] = useState({
@@ -1216,6 +1219,10 @@ export default function App() {
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https),
       saved_project_roots: Array.isArray(cfg.saved_project_roots) ? cfg.saved_project_roots : []
     });
+    // The deployed checkout's real version (git describe, same string the
+    // Diagnostic Tools Dashboard shows). Empty on installs without git —
+    // the built-in APP_VERSION constant stays as the fallback.
+    setServerVersion(cfg.app_version || "");
     if (cfg._validation) {
       setPathValidation(cfg._validation);
     }
@@ -1229,8 +1236,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    document.title = `vSNP GUI ${APP_VERSION}`;
-  }, []);
+    document.title = `vSNP GUI ${serverVersion || APP_VERSION}`;
+  }, [serverVersion]);
 
   // Headroom on the volume holding the Projects root. Debounced because the
   // field is a free-text input — we only stat once the user stops typing.
@@ -3060,6 +3067,11 @@ export default function App() {
     // T-46: surface samples auto-skipped from the dispatch (single-end,
     // junk-sized fastqs) so the user knows what didn't run and why. Without
     // this banner the GUI just silently runs N-of-M samples.
+    // A provenance warning means the batch STARTED but no run record was
+    // written — worth a diagnostic lab's attention, never a blocker.
+    const step1ProvWarn = data.provenance_warning
+      ? `\n\n⚠ ${data.provenance_warning}\nThe analysis itself is unaffected.`
+      : "";
     if (Array.isArray(data.skipped_samples) && data.skipped_samples.length > 0) {
       const lines = data.skipped_samples
         .map((s) => `  • ${s.sample}: ${s.reason}`)
@@ -3067,8 +3079,11 @@ export default function App() {
       window.alert(
         `Step 1 dispatched — ${data.skipped_samples.length} sample(s) auto-skipped:\n\n` +
         lines +
-        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run (junk/broken reads, or already complete — use Force re-run to redo completed ones).`
+        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run (junk/broken reads, or already complete — use Force re-run to redo completed ones).` +
+        step1ProvWarn
       );
+    } else if (step1ProvWarn) {
+      window.alert(`Step 1 dispatched.${step1ProvWarn}`);
     }
     // Clear the re-entry guard now that the job is recorded; step1JobStatus is
     // about to read "running" (loadStep1Status), which keeps the button disabled.
@@ -3370,10 +3385,14 @@ export default function App() {
     const countSuffix = excludedCount > 0
       ? ` (excluding ${excludedCount}${blk}${kept}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
       : (kept ? ` (${data.panel_exempt_count} kept via panel)` : "");
+    // Provenance capture failing must never stop an analysis, but a missing
+    // run record is something a diagnostic lab needs to SEE — keep it in the
+    // status note, non-blocking.
+    const provWarn = data.provenance_warning ? ` — ⚠ ${data.provenance_warning}` : "";
     setStep2SetupMsg(
       (data.status === "queued"
         ? "Step 2 queued — will start when a run slot is free…"
-        : "Step 2 running…") + countSuffix
+        : "Step 2 running…") + countSuffix + provWarn
     );
     setStep2RunId(new Date().toISOString());
     setStep2AutoRefreshPending(true);
@@ -4056,7 +4075,7 @@ export default function App() {
           <img className="app-logo" src="vSNP_icon_align_256.png" alt="vSNP alignment icon" />
           <div>
             <h1>
-              vSNP GUI <span className="version-tag">{APP_VERSION}</span>
+              vSNP GUI <span className="version-tag">{serverVersion || APP_VERSION}</span>
             </h1>
             <p>Local workflows for vSNP3 implementation</p>
           </div>
@@ -7160,9 +7179,33 @@ export default function App() {
                 </button>
               ) : null}
               <div className="note">
-                {step2SetupMsg || (typeof step2VcfCount === "number" && step2VcfCount > 0
-                  ? `VCFs in set: ${step2VcfCount} — ready to Run`
-                  : (selected ? `VCFs in set: ${selected.step2_vcfs || 0}` : ""))}
+                {step2SetupMsg || (() => {
+                  // Say what THIS RUN will compare, not just how big the
+                  // cumulative folder is — "VCFs in set: 9372" next to Run
+                  // reads as "9372 will run" when a pasted list picked 10.
+                  const inSet = (typeof step2VcfCount === "number" && step2VcfCount > 0)
+                    ? step2VcfCount
+                    : (selected ? selected.step2_vcfs || 0 : 0);
+                  if (!inSet) return selected ? `VCFs in set: ${inSet}` : "";
+                  const runN = step2RunSelection.keep.size;
+                  const outN = step2RunSelection.leaveOut.length;
+                  if (step2Mode === "list") {
+                    if (runN === 0) {
+                      return `VCFs in set: ${inSet} — paste sample names above to choose what this run compares`;
+                    }
+                    const dbs = step2RunSelection.fromDbs > 0
+                      ? ` + ${step2RunSelection.fromDbs} from the ticked databases` : "";
+                    const others = outN > 0
+                      ? ` · ${outN} other${outN === 1 ? "" : "s"} in vcf_database stay out of this run` : "";
+                    return `This run compares ${runN} sample${runN === 1 ? "" : "s"} `
+                      + `(${step2RunSelection.fromList} from your list${dbs})${others} — ready to Run`;
+                  }
+                  if (outN > 0) {
+                    return `This run compares ${runN} of the ${inSet} VCFs in the set `
+                      + `(${outN} left out by unticked sources) — ready to Run`;
+                  }
+                  return `VCFs in set: ${inSet} — ready to Run`;
+                })()}
               </div>
               {step2EditedCount > 0 ? (
                 <div className="note warning">

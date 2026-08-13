@@ -383,6 +383,28 @@ def main() -> int:
             assert_eq(yaml_count_after, yaml_count_before,
                       "env snapshot dedup: same content -> same file count")
 
+        # ------- Test: unresolvable reference degrades, never blocks -------
+        # The Ames HPC regression: the reference registry didn't contain the
+        # folder the run uses, and capture_reference_state's DispatchFailed
+        # 500'd the Run click before the job started. The capture must now
+        # return a degraded block and the dispatch must succeed.
+        print("\n[step2 dispatch with unresolvable reference]")
+        step2_run_id3, _pipe3 = pw.dispatch_step2(
+            cfg, project_dir, "not_a_registered_reference",
+            cli_command="vsnp3_step2.py -wd . -t not_a_registered_reference",
+            cli_flags=[],
+            user="vxk1", ood_session_id=None, is_shared=False,
+            resolved_vcf_db_folders=[],
+        )
+        rec3 = json.loads((step2_dir / "run_metadata.json").read_text())
+        ref_block = rec3["dispatch_state"]["reference"]
+        assert_true(ref_block.get("capture_error"),
+                    "reference block records capture_error")
+        assert_eq(ref_block.get("path"), None, "unresolved reference path")
+        assert_true(ref_block.get("searched_locations"),
+                    "searched locations recorded for diagnosis")
+        print("  OK  dispatch succeeded without a resolvable reference folder")
+
         print("\nAll writer smoke tests passed.")
         return 0
 

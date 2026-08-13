@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -5,9 +6,14 @@ from typing import Dict, List, Optional
 
 # Paths the upstream vsnp3 author ships inside the package/source tree
 # (dependencies/reference_options_paths.txt). They are his own machines' paths
-# — never a choice made at THIS site — yet on a fresh deployment they show up
-# in the Reference Editor as if someone here had added them. Recognized
-# verbatim and removed once per install by sanitize_upstream_paths().
+# — on almost every deployment not a choice made at THIS site — yet on a fresh
+# install they show up in the Reference Editor as if someone here had added
+# them. Recognized verbatim and removed once per install by
+# sanitize_upstream_paths(), BUT only when the path does not exist on this
+# machine: on the author's own systems (the USDA Ames HPC, where
+# /project/mycobacteria_brucella/... is real and holds the reference folders)
+# these are genuine configuration, and removing them silently breaks vsnp3's
+# -t resolution for every reference that lives there.
 UPSTREAM_SHIPPED_PATHS = frozenset({
     "/Users/todstuber/vsnp3_test_dataset/vsnp_dependencies",
     "/home/tstuber/vSNP_reference_options",
@@ -15,6 +21,8 @@ UPSTREAM_SHIPPED_PATHS = frozenset({
 })
 
 _SANITIZED_MARKER = ".upstream_paths_removed"
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def _write_paths_file(deps_file: Path, paths: List[str]) -> None:
@@ -42,24 +50,43 @@ def _write_paths_file(deps_file: Path, paths: List[str]) -> None:
 
 def sanitize_upstream_paths(vsnp3_path: Path) -> List[str]:
     """One-time removal of the upstream author's shipped paths (see
-    UPSTREAM_SHIPPED_PATHS) from this install's registry. Runs at backend
-    startup; a marker file next to the registry makes it once-per-install, so
-    a user who deliberately re-adds one of those paths afterwards keeps it.
+    UPSTREAM_SHIPPED_PATHS) from this install's registry — but ONLY the ones
+    that do not exist on this machine. A shipped path that exists here is the
+    author's (or this site's) real reference location, not stale clutter; on
+    the USDA Ames HPC removing it broke `-t` resolution for every reference
+    under it. Runs at backend startup; a marker file next to the registry
+    makes it once-per-install, so a user who deliberately re-adds or removes
+    one of those paths afterwards keeps their choice.
+
+    On installs sanitized by an earlier version (which removed the shipped
+    paths unconditionally), a one-time repair re-adds any removed path that
+    DOES exist on this machine (recorded in the marker as `restored:`).
+
     Returns the list of removed paths (empty when nothing changed)."""
     deps_file = vsnp3_path / "dependencies" / "reference_options_paths.txt"
     marker = deps_file.with_name(_SANITIZED_MARKER)
-    if marker.exists() or not deps_file.is_file():
+    if not deps_file.is_file():
+        return []
+    if marker.exists():
+        _restore_upstream_paths_that_exist(deps_file, marker)
         return []
     existing = get_reference_paths(vsnp3_path)
-    kept = [p for p in existing if p not in UPSTREAM_SHIPPED_PATHS]
-    removed = [p for p in existing if p in UPSTREAM_SHIPPED_PATHS]
+    removed = [p for p in existing
+               if p in UPSTREAM_SHIPPED_PATHS and not Path(p).is_dir()]
+    kept = [p for p in existing if p not in removed]
+    kept_upstream = [p for p in kept if p in UPSTREAM_SHIPPED_PATHS]
     try:
         if removed:
             _write_paths_file(deps_file, kept)
         marker.write_text(
             "reference_options_paths.txt was checked for upstream-shipped "
             "author paths at first backend start.\nremoved: "
-            + (", ".join(removed) if removed else "(none)") + "\n",
+            + (", ".join(removed) if removed else "(none)") + "\n"
+            + ("kept (exists on this machine): " + ", ".join(kept_upstream) + "\n"
+               if kept_upstream else "")
+            # This install never removed a real path, so the repair pass for
+            # installs sanitized by the old unconditional code must not run.
+            + "restored: (not applicable)\n",
             encoding="utf-8",
         )
     except OSError:
@@ -67,6 +94,41 @@ def sanitize_upstream_paths(vsnp3_path: Path) -> List[str]:
         # it; the next start by someone with write access will do it.
         return []
     return removed
+
+
+def _restore_upstream_paths_that_exist(deps_file: Path, marker: Path) -> List[str]:
+    """Repair pass for installs sanitized by the old unconditional code: any
+    upstream-shipped path it removed that DOES exist on this machine was real
+    local configuration (the Ames HPC case), so put it back. Once per install
+    — the marker gains a `restored:` line, and a user who deletes the path
+    from the registry afterwards keeps it deleted."""
+    try:
+        text = marker.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    if "restored:" in text:
+        return []
+    removed_line = next(
+        (l for l in text.splitlines() if l.startswith("removed:")), "")
+    removed = [p.strip() for p in removed_line[len("removed:"):].split(",")
+               if p.strip() and p.strip() != "(none)"]
+    to_restore = [p for p in removed
+                  if p in UPSTREAM_SHIPPED_PATHS and Path(p).is_dir()]
+    current = [line.strip()
+               for line in deps_file.read_text(encoding="utf-8").splitlines()
+               if line.strip()]
+    add = [p for p in to_restore if p not in current]
+    try:
+        if add:
+            _write_paths_file(deps_file, current + add)
+        with marker.open("a", encoding="utf-8") as fh:
+            fh.write("restored: " + (", ".join(add) if add else "(none)") + "\n")
+    except OSError:
+        return []
+    if add:
+        logger.info("Restored reference locations removed by an earlier "
+                    "version (they exist on this machine): %s", ", ".join(add))
+    return add
 
 
 def list_references(vsnp3_path: Path) -> List[Dict]:

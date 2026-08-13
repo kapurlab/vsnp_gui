@@ -46,6 +46,7 @@ from app.jobs import JobManager
 from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
+from app.step2_staging import stage_step2_vcfs
 from app.projects import (
     create_project,
     list_projects,
@@ -3661,33 +3662,6 @@ def step2_run(project: str, payload: Step2Request):
     run_dir = step2_dir / run_ts
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the VCFs out of the persistent database into this dated run folder and
-    # run vsnp3 against the COPIES, never the database itself. vsnp3_step2.py
-    # deletes every VCF out of its -wd after ingesting them (they survive only
-    # inside the vcf_starting_files zip it writes). If -wd pointed at
-    # step2/vcf_database, each run would empty the cumulative collection. The DB
-    # is the ongoing store for the project; only the dated folder is disposable.
-    # copy2 follows symlinks, so the real VCF content (the DB entries are
-    # symlinks into step1) lands in the run folder as regular files.
-    copied_vcfs = 0
-    for src in sorted([*vcf_source_dir.glob("*.vcf"), *vcf_source_dir.glob("*.vcf.gz")]):
-        try:
-            shutil.copy2(src, run_dir / src.name)
-            copied_vcfs += 1
-        except OSError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to stage {src.name} into the run folder: {exc}",
-            )
-    if not copied_vcfs:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No VCFs in step2/vcf_database to compare. Run Step 1 and collect "
-                "VCFs (or import VCFs) before starting Step 2."
-            ),
-        )
-
     # Effective removal set = Step 1 QC exclusions (remove_from_analysis.xlsx)
     # ∪ Step 2 build-list exclusions (.step2_build_excluded.json) ∪ the
     # authoritative set the UI sends in this request. The payload set is what
@@ -3703,6 +3677,7 @@ def step2_run(project: str, payload: Step2Request):
     #   B Step 1 exclusions    — EXEMPTED for accessions available from a
     #     reference panel (external reference VCFs, not Step 1 samples).
     #   C build-list exclusions — explicit per-run; never exempted.
+    # Computed BEFORE staging so the copy loop can skip what the run drops.
     def _clean(xs):
         return {str(s).strip() for s in (xs or []) if str(s).strip()}
     ref_block = set(_reference_blocklist_names(cfg, payload.reference))
@@ -3714,6 +3689,47 @@ def step2_run(project: str, payload: Step2Request):
         | _clean(payload.exclude)  # deprecated merged field -> treat as build (not exempted)
     )
     effective_removals = sorted(ref_block | step1_names | build_names)
+
+    # Copy the VCFs out of the persistent database into this dated run folder and
+    # run vsnp3 against the COPIES, never the database itself. vsnp3_step2.py
+    # deletes every VCF out of its -wd after ingesting them (they survive only
+    # inside the vcf_starting_files zip it writes). If -wd pointed at
+    # step2/vcf_database, each run would empty the cumulative collection. The DB
+    # is the ongoing store for the project; only the dated folder is disposable.
+    #
+    # Only the VCFs this run will analyze are staged: vsnp3 parses every VCF in
+    # its -wd BEFORE applying -remove_by_name, so staging the whole database
+    # made a 10-sample comparison copy AND parse all 9,372 VCFs of the big
+    # Ames project. stage_step2_vcfs skips exactly what vsnp3's removal would
+    # drop; -remove_by_name is still passed below, so a skipped-vs-removed
+    # disagreement can only cost time, never correctness.
+    try:
+        copied_vcfs, skipped_excluded, staged_vcf_names = stage_step2_vcfs(
+            vcf_source_dir, run_dir, effective_removals,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to stage VCFs into the run folder: {exc}",
+        )
+    if not copied_vcfs:
+        if skipped_excluded:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"All {skipped_excluded} VCFs in step2/vcf_database are excluded "
+                    "by the current selection/exclusions — nothing to compare. "
+                    "Tick a source or list at least one sample that is in the set."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No VCFs in step2/vcf_database to compare. Run Step 1 and collect "
+                "VCFs (or import VCFs) before starting Step 2."
+            ),
+        )
+
     remove_arg = ""
     if effective_removals:
         remove_file = run_dir / "remove_by_name.xlsx"
@@ -3795,6 +3811,7 @@ def step2_run(project: str, payload: Step2Request):
             is_shared=_is_shared_project(cfg, project_dir),
             resolved_vcf_db_folders=_resolved_vcf_db_folders(cfg),
             step2_run_dir=run_dir,
+            staged_vcf_names=staged_vcf_names,
         )
     except provenance_writer.Step2DispatchBlocked as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -3884,7 +3901,9 @@ def step2_run(project: str, payload: Step2Request):
         "blocklist_count": len(ref_block),
         "panel_exempt_count": panel_exempt_count,
         "vcf_total": vcf_total,
-        "comparison_count": max(0, vcf_total - excluded_count) if vcf_total else None,
+        # Exactly what was staged for vsnp3 — not vcf_total minus removal
+        # NAMES, which overcounted when stale exclusion names matched nothing.
+        "comparison_count": copied_vcfs,
         # Non-empty when the run started WITHOUT a provenance record (T-07
         # dispatch failed). The run itself is unaffected; the UI shows this
         # as a warning note, never as a blocking error.

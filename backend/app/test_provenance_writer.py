@@ -383,6 +383,40 @@ def main() -> int:
             assert_eq(yaml_count_after, yaml_count_before,
                       "env snapshot dedup: same content -> same file count")
 
+        # ------- Test: staged_vcf_names limits the hashed inputs -------
+        # A 10-sample run must not hash the whole project's step1 VCFs at
+        # dispatch; inputs are the staged files only (when the caller says so).
+        print("\n[step2 inputs limited to staged VCFs]")
+        # S002 uses the real vsnp3 layout (zc.vcf inside alignment_<ref>/);
+        # the others use the flat layout — both must be seen.
+        for s in samples:
+            if s == "S002":
+                align = step1_dir / s / "alignment_MTBC0_v1"
+                align.mkdir()
+                (align / f"{s}_zc.vcf").write_text("##fileformat=VCFv4.2\n")
+            else:
+                (step1_dir / s / f"{s}_zc.vcf").write_text("##fileformat=VCFv4.2\n")
+        pw.dispatch_step2(
+            cfg, project_dir, "mtbc0_v1.1",
+            cli_command="vsnp3_step2.py", cli_flags=[],
+            user="vxk1", ood_session_id=None, is_shared=False,
+            resolved_vcf_db_folders=[],
+        )
+        rec_all = json.loads((step2_dir / "run_metadata.json").read_text())
+        assert_eq(len(rec_all["dispatch_state"]["inputs"]), 3,
+                  "no staged filter -> every step1 VCF recorded")
+        pw.dispatch_step2(
+            cfg, project_dir, "mtbc0_v1.1",
+            cli_command="vsnp3_step2.py", cli_flags=[],
+            user="vxk1", ood_session_id=None, is_shared=False,
+            resolved_vcf_db_folders=[],
+            staged_vcf_names={"S001_zc.vcf"},
+        )
+        rec_one = json.loads((step2_dir / "run_metadata.json").read_text())
+        inputs_one = rec_one["dispatch_state"]["inputs"]
+        assert_eq(len(inputs_one), 1, "staged filter -> only the staged VCF")
+        assert_eq(inputs_one[0]["sample"], "S001", "staged input is S001")
+
         # ------- Test: unresolvable reference degrades, never blocks -------
         # The Ames HPC regression: the reference registry didn't contain the
         # folder the run uses, and capture_reference_state's DispatchFailed

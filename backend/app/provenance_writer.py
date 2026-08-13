@@ -1484,6 +1484,7 @@ def dispatch_step2(
     is_shared: bool,
     resolved_vcf_db_folders: list[dict[str, Any]],
     step2_run_dir: Path | None = None,
+    staged_vcf_names: set[str] | None = None,
 ) -> tuple[str, str]:
     """Dispatch step2: write pipeline_run record, then step2 run_metadata.json.
 
@@ -1501,6 +1502,9 @@ def dispatch_step2(
     via path comparison to cfg["shared_projects_root"].
     `resolved_vcf_db_folders` is the output of vsnp_gui's existing
     _resolved_vcf_db_folders helper; passed in rather than re-derived.
+    `staged_vcf_names` (when given) is the set of VCF basenames actually
+    staged into the run folder — the inputs block is limited to those, so a
+    10-sample run doesn't hash the whole project's step1 VCFs at dispatch.
     """
     step1_dir = project_dir / "step1"
     step2_dir = step2_run_dir if step2_run_dir is not None else project_dir / "step2"
@@ -1541,7 +1545,8 @@ def dispatch_step2(
     cli = _build_step2_cli(cli_command, cli_flags)
 
     # Inputs at step2 are the consumed step1 VCFs; capture as a list
-    inputs = _build_step2_inputs(step1_dir, step1_records, cfg)
+    inputs = _build_step2_inputs(step1_dir, step1_records, cfg,
+                                 staged_vcf_names=staged_vcf_names)
 
     dispatch_state = _build_dispatch_state(
         actor=actor,
@@ -1674,8 +1679,16 @@ def _build_step2_inputs(
     step1_dir: Path,
     step1_records: list[dict[str, Any]],
     cfg: dict[str, Any],
+    staged_vcf_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Step2 inputs are the per-sample *_zc.vcf files from step1."""
+    """Step2 inputs are the per-sample *_zc.vcf files from step1.
+
+    When `staged_vcf_names` is given, only VCFs actually staged into the run
+    folder are recorded (and hashed) — hashing every step1 VCF at dispatch
+    made the Run click O(project) on a 9k-sample project. A step1 VCF whose
+    database copy was renamed on collision won't match and is simply not
+    listed; the pipeline_run record still links every step1 run.
+    """
     threshold = int(
         cfg.get("provenance", {}).get("hash_max_bytes", DEFAULT_HASH_THRESHOLD_BYTES)
     )
@@ -1683,10 +1696,17 @@ def _build_step2_inputs(
     for rec in step1_records:
         sample = rec["sample"]
         sample_dir = step1_dir / sample
-        vcfs = sorted(sample_dir.glob("*_zc.vcf"))
+        # vsnp3 writes the zc.vcf inside alignment_<ref>/ — projects with that
+        # layout (every real step1 run) recorded ZERO inputs because only the
+        # sample dir's top level was globbed. Prefer the alignment dir, keep
+        # the flat layout as fallback (imports, tests).
+        vcfs = (sorted(sample_dir.glob("alignment_*/*_zc.vcf"))
+                or sorted(sample_dir.glob("*_zc.vcf")))
         if not vcfs:
             continue
         vcf = vcfs[0]
+        if staged_vcf_names is not None and vcf.name not in staged_vcf_names:
+            continue
         try:
             sha, identity = compute_input_identity(vcf, threshold)
         except OSError:

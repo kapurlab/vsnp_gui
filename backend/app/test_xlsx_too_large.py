@@ -104,6 +104,24 @@ def main() -> int:
         assert_true("<table" not in page,
                     "no partial table is rendered alongside the message")
 
+        # Arriving here BY clicking a branch, and being told to click a branch,
+        # is a loop — and it is the one an unrecognised position header put a
+        # user in on a real HPAI table: the sheet was not recognised as a SNP
+        # table, so the filter never applied, so the whole table came back, so
+        # it was too large, so the page advised opening the tree.
+        print("\n[a filter that could not apply does not send you back to the tree]")
+        looped = xlsx_html.too_large_page(
+            filename="x.xlsx", total_rows=2000, total_cols=8000,
+            tree_url="../../../?view=tree&project=p&path=t.tre", tree_name="t.tre",
+            filter_ignored="this sheet has no locus columns")
+        assert_true("view=tree" not in looped,
+                    "the Open-the-tree button is gone — that is where this came from")
+        assert_true("no locus columns" in looped,
+                    "…and the page says WHY the clade filter did not apply")
+        assert_true("whole table, not your clade" in looped,
+                    "…and that the size quoted is the whole table, not the clade")
+        assert_true("Download" in looped, "the download route survives")
+
         print("\n[with no tree beside the table, the page still stands on its own]")
         page2 = xlsx_html.too_large_page(
             filename="x.xlsx", total_rows=2000, total_cols=8000,

@@ -50,7 +50,19 @@ from openpyxl.worksheet.cell_range import CellRange
 _DEFAULT_FONT_SIZE = 11
 _DEFAULT_FONT_COLOR = "FF000000"
 
-_LOCUS_RE = re.compile(r"^[A-Za-z0-9_.\-]+:\d+$")
+# A position header in a vSNP3 table. vsnp3 builds these as
+# `abs_pos = CHROM + ':' + POS` (vsnp3_group_on_defining_snps.py), so the part
+# before the colon is whatever the reference FASTA calls the contig — and the
+# VCF spec is the only constraint on it: no whitespace.
+#
+# This used to be `[A-Za-z0-9_.\-]+`, which fits a bacterial accession
+# (`NC_002945.4:12345`) and NOTHING ELSE. An influenza reference names each
+# segment after the isolate it came from — `A/mallard/.../2024(H5N1)_PB2:1234`
+# — so not one column of an HPAI table was recognised as a locus, the sheet was
+# classified "not a variant table", and the clade filter silently handed back
+# the whole table. On a big one it came back as "too large to display — open
+# the tree and click a branch", which is what the user had just done.
+_LOCUS_RE = re.compile(r"^\S+:\d+$")
 
 # --- Very large sheets -------------------------------------------------------
 #
@@ -205,7 +217,8 @@ def too_large_page(filename: str, total_rows: int, total_cols: int,
                    tree_url: str | None = None, tree_name: str | None = None,
                    clade_samples: int | None = None,
                    download_url: str | None = None,
-                   clade_positions: int | None = None) -> str:
+                   clade_positions: int | None = None,
+                   filter_ignored: str | None = None) -> str:
     """The page shown instead of a table that cannot be shown in full.
 
     Two routes, because both are real: the file itself in a spreadsheet
@@ -215,6 +228,12 @@ def too_large_page(filename: str, total_rows: int, total_cols: int,
     ``clade_samples`` set means this was ALREADY filtered to a clade and is
     still too large — the advice becomes "select a smaller clade", not "select
     a clade".
+
+    ``filter_ignored`` set means a clade WAS selected and the filter could not
+    be applied to this sheet at all. The tree route is then removed rather than
+    reworded: it is the page's job not to send someone back to do the thing
+    they have just done. That loop is exactly what an unrecognised position
+    header produced — click a branch, get "open the tree and click a branch".
     """
     cells = total_rows * total_cols
     positions = max(0, total_cols - 1)      # column 1 holds the sample names
@@ -223,7 +242,22 @@ def too_large_page(filename: str, total_rows: int, total_cols: int,
     else:
         size_words = f"{cells:,} cells"
 
-    if clade_samples is not None:
+    if filter_ignored:
+        heading = "This table is too large to display"
+        lede = (
+            f"<strong>{total_rows:,} rows × {total_cols:,} columns</strong> — "
+            f"{size_words}, more than a browser can lay out. A clade was selected, "
+            f"but the filter could not be applied to this sheet: "
+            f"{html.escape(filter_ignored)}. What you are being told the size of is "
+            "therefore the whole table, not your clade."
+        )
+        tree_lead = "Selecting a clade cannot narrow this sheet"
+        tree_body = (
+            "The clade filter works by keeping only the position columns a clade "
+            "uses, and this sheet has none it can recognise. Open the file in a "
+            "spreadsheet application instead."
+        )
+    elif clade_samples is not None:
         # The clade's OWN matching positions when the filter got far enough to
         # count them; the sheet's position count otherwise (which is the case
         # where the selection was too large to filter by position at all).
@@ -260,7 +294,10 @@ def too_large_page(filename: str, total_rows: int, total_cols: int,
 
     dl = html.escape(download_url or "?download=1", quote=True)
     tree_block = ""
-    if tree_url:
+    if filter_ignored:
+        # No "Open the tree" button: the tree is where this request came from.
+        tree_block = ""
+    elif tree_url:
         tree_block = (
             f'<a class="tl-btn" href="{html.escape(tree_url, quote=True)}" '
             f'target="_blank" rel="noopener">Open the tree</a>'

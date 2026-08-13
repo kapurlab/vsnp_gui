@@ -66,7 +66,7 @@ def _contains_rule(text: str, argb: str) -> Rule:
 
 
 def make_group_table(path: Path, sample_labels: list[str], cols: int,
-                     call_at) -> None:
+                     call_at, locus_at=None) -> None:
     """A workbook shaped like a real vSNP3 group table.
 
     Row 1 is loci, row 2 the `root` reference row (all 'C'), then sample
@@ -76,11 +76,17 @@ def make_group_table(path: Path, sample_labels: list[str], cols: int,
     reference-match rule FIRST (`equal B$2`, near-white — so every populated
     call cell ends up with a fill), per-base colours after it, missing-data
     colours last, over the sample rows only.
+
+    ``locus_at(col)`` names the position headers. vsnp3 writes them as
+    `CHROM:POS`, and CHROM is whatever the reference FASTA calls the contig —
+    an accession for a bacterial reference, an isolate name for an influenza
+    one. Both are exercised.
     """
+    locus_at = locus_at or (lambda c: f"MTBC0:{1000 + c}")
     wb = openpyxl.Workbook()
     ws = wb.active
     for c in range(2, cols + 1):
-        ws.cell(row=1, column=c, value=f"MTBC0:{1000 + c}")
+        ws.cell(row=1, column=c, value=locus_at(c))
     ws.cell(row=2, column=1, value="root")
     for c in range(2, cols + 1):
         ws.cell(row=2, column=c, value="C")
@@ -286,6 +292,38 @@ def main() -> int:
             raise AssertionError("expected FilterMatchError")
         except xlsx_html.FilterMatchError:
             assert_true(True, "a root-only selection has no sample names")
+
+        # The reference decides what a position header LOOKS like, and for a
+        # while only one shape was recognised. `NC_002945.4:12345` is a
+        # bacterial accession; an influenza reference names each segment after
+        # the isolate it came from, so its headers carry '/', '(' and ')'. Not
+        # one column of an HPAI table matched, the sheet was classified "not a
+        # variant table", and the clade filter handed back the WHOLE table —
+        # or, on a big one, the "too large to display, open the tree and click
+        # a branch" page, which is what the user had just done. Reported from
+        # the Ames HPC on an H5N1 dairy-cattle group.
+        print("\n[the position header's contig name is the reference's, not an accession]")
+        for label, locus_at in (
+            ("influenza segment named after its isolate",
+             lambda c: f"A/mallard/Netherlands/12/2022(H5N1)_PB2:{100 + c}"),
+            ("a bare contig name",
+             lambda c: f"NC_002945.4:{1000 + c}"),
+            ("a contig name carrying its own colon",
+             lambda c: f"gi|12345|ref|NC_002945.4:{1000 + c}"),
+        ):
+            named = tmp / f"named_{abs(hash(label))}.xlsx"
+            make_group_table(named, [f"S{i}_meta_country" for i in range(1, 5)],
+                             8, calls, locus_at=locus_at)
+            w = xlsx_html.render_filtered_window(
+                named, 4 + 4, 8, None, "p", {f"S{i}" for i in range(1, 5)}, set(),
+                ["S1_meta_country", "S2_meta_country"],
+                xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+            assert_true(not w["filter"].get("ignored"),
+                        f"{label}: recognised as a SNP table")
+            assert_eq(w["filter"]["shown_samples"], 2, f"{label}: rows filtered")
+            assert_true(w["filter"]["locus_shown"] < w["filter"]["locus_total"],
+                        f"{label}: positions filtered "
+                        f"({w['filter']['locus_shown']} of {w['filter']['locus_total']})")
 
         print("\n[a sheet with no locus columns ignores the filter, loudly]")
         plain = tmp / "plain.xlsx"

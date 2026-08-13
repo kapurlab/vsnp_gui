@@ -6421,7 +6421,8 @@ def _sibling_tree(target: Path) -> Optional[Path]:
 
 def _too_large_response(project: str, target: Path, path: str,
                         rows: int, cols: int,
-                        clade_samples: Optional[int] = None) -> HTMLResponse:
+                        clade_samples: Optional[int] = None,
+                        filter_ignored: Optional[str] = None) -> HTMLResponse:
     """The page shown in place of a table that cannot be shown in full.
 
     Both links are built relative to this endpoint so they survive the OOD
@@ -6442,6 +6443,7 @@ def _too_large_response(project: str, target: Path, path: str,
             filename=target.name, total_rows=rows, total_cols=cols,
             tree_url=tree_url, tree_name=tree_name,
             clade_samples=clade_samples,
+            filter_ignored=filter_ignored,
             download_url=f"?path={quote(path, safe='')}&download=1",
         ),
         # 200, not an error status: nothing failed. The file is intact and the
@@ -6714,6 +6716,11 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             project, target, path,
             window["total_rows"], window["total_cols"],
             clade_samples=filt.get("matched") if selection_samples is not None else None,
+            # A clade was selected and the filter could not apply: say so, and
+            # do NOT offer "open the tree and click a branch" to someone who
+            # arrived here by clicking a branch.
+            filter_ignored=(filt.get("ignored")
+                            if selection_samples is not None else None),
         )
 
     # A scroll request: return just the requested <tr> block. The window is

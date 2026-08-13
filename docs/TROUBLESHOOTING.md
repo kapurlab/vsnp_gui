@@ -58,7 +58,7 @@ Opening a Step 2 SNP table renders it to HTML, which for the large ones takes
 tens of seconds — so the result is cached and every later visit is instant. The
 cache lives in `~/.cache/vsnp_gui/xlsx_preview/`.
 
-It is capped at **250 MB** by default and drops the least-recently-used entries
+It is capped at **400 MB** by default and drops the least-recently-used entries
 once it is full, so it cannot grow without limit. A dropped entry costs one
 re-render and nothing else. Two environment variables change this — set them
 wherever the app is launched (the OOD `script.sh.erb`, or `sites/site.conf`):

@@ -6182,7 +6182,7 @@ def bootstrap():
 
 # Bumped whenever the rendered HTML changes, so old cache entries are ignored
 # rather than served as a stale preview.
-_XLSX_RENDER_VERSION = "2"
+_XLSX_RENDER_VERSION = "3"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6198,7 +6198,7 @@ _XLSX_RENDER_VERSION = "2"
 #   VSNP_GUI_PREVIEW_CACHE_MB   budget in MB; 0 disables caching entirely
 #   VSNP_GUI_PREVIEW_CACHE_DIR  put the cache somewhere other than $HOME
 #                               (scratch, node-local storage, a project volume)
-_XLSX_CACHE_DEFAULT_MB = 250
+_XLSX_CACHE_DEFAULT_MB = 400
 
 
 def _xlsx_cache_budget_bytes() -> int:

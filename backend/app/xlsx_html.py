@@ -66,11 +66,22 @@ _LOCUS_RE = re.compile(r"^[A-Za-z0-9_.\-]+:\d+$")
 # cells, and each variant cell additionally carries an IGV launch anchor of
 # ~450 bytes, so the full grid would be a multi-gigabyte page. The page says
 # plainly how much it is showing and links the xlsx for the rest.
-STREAM_ABOVE_CELLS = 200_000
+# The streaming renderer now reproduces the full renderer's output exactly on
+# these files (same colours, same IGV links — verified cell-for-cell), so the
+# threshold is set low: the full path's only remaining advantages are merged
+# cells and CF rules that reference other cells, neither of which vSNP3 emits,
+# and it is the path with no size bound at all.
+STREAM_ABOVE_CELLS = 20_000
 # Rendered-cell budget for the streaming path. ~120k cells keeps the page in
 # the low tens of MB (measured), which browsers open in a few seconds.
 DEFAULT_MAX_CELLS = 120_000
 DEFAULT_MAX_ROWS = 5_000
+# …and a cap on the RENDERED BYTES, which is what actually decides whether a
+# page opens and how much disk a cached preview costs. A cell budget alone
+# bounds neither: bytes per cell range from ~30 (a plain cell) to ~450 (a
+# variant cell carrying an IGV launch anchor), so a 480 KB sheet of mostly
+# variant cells rendered to 48 MB while a 35 MB sheet rendered to 1.4 MB.
+DEFAULT_MAX_TABLE_BYTES = 12 * 1024 * 1024
 _NON_SAMPLE_LABELS = {
     "root", "mq", "annotation", "position not annotated",
     "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
@@ -180,6 +191,105 @@ def _sheet_layout(xlsx_path: Path) -> dict:
     except Exception:
         return {"widths": {}, "default_width": None, "freeze_row": 0, "freeze_col": 0}
     return out
+
+
+class _XmlCfRule:
+    """A conditional-formatting rule parsed straight from the sheet XML.
+
+    Deliberately not an openpyxl Rule: it only carries the attributes
+    _cf_rule_matches() reads, so the streaming renderer can evaluate rules
+    without the full (read-write) workbook load that exposes them normally.
+    """
+    __slots__ = ("type", "operator", "text", "formula", "dxfId", "priority")
+
+    def __init__(self, el):
+        self.type = el.get("type")
+        self.operator = el.get("operator")
+        self.text = el.get("text")
+        try:
+            self.dxfId = int(el.get("dxfId")) if el.get("dxfId") is not None else None
+        except ValueError:
+            self.dxfId = None
+        try:
+            self.priority = int(el.get("priority") or 0)
+        except ValueError:
+            self.priority = 0
+        self.formula = [
+            (child.text or "") for child in el
+            if child.tag.split("}")[-1] == "formula"
+        ]
+
+
+class _NoRefSheet:
+    """Stand-in worksheet for CF evaluation while streaming.
+
+    _resolve_cf_value() falls back to reading another cell for rules whose
+    comparison value is a cell reference. Read-only sheets have no random
+    access, so those rules simply don't resolve here — every rule vSNP3
+    actually writes compares against a literal, which needs no sheet at all.
+    """
+    def cell(self, *_args, **_kwargs):
+        raise LookupError("no random access while streaming")
+
+
+def _cf_from_sheet_xml(xlsx_path: Path) -> list[tuple[object, list]]:
+    """Conditional-formatting ranges + rules, read from the sheet XML.
+
+    This exists because EVERY colour in a vSNP3 SNP table comes from
+    conditional formatting — the cells carry no direct fill at all — and
+    openpyxl's read-only worksheets do not expose `conditional_formatting`.
+    Without this the streaming renderer produced a perfectly laid out,
+    completely colourless table, and no IGV links (which are gated on a cell
+    having a background).
+
+    In the OOXML schema `conditionalFormatting` elements follow `sheetData`,
+    so they sit near the END of the sheet part. The stream is decompressed
+    once, keeping only a rolling tail, and the blocks are parsed out of that —
+    no cell objects are built.
+
+    Returns [(CellRange, [rules]), ...]; empty on any problem, because a
+    preview without colour is bad but a preview that raises is worse.
+    """
+    TAIL = 8 * 1024 * 1024
+    try:
+        import zipfile
+        from xml.etree import ElementTree as ET
+
+        with zipfile.ZipFile(xlsx_path) as zf:
+            name = next((n for n in zf.namelist()
+                         if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")),
+                        None)
+            if not name:
+                return []
+            tail = b""
+            with zf.open(name) as fh:
+                while True:
+                    chunk = fh.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    tail = (tail + chunk)[-TAIL:]
+        text = tail.decode("utf-8", errors="replace")
+        out: list[tuple[object, list]] = []
+        for m in re.finditer(r"<conditionalFormatting\b.*?</conditionalFormatting>",
+                             text, re.S):
+            block = m.group(0)
+            try:
+                el = ET.fromstring(block)
+            except ET.ParseError:
+                continue
+            sqref = el.get("sqref") or ""
+            rules = [_XmlCfRule(child) for child in el
+                     if child.tag.split("}")[-1] == "cfRule"]
+            if not rules:
+                continue
+            for part in str(sqref).split():
+                try:
+                    out.append((CellRange(part), rules))
+                except Exception:
+                    continue
+        return out
+    except Exception:
+        return []
 
 
 def _detect_variant_table(ws) -> dict | None:
@@ -571,6 +681,34 @@ def _build_cf_extras(ws, dxfs) -> dict[str, list[str]]:
     return extras
 
 
+def _cf_fragments_for(cell, row_idx: int, col_idx: int,
+                      cf_ranges: list, dxfs: list, cf_sheet) -> list[str]:
+    """CSS fragments a cell picks up from conditional formatting, first match wins.
+
+    Mirrors _build_cf_extras, but evaluated per cell as the sheet streams past
+    rather than by walking every CF range up front — the ranges in these files
+    span the whole table, so materialising them would defeat the point.
+    """
+    if not cf_ranges:
+        return []
+    for cr, rules in cf_ranges:
+        if not (cr.min_row <= row_idx <= cr.max_row
+                and cr.min_col <= col_idx <= cr.max_col):
+            continue
+        for rule in sorted(rules, key=lambda r: r.priority or 0):
+            try:
+                if not _cf_rule_matches(rule, cell, cf_sheet, cr.min_row, cr.min_col):
+                    continue
+            except Exception:
+                continue
+            if rule.dxfId is None or rule.dxfId >= len(dxfs):
+                continue
+            frags = _dxf_style_fragments(dxfs[rule.dxfId])
+            if frags:
+                return frags
+    return []
+
+
 def _render_streaming(
     xlsx_path: Path,
     total_rows: int,
@@ -581,6 +719,7 @@ def _render_streaming(
     samples_with_vcfs: set[str] | None,
     max_cells: int,
     max_rows: int,
+    max_table_bytes: int = None,
 ) -> str:
     """Render a bounded window of a very large sheet in one streaming pass.
 
@@ -594,9 +733,10 @@ def _render_streaming(
     in read-only mode. vSNP3 cascade tables colour their variant cells with
     direct fills, which ARE read, so what a user actually looks at survives.
     """
+    if max_table_bytes is None:
+        max_table_bytes = DEFAULT_MAX_TABLE_BYTES
     render_rows = min(total_rows, max_rows)
     render_cols = max(1, min(total_cols, max_cells // max(1, render_rows)))
-    truncated = render_rows < total_rows or render_cols < total_cols
 
     layout = _sheet_layout(xlsx_path)
     default_width_units = layout["default_width"] or 8.43
@@ -611,8 +751,22 @@ def _render_streaming(
     try:
         ws = wb.active
         sheet_title = ws.title or "Sheet1"
+        # Conditional formatting is where ALL of a vSNP3 table's colour lives,
+        # and read-only sheets don't expose it — so it comes from the XML.
+        dxfs = []
+        try:
+            dxfs = list(wb._differential_styles.styles)
+        except Exception:
+            dxfs = []
+        cf_ranges = _cf_from_sheet_xml(xlsx_path) if dxfs else []
+        cf_sheet = _NoRefSheet()
         positions: dict[int, str] = {}
-        rows_html: list[str] = []
+        # Rows are buffered as per-cell lists rather than one flat string, so
+        # the column count can be trimmed after the fact — see the byte budget
+        # below, which is only measurable once real cells have been rendered.
+        rows_cells: list[list[str]] = []
+        effective_cols = render_cols
+        bytes_so_far = 0
 
         # Row/column indices are tracked by position, not read off the cell:
         # a read-only sheet yields `EmptyCell` for gaps, and those carry no
@@ -642,12 +796,20 @@ def _render_streaming(
                         row_stem = _canonical_stem(
                             stem, samples_with_bams, samples_with_vcfs)
 
-            rows_html.append("<tr>")
+            cells: list[str] = []
             for col_idx, cell in enumerate(row, start=1):
+                if col_idx > effective_cols:
+                    break
                 if not hasattr(cell, "column"):     # EmptyCell: no value, no style
-                    rows_html.append("<td></td>")
+                    cells.append("<td></td>")
                     continue
                 inline = _cell_inline_style(cell)
+                # CF wins over direct cell styles for the properties it sets,
+                # so its fragments go last (later declarations override).
+                cf_frags = _cf_fragments_for(
+                    cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
+                if cf_frags:
+                    inline = "; ".join([p for p in (inline,) if p] + cf_frags)
                 classes = []
                 if row_idx <= freeze_row:
                     classes.append("xlsx-sticky-top")
@@ -677,10 +839,44 @@ def _render_streaming(
                     classes.append("xlsx-variant")
                 attrs = f' class="{" ".join(classes)}"' if classes else ""
                 style_attr = f' style="{inline}"' if inline else ""
-                rows_html.append(f"<td{attrs}{style_attr}>{cell_inner}</td>")
-            rows_html.append("</tr>")
+                cells.append(f"<td{attrs}{style_attr}>{cell_inner}</td>")
+            rows_cells.append(cells)
+            bytes_so_far += sum(len(c) for c in cells)
+
+            # Bound the OUTPUT, not just the cell count. Bytes per cell vary by
+            # more than tenfold — a plain cell is ~30 bytes, a coloured variant
+            # cell carrying an IGV anchor ~450 — so a cell budget bounds
+            # nothing useful: a 480 KB sheet rendered to 48 MB, which is a page
+            # no browser enjoys and a cache entry larger than the spreadsheet
+            # that produced it.
+            #
+            # Enforced continuously rather than predicted once. A single
+            # sample row is a bad estimator here: the first rows of a cascade
+            # table are headers and annotations with no colour at all, so
+            # estimating from them left the budget 5x overshot by the time the
+            # dense rows arrived. After each row, project the finished size
+            # from what has actually been emitted and narrow the window if it
+            # is heading over — already-buffered rows are trimmed to match, so
+            # the result is the same as if the width had been right all along.
+            if bytes_so_far and effective_cols > 1:
+                projected = bytes_so_far / len(rows_cells) * render_rows
+                if projected > max_table_bytes:
+                    scale = max_table_bytes / projected
+                    narrowed = max(1, int(effective_cols * scale))
+                    if narrowed < effective_cols:
+                        effective_cols = narrowed
+                        rows_cells = [r[:effective_cols] for r in rows_cells]
+                        bytes_so_far = sum(len(c) for r in rows_cells for c in r)
     finally:
         wb.close()
+
+    # Trim to the width the byte budget allows (a no-op when nothing was over).
+    if effective_cols < render_cols:
+        rows_cells = [r[:effective_cols] for r in rows_cells]
+        colgroup_parts = colgroup_parts[:effective_cols]
+    render_cols = min(render_cols, effective_cols)
+    truncated = render_rows < total_rows or render_cols < total_cols
+    rows_html = ["<tr>" + "".join(r) + "</tr>" for r in rows_cells]
 
     notice = ""
     if truncated:

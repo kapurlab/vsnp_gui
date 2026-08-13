@@ -63,12 +63,20 @@ much of the sheet you are seeing, and *Download xlsx* always gives the
 complete file.
 
 **The better way into a big table is through its tree.** Open the group's
-`.tre` from Step 2 Results (*View tree*), tick **Clade → SNP table (click
-branch)**, and click the branch leading into the clade you care about. The
-selected tips highlight, and *Open SNP table for clade* opens the group's
-table showing **only those samples and only the SNP positions they actually
-use** — positions where every selected sample matches the reference are
-hidden. On a 1,000 × 10,000 table a 30-sample clade typically comes back as
+`.tre` from Step 2 Results (*View tree*) and click the branch — or the node
+marker at the fork — leading into the clade you care about. No mode to switch
+on: clicking the tree selects clades by default whenever SNP tables sit beside
+it, and the green bar above the tree says so. The selected tips highlight, and
+*Open SNP table for clade* opens the group's table showing **only those samples
+and only the SNP positions they actually use** — positions where every selected
+sample matches the reference are hidden.
+
+The node markers are the easier target: a branch is a hairline, so it only
+answers a click within a pixel or two of the line itself (they thicken and
+highlight under the cursor to help). If clicking does nothing at all, check
+whether **Reroot mode** is ticked — while it is, a branch click reroots the
+tree instead of selecting a clade, and the green bar says which mode has the
+click. On a 1,000 × 10,000 table a 30-sample clade typically comes back as
 a few-thousand-cell table with all the colour and the click-to-IGV cells
 intact, and a banner saying exactly what was filtered (with a *Show the full
 table* link back). Missing data (`-`/`N`) does not count as a SNP for the

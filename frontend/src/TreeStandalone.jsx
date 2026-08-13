@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { phylotree, computeMidpoint } from "phylotree";
 import "phylotree/dist/phylotree.css";
+import { cladeSamples, resolveClickTarget, stripZc, styleable } from "./clade.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -8,39 +9,6 @@ function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
 }
 
-// Tree tips may carry the vSNP3 `_zc.vcf` suffix; reduce to the sample name
-// the way the display option does. The backend strips again on its side, so
-// this only needs to be good, not perfect.
-function stripZc(name) {
-  const n = String(name || "");
-  const low = n.toLowerCase();
-  if (low.endsWith("_zc.vcf.gz")) return n.slice(0, -"_zc.vcf.gz".length);
-  if (low.endsWith("_zc.vcf")) return n.slice(0, -"_zc.vcf".length);
-  return n;
-}
-
-// All tip names under a node (the clade a clicked branch leads to).
-function tipsUnder(node) {
-  const out = [];
-  if (!node) return out;
-  if (typeof node.leaves === "function") {
-    for (const leaf of node.leaves()) {
-      const name = leaf && leaf.data && leaf.data.name;
-      if (name) out.push(name);
-    }
-    return out;
-  }
-  (function walk(n) {
-    if (!n) return;
-    if (!n.children || !n.children.length) {
-      const name = n.data && n.data.name;
-      if (name) out.push(name);
-      return;
-    }
-    n.children.forEach(walk);
-  })(node);
-  return out;
-}
 
 export default function TreeStandalone() {
   const params = new URLSearchParams(window.location.search);
@@ -51,7 +19,6 @@ export default function TreeStandalone() {
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [rerootMode, setRerootMode] = useState(false);
-  const [cladeMode, setCladeMode] = useState(false);
   const [stripSuffix, setStripSuffix] = useState(true);
   const [counts, setCounts] = useState({ leaves: 0 });
   // SNP tables living beside this tree (same Step 2 group directory); empty
@@ -61,15 +28,22 @@ export default function TreeStandalone() {
   const [selectedTips, setSelectedTips] = useState([]);
   const [opening, setOpening] = useState(false);
 
+  // Clade selection is the DEFAULT way a branch click behaves, not a mode to
+  // find and switch on. It was a checkbox first, and the first thing that
+  // happened is what always happens with a hidden mode: clicking the tree did
+  // nothing and the feature read as broken. Rerooting stays an explicit opt-in
+  // and takes the click while it is on — it is the destructive-looking one.
+  const cladePick = tables.length > 0 && !rerootMode;
+
   const treeRef = useRef(null);
   const containerRef = useRef(null);
   const originalNewickRef = useRef("");
   const rerootModeRef = useRef(false);
-  const cladeModeRef = useRef(false);
+  const cladePickRef = useRef(false);
   const selectedSetRef = useRef(new Set());
 
   useEffect(() => { rerootModeRef.current = rerootMode; }, [rerootMode]);
-  useEffect(() => { cladeModeRef.current = cladeMode; }, [cladeMode]);
+  useEffect(() => { cladePickRef.current = cladePick; }, [cladePick]);
   useEffect(() => {
     selectedSetRef.current = new Set(selectedTips.map((t) => stripZc(t)));
   }, [selectedTips]);
@@ -93,7 +67,14 @@ export default function TreeStandalone() {
       brush: false,
       zoom: true,
       "node-styler": (element, node) => {
+        if (!styleable(element)) return;
         const data = (node && node.data) || {};
+        // The node itself is a clade-selection target too. A branch is an SVG
+        // path with no fill, so it answers pointer events only on its painted
+        // stroke — a ~2px line to hit. The node marker at the fork is a far
+        // easier target for the same clade, and it is where a reader's eye
+        // already is when they mean "this group".
+        if (cladePickRef.current) element.style("cursor", "pointer");
         if (node && node.children) {
           // Internal node: phylotree renders data.name when internal-names is on.
           // Suppress any literal "root" label (synthetic wrapper or otherwise);
@@ -119,22 +100,8 @@ export default function TreeStandalone() {
         }
       },
       "edge-styler": (element, edge) => {
-        if (rerootModeRef.current || cladeModeRef.current) element.style("cursor", "pointer");
-        element.on("click.tree-branch", () => {
-          if (cladeModeRef.current) {
-            const tips = tipsUnder(edge.target)
-              .filter((t) => String(t).toLowerCase() !== "root");
-            if (tips.length) setSelectedTips(tips);
-            return;
-          }
-          if (!rerootModeRef.current) return;
-          try {
-            tree.reroot(edge.target);
-            render(tree);
-          } catch (e) {
-            setStatus(`Reroot failed: ${e && e.message ? e.message : e}`);
-          }
-        });
+        if (!styleable(element)) return;
+        if (rerootModeRef.current || cladePickRef.current) element.style("cursor", "pointer");
       },
     });
     const svgNode = display.show ? display.show() : null;
@@ -146,6 +113,49 @@ export default function TreeStandalone() {
       setStatus("phylotree returned no SVG node");
     }
   }
+
+  // ONE delegated click listener for the whole tree, bound once to the
+  // container — not a handler per branch.
+  //
+  // phylotree's own branch handler calls modifySelection() + update(), which
+  // re-renders and REPLACES every branch path on each click. Per-element
+  // listeners therefore live on elements that are about to be discarded, and
+  // whether ours runs at all comes down to listener ordering; they also have to
+  // be re-attached on every redraw. Delegation sidesteps all of it — the
+  // container outlives every render — and it is bound in the CAPTURE phase so
+  // the clade is read out of the DOM before phylotree starts rebuilding it.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    function onClick(ev) {
+      const hit = resolveClickTarget(ev.target, el);
+      if (!hit) return;
+      if (!rerootModeRef.current && !cladePickRef.current) return;
+      // Having handled it, keep it from reaching phylotree's own click
+      // handlers. Theirs call modifySelection() + update() — a full redraw we
+      // then redraw over — and its node handler opens a dropdown menu this
+      // viewer does not use (selectable/collapsible are off) whose code throws
+      // "Invalid selector" here anyway. Zooming is wheel/drag, so it is
+      // unaffected.
+      ev.stopPropagation();
+      if (rerootModeRef.current) {
+        if (hit.kind !== "edge" || !treeRef.current) return;
+        try {
+          treeRef.current.reroot(hit.node);
+          render(treeRef.current);
+        } catch (e) {
+          setStatus(`Reroot failed: ${e && e.message ? e.message : e}`);
+        }
+        return;
+      }
+      if (!cladePickRef.current) return;
+      const s = cladeSamples(hit.node);
+      if (s.length) setSelectedTips(s);
+    }
+    el.addEventListener("click", onClick, true);
+    return () => el.removeEventListener("click", onClick, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!project || !path) return;
@@ -207,7 +217,7 @@ export default function TreeStandalone() {
   useEffect(() => {
     if (treeRef.current) render(treeRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showBootstrap, searchTerm, rerootMode, cladeMode, stripSuffix, selectedTips]);
+  }, [showBootstrap, searchTerm, rerootMode, cladePick, stripSuffix, selectedTips]);
 
   function midpointRoot() {
     if (!treeRef.current) return;
@@ -302,18 +312,15 @@ export default function TreeStandalone() {
         <input placeholder="Search tip…" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} style={{ width: 180 }} />
         <label><input type="checkbox" checked={stripSuffix} onChange={(e) => setStripSuffix(e.target.checked)} /> Strip <code>_zc.vcf</code></label>
         <label><input type="checkbox" checked={showBootstrap} onChange={(e) => setShowBootstrap(e.target.checked)} /> Bootstrap</label>
-        <label><input type="checkbox" checked={rerootMode} onChange={(e) => { setRerootMode(e.target.checked); if (e.target.checked) setCladeMode(false); }} /> Reroot mode (click branch)</label>
-        {tables.length ? (
-          <label title="Click a branch to select its clade, then open the group's SNP table filtered to those samples.">
-            <input type="checkbox" checked={cladeMode} onChange={(e) => { setCladeMode(e.target.checked); if (e.target.checked) setRerootMode(false); }} /> Clade → SNP table (click branch)
-          </label>
-        ) : null}
+        <label title={tables.length ? "While this is on, a branch click reroots the tree instead of selecting a clade." : ""}>
+          <input type="checkbox" checked={rerootMode} onChange={(e) => setRerootMode(e.target.checked)} /> Reroot mode (click branch)
+        </label>
         <button onClick={midpointRoot}>Midpoint</button>
         <button onClick={resetRoot}>Reset</button>
         <button onClick={downloadTre}>Download .tre</button>
         {status ? <span style={{ color: "#b34", fontSize: "0.9em" }}>{status}</span> : null}
       </div>
-      {tables.length && (cladeMode || selectedTips.length) ? (
+      {tables.length > 0 ? (
         <div style={{ padding: "0.4rem 0.8rem", borderBottom: "1px solid #cfe0cf", background: "#eef6ee", display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap", fontSize: "0.92em" }}>
           {selectedTips.length ? (
             <>
@@ -332,11 +339,19 @@ export default function TreeStandalone() {
               <button onClick={() => setSelectedTips([])}>Clear</button>
             </>
           ) : (
-            <span style={{ color: "#3a5a3a" }}>Click a branch to select its clade.</span>
+            <span style={{ color: "#3a5a3a" }}>
+              {rerootMode
+                ? "Reroot mode is on — a branch click reroots the tree. Untick it to select clades again."
+                : "Click any branch or node to select that clade, then open its SNP table filtered to those samples."}
+            </span>
           )}
         </div>
       ) : null}
-      <div ref={containerRef} style={{ flex: 1, overflow: "auto", background: "#fff" }} />
+      <div
+        ref={containerRef}
+        className={cladePick ? "tree-canvas tree-pick" : "tree-canvas"}
+        style={{ flex: 1, overflow: "auto", background: "#fff" }}
+      />
     </div>
   );
 }

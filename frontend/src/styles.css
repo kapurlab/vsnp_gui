@@ -1613,3 +1613,15 @@ html[data-theme="dark"] .qc-criteria summary:hover { background:#263640; }
 html[data-theme="dark"] .ref-editor-card,html[data-theme="dark"] .step2-options-panel { background:var(--panel-2);border-color:var(--border); }
 html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
 @media (max-width:720px) { .header-actions { width:100%;justify-content:space-between; } }
+
+/* Tree viewer: clade picking.
+   A phylotree branch is an SVG <path> with no fill, so it answers pointer
+   events only where it is PAINTED — a 1.5px line is a 1.5px click target, and
+   aiming at one reads as "clicking the tree does nothing". While clade picking
+   is active the branches are painted thicker (still hairlines, just hittable)
+   and highlight under the cursor, and the node markers — a much easier target
+   for the same clade — grow enough to aim at. */
+.tree-pick path.branch { stroke-width:3px;cursor:pointer; }
+.tree-pick path.branch:hover { stroke:#1d5fbf;stroke-width:5px; }
+.tree-pick g.node circle,.tree-pick circle.node-marker { cursor:pointer;r:4px; }
+.tree-pick g.node:hover circle,.tree-pick circle.node-marker:hover { fill:#1d5fbf;r:6px; }

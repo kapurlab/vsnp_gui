@@ -6182,7 +6182,7 @@ def bootstrap():
 
 # Bumped whenever the rendered HTML changes, so old cache entries are ignored
 # rather than served as a stale preview.
-_XLSX_RENDER_VERSION = "4"
+_XLSX_RENDER_VERSION = "5"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6260,6 +6260,7 @@ def _xlsx_cache_path(
     project: str,
     samples_with_bams: set,
     samples_with_vcfs: set,
+    extra: str = "",
 ) -> Optional[Path]:
     """Where this file's rendered preview lives, or None if it can't be cached.
 
@@ -6286,6 +6287,7 @@ def _xlsx_cache_path(
                 project,
                 ",".join(sorted(samples_with_bams)),
                 ",".join(sorted(samples_with_vcfs)),
+                extra,
             ]).encode("utf-8")
         ).hexdigest()
     except OSError:
@@ -6293,9 +6295,147 @@ def _xlsx_cache_path(
     return _xlsx_cache_dir() / f"{key}.html"
 
 
+# --- Tree-clade selections -> filtered SNP-table previews -------------------
+#
+# The tree viewer lets a user click a clade and open the group's SNP table
+# subset to just that clade's samples (and just the SNP columns those samples
+# use). The sample list can be hundreds of names — far too long for a GET
+# query string through the OOD proxy — so the viewer POSTs the list first and
+# gets back a short token, and the preview URL carries only the token.
+#
+# The token is a hash of the sorted sample set, so re-clicking the same clade
+# yields the same token — and therefore the same preview cache entry — no
+# matter how many times the selection is re-posted. Selections are kept in
+# memory and mirrored as tiny JSON files under the preview cache dir, so they
+# survive a backend restart; when neither has the token (e.g. cache disabled
+# and backend restarted), the preview says to re-open from the tree rather
+# than guessing.
+
+_SNP_SELECTIONS: Dict[str, Dict[str, Any]] = {}
+_SNP_SELECTIONS_MAX_FILES = 500
+
+
+class SnpSelectionRequest(BaseModel):
+    samples: List[str]
+    source: Optional[str] = None   # tree path, recorded for debugging only
+
+
+def _snp_selection_dir() -> Path:
+    return _xlsx_cache_dir() / "selections"
+
+
+def _snp_selection_token(samples: List[str]) -> str:
+    key = "\n".join(sorted(set(samples)))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
+
+
+def _store_snp_selection(token: str, payload: Dict[str, Any]) -> None:
+    _SNP_SELECTIONS[token] = payload
+    try:
+        d = _snp_selection_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f"{token}.part"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, d / f"{token}.json")
+        # Selections are ~KB each; a count cap keeps the dir tidy without
+        # needing the byte-budget machinery the preview entries use.
+        entries = sorted(
+            (e for e in d.iterdir() if e.suffix == ".json"),
+            key=lambda e: e.stat().st_mtime,
+        )
+        for e in entries[:-_SNP_SELECTIONS_MAX_FILES]:
+            try:
+                e.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass  # memory copy still serves this process's lifetime
+
+
+def _load_snp_selection(token: str) -> Optional[Dict[str, Any]]:
+    if not re.fullmatch(r"[0-9a-f]{8,64}", token or ""):
+        return None
+    hit = _SNP_SELECTIONS.get(token)
+    if hit is not None:
+        return hit
+    try:
+        f = _snp_selection_dir() / f"{token}.json"
+        if f.is_file():
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("samples"), list):
+                _SNP_SELECTIONS[token] = data
+                return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+@app.post("/api/projects/{project}/snp-selection")
+def create_snp_selection(project: str, payload: SnpSelectionRequest):
+    """Register a clade's sample list and return the token that names it."""
+    cfg = load_config()
+    _project_dir_for(cfg, project)   # 404 on unknown project
+    samples = sorted({s.strip() for s in payload.samples if s and s.strip()})
+    if not samples:
+        raise HTTPException(status_code=400, detail="No sample names given")
+    if len(samples) > 20000:
+        raise HTTPException(status_code=400, detail="Selection is too large")
+    token = _snp_selection_token(samples)
+    _store_snp_selection(token, {
+        "samples": samples,
+        "source": (payload.source or "")[:1000],
+        "project": project,
+    })
+    return {"token": token, "count": len(samples)}
+
+
+@app.get("/api/projects/{project}/tree-tables")
+def tree_tables(project: str, path: str = Query(...)):
+    """SNP tables that belong to a tree file — the xlsx siblings in its
+    directory. vSNP3 writes each group's tree and tables side by side
+    (`<group>/<group>_*.tre` next to `<group>_*_table*.xlsx`), so directory
+    siblinghood IS the pairing. Cascade tables are listed before sorted
+    ones to make the common choice the default."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    target = Path(path).resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.suffix.lower() not in (".tre", ".tree", ".nwk"):
+        raise HTTPException(status_code=400, detail="Not a tree file")
+    from app import xlsx_html
+    tables = []
+    for f in sorted(target.parent.glob("*.xlsx")):
+        if f.name.startswith("~$") or not f.is_file():
+            continue
+        entry: Dict[str, Any] = {"path": str(f), "name": f.name}
+        try:
+            rows, cols = xlsx_html.sheet_extent(f)
+            entry["rows"], entry["cols"] = rows, cols
+        except Exception:
+            pass
+        tables.append(entry)
+
+    def _order(e: Dict[str, Any]) -> tuple:
+        n = e["name"].lower()
+        if "cascade" in n:
+            group = 0
+        elif "sorted" in n:
+            group = 1
+        else:
+            group = 2
+        return (group, n)
+
+    tables.sort(key=_order)
+    return {"tables": tables}
+
+
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
-                 rows_from: Optional[int] = None, rows_count: int = 200):
+                 rows_from: Optional[int] = None, rows_count: int = 200,
+                 selection: Optional[str] = None):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
     via openpyxl). With ?download=1, returns the raw xlsx (for the "Download
     xlsx" link inside the preview page)."""
@@ -6314,6 +6454,22 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
         )
+    # A clade filter (posted by the tree viewer, named by token). Resolved
+    # before anything is rendered: a dangling token must say so plainly, not
+    # quietly serve the unfiltered table as if the filter had applied.
+    selection_samples: Optional[List[str]] = None
+    if selection:
+        sel_data = _load_snp_selection(selection)
+        if sel_data is None:
+            raise HTTPException(
+                status_code=410,
+                detail=(
+                    "This clade selection has expired (the token is no longer "
+                    "known to the server). Re-open the table from the tree "
+                    "viewer to make a fresh selection."
+                ),
+            )
+        selection_samples = list(sel_data.get("samples") or [])
     # Build sets of samples loadable in IGV so the cascade-table render
     # can correctly enable / grey out the "↗ this" affordance per row:
     #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
@@ -6360,7 +6516,10 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
     # read every cell of the sheet XML even to render the leading columns), so
     # without this every revisit pays the full cost again. Keyed on the file's
     # identity AND the renderer version, so a code change invalidates the lot.
-    cached = _xlsx_cache_path(target, project, samples_with_bams, samples_with_vcfs)
+    cached = _xlsx_cache_path(
+        target, project, samples_with_bams, samples_with_vcfs,
+        extra=f"sel:{selection}" if selection_samples is not None else "",
+    )
     window = None
     if cached is not None and cached.exists():
         try:
@@ -6377,7 +6536,16 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
     if window is None:
         try:
             rows, cols = xlsx_html.sheet_extent(target)
-            if rows * cols <= xlsx_html.STREAM_ABOVE_CELLS:
+            if selection_samples is not None:
+                # Filtered previews always take the streaming renderer — the
+                # filter is implemented there, and it handles small sheets
+                # exactly as well as the 35 MB ones it was built for.
+                window = xlsx_html.render_filtered_window(
+                    target, rows, cols, None, project,
+                    samples_with_bams, samples_with_vcfs, selection_samples,
+                    xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
+                )
+            elif rows * cols <= xlsx_html.STREAM_ABOVE_CELLS:
                 # Small sheet: the original full-fidelity renderer, unchanged,
                 # and nothing to page through.
                 return HTMLResponse(content=xlsx_html.xlsx_to_html(
@@ -6385,11 +6553,14 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                     samples_with_bams=samples_with_bams,
                     samples_with_vcfs=samples_with_vcfs,
                 ))
-            window = xlsx_html.render_window(
-                target, rows, cols, None, project,
-                samples_with_bams, samples_with_vcfs,
-                xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
-            )
+            else:
+                window = xlsx_html.render_window(
+                    target, rows, cols, None, project,
+                    samples_with_bams, samples_with_vcfs,
+                    xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
+                )
+        except xlsx_html.FilterMatchError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         except MemoryError:
             raise HTTPException(
                 status_code=507,

@@ -87,10 +87,27 @@ DEFAULT_INITIAL_ROWS = 200
 # variant cell carrying an IGV launch anchor), so a 480 KB sheet of mostly
 # variant cells rendered to 48 MB while a 35 MB sheet rendered to 1.4 MB.
 DEFAULT_MAX_TABLE_BYTES = 64 * 1024 * 1024
+# Clade-filtered previews (render_filtered_window) must see every column of a
+# kept row before they can decide which SNP columns the clade actually uses,
+# so kept rows are buffered at full sheet width during the single streaming
+# pass. This caps that buffer: above it (selection rows x total columns) the
+# per-column SNP filter is skipped and only rows are filtered — a selection
+# that big is the too-big table again, and buffering it would recreate the
+# memory blow-up the streaming renderer exists to avoid. 2M cells of small
+# fragment strings is roughly 150-200 MB transient, measured tolerable here.
+FILTER_BUFFER_MAX_CELLS = 2_000_000
 _NON_SAMPLE_LABELS = {
     "root", "mq", "annotation", "position not annotated",
     "n:p207l, orf1ab",  # vSNP3 sometimes carries annotation hints into col 1; skip
 }
+
+
+class FilterMatchError(ValueError):
+    """A clade selection matched no sample row of the table at all.
+
+    Raised instead of rendering a table of nothing-but-header-rows: when the
+    tree tips and the table labels disagree this loudly, the user needs the
+    message, not an empty grid."""
 
 
 def _strip_vcf_suffix(s: str) -> str:
@@ -129,6 +146,22 @@ def _canonical_stem(label: str, *stem_sets) -> str:
         if label.startswith(s + "_") and (best is None or len(s) > len(best)):
             best = s
     return best if best is not None else label
+
+
+def _selection_key(label: str, *stem_sets) -> str:
+    """Normalise a tree tip / table row label for clade-selection matching.
+
+    Tree tips and table rows both come out of the same vSNP3 step 2 run, but
+    they are not always spelled identically: either side may carry a
+    `_zc.vcf` suffix, and either side may be decorated with metadata
+    (`DRR184883_Vietnam_Asia_L4`) — the GUI's re-labeled trees decorate from
+    a different source than vsnp3 decorates its tables. Reducing both sides
+    to the canonical on-disk stem (when the stem is known from step1 BAMs or
+    the imported VCF database) makes differently-decorated spellings of the
+    same sample compare equal; unknown stems fall back to the suffix-stripped
+    label itself."""
+    stem = _strip_vcf_suffix(str(label).strip())
+    return _canonical_stem(stem, *stem_sets)
 
 
 def sheet_extent(xlsx_path: Path) -> tuple[int, int]:
@@ -230,11 +263,66 @@ class _NoRefSheet:
 
     _resolve_cf_value() falls back to reading another cell for rules whose
     comparison value is a cell reference. Read-only sheets have no random
-    access, so those rules simply don't resolve here — every rule vSNP3
-    actually writes compares against a literal, which needs no sheet at all.
+    access, so those rules simply don't resolve here.
     """
     def cell(self, *_args, **_kwargs):
         raise LookupError("no random access while streaming")
+
+
+class _ValueCell:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _CapturedRowsSheet:
+    """A worksheet shim that answers cell refs from rows captured in passing.
+
+    The colour-deciding rule in a real vSNP3 table is `cellIs equal B$2` —
+    "this call matches the reference row" — an ANCHOR-ROW reference, not a
+    literal. A read-only pass cannot look back at row 2 on demand, but it
+    doesn't have to: row 2 streams past before any row whose rule needs it,
+    so the renderer hands the rows that CF formulas name (by absolute row)
+    to this shim as they go by. Refs into rows that were not captured raise,
+    which _resolve_cf_value already treats as "rule doesn't resolve" — the
+    behaviour all streamed CF evaluation had before this shim existed.
+    """
+    def __init__(self):
+        self._rows: dict[int, dict[int, object]] = {}
+
+    def capture(self, row_idx: int, row) -> None:
+        vals: dict[int, object] = {}
+        for col_idx, cell in enumerate(row, start=1):
+            v = getattr(cell, "value", None)
+            if v is not None:
+                vals[col_idx] = v
+        self._rows[row_idx] = vals
+
+    def cell(self, row: int, column: int):
+        vals = self._rows.get(row)
+        if vals is None:
+            raise LookupError("row not captured while streaming")
+        return _ValueCell(vals.get(column))
+
+
+def _cf_absolute_ref_rows(cf_ranges: list) -> set[int]:
+    """Row numbers that CF formulas pin with an absolute row (e.g. B$2).
+
+    These are the rows worth capturing during a streaming pass; relative-row
+    references can point anywhere and stay unresolvable, as before."""
+    rows: set[int] = set()
+    for _cr, rules in cf_ranges:
+        for rule in rules:
+            if rule.type != "cellIs" or not rule.formula:
+                continue
+            parsed = _parse_single_ref(str(rule.formula[0]).strip())
+            if parsed is None:
+                continue
+            _col_abs, _col_letter, row_abs, row_num = parsed
+            if row_abs and row_num >= 1:
+                rows.add(row_num)
+    return rows
 
 
 def _cf_from_sheet_xml(xlsx_path: Path) -> list[tuple[object, list]]:
@@ -764,7 +852,13 @@ def render_window(
         except Exception:
             dxfs = []
         cf_ranges = _cf_from_sheet_xml(xlsx_path) if dxfs else []
-        cf_sheet = _NoRefSheet()
+        # vSNP3's top-priority rule compares each call against the reference
+        # row (`equal B$2`). Capture the rows such rules pin so the rule
+        # resolves here the way it does in Excel — without it, reference-
+        # matching calls fell through to the per-base colour rules and the
+        # streamed table painted every cell bright instead of near-white.
+        cf_sheet = _CapturedRowsSheet()
+        cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
         positions: dict[int, str] = {}
         # Rows are buffered as per-cell lists rather than one flat string, so
         # the column count can be trimmed after the fact — see the byte budget
@@ -789,6 +883,8 @@ def render_window(
                              min_col=1, max_col=render_cols), start=1):
             if not row:
                 continue
+            if row_idx in cf_capture_rows:
+                cf_sheet.capture(row_idx, row)
             # Row 1 carries the locus headers; capture them before any data row
             # needs them (they arrive first, so a single pass is enough).
             if row_idx == 1 and project:
@@ -920,6 +1016,327 @@ def render_window(
     }
 
 
+def render_filtered_window(
+    xlsx_path: Path,
+    total_rows: int,
+    total_cols: int,
+    title: str | None,
+    project: str | None,
+    samples_with_bams: set[str] | None,
+    samples_with_vcfs: set[str] | None,
+    selection: "list[str] | set[str]",
+    max_cells: int,
+    max_rows: int,
+    max_table_bytes: int = None,
+) -> dict:
+    """Render a SNP table subset to a tree clade, in one streaming pass.
+
+    ``selection`` is the clade's tip names as read off the tree. Kept rows are
+    the header, the structural rows (root / MQ / annotation), and every sample
+    row whose label resolves to a selected tip (see _selection_key). Kept
+    columns are column 1 plus every locus column with at least one COLOURED
+    cell among the kept sample rows — colour is what marks a call as a SNP in
+    these tables, so "columns with a SNP in this clade" and "columns a user
+    sees highlighted" are the same set by construction.
+
+    Single pass by design: a full streaming pass over a 35 MB cascade table
+    costs ~30 s in XML parsing alone, so a look-ahead pass to pick columns
+    first would double the dominant cost. Instead kept rows are buffered at
+    full sheet width and the column choice is applied afterwards. The buffer
+    is bounded by FILTER_BUFFER_MAX_CELLS; selections too large for it fall
+    back to row filtering only (disclosed on the page), because a clade that
+    big is the unfiltered table again for all practical purposes.
+
+    Returns the same window dict as render_window, plus a ``filter`` block
+    for the page banner. Raises FilterMatchError when nothing matched.
+    """
+    if max_table_bytes is None:
+        max_table_bytes = DEFAULT_MAX_TABLE_BYTES
+
+    raw_sel = {_strip_vcf_suffix(str(s).strip()) for s in selection
+               if str(s).strip()}
+    raw_sel = {s for s in raw_sel if s and s.lower() not in _NON_SAMPLE_LABELS}
+    sel_keys = {_selection_key(s, samples_with_bams, samples_with_vcfs)
+                for s in raw_sel}
+    if not sel_keys:
+        raise FilterMatchError("The clade selection contains no sample names.")
+
+    # Row caps: samples up to the window bound, structural rows generously but
+    # not unboundedly (a vSNP3 table has ~4; a sheet where thousands of rows
+    # have no sample label is not a SNP table and must not be buffered whole).
+    max_sample_rows = max(1, max_rows - 8)
+    max_structural_rows = 50
+
+    # Decide up front whether the full-width buffer fits. Kept rows can't
+    # exceed the selection size (plus structural rows), so this is a real
+    # bound, not an estimate.
+    est_kept_rows = min(len(sel_keys), max_sample_rows) + max_structural_rows
+    column_filter = est_kept_rows * total_cols <= FILTER_BUFFER_MAX_CELLS
+    if column_filter:
+        buffer_width = total_cols
+    else:
+        buffer_width = max(1, min(total_cols, max_cells // max(1, est_kept_rows)))
+
+    layout = _sheet_layout(xlsx_path)
+    default_width_units = layout["default_width"] or 8.43
+    freeze_row, freeze_col = layout["freeze_row"], layout["freeze_col"]
+
+    not_variant_table = False
+    positions: dict[int, str] = {}
+    # A locus column belongs to the clade when at least one selected sample
+    # CALLS something different from the reference row there. Values, not
+    # colours, decide this: in a real vSNP3 table every populated cell has a
+    # fill (reference matches are painted near-white), so "has a colour"
+    # would keep every column. Missing data ('-'/'N'/empty) is not a call —
+    # a low-coverage sample must not drag thousands of columns into the view.
+    col_snp = bytearray(total_cols + 1)
+    root_vals: dict[int, str] | None = None      # reference row's calls
+    clade_first_call: dict[int, str] = {}        # fallback baseline, no-root sheets
+    kept_frags: list[list[str]] = []     # per kept row, one fragment per column
+    kept_samples: list[str] = []         # per kept row, IGV stem ('' = structural)
+    style_classes: dict[str, str] = {}
+    matched_rows = 0                     # sample rows that matched the clade
+    shown_sample_rows = 0                # ...and were actually buffered
+    total_sample_rows = 0                # all sample rows in the sheet
+    structural_kept = 0
+    bytes_so_far = 0
+
+    def _call_of(cell) -> str:
+        v = getattr(cell, "value", None)
+        s = str(v).strip() if v is not None else ""
+        return "" if s.upper() in ("", "-", "N") else s
+
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        sheet_title = ws.title or "Sheet1"
+        dxfs = []
+        try:
+            dxfs = list(wb._differential_styles.styles)
+        except Exception:
+            dxfs = []
+        cf_ranges = _cf_from_sheet_xml(xlsx_path) if dxfs else []
+        # Same reference-row capture as render_window: the `equal B$2` rule
+        # needs row 2 to resolve, and row 2 streams past before any row that
+        # asks for it.
+        cf_sheet = _CapturedRowsSheet()
+        cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
+
+        for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=total_rows,
+                             min_col=1, max_col=total_cols), start=1):
+            if row_idx in cf_capture_rows:
+                cf_sheet.capture(row_idx, row)
+            if row_idx == 1:
+                for col_idx, cell in enumerate(row, start=1):
+                    v = getattr(cell, "value", None)
+                    if v is not None and _LOCUS_RE.match(str(v).strip()):
+                        positions[col_idx] = str(v).strip()
+                if len(positions) < 2:
+                    # Not a variant table — a clade filter is meaningless here.
+                    not_variant_table = True
+                    break
+                keep, row_stem, is_matched_sample = True, "", False
+            else:
+                first = getattr(row[0], "value", None) if row else None
+                raw = str(first).strip() if first is not None else ""
+                if not raw or raw.lower() in _NON_SAMPLE_LABELS:
+                    if root_vals is None and raw.lower() == "root":
+                        # The reference row — the baseline every sample's
+                        # calls are compared against for the column choice.
+                        root_vals = {}
+                        for ci, c in enumerate(row, start=1):
+                            if ci in positions:
+                                call = _call_of(c)
+                                if call:
+                                    root_vals[ci] = call
+                    keep = structural_kept < max_structural_rows
+                    if keep:
+                        structural_kept += 1
+                    row_stem, is_matched_sample = "", False
+                else:
+                    total_sample_rows += 1
+                    stem = _strip_vcf_suffix(raw)
+                    key = _canonical_stem(
+                        stem, samples_with_bams, samples_with_vcfs)
+                    is_matched_sample = key in sel_keys or stem in raw_sel
+                    if is_matched_sample:
+                        matched_rows += 1
+                    keep = is_matched_sample and shown_sample_rows < max_sample_rows
+                    if keep:
+                        shown_sample_rows += 1
+                        row_stem = key
+                    else:
+                        row_stem = ""
+            if not keep:
+                continue
+
+            cells: list[str] = []
+            for col_idx, cell in enumerate(row, start=1):
+                if col_idx > buffer_width:
+                    break
+                if not hasattr(cell, "column"):     # EmptyCell: no value, no style
+                    cells.append("<td></td>")
+                    continue
+                inline = _cell_inline_style(cell)
+                cf_frags = _cf_fragments_for(
+                    cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
+                if cf_frags:
+                    inline = "; ".join([p for p in (inline,) if p] + cf_frags)
+                colored = "background-color" in inline
+                if is_matched_sample and row_stem and col_idx in positions:
+                    call = _call_of(cell)
+                    if call:
+                        base = (root_vals or {}).get(col_idx)
+                        if base is not None:
+                            if call != base:
+                                col_snp[col_idx] = 1
+                        else:
+                            # No reference call for this column (or no root
+                            # row at all): fall back to variation within the
+                            # clade itself.
+                            seen = clade_first_call.get(col_idx)
+                            if seen is None:
+                                clade_first_call[col_idx] = call
+                            elif call != seen:
+                                col_snp[col_idx] = 1
+                classes = []
+                if inline:
+                    cls = style_classes.get(inline)
+                    if cls is None:
+                        cls = f"k{len(style_classes)}"
+                        style_classes[inline] = cls
+                    classes.append(cls)
+                if row_idx <= freeze_row:
+                    classes.append("xlsx-sticky-top")
+                if col_idx <= freeze_col:
+                    classes.append("xlsx-sticky-left")
+                rot_class = _cell_rotation_class(cell)
+                if rot_class:
+                    classes.append(rot_class)
+                value = _format_cell_value(cell)
+                if row_stem and col_idx in positions and colored:
+                    has_bam = samples_with_bams is None or row_stem in samples_with_bams
+                    has_vcf = (samples_with_vcfs is not None
+                               and row_stem in samples_with_vcfs)
+                    loadable = (
+                        samples_with_bams is None and samples_with_vcfs is None
+                    ) or has_bam or has_vcf
+                    if not loadable:
+                        classes.append("xlsx-igv-none")
+                    elif (not has_bam) and has_vcf:
+                        classes.append("xlsx-variant")
+                        classes.append("xlsx-igv-calls-only")
+                    else:
+                        classes.append("xlsx-variant")
+                attrs = f' class="{" ".join(classes)}"' if classes else ""
+                cells.append(f"<td{attrs}>{value}</td>")
+            kept_frags.append(cells)
+            kept_samples.append(row_stem)
+            bytes_so_far += sum(len(c) for c in cells)
+
+            # Row-filter-only mode has no post-pass column choice, so it must
+            # bound its output the way render_window does: project the final
+            # size from what has been emitted and narrow the buffered width.
+            if not column_filter and bytes_so_far and buffer_width > 1:
+                projected = bytes_so_far / len(kept_frags) * est_kept_rows
+                if projected > max_table_bytes:
+                    scale = max_table_bytes / projected
+                    narrowed = max(1, int(buffer_width * scale))
+                    if narrowed < buffer_width:
+                        buffer_width = narrowed
+                        kept_frags = [r[:buffer_width] for r in kept_frags]
+                        bytes_so_far = sum(
+                            len(c) for r in kept_frags for c in r)
+    finally:
+        wb.close()
+
+    if not_variant_table:
+        win = render_window(
+            xlsx_path, total_rows, total_cols, title, project,
+            samples_with_bams, samples_with_vcfs, max_cells, max_rows,
+            max_table_bytes)
+        win["filter"] = {
+            "ignored": ("this sheet has no locus columns, so it is not a "
+                        "SNP table and the clade filter does not apply"),
+        }
+        return win
+
+    if matched_rows == 0:
+        raise FilterMatchError(
+            f"None of the {len(sel_keys)} selected samples appear in this "
+            f"table (it has {total_sample_rows} sample rows). The tree and "
+            "the table may not belong to the same Step 2 group."
+        )
+
+    locus_total = len(positions)
+    truncated_cols = 0
+    if column_filter:
+        kept_cols = [c for c in range(1, total_cols + 1)
+                     if c == 1 or c not in positions or col_snp[c]]
+        locus_matched = sum(1 for c in kept_cols if c in positions)
+        # Cell budget, then byte budget — both trim the column tail, never
+        # column 1. A filtered table is nearly always far inside both.
+        allowed = max(1, max_cells // max(1, len(kept_frags)))
+        if len(kept_cols) > allowed:
+            truncated_cols += len(kept_cols) - allowed
+            kept_cols = kept_cols[:allowed]
+        rows_cells = [[(r[c - 1] if c - 1 < len(r) else "<td></td>")
+                       for c in kept_cols] for r in kept_frags]
+        total_bytes = sum(len(c) for r in rows_cells for c in r)
+        if total_bytes > max_table_bytes:
+            scale = max_table_bytes / total_bytes
+            narrowed = max(1, int(len(kept_cols) * scale))
+            if narrowed < len(kept_cols):
+                truncated_cols += len(kept_cols) - narrowed
+                kept_cols = kept_cols[:narrowed]
+                rows_cells = [r[:narrowed] for r in rows_cells]
+    else:
+        kept_cols = list(range(1, buffer_width + 1))
+        locus_matched = sum(1 for c in kept_cols if c in positions)
+        rows_cells = [[(r[c - 1] if c - 1 < len(r) else "<td></td>")
+                       for c in kept_cols] for r in kept_frags]
+
+    locus_shown = sum(1 for c in kept_cols if c in positions)
+    colgroup_parts = [
+        f'<col style="width: '
+        f'{max(int(round(layout["widths"].get(ci, default_width_units) * 7)), 16)}px">'
+        for ci in kept_cols
+    ]
+    loci = {str(new_idx): positions[orig]
+            for new_idx, orig in enumerate(kept_cols, start=1)
+            if orig in positions}
+    style_css = "".join(f".{cls}{{{style}}}" for style, cls in style_classes.items())
+    return {
+        "title": title or xlsx_path.name,
+        "filename": xlsx_path.name,
+        "sheet": sheet_title,
+        "total_rows": total_rows,
+        "total_cols": total_cols,
+        "shown_rows": len(rows_cells),
+        "shown_cols": len(kept_cols),
+        "style_css": style_css,
+        "colgroup": "".join(colgroup_parts),
+        "rows": ["<tr>" + "".join(r) + "</tr>" for r in rows_cells],
+        "row_samples": kept_samples,
+        "loci": loci,
+        "project": project or "",
+        "filter": {
+            "selected": len(sel_keys),
+            "matched": matched_rows,
+            "shown_samples": shown_sample_rows,
+            "total_samples": total_sample_rows,
+            "locus_total": locus_total,
+            "locus_matched": locus_matched,
+            "locus_shown": locus_shown,
+            "column_filter": column_filter,
+            "truncated_cols": truncated_cols,
+            "truncated_rows": matched_rows - shown_sample_rows,
+            "ignored": None,
+        },
+    }
+
+
 def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
     """Build the preview page from a rendered window.
 
@@ -931,9 +1348,44 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
     head = "".join(rows[:initial_rows])
     total_rows, total_cols = window["total_rows"], window["total_cols"]
     shown_rows, shown_cols = window["shown_rows"], window["shown_cols"]
+    filt = window.get("filter")
+
+    # The link target is the same preview minus the selection — assembled in
+    # JS from the live URL so it survives the OOD proxy prefix, exactly like
+    # the Download link above it.
+    _clear_filter_link = (
+        '<a href="#" onclick="var u=new URL(window.location.href);'
+        "u.searchParams.delete('selection');u.searchParams.delete('rows_from');"
+        'window.location.href=u.toString();return false;">Show the full table</a>'
+    )
 
     notice = ""
-    if shown_rows < total_rows or shown_cols < total_cols:
+    if filt and filt.get("ignored"):
+        notice += (
+            '<div class="xlsx-filter xlsx-filter-warn">'
+            f'<strong>Clade filter not applied:</strong> {html.escape(filt["ignored"])}. '
+            f'{_clear_filter_link}</div>'
+        )
+        filt = None
+    if filt:
+        bits = (f'<strong>Filtered to a tree clade:</strong> '
+                f'{filt["shown_samples"]:,} of {filt["total_samples"]:,} samples')
+        if filt["column_filter"]:
+            bits += (f' and {filt["locus_shown"]:,} of {filt["locus_total"]:,} '
+                     'SNP positions — positions with no SNP in these samples '
+                     'are hidden')
+            if filt["truncated_cols"]:
+                bits += (f' ({filt["truncated_cols"]:,} matching positions '
+                         'were dropped to fit the size budget)')
+        else:
+            bits += (f'. The selection is too large for per-SNP filtering, so '
+                     f'the first {filt["locus_shown"]:,} of '
+                     f'{filt["locus_total"]:,} positions are shown')
+        if filt["truncated_rows"]:
+            bits += (f'; only the first {filt["shown_samples"]:,} of '
+                     f'{filt["matched"]:,} matching samples are rendered')
+        notice += f'<div class="xlsx-filter">{bits}. {_clear_filter_link}</div>'
+    elif shown_rows < total_rows or shown_cols < total_cols:
         bits = []
         if shown_rows < total_rows:
             bits.append(f"the first {shown_rows:,} of {total_rows:,} rows")
@@ -1199,6 +1651,17 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     margin: 0; padding: 10px 20px;
     background: #fff5e0; border-bottom: 1px solid #e6c98a;
     color: #4a3a12; font-size: 13px; line-height: 1.5;
+  }}
+  /* Clade-filtered view (opened from the tree viewer): green = a deliberate
+     subset, distinct from the amber too-big-to-show truncation above. */
+  .xlsx-filter {{
+    margin: 0; padding: 10px 20px;
+    background: #e9f2e7; border-bottom: 1px solid #a9c6a2;
+    color: #1e3a1a; font-size: 13px; line-height: 1.5;
+  }}
+  .xlsx-filter a {{ color: #b85a3e; }}
+  .xlsx-filter-warn {{
+    background: #fff5e0; border-bottom: 1px solid #e6c98a; color: #4a3a12;
   }}
   .xlsx-bar .filename {{ font-weight: 600; font-size: 14px; }}
   .xlsx-bar .meta {{ color: var(--xlsx-muted); font-size: 12px; font-family: 'IBM Plex Mono', monospace; }}

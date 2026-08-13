@@ -145,6 +145,62 @@ def main() -> int:
         assert_true("Showing the first" not in page, "no truncation notice")
         assert_true(page.count("background-color") > 0, "small sheet is coloured")
 
+        print("\n[the reference-match rule (equal B$2) resolves while streaming]")
+        # The REAL top-priority rule in a vSNP3 table is not a literal: it
+        # paints a cell near-white when it equals the reference row — an
+        # anchor-row reference (B$2). A streaming pass can honour it because
+        # row 2 goes by before any row that needs it; without that capture,
+        # reference-matching calls fell through to the per-base colour rules
+        # and a streamed table painted every cell bright.
+        refbook = tmp / "refrule.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        rows, cols = 12, 10
+        for c in range(2, cols + 1):
+            ws.cell(row=1, column=c, value=f"MTBC0:{1000 + c}")
+        ws.cell(row=2, column=1, value="root")
+        for c in range(2, cols + 1):
+            ws.cell(row=2, column=c, value="C")
+        for r in range(3, rows + 1):
+            ws.cell(row=r, column=1, value=f"SAMPLE{r - 2}")
+            for c in range(2, cols + 1):
+                # Alternate reference-matching 'C' with variant 'A'.
+                ws.cell(row=r, column=c, value="C" if (r + c) % 2 == 0 else "A")
+        rng = f"B3:{openpyxl.utils.get_column_letter(cols)}{rows}"
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=["B$2"],
+            fill=PatternFill(start_color="FFFDFEFE", end_color="FFFDFEFE",
+                             fill_type="solid")))
+        ws.conditional_formatting.add(rng, CellIsRule(
+            operator="equal", formula=['"A"'],
+            fill=PatternFill(start_color="FF58FA82", end_color="FF58FA82",
+                             fill_type="solid")))
+        wb.save(refbook)
+        wb.close()
+        full = xlsx_html.xlsx_to_html(refbook, project="p",
+                                      samples_with_bams=None, samples_with_vcfs=None)
+        wref = xlsx_html.render_window(
+            refbook, rows, cols, None, "p", None, None,
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        full_white = full.count("#fdfefe")
+        assert_true(full_white > 0, "the full renderer resolves B$2 at all")
+        # In the streamed output the near-white lives once in the palette;
+        # count the cells wearing its class.
+        import re as _re
+        white_classes = _re.findall(r"\.(k\d+)\{[^}]*#fdfefe", wref["style_css"])
+        assert_true(len(white_classes) >= 1, "streaming palette carries the near-white")
+        stream_white = sum(
+            sum(len(_re.findall(rf'\b{cls}\b', row)) for row in wref["rows"])
+            for cls in white_classes)
+        assert_eq(stream_white, full_white,
+                  "streaming paints the same reference-matching cells near-white")
+        green_classes = _re.findall(r"\.(k\d+)\{[^}]*#58fa82", wref["style_css"])
+        stream_green = sum(
+            sum(len(_re.findall(rf'\b{cls}\b', row)) for row in wref["rows"])
+            for cls in green_classes)
+        assert_eq(stream_green, full.count("#58fa82"),
+                  "…and the same variant cells green")
+
         print("\nAll xlsx render tests passed.")
         return 0
     finally:

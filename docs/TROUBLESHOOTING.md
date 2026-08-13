@@ -62,6 +62,19 @@ first 200 rows immediately, and loads the rest as you scroll (there is also a
 much of the sheet you are seeing, and *Download xlsx* always gives the
 complete file.
 
+**The better way into a big table is through its tree.** Open the group's
+`.tre` from Step 2 Results (*View tree*), tick **Clade → SNP table (click
+branch)**, and click the branch leading into the clade you care about. The
+selected tips highlight, and *Open SNP table for clade* opens the group's
+table showing **only those samples and only the SNP positions they actually
+use** — positions where every selected sample matches the reference are
+hidden. On a 1,000 × 10,000 table a 30-sample clade typically comes back as
+a few-thousand-cell table with all the colour and the click-to-IGV cells
+intact, and a banner saying exactly what was filtered (with a *Show the full
+table* link back). Missing data (`-`/`N`) does not count as a SNP for the
+column choice, so one low-coverage sample cannot drag thousands of columns
+into the view.
+
 ### Issue: the SNP-table preview cache is using space in my home directory
 
 Opening a Step 2 SNP table renders it to HTML, which for the large ones takes

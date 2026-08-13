@@ -2,6 +2,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { phylotree, computeMidpoint } from "phylotree";
 import "phylotree/dist/phylotree.css";
 import { cladeSamples, resolveClickTarget, stripZc, styleable } from "./clade.js";
+import {
+  ZOOM_STEP, ZOOM_MIN, ZOOM_MAX,
+  applyZoomStyles, attachZoom, restoreZoom, zoomBy as zoomDisplayBy, zoomReset as zoomDisplayReset,
+} from "./zoom.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -27,6 +31,7 @@ export default function TreeStandalone() {
   const [tableChoice, setTableChoice] = useState("");
   const [selectedTips, setSelectedTips] = useState([]);
   const [opening, setOpening] = useState(false);
+  const [zoomK, setZoomK] = useState(1);
 
   // Clade selection is the DEFAULT way a branch click behaves, not a mode to
   // find and switch on. It was a checkbox first, and the first thing that
@@ -37,6 +42,12 @@ export default function TreeStandalone() {
 
   const treeRef = useRef(null);
   const containerRef = useRef(null);
+  // The TreeRender phylotree builds per render(): it owns the d3 zoom behaviour
+  // and the SVG selection the +/− buttons have to drive.
+  const displayRef = useRef(null);
+  // The live zoom transform, kept outside React state so a rebuild can restore
+  // it (a new render() means a new TreeRender, with the zoom back at identity).
+  const zoomRef = useRef(null);
   const originalNewickRef = useRef("");
   const rerootModeRef = useRef(false);
   const cladePickRef = useRef(false);
@@ -91,7 +102,50 @@ export default function TreeStandalone() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchTerm]);
 
-  function render(tree) {
+  // The zoom mechanics live in zoom.js; these are the two buttons' worth of
+  // wiring. Everything goes through displayRef because each render() replaces
+  // the TreeRender that owns the zoom behaviour.
+  function zoomIn(factor) {
+    const el = containerRef.current;
+    if (!el) return;
+    // About the middle of what the user can SEE. d3 measures the zoom point in
+    // the SVG's user units; with no viewBox and fit-to-size spacing those are
+    // CSS pixels from the container's top-left corner, so the centre of the
+    // view is just half the container.
+    const p = [(el.clientWidth || 0) / 2, (el.clientHeight || 0) / 2];
+    try {
+      zoomDisplayBy(displayRef.current, factor, p);
+    } catch (e) {
+      setStatus(`Zoom failed: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  function zoomFit() {
+    try {
+      zoomDisplayReset(displayRef.current);
+    } catch (e) {
+      setStatus(`Zoom reset failed: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  // Keyboard, for the same reason the buttons exist: a trackpad pinch is not a
+  // reliable way to zoom. Modified keys are left alone so browser zoom and
+  // shortcuts still work, and typing in the tip search never zooms the tree.
+  useEffect(() => {
+    function onKey(ev) {
+      if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      const tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : "";
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (ev.key === "+" || ev.key === "=") { ev.preventDefault(); zoomIn(ZOOM_STEP); }
+      else if (ev.key === "-" || ev.key === "_") { ev.preventDefault(); zoomIn(1 / ZOOM_STEP); }
+      else if (ev.key === "0") { ev.preventDefault(); zoomFit(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function render(tree, keepZoom = false) {
     if (!containerRef.current) return;
     containerRef.current.innerHTML = "";
     const width = Math.max(400, containerRef.current.clientWidth || 800);
@@ -139,6 +193,7 @@ export default function TreeStandalone() {
         if (rerootModeRef.current || cladePickRef.current) element.style("cursor", "pointer");
       },
     });
+    displayRef.current = display;
     const svgNode = display.show ? display.show() : null;
     if (svgNode) {
       svgNode.style.width = "100%";
@@ -149,6 +204,24 @@ export default function TreeStandalone() {
       paintTips();
     } else {
       setStatus("phylotree returned no SVG node");
+    }
+
+    // phylotree creates the zoom behaviour inside render(), so it exists by now.
+    attachZoom(display, (t) => {
+      zoomRef.current = { k: t.k, x: t.x, y: t.y };
+      applyZoomStyles(containerRef.current, t.k);
+      setZoomK(t.k);
+    });
+    let restored = false;
+    if (keepZoom && zoomRef.current) {
+      try {
+        restored = restoreZoom(display, zoomRef.current);
+      } catch { /* fall through to the fit-to-size view */ }
+    }
+    if (!restored) {
+      zoomRef.current = null;
+      applyZoomStyles(containerRef.current, 1);
+      setZoomK(1);
     }
   }
 
@@ -294,7 +367,10 @@ export default function TreeStandalone() {
   // search changed colour only and used to be in here, which is what made every
   // clade click discard the user's zoom and pan; they are painted in place now.
   useEffect(() => {
-    if (treeRef.current) render(treeRef.current);
+    // keepZoom: none of these change the tree's topology, so throwing away the
+    // user's zoom and pan to redraw the same tree with bootstrap labels on is
+    // pure loss.
+    if (treeRef.current) render(treeRef.current, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showBootstrap, rerootMode, cladePick, stripSuffix]);
 
@@ -464,11 +540,27 @@ export default function TreeStandalone() {
           )}
         </div>
       ) : null}
-      <div
-        ref={containerRef}
-        className={cladePick ? "tree-canvas tree-pick" : "tree-canvas"}
-        style={{ flex: 1, overflow: "auto", background: "#fff" }}
-      />
+      {/* The zoom buttons live OUTSIDE the tree container on purpose: render()
+          clears that element's innerHTML on every redraw, and a control inside
+          it would be wiped out with the tree. */}
+      <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
+        <div
+          ref={containerRef}
+          className={cladePick ? "tree-canvas tree-pick" : "tree-canvas"}
+          style={{ flex: 1, minWidth: 0, overflow: "auto", background: "#fff" }}
+        />
+        <div className="tree-zoom">
+          <button onClick={() => zoomIn(ZOOM_STEP)} disabled={zoomK >= ZOOM_MAX * 0.999}
+                  title="Zoom in (keyboard: +)" aria-label="Zoom in">+</button>
+          <span className="tree-zoom-level" title="Current zoom">
+            {zoomK >= 10 ? zoomK.toFixed(0) : zoomK.toFixed(1)}×
+          </span>
+          <button onClick={() => zoomIn(1 / ZOOM_STEP)} disabled={zoomK <= ZOOM_MIN * 1.001}
+                  title="Zoom out (keyboard: −)" aria-label="Zoom out">−</button>
+          <button className="tree-zoom-fit" onClick={zoomFit}
+                  title="Back to the whole tree (keyboard: 0)">Fit</button>
+        </div>
+      </div>
     </div>
   );
 }

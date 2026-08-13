@@ -1621,9 +1621,23 @@ html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
    is active the branches are painted thicker (still hairlines, just hittable)
    and highlight under the cursor, and the node markers — a much easier target
    for the same clade — grow enough to aim at. */
-.tree-pick path.branch { stroke-width:3px;cursor:pointer; }
-/* Deliberately NO stroke-width on hover: phylotree.css already widens
-   .branch:hover to 10px for exactly this purpose, and any value set here wins on
+/* The widths and radii below come from custom properties that TreeStandalone
+   rewrites on every zoom (applyZoomStyles), because phylotree zooms with an SVG
+   `scale(k)` and that multiplies stroke widths and radii along with the
+   geometry — so a tree whose branches merge into a mass at fit-to-size is still
+   a mass at 30x. The properties are divided by k, holding each at a chosen
+   number of SCREEN pixels while the layout and the tip labels grow. The literal
+   fallbacks are the pre-zoom values, so nothing changes if the script never
+   sets them. */
+.tree-canvas path.branch { stroke-width:var(--tree-branch-w,2px); }
+/* The click target, held at a constant 12 screen px. phylotree.css uses
+   .branch:hover for this (10px) but the zoom scaled it away too: a 4px target
+   when zoomed out, and when zoomed in a 200px one that swallowed clicks meant
+   for the branch above. */
+.tree-canvas path.branch:hover { stroke-width:var(--tree-branch-hit-w,10px); }
+.tree-pick path.branch { stroke-width:var(--tree-branch-pick-w,3px);cursor:pointer; }
+/* Deliberately NO stroke-width on the PICK hover rule: the .tree-canvas rule
+   above sets the sticky area for both modes, and a value here would win on
    specificity — a 5px rule made pick mode's sticky area HALF that of normal
    mode, the opposite of the intent. */
 .tree-pick path.branch:hover { stroke:#1d5fbf; }
@@ -1633,5 +1647,24 @@ html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
    circle with draw-size-bubbles off), so the "easier target" was never easier.
    These are also the elements that need it most — phylotree sizes them
    min(font*0.75, 3), which measures r=0.476 on a 1,000-tip tree. */
-.tree-pick g.internal-node circle,.tree-pick g.node circle { cursor:pointer;r:4px; }
-.tree-pick g.internal-node:hover circle,.tree-pick g.node:hover circle { fill:#1d5fbf;r:6px; }
+.tree-pick g.internal-node circle,.tree-pick g.node circle { cursor:pointer;r:var(--tree-node-r,4px); }
+.tree-pick g.internal-node:hover circle,.tree-pick g.node:hover circle { fill:#1d5fbf;r:var(--tree-node-r-hover,6px); }
+
+/* Zoom controls, floated over the bottom-right of the tree.
+   They exist because a two-finger trackpad zoom is unreliable on this canvas,
+   so there has to be something to press; they drive phylotree's own d3 zoom, so
+   wheel, pinch and buttons all move one transform. */
+.tree-zoom {
+  position:absolute;right:14px;bottom:14px;z-index:5;
+  display:flex;flex-direction:column;align-items:stretch;gap:3px;
+  padding:4px;border:1px solid #c9c9c9;border-radius:7px;
+  background:rgba(255,255,255,0.94);box-shadow:0 1px 5px rgba(0,0,0,0.2);
+}
+.tree-zoom button {
+  width:34px;height:28px;padding:0;line-height:1;font-size:1.1rem;
+  cursor:pointer;border:1px solid #bbb;border-radius:4px;background:#fff;color:#222;
+}
+.tree-zoom button:hover:not(:disabled) { background:#eef4fb;border-color:#1d5fbf; }
+.tree-zoom button:disabled { opacity:0.45;cursor:default; }
+.tree-zoom .tree-zoom-fit { font-size:0.72rem; }
+.tree-zoom-level { text-align:center;font-size:0.68rem;color:#555;font-variant-numeric:tabular-nums; }

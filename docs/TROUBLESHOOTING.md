@@ -52,6 +52,34 @@ pip install -r requirements.txt
 
 ## Configuration Issues
 
+### Issue: the SNP-table preview cache is using space in my home directory
+
+Opening a Step 2 SNP table renders it to HTML, which for the large ones takes
+tens of seconds — so the result is cached and every later visit is instant. The
+cache lives in `~/.cache/vsnp_gui/xlsx_preview/`.
+
+It is capped at **250 MB** by default and drops the least-recently-used entries
+once it is full, so it cannot grow without limit. A dropped entry costs one
+re-render and nothing else. Two environment variables change this — set them
+wherever the app is launched (the OOD `script.sh.erb`, or `sites/site.conf`):
+
+```bash
+# Put the cache somewhere other than $HOME — scratch, node-local disk, a
+# project volume. Useful when home directories are tightly quota'd.
+export VSNP_GUI_PREVIEW_CACHE_DIR=/scratch/$USER/vsnp_gui_preview
+
+# Change the budget, in MB. 0 disables caching entirely: previews still work,
+# they just re-render every time (tens of seconds for the biggest tables).
+export VSNP_GUI_PREVIEW_CACHE_MB=500
+```
+
+To reclaim the space right now, just delete the directory — it is only a cache
+and is rebuilt on demand:
+
+```bash
+rm -rf ~/.cache/vsnp_gui/xlsx_preview
+```
+
 ### Issue: Preflight fails with missing packages
 
 **Error:** `Missing: pandas` or `Missing: Bio`

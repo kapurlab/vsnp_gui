@@ -6184,6 +6184,76 @@ def bootstrap():
 # rather than served as a stale preview.
 _XLSX_RENDER_VERSION = "2"
 
+# Preview cache budget, in MB. This lives in the user's HOME by default, and a
+# home directory on an HPC is usually quota'd — so it is capped, not left to
+# grow. It genuinely would grow: one project here holds 2,330 SNP tables (480
+# of them over 1 MB), which is ~700 MB of rendered HTML if someone browsed the
+# lot, and a site has several such projects. Duplicates accumulate too, because
+# the cache key includes which samples have BAMs and that set changes as Step 1
+# progresses, re-caching the same table under a new key.
+#
+# Once the budget is exceeded the least-recently-used entries are dropped. A
+# discarded entry costs one re-render, nothing more.
+#
+#   VSNP_GUI_PREVIEW_CACHE_MB   budget in MB; 0 disables caching entirely
+#   VSNP_GUI_PREVIEW_CACHE_DIR  put the cache somewhere other than $HOME
+#                               (scratch, node-local storage, a project volume)
+_XLSX_CACHE_DEFAULT_MB = 250
+
+
+def _xlsx_cache_budget_bytes() -> int:
+    try:
+        mb = float(os.environ.get("VSNP_GUI_PREVIEW_CACHE_MB", "").strip()
+                   or _XLSX_CACHE_DEFAULT_MB)
+    except ValueError:
+        mb = _XLSX_CACHE_DEFAULT_MB
+    return max(0, int(mb * 1024 * 1024))
+
+
+def _xlsx_cache_dir() -> Path:
+    explicit = os.environ.get("VSNP_GUI_PREVIEW_CACHE_DIR", "").strip()
+    if explicit:
+        return Path(explicit)
+    base = os.environ.get("XDG_CACHE_HOME", "").strip()
+    root = Path(base) if base else Path.home() / ".cache"
+    return root / "vsnp_gui" / "xlsx_preview"
+
+
+def _xlsx_cache_prune(cache_dir: Path, budget: int) -> None:
+    """Drop least-recently-used entries until the cache fits its budget.
+
+    Best-effort and never fatal: a preview that cannot tidy up still serves.
+    Recency is mtime, which is set on write and refreshed on read (see the
+    touch in preview_xlsx) — atime is unreliable on the noatime/relatime
+    mounts these filesystems typically use.
+    """
+    try:
+        entries = []
+        total = 0
+        with os.scandir(cache_dir) as it:
+            for e in it:
+                if not e.name.endswith(".html"):
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                entries.append((st.st_mtime, st.st_size, e.path))
+                total += st.st_size
+        if total <= budget:
+            return
+        entries.sort()                      # oldest first
+        for _mtime, size, path in entries:
+            if total <= budget:
+                break
+            try:
+                os.unlink(path)
+                total -= size
+            except OSError:
+                pass
+    except OSError:
+        pass
+
 
 def _xlsx_cache_path(
     target: Path,
@@ -6198,10 +6268,13 @@ def _xlsx_cache_path(
     sample sets that decide which cells become IGV links (a sample gaining a
     BAM must not keep serving a preview that says it has none).
 
-    Lives under the user's cache dir, not in the project: a Step 2 run folder
-    is something people zip up and share, and a shared project may well be
-    read-only to the person previewing it.
+    Not stored in the project: a Step 2 run folder is something people zip up
+    and share, and a shared project may well be read-only to the person
+    previewing it. See _xlsx_cache_dir/_xlsx_cache_budget_bytes for where it
+    does go and how big it is allowed to get.
     """
+    if _xlsx_cache_budget_bytes() <= 0:
+        return None
     try:
         st = target.stat()
         key = hashlib.sha256(
@@ -6217,9 +6290,7 @@ def _xlsx_cache_path(
         ).hexdigest()
     except OSError:
         return None
-    base = os.environ.get("XDG_CACHE_HOME", "").strip()
-    root = Path(base) if base else Path.home() / ".cache"
-    return root / "vsnp_gui" / "xlsx_preview" / f"{key}.html"
+    return _xlsx_cache_dir() / f"{key}.html"
 
 
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
@@ -6291,7 +6362,14 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
     cached = _xlsx_cache_path(target, project, samples_with_bams, samples_with_vcfs)
     if cached is not None and cached.exists():
         try:
-            return HTMLResponse(content=cached.read_text(encoding="utf-8"))
+            body = cached.read_text(encoding="utf-8")
+            # Mark it recently used so pruning drops the tables nobody opens,
+            # not the one being read right now.
+            try:
+                os.utime(cached, None)
+            except OSError:
+                pass
+            return HTMLResponse(content=body)
         except OSError:
             pass  # unreadable cache entry: fall through and re-render
     try:
@@ -6318,6 +6396,9 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0):
             tmp = cached.with_suffix(".part")
             tmp.write_text(html_page, encoding="utf-8")
             os.replace(tmp, cached)
+            # Keep the cache inside its budget. Done after the write so the
+            # entry just produced is the newest and survives.
+            _xlsx_cache_prune(cached.parent, _xlsx_cache_budget_bytes())
         except OSError:
             pass  # read-only cache location: serve it, just don't remember it
     return HTMLResponse(content=html_page)

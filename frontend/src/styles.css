@@ -711,6 +711,46 @@ label {
   border-radius: 10px;
 }
 
+/* "Scanning projects…" — deliberately loud.
+   Counting a large influenza root takes minutes, and while it runs the Projects
+   pane looks like it simply failed to load. As a plain `.note` this said so in
+   12px grey and was missed. Red carries the weight; the pulsing dot is what
+   keeps it reading as "still working" rather than "failed". */
+.note.scanning {
+  color: #7f1d1d;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-left: 4px solid #dc2626;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.note.scanning strong { font-size: 14px; }
+.note.scanning code {
+  background: #fff;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  padding: 1px 4px;
+  word-break: break-all;
+}
+.note.scanning .pulse-dot {
+  background: #dc2626;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+}
+html[data-theme="dark"] .note.scanning {
+  color: #fca5a5;
+  background: #3a1d1b;
+  border-color: #7f2d26;
+  border-left-color: #ef4444;
+}
+html[data-theme="dark"] .note.scanning code {
+  background: #2a1614;
+  border-color: #7f2d26;
+}
+
 .checklist {
   grid-column: auto;
 }

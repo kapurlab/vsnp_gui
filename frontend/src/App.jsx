@@ -3809,7 +3809,21 @@ export default function App() {
     }
     const data = await res.json();
     if (!data.bam || !data.reference_fasta) {
-      window.alert("IGV: BAM or reference FASTA not found for this sample.");
+      // Name what is actually missing, and where it looked. "BAM or reference
+      // FASTA not found" gave no way to tell an unaligned sample from a broken
+      // viewer, and the two were reported as the same bug.
+      const missing = [];
+      if (!data.bam) missing.push("no BAM");
+      if (!data.reference_fasta) missing.push("no reference FASTA");
+      const where = data.alignment_dir || data.sample_dir || "";
+      window.alert(
+        `IGV cannot open ${sample}: ${missing.join(" and ")}.\n\n`
+        + (data.alignment_dir
+          ? `Looked in ${where}`
+          : "This sample has no alignment directory, so Step 1 has not aligned "
+            + "it yet — there are reads but nothing to view."
+             + (where ? `\n\nSample directory: ${where}` : ""))
+      );
       return;
     }
     const baiPath = data.bam.endsWith(".bam") ? `${data.bam}.bai` : "";
@@ -4372,7 +4386,11 @@ export default function App() {
               ) : null}
             </div>
             {projectsScanning ? (
-              <div className="note" style={{display:"flex", alignItems:"center", gap:"8px"}}>
+              // Loud on purpose. This can run for minutes on a large influenza
+              // root, and while it does the pane looks like it has simply
+              // failed to load anything — so the notice has to read as "still
+              // working, wait", not as a footnote.
+              <div className="note scanning" style={{display:"flex", alignItems:"center", gap:"8px"}}>
                 <span className="pulse-dot" />
                 <span>
                   <strong>Scanning projects…</strong>{" "}
@@ -6054,9 +6072,20 @@ export default function App() {
                                   >
                                     Open Folder
                                   </button>
+                                  {/* Offered only when this sample HAS an
+                                      alignment. A sample with no Reference was
+                                      never aligned — it has reads and nothing
+                                      else — so IGV has no BAM to show and the
+                                      button could only ever produce an error.
+                                      Offering it anyway is how "IGV is broken"
+                                      gets reported for a project that is merely
+                                      part-way through Step 1. */}
                                   <button
                                     onClick={() => openSampleInIgv(row._project || "", row._sample || row.sample || "")}
-                                    disabled={!(row._project && (row._sample || row.sample))}
+                                    disabled={!(row._project && (row._sample || row.sample)) || !row.Reference}
+                                    title={row.Reference
+                                      ? "Open this sample's reads in IGV"
+                                      : "No alignment for this sample yet — Step 1 has not aligned it, so there is no BAM to show."}
                                   >
                                     IGV
                                   </button>

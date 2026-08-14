@@ -104,8 +104,33 @@ def main():
     bams = sorted(glob.glob(os.path.join(step1, sample, "**", f"{sample}_nodup.bam"),
                             recursive=True), key=lambda p: os.stat(p).st_mtime)
     if not bams:
-        bad(f"no {sample}_nodup.bam anywhere under step1/{sample}/ "
-            "-> the viewer reports 'no BAM or VCF' and loads nothing")
+        # Distinguish "never aligned" from "aligned but the BAM is missing".
+        # They look identical in the GUI and are completely different problems:
+        # the first is a project part-way through Step 1, the second is a run
+        # that failed.
+        aligns = [d for d in os.listdir(os.path.join(step1, sample))
+                  if d == "alignment" or d.startswith("alignment_")]
+        if aligns:
+            bad(f"alignment dir(s) {aligns} exist but hold no {sample}_nodup.bam "
+                "-> the alignment did not finish")
+            return 1
+        bad(f"{sample} has NO alignment directory — Step 1 has not aligned it")
+        note("There are reads here and nothing else, so IGV has nothing to show.")
+        note("This is not a viewer fault: the Reference column for this row in")
+        note("Step 1 Results is empty, and the IGV button is disabled for it.")
+        note("")
+        note("Samples in this project that DO have an alignment:")
+        shown = 0
+        for s in samples:
+            if glob.glob(os.path.join(step1, s, "alignment*", f"{s}_nodup.bam")):
+                note(f"  {s}")
+                shown += 1
+                if shown >= 5:
+                    break
+        if shown:
+            note(f"  try one of those: python3 {sys.argv[0]} {proj} <sample>")
+        else:
+            note("  (none — no sample in this project has been aligned)")
         return 1
     bam = bams[-1]
     align = os.path.dirname(bam)
@@ -150,8 +175,9 @@ def main():
                 fa_contigs.append(ln[1:].split()[0])
     note(f"{len(fa_contigs)} contigs in the FASTA, {len(fai_contigs)} in the .fai")
     if len(fa_contigs) > 1:
-        note("multi-contig reference: igv.js would open on the whole-genome view, "
-             "which cannot draw reads — v0.4.54 disables that")
+        note("multi-contig reference: igv.js opens such a genome on its \"all\" "
+             "pseudo-contig, which cannot draw reads — from v0.4.57 the viewer "
+             "navigates to the first contig instead")
 
     # --- do the BAM and the reference agree? ------------------------------
     hdr("3. BAM header vs reference")

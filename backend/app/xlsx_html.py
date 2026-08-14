@@ -167,7 +167,31 @@ def _canonical_stem(label: str, *stem_sets) -> str:
     the on-disk stems — blanking "this" and tripping a false "no Step 1
     outputs". Resolve the label to the longest known stem ``S`` such that
     ``label == S`` or ``label`` starts with ``S + "_"``; fall back to the label
-    unchanged when nothing matches (or when no stem sets were supplied)."""
+    unchanged when nothing matches (or when no stem sets were supplied).
+
+    Underscores and dashes are treated as the same character in the LAST
+    resort, and that clause is the difference between influenza tables having
+    IGV links and not having them. Step 1 deliberately dashes a sample prefix
+    when it stages reads (`_sanitized_sample_and_name`) — without that, vSNP3
+    splits the sample name at the first underscore and silently merges every
+    `Mg_280`, `Mg_281`, … into one sample called `Mg`. So a specimen submitted
+    as `26G02488-004_DUCK_2026-02-11_Elkhart-20-p11_IN` is on disk as
+    `26G02488-004-DUCK-2026-02-11-Elkhart-20-p11-IN`, all dashes, while a table
+    or tree label that came from anywhere else — an imported VCF, an older
+    run — still carries the underscores. Neither the equality test nor the
+    prefix test can bridge that, so the label resolved to itself, matched no
+    BAM and no VCF, and every cell in the row was rendered unclickable with no
+    hover and no explanation.
+
+    M. bovis and Brucella sample names (`SRR33643035`, `19-1234`) contain no
+    underscores at all, so the dashing is a no-op and label == folder. That,
+    and not the multi-segment reference, is why those tables always worked.
+
+    The normalised comparison is tried only after the exact and prefix rules
+    have both failed, so it can never change an answer that was already
+    right. It also cannot alias two genuinely distinct samples: a pair
+    differing only in `_` versus `-` cannot both exist as Step 1 samples,
+    because staging would have collapsed them to the same folder."""
     known: set[str] = set()
     for s in stem_sets:
         if s:
@@ -178,7 +202,20 @@ def _canonical_stem(label: str, *stem_sets) -> str:
     for s in known:
         if label.startswith(s + "_") and (best is None or len(s) > len(best)):
             best = s
+    if best is not None:
+        return best
+    flat = _flatten_sep(label)
+    for s in known:
+        fs = _flatten_sep(s)
+        if flat == fs or flat.startswith(fs + "-"):
+            if best is None or len(s) > len(best):
+                best = s
     return best if best is not None else label
+
+
+def _flatten_sep(s: str) -> str:
+    """Underscores and dashes as one character, for stem comparison only."""
+    return s.replace("_", "-")
 
 
 def _selection_key(label: str, *stem_sets) -> str:
@@ -998,6 +1035,63 @@ def _cf_fragments_for(cell, row_idx: int, col_idx: int,
     return []
 
 
+def ambiguous_stems(row_labels) -> dict:
+    """Stems that more than one distinct row label resolves to.
+
+    A row whose label is not itself an on-disk sample name was matched by
+    canonicalisation — its label merely STARTS WITH a known stem. When two
+    labels reach the same stem that way, neither cell can be given an IGV link:
+    a click would open one specimen's alignment while claiming to be the
+    other's. Influenza labels make this common, because they are underscore
+    joins led by a submission id, so `26G02776-002_DUCK_2026-02-17_Elkhart-21_IN`
+    and `26G02776-007_DUCK_2026-02-17_Elkhart-21_IN` both extend `26G02776`.
+
+    A row that IS the stem exactly is unaffected: it is that sample, and it
+    keeps its link.
+
+    @param row_labels iterable of (raw_label, resolved_stem)
+    @returns {stem: sorted labels that collide on it}
+    """
+    reached: dict = {}
+    for raw, stem in row_labels:
+        if not stem:
+            continue
+        if _strip_vcf_suffix(str(raw).strip()) == stem:
+            continue                      # exact: this row really is that sample
+        reached.setdefault(stem, set()).add(str(raw).strip())
+    return {k: sorted(v) for k, v in reached.items() if len(v) > 1}
+
+
+def withheld_note(ambiguous: dict, rows: int) -> str:
+    """Why IGV links were withheld, in the user's terms.
+
+    Withholding them SILENTLY is the failure this exists to prevent. A table
+    where clicking a SNP does nothing and nothing even hovers is
+    indistinguishable from a broken build, and was reported as one.
+    """
+    if not ambiguous or not rows:
+        return ""
+    stems = sorted(ambiguous)
+    shown = ", ".join(f"<code>{html.escape(s)}</code>" for s in stems[:3])
+    if len(stems) > 3:
+        shown += f", and {len(stems) - 3} more"
+    return (
+        f'<strong>IGV links are off for {rows:,} row(s).</strong> Their names '
+        f'each extend the same Step 1 sample folder ({shown}), so a click could '
+        'not tell which specimen you meant and would risk opening the wrong '
+        'alignment. Open those samples from the Step 1 results pane instead.'
+    )
+
+
+def _delink(cells):
+    """Strip the IGV affordance from a rendered row's cells."""
+    return [
+        c.replace("xlsx-variant xlsx-igv-calls-only", "xlsx-igv-none")
+         .replace("xlsx-variant", "xlsx-igv-none")
+        for c in cells
+    ]
+
+
 def render_window(
     xlsx_path: Path,
     total_rows: int,
@@ -1069,6 +1163,9 @@ def render_window(
         # ~25, which is the difference between showing 24 columns and 1,000.
         style_classes: dict[str, str] = {}
         row_samples: list[str] = []
+        # (label, stem) per rendered row, kept so look-alike names can be found
+        # once the whole window is known — see ambiguous_stems().
+        row_labels: list[tuple[str, str]] = []
 
         # Row/column indices are tracked by position, not read off the cell:
         # a read-only sheet yields `EmptyCell` for gaps, and those carry no
@@ -1091,15 +1188,18 @@ def render_window(
 
             # Column 1 of a data row is the sample label.
             row_stem = ""
+            row_label = ""
             if project and positions and row_idx > 1:
                 first = getattr(row[0], "value", None)
                 raw = str(first).strip() if first is not None else ""
                 if raw and raw.lower() not in _NON_SAMPLE_LABELS:
+                    row_label = raw
                     stem = _strip_vcf_suffix(raw)
                     if stem:
                         row_stem = _canonical_stem(
                             stem, samples_with_bams, samples_with_vcfs)
 
+            row_labels.append((row_label, row_stem))
             row_samples.append(row_stem)
             cells: list[str] = []
             for col_idx, cell in enumerate(row, start=1):
@@ -1190,8 +1290,27 @@ def render_window(
     render_cols = min(render_cols, effective_cols)
     render_rows = len(rows_cells)
 
+    # Look-alike names, resolved once the whole window is known.
+    #
+    # The clade-filtered renderer has always refused to link these, on the
+    # grounds that a click would open the wrong specimen's alignment. This view
+    # linked them anyway — the same table, the same rows, opposite answers, and
+    # the permissive one is the dangerous one. Now they agree, and both say why.
+    ambiguous = ambiguous_stems(row_labels[:render_rows])
+    withheld = 0
+    if ambiguous:
+        for i, (raw, stem) in enumerate(row_labels[:render_rows]):
+            if not stem or stem not in ambiguous:
+                continue
+            if _strip_vcf_suffix(str(raw).strip()) == stem:
+                continue
+            rows_cells[i] = _delink(rows_cells[i])
+            withheld += 1
+
     style_css = "".join(f".{cls}{{{style}}}" for style, cls in style_classes.items())
     return {
+        "igv_withheld": withheld,
+        "igv_withheld_stems": ambiguous,
         "title": title or xlsx_path.name,
         "filename": xlsx_path.name,
         "sheet": sheet_title,
@@ -1526,14 +1645,18 @@ def render_filtered_window(
     # (it takes the whole sheet to establish), so the classes are rewritten here
     # as well — a cell left looking clickable would resolve to a name with no
     # data behind it, which is a dead end dressed as a link.
+    # Counted, not just done: a table where every SNP cell has quietly stopped
+    # responding reads as a broken build, and was reported as one. The page says
+    # how many rows lost their links and which folder names collided.
+    igv_withheld = 0
+    withheld_stems: dict = {}
     for i, meta in enumerate(kept_meta):
         if meta.get("sample") and meta.get("key") in ambiguous_keys:
             kept_samples[i] = meta.get("stem") or kept_samples[i]
-            kept_frags[i] = [
-                c.replace("xlsx-variant xlsx-igv-calls-only", "xlsx-igv-none")
-                 .replace("xlsx-variant", "xlsx-igv-none")
-                for c in kept_frags[i]
-            ]
+            kept_frags[i] = _delink(kept_frags[i])
+            igv_withheld += 1
+            key = str(meta.get("key"))
+            withheld_stems[key] = sorted(key_stems.get(meta.get("key"), ()))
 
     if matched_rows == 0:
         raise FilterMatchError(
@@ -1607,6 +1730,8 @@ def render_filtered_window(
         "row_samples": kept_samples,
         "loci": loci,
         "project": project or "",
+        "igv_withheld": igv_withheld,
+        "igv_withheld_stems": withheld_stems,
         "filter": {
             "selected": len(sel_keys),
             "matched": matched_rows,
@@ -1697,6 +1822,15 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
             'out. Use <em>Download xlsx</em> above for the complete table.'
             '</div>'
         )
+
+    # Appended to whatever else the page has to say, because it is orthogonal to
+    # all of it: a table can be filtered, truncated, both or neither and still
+    # have had links withheld. Silence here is what turned a naming collision
+    # into "clicking a SNP does nothing, not even a hover".
+    wnote = withheld_note(window.get("igv_withheld_stems") or {},
+                          window.get("igv_withheld") or 0)
+    if wnote:
+        notice += f'<div class="xlsx-filter xlsx-filter-warn">{wnote}</div>'
 
     table_html = (f'<table class="xlsx" id="xlsxTable"><colgroup>{window["colgroup"]}'
                   f'</colgroup><tbody id="xlsxBody">{head}</tbody></table>')

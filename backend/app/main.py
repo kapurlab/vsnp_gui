@@ -6183,7 +6183,19 @@ def bootstrap():
 
 # Bumped whenever the rendered HTML changes, so old cache entries are ignored
 # rather than served as a stale preview.
-_XLSX_RENDER_VERSION = "6"
+#
+# Forgetting this bump is not a cosmetic slip, and it has already cost a
+# debugging round. v0.4.52 widened the position-header pattern so that influenza
+# tables are recognised as variant tables at all — and left the version at "6".
+# The xlsx file itself never changed, so the key did not change, so every
+# influenza table previewed before the fix went on being served from cache
+# rendered by the OLD pattern: no loci, no sample map, no clickable cells. The
+# symptom was "clicking a SNP does nothing, not even a hover", on a build that
+# contained the fix. Nothing about the deployment looked wrong, because nothing
+# about the deployment was wrong.
+#
+# So: if a change alters a single byte of rendered preview HTML, bump this.
+_XLSX_RENDER_VERSION = "8"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to

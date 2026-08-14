@@ -4649,7 +4649,7 @@ export default function App() {
                           type="text"
                           value={localPath}
                           onChange={(e) => setLocalPath(e.target.value)}
-                          placeholder="/srv/kapurlab/projects/<name>/download"
+                          placeholder="/path/to/projects/<name>/download"
                           style={{flex:1, fontSize:"12px"}}
                           onKeyDown={async (e) => {
                             if (e.key === "Enter" && localPath.trim()) {
@@ -5362,7 +5362,7 @@ export default function App() {
                           <br />
                           <strong>Download</strong> saves the .xlsx so you can edit it locally in Excel, Numbers, or LibreOffice.
                           <br />
-                          <strong>Replace</strong> uploads your edited copy back to the reference dir. You'll be asked for a rationale (recorded in <code>/srv/kapurlab/audit/reference-changes.jsonl</code>); the previous version is archived under <code>.history/</code> and is recoverable. Filename must match exactly — only <code>*_define_filter.xlsx</code> and <code>*_remove_from_analysis.xlsx</code> can be replaced via this path.
+                          <strong>Replace</strong> uploads your edited copy back to the reference dir. You'll be asked for a rationale (recorded in <code>&lt;audit root&gt;/reference-changes.jsonl</code>); the previous version is archived under <code>.history/</code> and is recoverable. Filename must match exactly — only <code>*_define_filter.xlsx</code> and <code>*_remove_from_analysis.xlsx</code> can be replaced via this path.
                         </div>
                         <button
                           className="ghost action"

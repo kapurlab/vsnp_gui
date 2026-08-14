@@ -1614,57 +1614,81 @@ html[data-theme="dark"] .ref-editor-card,html[data-theme="dark"] .step2-options-
 html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
 @media (max-width:720px) { .header-actions { width:100%;justify-content:space-between; } }
 
-/* Tree viewer: clade picking.
-   A phylotree branch is an SVG <path> with no fill, so it answers pointer
-   events only where it is PAINTED — a 1.5px line is a 1.5px click target, and
-   aiming at one reads as "clicking the tree does nothing". While clade picking
-   is active the branches are painted thicker (still hairlines, just hittable)
-   and highlight under the cursor, and the node markers — a much easier target
-   for the same clade — grow enough to aim at. */
-/* The widths and radii below come from custom properties that TreeStandalone
-   rewrites on every zoom (applyZoomStyles), because phylotree zooms with an SVG
-   `scale(k)` and that multiplies stroke widths and radii along with the
-   geometry — so a tree whose branches merge into a mass at fit-to-size is still
-   a mass at 30x. The properties are divided by k, holding each at a chosen
-   number of SCREEN pixels while the layout and the tip labels grow. The literal
-   fallbacks are the pre-zoom values, so nothing changes if the script never
-   sets them. */
-.tree-canvas path.branch { stroke-width:var(--tree-branch-w,2px); }
-/* The click target, held at a constant 12 screen px. phylotree.css uses
-   .branch:hover for this (10px) but the zoom scaled it away too: a 4px target
-   when zoomed out, and when zoomed in a 200px one that swallowed clicks meant
-   for the branch above. */
-.tree-canvas path.branch:hover { stroke-width:var(--tree-branch-hit-w,10px); }
-.tree-pick path.branch { stroke-width:var(--tree-branch-pick-w,3px);cursor:pointer; }
-/* Deliberately NO stroke-width on the PICK hover rule: the .tree-canvas rule
-   above sets the sticky area for both modes, and a value here would win on
-   specificity — a 5px rule made pick mode's sticky area HALF that of normal
-   mode, the opposite of the intent. */
-.tree-pick path.branch:hover { stroke:#1d5fbf; }
-/* The fork markers are `g.internal-node`, not `g.node`: phylotree classes leaves
-   `node` and internal nodes `internal-node`, and `.node` matches neither token of
-   the other. Targeting `g.node circle` styled nothing whatsoever (leaves carry no
-   circle with draw-size-bubbles off), so the "easier target" was never easier.
-   These are also the elements that need it most — phylotree sizes them
-   min(font*0.75, 3), which measures r=0.476 on a 1,000-tip tree. */
-.tree-pick g.internal-node circle,.tree-pick g.node circle { cursor:pointer;r:var(--tree-node-r,4px); }
-.tree-pick g.internal-node:hover circle,.tree-pick g.node:hover circle { fill:#1d5fbf;r:var(--tree-node-r-hover,6px); }
 
-/* Zoom controls, floated over the bottom-right of the tree.
-   They exist because a two-finger trackpad zoom is unreliable on this canvas,
-   so there has to be something to press; they drive phylotree's own d3 zoom, so
-   wheel, pinch and buttons all move one transform. */
+/* ---------------------------------------------------------------------------
+   Tree viewer.
+
+   The tree itself is a <canvas>, so there is nothing here that sizes a branch
+   or a tip label: those are screen pixels chosen at draw time in tree/draw.js,
+   deliberately, because the previous viewer's line widths and font sizes were
+   SVG lengths multiplied by the zoom and could not be held still. What is left
+   for CSS is the chrome around the canvas.
+   --------------------------------------------------------------------------- */
+.tree-page { display:flex;flex-direction:column;height:100vh;width:100vw;overflow:hidden;
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#1a2029;background:#fff; }
+.tree-bar,.tree-clade-bar {
+  display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;flex:0 0 auto;
+}
+.tree-bar { padding:0.45rem 0.8rem;border-bottom:1px solid #dcdfe4;background:#f7f8fa; }
+.tree-bar label { display:inline-flex;align-items:center;gap:0.25rem;font-size:0.88rem;white-space:nowrap; }
+.tree-bar button,.tree-clade-bar button {
+  padding:0.22rem 0.6rem;font-size:0.85rem;cursor:pointer;
+  border:1px solid #c2c7ce;border-radius:5px;background:#fff;color:#1a2029;
+}
+.tree-bar button:hover,.tree-clade-bar button:hover { background:#eef4fb;border-color:#1d5fbf; }
+.tree-bar button:disabled,.tree-clade-bar button:disabled { opacity:0.5;cursor:default; }
+.tree-meta { color:#6b7480;font-size:0.86rem; }
+.tree-status { color:#b3344a;font-size:0.86rem; }
+
+/* Search. The match counter is part of the fix, not decoration: without it a
+   search that jumps somewhere gives no way to tell "found, showing 1 of 12"
+   from "found nothing and did not move". */
+.tree-search { display:inline-flex;align-items:center;gap:0.25rem; }
+.tree-search input { width:190px;padding:0.2rem 0.4rem;font-size:0.86rem;
+  border:1px solid #c2c7ce;border-radius:5px; }
+.tree-search button { width:24px;padding:0.1rem 0;font-size:0.95rem;line-height:1; }
+.tree-hitcount { font-size:0.8rem;color:#6b7480;font-variant-numeric:tabular-nums;white-space:nowrap; }
+.tree-nohit { color:#b3344a; }
+
+.tree-clade-bar { padding:0.35rem 0.8rem;border-bottom:1px solid #cfe0cf;
+  background:#eef6ee;font-size:0.9rem; }
+.tree-hint { color:#2f4a2f; }
+.tree-dim { color:#6b7480; }
+.tree-warn { color:#8a5a10; }
+.tree-linky { border:none !important;background:none !important;color:#1d5fbf !important;
+  text-decoration:underline;padding:0 !important;font-size:0.85rem; }
+.tree-groups { display:inline-flex;align-items:center;gap:0.3rem;margin-left:auto; }
+.tree-chip { border:2px solid;border-radius:9px;padding:0 0.35rem;font-size:0.75rem;
+  font-variant-numeric:tabular-nums; }
+
+.tree-body { position:relative;flex:1;min-height:0;display:flex;background:#fff; }
+.tree-canvas { flex:1;min-width:0;display:block;cursor:crosshair;touch-action:none; }
+.tree-canvas.tree-reroot { cursor:cell; }
+/* The whole tree in one strip: where the viewport is, where the selection is,
+   and where every search hit is — on a tree far too tall to show at a
+   readable scale, this is the only view that shows all of them at once. */
+.tree-overview { flex:0 0 auto;display:block;cursor:pointer;border-left:1px solid #dcdfe4; }
+
 .tree-zoom {
-  position:absolute;right:14px;bottom:14px;z-index:5;
-  display:flex;flex-direction:column;align-items:stretch;gap:3px;
+  position:absolute;right:30px;bottom:14px;z-index:5;
+  display:flex;flex-direction:column;align-items:stretch;gap:2px;
   padding:4px;border:1px solid #c9c9c9;border-radius:7px;
   background:rgba(255,255,255,0.94);box-shadow:0 1px 5px rgba(0,0,0,0.2);
 }
 .tree-zoom button {
-  width:34px;height:28px;padding:0;line-height:1;font-size:1.1rem;
+  width:34px;height:24px;padding:0;line-height:1;font-size:1rem;
   cursor:pointer;border:1px solid #bbb;border-radius:4px;background:#fff;color:#222;
 }
-.tree-zoom button:hover:not(:disabled) { background:#eef4fb;border-color:#1d5fbf; }
-.tree-zoom button:disabled { opacity:0.45;cursor:default; }
-.tree-zoom .tree-zoom-fit { font-size:0.72rem; }
-.tree-zoom-level { text-align:center;font-size:0.68rem;color:#555;font-variant-numeric:tabular-nums; }
+.tree-zoom button:hover { background:#eef4fb;border-color:#1d5fbf; }
+.tree-zoom .tree-zoom-fit { font-size:0.7rem;height:22px;margin-top:3px; }
+/* Two axes, labelled. They are scaled independently — these trees are thousands
+   of rows deep and a fraction of a substitution wide, so "zoom in" almost
+   always means the vertical one, and welding them together (which is all an SVG
+   scale(k) can do) is what made the old viewer unreadable. */
+.tree-zoom-tag { text-align:center;font-size:0.6rem;color:#6b7480;letter-spacing:0.04em;
+  text-transform:uppercase; }
+.tree-readout {
+  position:absolute;left:12px;bottom:10px;z-index:5;pointer-events:none;
+  font-size:0.75rem;color:#6b7480;background:rgba(255,255,255,0.85);
+  padding:2px 6px;border-radius:4px;font-variant-numeric:tabular-nums;
+}

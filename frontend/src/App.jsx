@@ -5881,9 +5881,17 @@ export default function App() {
                                     >
                                       Open Folder
                                     </button>
+                                    {/* Same rule as the other Files panel: a row
+                                        with no Reference was never aligned, so
+                                        there is no BAM and IGV can only error.
+                                        There are TWO of these panels and the
+                                        first fix patched only the other one. */}
                                     <button
                                       onClick={() => openSampleInIgv(selectedProject, sampleKey(row))}
-                                      disabled={!sampleKey(row)}
+                                      disabled={!sampleKey(row) || !row.Reference}
+                                      title={row.Reference
+                                        ? "Open this sample's reads in IGV"
+                                        : "No alignment for this sample yet — Step 1 has not aligned it, so there is no BAM to show."}
                                     >
                                       IGV
                                     </button>

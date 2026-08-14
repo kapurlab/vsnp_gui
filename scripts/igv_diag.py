@@ -125,6 +125,59 @@ def table_row_labels(xlsx, limit=400):
         return []
 
 
+class _FallbackResolver:
+    """A stand-in for xlsx_html when it cannot be imported.
+
+    Mirrors _strip_vcf_suffix / _canonical_stem / ambiguous_stems /
+    _NON_SAMPLE_LABELS. Kept deliberately small and side by side with the real
+    thing; if the two ever disagree, the real one is right.
+    """
+    _NON_SAMPLE_LABELS = {"root", "mq", "annotation", "no annotations", "reference"}
+
+    @staticmethod
+    def _strip_vcf_suffix(s):
+        for suf in (".vcf.gz", ".vcf"):
+            if s.endswith(suf):
+                s = s[: -len(suf)]
+        return s[:-3] if s.endswith("_zc") else s
+
+    @staticmethod
+    def _flatten(s):
+        return s.replace("_", "-")
+
+    def _canonical_stem(self, label, *stem_sets):
+        known = set()
+        for st in stem_sets:
+            if st:
+                known |= st
+        if not known or label in known:
+            return label
+        best = None
+        for s in known:
+            if label.startswith(s + "_") and (best is None or len(s) > len(best)):
+                best = s
+        if best is not None:
+            return best
+        flat = self._flatten(label)
+        for s in known:
+            fs = self._flatten(s)
+            if flat == fs or flat.startswith(fs + "-"):
+                if best is None or len(s) > len(best):
+                    best = s
+        return best if best is not None else label
+
+    @staticmethod
+    def ambiguous_stems(pairs):
+        reached = {}
+        for raw, stem in pairs:
+            if not stem:
+                continue
+            if _FallbackResolver._strip_vcf_suffix(str(raw).strip()) == stem:
+                continue
+            reached.setdefault(stem, set()).add(str(raw).strip())
+        return {k: sorted(v) for k, v in reached.items() if len(v) > 1}
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -278,13 +331,16 @@ def main():
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, os.path.join(repo, "backend", "app"))
     try:
-        import xlsx_html as X
-    except Exception as e:
-        note(f"cannot import the renderer ({type(e).__name__}: {e})")
-        note("re-run with the tool's python so this section can answer, e.g.")
-        note(f"  <tool env>/bin/python {sys.argv[0]} {proj}")
-        note(f"step1 folders: {samples[:4]}{' …' if len(samples) > 4 else ''}")
-        return 0
+        import xlsx_html as X                      # the real thing
+        note("using the renderer's own resolver")
+    except Exception:
+        # openpyxl is not importable under a bare python3, and needing the
+        # tool's env was enough friction to stop this being run at all. Mirror
+        # the three rules instead, and say which was used so the answer is not
+        # mistaken for the renderer's word.
+        X = _FallbackResolver()
+        note("renderer not importable here — using a copy of its rules "
+             "(same three: exact, S_ prefix, then dash/underscore-insensitive)")
 
     # Exactly the sets preview_xlsx builds.
     bams, vcfs = set(), set()

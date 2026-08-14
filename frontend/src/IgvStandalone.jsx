@@ -1,38 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import igv from "igv";
+import { normalizeLocus, goToLocus } from "./igvLocus.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
 function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
-}
-
-// Normalize a locus string for igv.js. For a single-position locus like
-// `CONTIG:POS`, igv.js's behavior depends on the underlying genome size:
-// on a ~30kb viral genome it auto-zooms to a small flanking window; on a
-// multi-megabase bacterial genome it silently falls back to showing the
-// whole contig. We force consistent behavior by expanding a single-position
-// locus to a small explicit range (`CONTIG:POS-FLANK – POS+FLANK`), so the
-// user always lands centered on the variant with a few bases of context.
-// Already-ranged loci (`CONTIG:START-END`) and contig-only strings pass
-// through unchanged.
-function normalizeLocus(locus, flank = 25) {
-  if (!locus) return "";
-  const s = String(locus).trim();
-  // Already a range — pass through.
-  if (/:\d[\d,]*-\d/.test(s)) return s;
-  // Single position: CONTIG:POS (POS may contain commas like 1,484,567).
-  const m = s.match(/^([^:]+):([\d,]+)$/);
-  if (m) {
-    const contig = m[1];
-    const pos = parseInt(m[2].replace(/,/g, ""), 10);
-    if (Number.isFinite(pos) && pos >= 1) {
-      const start = Math.max(1, pos - flank);
-      const end = pos + flank;
-      return `${contig}:${start}-${end}`;
-    }
-  }
-  return s;
 }
 
 // Translate the backend's structured 404 details for /step1/files into a
@@ -185,7 +158,8 @@ export default function IgvStandalone() {
     }
     if (locusParam) {
       if (browserRef.current) {
-        try { browserRef.current.search(normalizeLocus(locusParam)); } catch (e) { /* ignore */ }
+        const navErr = await goToLocus(browserRef.current, locusParam);
+        if (navErr) setStatus(navErr);
       } else {
         // Still loading: remember where they wanted to go. Dropping it left the
         // user at the initial whole-genome view, where an alignment track shows
@@ -352,6 +326,25 @@ export default function IgvStandalone() {
           id: refName.replace(/\.(fa|fasta)$/i, "") || "ref",
           fastaURL: serveUrl(refProject, referenceFastaPath),
           indexURL: serveUrl(refProject, referenceFaiPath),
+          // NO whole-genome view. igv.js builds a pseudo-chromosome called
+          // "all" whenever a reference has more than one contig, and lands
+          // there by default — but its alignment readers return no features for
+          // chr "all", so the reads track draws EMPTY. On an 8-segment
+          // influenza reference that is what "I click a SNP and nothing
+          // happens" actually was: the viewer opened on a view that cannot
+          // show reads. It is also why opening a virus from the Step 1 pane
+          // needed a manual click on a segment first.
+          //
+          // A single-chromosome reference (MTBC0) never gets the pseudo-contig,
+          // so it always landed on real sequence — that, and not the segment
+          // count in itself, is the whole difference in behaviour between the
+          // TB and influenza projects.
+          //
+          // Nothing is lost by turning it off: every reference here exists to
+          // align reads against, and the whole-genome view shows neither reads
+          // nor sequence. igv.js now opens on the first contig, and the contig
+          // dropdown still lists them all.
+          wholeGenomeView: false,
         },
         ...(initialLocus ? { locus: initialLocus } : {}),
         tracks: sampleTracks,
@@ -376,28 +369,23 @@ export default function IgvStandalone() {
             notes.push("reference annotation unavailable (gene track off)");
           }
         }
-        setStatus(notes.length ? `Loaded ${tracks.length}; ${notes.join("; ")}` : "");
-        // Explicitly navigate to the locus AFTER the browser is fully built.
-        // config.locus in createBrowser is unreliable — it gets silently
-        // dropped on some genomes (observed on MTBC0 4.4 Mb: page lands at
-        // whole-contig view despite locus being set). browser.search() is
-        // the same API path the user uses to manually paste a position, and
-        // it always navigates correctly. Belt-and-suspenders alongside the
-        // config.locus set above.
-        if (initialLocus) {
-          try { browser.search(initialLocus); } catch (e) { /* ignore */ }
-        }
-        // Replay anything clicked while we were loading (see addSample), then go
-        // where that click asked to go.
+        // Replay anything clicked while we were loading (see addSample) BEFORE
+        // navigating, so the navigation is the last thing to touch the view.
+        // It used to come first and without an await, which left a navigation
+        // and a track load interleaving inside igv.js's view update.
         const queued = pendingRef.current.splice(0);
         for (const [qProject, qSample] of queued) {
           await addSample(qProject, qSample);
         }
-        if (pendingLocusRef.current) {
-          const qLocus = normalizeLocus(pendingLocusRef.current);
-          pendingLocusRef.current = "";
-          try { browser.search(qLocus); } catch (e) { /* ignore */ }
-        }
+        // Navigate explicitly, even though config.locus was set above:
+        // createBrowser drops it on some genomes (observed on MTBC0 4.4 Mb,
+        // which lands at whole-contig view with locus set). search() is the
+        // same path a user takes when pasting a position by hand.
+        const wanted = pendingLocusRef.current || initialLocus;
+        pendingLocusRef.current = "";
+        const navErr = await goToLocus(browser, wanted);
+        if (navErr) notes.push(navErr);
+        setStatus(notes.length ? `Loaded ${tracks.length}; ${notes.join("; ")}` : "");
       } catch (err) {
         setStatus(`IGV failed to load: ${err && err.message ? err.message : err}`);
       }

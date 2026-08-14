@@ -6195,7 +6195,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "9"
+_XLSX_RENDER_VERSION = "10"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to

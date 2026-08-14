@@ -105,6 +105,43 @@ def main() -> int:
         assert_true(all(s in on_disk for s in plain0["row_samples"] if s),
                     f"row targets are on-disk stems: {plain0['row_samples']}")
 
+        # ---- the on-disk name EXTENDS the label's id ----------------------
+        #
+        # Straight from a real Ames HPAI project. Step 2 relabels a sample with
+        # metadata after its id; Step 1 staged it under a name with a suffix of
+        # its own. Neither string is a prefix of the other, so every rule that
+        # asks "does the label start with this stem?" fails, and every row of
+        # the table rendered unclickable — no link, no hover, and no banner,
+        # because nothing resolved far enough to be called ambiguous.
+        print("Step 2 label vs Step 1 folder with its own suffix")
+        ames_disk = {"24-029315-007-original", "24-030920-008-r-original",
+                     "24-035297-035-original"}
+        ames = {
+            "24-029315-007_GWTE_2024-09-26_AH0238161_AK": "24-029315-007-original",
+            "24-030920-008-r_GWTE_2024-10-12_AH0373419_OR": "24-030920-008-r-original",
+            "24-035297-035_GADW_2024-11-16_AH0383775_CA": "24-035297-035-original",
+        }
+        for label, want in ames.items():
+            assert_eq(xlsx_html._canonical_stem(label, ames_disk, set()), want,
+                      f"{label[:28]}…")
+        # A GISAID sequence has no reads staged, so it must stay unmatched
+        # rather than being attached to whatever folder looks closest.
+        gisaid = "GISAID-20208434_OTH-0108-27_Red-Tailed-Hawk_2024-10-07_CAN-BC"
+        assert_eq(xlsx_html._canonical_stem(gisaid, ames_disk, set()), gisaid,
+                  "an imported sequence with no Step 1 folder stays unmatched")
+
+        print("…and it cannot claim a folder it does not identify")
+        # A separator after the id is required, or 007 would claim 0071.
+        assert_eq(xlsx_html._canonical_stem("24-029315-007_X",
+                                            {"24-029315-0071-original"}, set()),
+                  "24-029315-007_X", "a longer id is not a match")
+        # Two candidates means the id does not identify a sample; no link beats
+        # the wrong one.
+        assert_eq(xlsx_html._canonical_stem(
+            "24-029315-007_X",
+            {"24-029315-007-original", "24-029315-007-repeat"}, set()),
+            "24-029315-007_X", "an ambiguous id resolves to nothing")
+
         print("controls: bacterial names are resolved exactly as before")
         assert_eq(xlsx_html._canonical_stem("SRR33643035", {"SRR33643035"}, set()),
                   "SRR33643035", "accession")

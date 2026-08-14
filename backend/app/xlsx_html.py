@@ -210,7 +210,31 @@ def _canonical_stem(label: str, *stem_sets) -> str:
         if flat == fs or flat.startswith(fs + "-"):
             if best is None or len(s) > len(best):
                 best = s
-    return best if best is not None else label
+    if best is not None:
+        return best
+
+    # Last rule, and the reverse of every rule above: the on-disk name EXTENDS
+    # the label's leading id rather than being extended by it.
+    #
+    # Step 2 relabels a sample with metadata after its id
+    # (`24-029315-007_GWTE_2024-09-26_AH0238161_AK`) while Step 1 staged it
+    # under a name carrying a suffix of its own
+    # (`24-029315-007-original`). Neither string is a prefix of the other, so
+    # nothing above can match them, and every row of such a table rendered
+    # unclickable — no link, no hover, and no banner either, because nothing
+    # resolved far enough to be called ambiguous. Measured on a real HPAI
+    # cascade table: 0 of 8 sample rows matched.
+    #
+    # A separator after the id is required, so `24-029315-007` cannot claim
+    # `24-029315-0071-original`. More than one candidate means the id does not
+    # identify a sample, and no link is better than the wrong one.
+    head = label.split("_", 1)[0]
+    if head and head != label:
+        cands = [s for s in known
+                 if s == head or s.startswith(head + "-") or s.startswith(head + "_")]
+        if len(cands) == 1:
+            return cands[0]
+    return label
 
 
 def _flatten_sep(s: str) -> str:

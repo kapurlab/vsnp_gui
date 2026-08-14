@@ -40,41 +40,90 @@ def bam_contigs(path):
         note(f"could not read BAM header: {type(e).__name__}: {e}")
         return None
 
+def _cell_text(cell_xml, shared):
+    """The text of one <c> element.
+
+    Two encodings have to be handled or the answer is a false alarm: a shared
+    string (`t="s"` plus an index into sharedStrings.xml, which is what vsnp3's
+    writer emits) and an inline string (`t="inlineStr"` with the text in an
+    `<is><t>` child, which openpyxl emits). Reading only the first made this
+    report "no CHROM:POS headers recognised" for a perfectly good table.
+    """
+    t = re.search(r'\bt="(\w+)"', cell_xml)
+    kind = t.group(1) if t else ""
+    if kind == "inlineStr":
+        m = re.search(r"<is>(.*?)</is>", cell_xml, re.S)
+        return re.sub(r"<[^>]+>", "", m.group(1)) if m else ""
+    v = re.search(r"<v>(.*?)</v>", cell_xml, re.S)
+    if not v:
+        return ""
+    val = v.group(1)
+    if kind == "s":
+        i = int(val)
+        return shared[i] if i < len(shared) else ""
+    return val
+
+
+def _shared_strings(z):
+    if "xl/sharedStrings.xml" not in z.namelist():
+        return []
+    sx = z.read("xl/sharedStrings.xml").decode("utf-8", "replace")
+    return [re.sub(r"<[^>]+>", "", m) for m in re.findall(r"<si>(.*?)</si>", sx, re.S)]
+
+
+def _sheet_xml(z):
+    name = next((n for n in z.namelist()
+                 if re.fullmatch(r"xl/worksheets/sheet1\.xml", n)), None)
+    if not name:
+        # Some writers number differently; take the first worksheet there is.
+        name = next((n for n in sorted(z.namelist())
+                     if n.startswith("xl/worksheets/") and n.endswith(".xml")), None)
+    return z.read(name).decode("utf-8", "replace") if name else ""
+
+
 def table_loci(xlsx, limit=400):
     """Position headers (CHROM:POS) from row 1 of the first sheet."""
     try:
         with zipfile.ZipFile(xlsx) as z:
-            shared = []
-            if "xl/sharedStrings.xml" in z.namelist():
-                sx = z.read("xl/sharedStrings.xml").decode("utf-8", "replace")
-                shared = [re.sub(r"<[^>]+>", "", m) for m in
-                          re.findall(r"<si>(.*?)</si>", sx, re.S)]
-            name = next((n for n in z.namelist()
-                         if re.fullmatch(r"xl/worksheets/sheet1\.xml", n)), None)
-            if not name:
-                return []
-            xml = z.read(name).decode("utf-8", "replace")
-            row1 = re.search(r'<row[^>]*r="1"[^>]*>(.*?)</row>', xml, re.S)
+            shared = _shared_strings(z)
+            xml = _sheet_xml(z)
+            row1 = re.search(r'<row[^>]*\br="1"[^>]*>(.*?)</row>', xml, re.S)
             if not row1:
                 return []
             out = []
             for c in re.findall(r"<c\b[^>]*>.*?</c>", row1.group(1), re.S):
-                t = re.search(r'\bt="(\w+)"', c)
-                v = re.search(r"<v>(.*?)</v>", c, re.S)
-                if not v:
-                    continue
-                val = v.group(1)
-                if t and t.group(1) == "s":
-                    idx = int(val)
-                    val = shared[idx] if idx < len(shared) else ""
-                if re.fullmatch(r"\S+:\d+", val.strip()):
-                    out.append(val.strip())
+                val = _cell_text(c, shared).strip()
+                if re.fullmatch(r"\S+:\d+", val):
+                    out.append(val)
                 if len(out) >= limit:
                     break
             return out
     except Exception as e:
         note(f"could not read table: {type(e).__name__}: {e}")
         return []
+
+
+def table_row_labels(xlsx, limit=400):
+    """First-column values from every row of the first sheet."""
+    try:
+        with zipfile.ZipFile(xlsx) as z:
+            shared = _shared_strings(z)
+            xml = _sheet_xml(z)
+            out = []
+            for row in re.findall(r"<row\b[^>]*>(.*?)</row>", xml, re.S):
+                c = re.search(r'<c\b[^>]*r="A\d+"[^>]*>.*?</c>', row, re.S)
+                if not c:
+                    continue
+                val = _cell_text(c.group(0), shared).strip()
+                if val:
+                    out.append(val)
+                if len(out) >= limit:
+                    break
+            return out
+    except Exception as e:
+        note(f"could not read row labels: {type(e).__name__}: {e}")
+        return []
+
 
 def main():
     if len(sys.argv) < 2:
@@ -222,10 +271,89 @@ def main():
     for c in contigs[:8]:
         note(f"table contig: {c}{'' if c in known else '   <-- NOT IN REFERENCE'}")
 
-    hdr("5. sample labels vs step1 folder names")
-    # A row label that resolves to no step1 folder gets no link at all.
-    print(f"        step1 folders : {samples[:4]}{' …' if len(samples) > 4 else ''}")
-    print("        (compare with the first column of the SNP table in the browser)")
+    hdr("5. why each row is or is not clickable")
+    # The gate that decides hover. Run with the tool's own python so the real
+    # backend code answers, rather than a re-implementation that could differ
+    # from it in exactly the way that matters.
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(repo, "backend", "app"))
+    try:
+        import xlsx_html as X
+    except Exception as e:
+        note(f"cannot import the renderer ({type(e).__name__}: {e})")
+        note("re-run with the tool's python so this section can answer, e.g.")
+        note(f"  <tool env>/bin/python {sys.argv[0]} {proj}")
+        note(f"step1 folders: {samples[:4]}{' …' if len(samples) > 4 else ''}")
+        return 0
+
+    # Exactly the sets preview_xlsx builds.
+    bams, vcfs = set(), set()
+    for s in samples:
+        d = os.path.join(step1, s)
+        if glob.glob(os.path.join(d, "alignment*", f"{s}_nodup.bam")):
+            bams.add(s)
+        if "_" in s:
+            pre = s.split("_")[0]
+            if pre and glob.glob(os.path.join(d, "alignment*", f"{pre}_nodup.bam")):
+                bams.add(pre)
+    for p in glob.glob(os.path.join(proj, "step2", "vcf_database", "*")):
+        n = os.path.basename(p)
+        for suf in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
+            if n.endswith(suf):
+                vcfs.add(n[: -len(suf)])
+                break
+    note(f"{len(bams)} samples with a BAM, {len(vcfs)} with a VCF")
+
+    labels = table_row_labels(table)
+    if not labels:
+        bad("could not read the table's first column")
+        return 1
+    resolved, dead, live = [], 0, 0
+    for lbl in labels:
+        if lbl.lower() in X._NON_SAMPLE_LABELS:
+            continue
+        stem = X._canonical_stem(X._strip_vcf_suffix(lbl), bams, vcfs)
+        resolved.append((lbl, stem))
+        if stem in bams or stem in vcfs:
+            live += 1
+        else:
+            dead += 1
+    print(f"        {live} row(s) resolve to a sample, {dead} do not")
+    amb = X.ambiguous_stems(resolved)
+    if dead:
+        bad(f"{dead} row(s) match no Step 1 folder and no VCF -> those cells are "
+            "not clickable and show NO hover")
+        for lbl, stem in resolved:
+            if stem not in bams and stem not in vcfs:
+                note(f"row {lbl!r} -> {stem!r}  (no such sample)")
+                break
+        note("the label in the table and the folder under step1/ must correspond;")
+        note("compare the two lists above")
+    if amb:
+        bad(f"{len(amb)} Step 1 folder(s) are reached by more than one row label "
+            "-> ALL those rows are de-linked, deliberately, because a click "
+            "could open the wrong specimen")
+        for k, v in list(amb.items())[:3]:
+            note(f"folder {k!r} <- {len(v)} labels, e.g. {v[:2]}")
+        note("the page shows an 'IGV links are off for N rows' banner when this")
+        note("happens; if you see no banner AND no hover, it is the case above")
+    if not dead and not amb:
+        ok("every sample row resolves uniquely -> all variant cells clickable")
+
+    hdr("6. step2 runs (what the results drop-down lists)")
+    runs = sorted(glob.glob(os.path.join(proj, "step2", "*", "run_metadata.json")))
+    if runs:
+        ok(f"{len(runs)} run(s) with metadata")
+        for r in runs[-3:]:
+            note(os.path.basename(os.path.dirname(r)))
+    else:
+        groups = [d for d in glob.glob(os.path.join(proj, "step2", "*"))
+                  if os.path.isdir(d) and os.path.basename(d) != "vcf_database"]
+        bad("no run_metadata.json under step2/ — the drop-down lists timestamped "
+            "runs, and this project has none")
+        note(f"{len(groups)} directory(ies) directly under step2/: "
+             f"{[os.path.basename(d) for d in groups[:4]]}")
+        note("those are served as a single synthetic 'legacy' entry instead")
     return 0
 
 if __name__ == "__main__":

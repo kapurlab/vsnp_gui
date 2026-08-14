@@ -4447,7 +4447,15 @@ export default function App() {
                       ) : null}
                     </div>
                     <div className="list-meta">
-                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF DB: {p.vcfs_count ?? p.step1_vcfs}
+                      {/* No `?? p.step1_vcfs` fallback: vcfs_count is set on
+                          every backend path, so it never fired, and producing
+                          step1_vcfs cost one directory read per sample — 24,000
+                          of them on an influenza project, each time this list
+                          was fetched. */}
+                      FASTQ: {p.fastq_count} | Step1: {p.step1_samples} | VCF DB: {p.vcfs_count}
+                      {p.counts_unreadable ? (
+                        <span title="This project's folders could not be read, so its counts are unknown."> ⚠</span>
+                      ) : null}
                       {p.last_activity ? (
                         <span title={`Last activity: ${p.last_activity}`}> | {_formatActivity(p.last_activity)}</span>
                       ) : null}

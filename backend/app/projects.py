@@ -1,9 +1,13 @@
 import json
+import logging
 import os
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
 _PROJECT_NAME_OK_CHARSET = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -72,14 +76,29 @@ def vcf_db_dir(step2_dir: Path) -> Path:
     used ``vcf_source``. Prefer the new name, fall back to the legacy one when
     it's the only one present, and default to the new name for creation so new
     projects always get ``vcf_database``.
+
+    Never raises. ``Path.exists()`` PROPAGATES EACCES rather than returning
+    False, and this is called while merely describing a project — including
+    from inside the argument list that builds the activity-timestamp
+    candidates. A project directory the current user cannot search therefore
+    raised from a routine "which layout is this?" question, and took the whole
+    listing with it.
     """
     new = step2_dir / "vcf_database"
-    if new.exists():
+    if _exists(new):
         return new
     legacy = step2_dir / "vcf_source"
-    if legacy.exists():
+    if _exists(legacy):
         return legacy
     return new
+
+
+def _exists(p: Path) -> bool:
+    """``Path.exists()`` without the EACCES surprise: unreachable is not there."""
+    try:
+        return p.exists()
+    except OSError:
+        return False
 
 
 def ensure_project_dirs(project_dir: Path) -> None:
@@ -175,10 +194,20 @@ def list_projects(roots: RootsLike) -> List[Dict]:
     name collision across roots, the personal one wins (listed first)."""
     norm = _normalize_roots(roots)
     seen: set = set()
-    out: List[Dict] = []
+    todo: List[Tuple[str, Path, Path]] = []
     for scope, root in norm:
-        for p in root.iterdir():
-            if not p.is_dir():
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            # A root that cannot be read contributes nothing; the other root's
+            # projects are still perfectly listable.
+            logger.warning("list_projects: cannot read root %s", root)
+            continue
+        for p in entries:
+            try:
+                if not p.is_dir():
+                    continue
+            except OSError:
                 continue
             if p.name in (ARCHIVE_DIR_NAME,):
                 continue
@@ -189,39 +218,81 @@ def list_projects(roots: RootsLike) -> List[Dict]:
             if p.name in seen:
                 continue
             seen.add(p.name)
-            meta_path = project_meta_path(p)
-            if meta_path.exists():
-                try:
-                    with open(meta_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                except json.JSONDecodeError:
-                    meta = {}
-            else:
-                meta = {}
-            # Always derive `name` from the directory. Older project.json files
-            # written by update_project_meta may have set display_name and
-            # reference without a name field; the directory is the source of
-            # truth for the project's identity.
-            meta["name"] = p.name
-            # Activity first: it is a handful of stats and doubles as the
-            # cache signature for the (much more expensive) counts below.
-            activity = _project_last_activity(p)
-            meta.update(_project_counts(p, activity))
-            meta["scope"] = scope
-            meta["_root"] = str(root)
-            meta["_mtime"] = activity
-            # ISO string for display; the frontend sorts/labels by recency.
-            from datetime import datetime
-            meta["last_activity"] = (
-                datetime.fromtimestamp(activity).isoformat(timespec="seconds")
-                if activity
-                else ""
-            )
-            out.append(meta)
+            todo.append((scope, root, p))
+
+    # Counted concurrently, because this is a syscall-bound walk and the
+    # roots hold projects of wildly different sizes. Serially, N projects cost
+    # the SUM of their scans: three influenza projects of ~24,000 samples each
+    # took minutes, during which the whole GUI was unresponsive — every other
+    # endpoint is a sync def sharing the same threadpool, and one of its
+    # workers was held for the duration. Concurrently the cost is closer to
+    # the largest single project.
+    #
+    # The cap is small on purpose. These are directory reads against one
+    # filesystem, so past a handful of workers there is nothing left to
+    # overlap and the extra threads only compete for the GIL with the requests
+    # this was slowing down in the first place.
+    workers = max(1, min(8, len(todo)))
+    out: List[Dict] = []
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="proj-count") as pool:
+            results = list(pool.map(lambda t: _describe_project(*t), todo))
+    else:
+        results = [_describe_project(*t) for t in todo]
+    out = [m for m in results if m is not None]
+
     out.sort(key=lambda x: x.get("_mtime", 0), reverse=True)
     for meta in out:
         meta.pop("_mtime", None)
     return out
+
+
+def _describe_project(scope: str, root: Path, p: Path) -> Optional[Dict]:
+    """One project's card. Never raises: a project that cannot be described
+    must not take the rest of the list down with it."""
+    try:
+        meta: Dict = {}
+        meta_path = project_meta_path(p)
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        # A missing project.json is the normal case for an older project, and
+        # is what `exists()` used to be asked. Asking by opening removes a stat
+        # AND the failure mode it had: pathlib's exists() PROPAGATES EACCES
+        # rather than returning False, so a single project whose project.json
+        # this user cannot reach raised straight out of the listing and blanked
+        # every readable project in the GUI.
+        except FileNotFoundError:
+            meta = {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("list_projects: unusable project.json in %s: %s", p, e)
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        # Always derive `name` from the directory. Older project.json files
+        # written by update_project_meta may have set display_name and
+        # reference without a name field; the directory is the source of
+        # truth for the project's identity.
+        meta["name"] = p.name
+        # Activity first: it is a handful of stats and doubles as the
+        # cache signature for the (much more expensive) counts below.
+        activity = _project_last_activity(p)
+        meta.update(_project_counts(p, activity))
+        meta["scope"] = scope
+        meta["_root"] = str(root)
+        meta["_mtime"] = activity
+        # ISO string for display; the frontend sorts/labels by recency.
+        from datetime import datetime
+        meta["last_activity"] = (
+            datetime.fromtimestamp(activity).isoformat(timespec="seconds")
+            if activity
+            else ""
+        )
+        return meta
+    except Exception:
+        logger.exception("list_projects: skipping %s", p)
+        return None
 
 
 def resolve_project_dir(roots: RootsLike, name: str) -> Optional[Path]:
@@ -328,11 +399,11 @@ def _scan_download_reads(download_dir: Path, seen: set) -> None:
             continue
 
 
-def _scan_step1(step1_dir: Path, seen: set) -> Tuple[int, int]:
-    """One pass over step1/ for every number the project card needs.
+def _scan_step1(step1_dir: Path, seen: set) -> int:
+    """One pass over step1/ for the numbers the project card needs.
 
-    Returns (sample_count, zc_vcf_count) and adds each sample's reads to the
-    shared identity set.
+    Returns the sample count and adds each sample's reads to the shared
+    identity set.
 
     Previously this cost FOUR separate traversals of every sample directory —
     an ``iterdir`` for the sample count, a ``*/*.fastq.gz`` glob, an
@@ -340,10 +411,19 @@ def _scan_step1(step1_dir: Path, seen: set) -> Tuple[int, int]:
     glob. On the 9,364-sample Ames project that is tens of thousands of
     directory reads for one project listing, and the GUI re-fetches
     /api/projects after most actions, so the whole app stalled for minutes
-    each time. Identical numbers, one traversal.
+    each time.
+
+    It then cost two: the sample dir, and every ``alignment*/`` inside it. The
+    second read existed solely to produce a ``step1_vcfs`` count that the card
+    never displayed — the badge reads ``vcfs_count ?? step1_vcfs`` and
+    ``vcfs_count`` is set on every path, including the error path, so the
+    fallback could not fire even when it was meant to. One directory read per
+    sample was being spent on a number nothing could show. Now one traversal,
+    and on a 24,000-sample influenza project that is 24,000 fewer directory
+    reads per listing.
     """
     if not step1_dir.is_dir():
-        return 0, 0
+        return 0
     sample_dirs = []
     try:
         with os.scandir(step1_dir) as it:
@@ -355,35 +435,19 @@ def _scan_step1(step1_dir: Path, seen: set) -> Tuple[int, int]:
                 if entry.is_dir():
                     sample_dirs.append(entry.path)
     except OSError:
-        return 0, 0
+        return 0
 
-    vcfs = 0
     for sample_path in sample_dirs:
-        align_dirs = []
         dev = _dir_device(Path(sample_path))
         try:
             with os.scandir(sample_path) as it:
                 for entry in it:
-                    name = entry.name
                     # Reads live directly under the sample dir.
-                    if _is_read_file(name):
+                    if _is_read_file(entry.name):
                         _add_read_identity(entry, dev, seen)
-                    # alignment_<ref>/ plus the legacy suffix-less alignment/
-                    # of pre-GUI runs, so old projects' badges count too.
-                    elif (name == "alignment" or name.startswith("alignment_")) \
-                            and entry.is_dir():
-                        align_dirs.append(entry.path)
         except OSError:
             continue
-        for align_path in align_dirs:
-            try:
-                with os.scandir(align_path) as it:
-                    for entry in it:
-                        if entry.name.endswith("_zc.vcf"):
-                            vcfs += 1
-            except OSError:
-                continue
-    return len(sample_dirs), vcfs
+    return len(sample_dirs)
 
 
 def _count_vcf_database(vcfs_dir: Path) -> Tuple[int, int]:
@@ -442,30 +506,37 @@ def _project_counts(project_dir: Path, activity: Optional[float] = None) -> Dict
     step2_dir = project_dir / "step2"
     # The cumulative VCF store is step2/vcf_database now; vcfs_count (the card's
     # "collected VCFs" badge) and step2_vcfs both read from it.
-    vcfs_dir = vcf_db_dir(step2_dir)
     try:
+        # vcf_db_dir stats its candidates, so it belongs INSIDE the guard: on an
+        # unreadable project it raised from the assignment line and escaped the
+        # except below, which is how one project nobody can read became a 500
+        # for the whole list.
+        vcfs_dir = vcf_db_dir(step2_dir)
         # One shared identity set across both read locations, so a download/
         # symlink pointing at a step1 read (or the reverse) counts once.
         reads: set = set()
         _scan_download_reads(download_dir, reads)
-        step1_samples, step1_vcfs = _scan_step1(step1_dir, reads)
+        step1_samples = _scan_step1(step1_dir, reads)
         step2_vcfs, vcfs_count = _count_vcf_database(vcfs_dir)
         counts = {
             "fastq_count": len(reads),
             "step1_samples": step1_samples,
-            "step1_vcfs": step1_vcfs,
             "step2_html": len(list(step2_dir.glob("*.html"))) if step2_dir.exists() else 0,
             "step2_vcfs": step2_vcfs,
             "vcfs_count": vcfs_count,
         }
-    except PermissionError:
+    # OSError, not PermissionError: a stale NFS handle, an ENOTDIR where a
+    # directory is expected, or an EIO from a failing disk are all the same
+    # situation — this project's numbers are unknowable — and none of them is a
+    # reason to refuse the other projects.
+    except OSError:
         counts = {
             "fastq_count": 0,
             "step1_samples": 0,
-            "step1_vcfs": 0,
             "step2_html": 0,
             "step2_vcfs": 0,
             "vcfs_count": 0,
+            "counts_unreadable": True,
         }
     _COUNTS_CACHE[key] = (sig, now, counts)
     # Bound the cache: projects come and go (create/archive/delete), and this

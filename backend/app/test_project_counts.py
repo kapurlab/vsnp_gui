@@ -14,6 +14,7 @@ Run directly:  python test_project_counts.py
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -87,7 +88,12 @@ def main() -> int:
         # A_unmapped_R1 is excluded entirely.
         assert_eq(c["fastq_count"], 5, "distinct reads (symlink deduped)")
         assert_eq(c["step1_samples"], 2, "sample dirs (_provenance/.hidden skipped)")
-        assert_eq(c["step1_vcfs"], 2, "zc VCFs across alignment_<ref>/ and legacy alignment/")
+        # No step1_vcfs. Producing it meant one extra directory read per sample
+        # — 24,000 of them on an influenza project, every time the GUI
+        # re-fetched the list — for a number the card could never display: the
+        # badge reads `vcfs_count ?? step1_vcfs`, and vcfs_count is set on every
+        # path including the error path, so the fallback could not fire.
+        assert_eq("step1_vcfs" in c, False, "no per-sample alignment descent")
         assert_eq(c["step2_vcfs"], 2, "plain .vcf in the database")
         assert_eq(c["vcfs_count"], 3, "collected _zc.vcf + _zc.vcf.gz")
         assert_eq(c["step2_html"], 0, "no reports yet")
@@ -119,16 +125,45 @@ def main() -> int:
         finally:
             projects._COUNTS_TTL_SECONDS = original_ttl
         assert_eq(c2["step1_samples"], 3, "new sample counted")
-        assert_eq(c2["step1_vcfs"], 4, "VCFs in new AND existing samples counted")
         assert_eq(c2["fastq_count"], 6, "new sample's read counted")
 
         print("\n[an empty / missing project counts as zero, never an error]")
         empty = tmp / "empty"
         empty.mkdir()
         c3 = _project_counts(empty)
-        assert_eq(c3, {"fastq_count": 0, "step1_samples": 0, "step1_vcfs": 0,
+        assert_eq(c3, {"fastq_count": 0, "step1_samples": 0,
                        "step2_html": 0, "step2_vcfs": 0, "vcfs_count": 0},
                   "all zeros")
+
+        print("\n[one unreadable project does not take the list down]")
+        # pathlib's exists() propagates EACCES rather than returning False, so a
+        # single project whose project.json this user cannot reach used to raise
+        # straight out of /api/projects — and the frontend's catch replaced the
+        # whole list with an empty one. Every readable project vanished because
+        # of one that was not.
+        root = tmp / "root"
+        (root / "good").mkdir(parents=True)
+        (root / "good" / "project.json").write_text('{"reference": "ok"}')
+        bad = root / "locked"
+        bad.mkdir()
+        (bad / "project.json").write_text("{}")
+        os.chmod(bad, 0o000)
+        try:
+            listed = projects.list_projects([("personal", root)])
+            names = sorted(p["name"] for p in listed)
+            assert_eq(names, ["good", "locked"], "both projects still listed")
+            good = next(p for p in listed if p["name"] == "good")
+            assert_eq(good.get("reference"), "ok", "the readable one is intact")
+            locked = next(p for p in listed if p["name"] == "locked")
+            assert_eq(locked.get("counts_unreadable"), True,
+                      "the unreadable one is flagged, not omitted")
+            assert_eq(locked["fastq_count"], 0, "unreadable counts are zero")
+        finally:
+            os.chmod(bad, 0o755)
+
+        print("\n[a root that cannot be read is skipped, not fatal]")
+        assert_eq(projects.list_projects([("personal", tmp / "nonexistent")]), [],
+                  "missing root yields an empty list")
 
         print("\nAll project-count tests passed.")
         return 0

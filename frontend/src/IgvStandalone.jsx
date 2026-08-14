@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import igv from "igv";
-import { normalizeLocus, goToLocus } from "./igvLocus.js";
+import { normalizeLocus, goToLocus, landingLocus } from "./igvLocus.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -335,25 +335,21 @@ export default function IgvStandalone() {
           id: refName.replace(/\.(fa|fasta)$/i, "") || "ref",
           fastaURL: serveUrl(refProject, referenceFastaPath),
           indexURL: serveUrl(refProject, referenceFaiPath),
-          // NO whole-genome view. igv.js builds a pseudo-chromosome called
-          // "all" whenever a reference has more than one contig, and lands
-          // there by default — but its alignment readers return no features for
-          // chr "all", so the reads track draws EMPTY. On an 8-segment
-          // influenza reference that is what "I click a SNP and nothing
-          // happens" actually was: the viewer opened on a view that cannot
-          // show reads. It is also why opening a virus from the Step 1 pane
-          // needed a manual click on a segment first.
+          // Deliberately NOT `wholeGenomeView: false`, though that is the
+          // obvious way to stop igv.js opening on its "all" pseudo-contig where
+          // alignment tracks render nothing.
           //
-          // A single-chromosome reference (MTBC0) never gets the pseudo-contig,
-          // so it always landed on real sequence — that, and not the segment
-          // count in itself, is the whole difference in behaviour between the
-          // TB and influenza projects.
+          // v0.4.54 did exactly that and broke the viewer outright, including
+          // from the Step 1 pane, which had been fine. Setting the flag skips a
+          // whole block of igv.js's genome setup, leaving `wgChromosomeNames`
+          // undefined — and igv.js iterates it with `for...of` in places that
+          // do not check, so it throws. Turning a library option off is not the
+          // same as changing where the viewer looks.
           //
-          // Nothing is lost by turning it off: every reference here exists to
-          // align reads against, and the whole-genome view shows neither reads
-          // nor sequence. igv.js now opens on the first contig, and the contig
-          // dropdown still lists them all.
-          wholeGenomeView: false,
+          // So the config stays on the path igv.js is tested for, and landing
+          // on a real contig is done by navigating after the browser is built
+          // (see landingLocus). Same result, none of the initialisation
+          // skipped, and the whole-genome view remains available in the dropdown.
         },
         ...(initialLocus ? { locus: initialLocus } : {}),
         tracks: sampleTracks,
@@ -390,7 +386,7 @@ export default function IgvStandalone() {
         // createBrowser drops it on some genomes (observed on MTBC0 4.4 Mb,
         // which lands at whole-contig view with locus set). search() is the
         // same path a user takes when pasting a position by hand.
-        const wanted = pendingLocusRef.current || initialLocus;
+        const wanted = landingLocus(browser, pendingLocusRef.current || initialLocus);
         pendingLocusRef.current = "";
         const navErr = await goToLocus(browser, wanted);
         if (navErr) notes.push(navErr);

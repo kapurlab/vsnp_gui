@@ -14,7 +14,7 @@
 //   node test/igv_locus.test.mjs
 
 import assert from "node:assert/strict";
-import { normalizeLocus, goToLocus } from "../src/igvLocus.js";
+import { normalizeLocus, goToLocus, landingLocus } from "../src/igvLocus.js";
 
 let passed = 0;
 async function test(name, fn) {
@@ -133,6 +133,57 @@ await test("a browser without referenceFrameList is not treated as a failure", a
     async search() { /* succeeded, exposes nothing */ },
   };
   assert.equal(await goToLocus(b, "A/Fancy_Ck/NL/FAV33/2021_M:914"), "");
+});
+
+// ---- where the viewer opens when nothing was requested -------------------
+//
+// This is the Step 1 pane's case. v0.4.54 solved it by setting
+// `wholeGenomeView: false` on the reference, which skips part of igv.js's
+// genome setup and leaves `wgChromosomeNames` undefined — igv.js iterates that
+// unguarded, so the viewer broke outright, including for projects that had been
+// working. The fix is to navigate rather than reconfigure, and these pin that
+// the navigation happens in the cases that need it and nowhere else.
+
+await test("a requested locus always wins", () => {
+  const b = { genome: { chromosomeNames: OWL } };
+  assert.equal(landingLocus(b, "A/Fancy_Ck/NL/FAV33/2021_M:914"),
+               "A/Fancy_Ck/NL/FAV33/2021_M:914");
+});
+
+await test("a multi-contig reference lands on its first real contig", () => {
+  // Without this the viewer opens on igv.js's "all" pseudo-contig, whose
+  // alignment readers return nothing, so the reads track draws empty.
+  const b = { genome: { chromosomeNames: OWL } };
+  assert.equal(landingLocus(b, ""), "A/Blue-Winged_Teal/Alberta/39/2020_PB2");
+});
+
+await test("a single-contig reference is left alone", () => {
+  // MTBC0's case, which was never broken: igv.js already opens on the only
+  // contig, so navigating would be a behaviour change for no reason.
+  const b = { genome: { chromosomeNames: ["NC_002945.4"] } };
+  assert.equal(landingLocus(b, ""), "");
+});
+
+await test('"all" is never chosen as a landing contig', () => {
+  const b = { genome: { chromosomeNames: ["all", ...OWL] } };
+  assert.equal(landingLocus(b, ""), "A/Blue-Winged_Teal/Alberta/39/2020_PB2");
+});
+
+await test("an unreadable genome falls back to igv.js's own default", () => {
+  assert.equal(landingLocus(null, ""), "");
+  assert.equal(landingLocus({}, ""), "");
+  assert.equal(landingLocus({ genome: {} }, ""), "");
+  assert.equal(landingLocus({ genome: { chromosomeNames: [] } }, ""), "");
+  assert.equal(landingLocus({ genome: { get chromosomeNames() { throw new Error("x"); } } }, ""), "");
+});
+
+await test("landing on a bare contig reads as success, not as failure", async () => {
+  // goToLocus treats "still on all" as a failure; a bare contig name must not
+  // be caught by that, or every Step 1 launch would report an error.
+  const b = fakeBrowser({ known: OWL });
+  const target = landingLocus({ genome: { chromosomeNames: OWL } }, "");
+  assert.equal(await goToLocus(b, target), "");
+  assert.equal(b.calls[0], "A/Blue-Winged_Teal/Alberta/39/2020_PB2");
 });
 
 if (!process.exitCode) console.log(`ok — ${passed} igv locus assertions`);

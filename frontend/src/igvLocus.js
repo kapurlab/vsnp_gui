@@ -49,6 +49,37 @@ export function normalizeLocus(locus, flank = 25) {
  *
  * Returns "" on success, or a description of what went wrong.
  */
+/**
+ * Where the viewer should open.
+ *
+ * A requested locus always wins. With none — which is every launch from the
+ * Step 1 pane — a multi-contig reference needs one anyway: igv.js opens such a
+ * genome on its `"all"` pseudo-contig, and its alignment readers return no
+ * features there, so the reads track draws empty. That is what made opening a
+ * virus from Step 1 require a manual click on a segment first.
+ *
+ * Navigating to the first real contig fixes that without touching igv.js's
+ * configuration. The alternative — `wholeGenomeView: false` — skips part of the
+ * library's genome setup and leaves `wgChromosomeNames` undefined, which igv.js
+ * iterates unguarded; that shipped in v0.4.54 and broke the viewer.
+ *
+ * A single-contig reference is left alone: igv.js already opens on the only
+ * contig there, and that case was never broken.
+ */
+export function landingLocus(browser, requested) {
+  if (requested) return requested;
+  try {
+    const names = browser && browser.genome && browser.genome.chromosomeNames;
+    if (Array.isArray(names) && names.length > 1) {
+      // "all" is not in chromosomeNames on the genomes seen here, but skip it
+      // defensively — navigating to it is precisely what this exists to avoid.
+      const first = names.find((n) => String(n).toLowerCase() !== "all");
+      if (first) return first;
+    }
+  } catch (err) { /* no genome to ask — let igv.js keep its default */ }
+  return "";
+}
+
 export async function goToLocus(browser, locus) {
   if (!browser || !locus) return "";
   const target = normalizeLocus(locus);

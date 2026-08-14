@@ -2201,6 +2201,12 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-filter-warn {{
     background: #fff5e0; border-bottom: 1px solid #e6c98a; color: #4a3a12;
   }}
+  /* Written only when a launch actually failed — a click that opens nothing has
+     to say so somewhere the user is already looking. */
+  .xlsx-igv-note {{
+    padding: 10px 20px; background: #fdecea; border-bottom: 1px solid #e6a8a0;
+    color: #5a1d16; font-size: 13px; line-height: 1.5;
+  }}
   .xlsx-bar .filename {{ font-weight: 600; font-size: 14px; }}
   .xlsx-bar .meta {{ color: var(--xlsx-muted); font-size: 12px; font-family: 'IBM Plex Mono', monospace; }}
   .xlsx-bar a {{ color: #b85a3e; text-decoration: none; font-size: 13px; }}
@@ -2297,28 +2303,82 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');window.location.href=u.toString();return false;">Download xlsx</a></span>
 </div>
 {notice}
+<div id="xlsxIgvNote" class="xlsx-igv-note" style="display:none"></div>
 <div class="xlsx-wrap" id="xlsxWrap">
 {table}
 </div>
 <div id="xlsxMore"></div>
 <script>
-// IGV launcher for cascade-table variant cells. First click opens a new
-// IGV tab; subsequent clicks reuse that tab additively (postMessage tells
-// IgvStandalone to add any new samples + navigate to the new locus).
-// Window reference is kept on `window.__vsnpIgvWin` so it survives
-// across many clicks in the same preview page. If the user closes the
-// IGV tab, .closed flips true and we open a fresh one.
+// IGV launcher for cascade-table variant cells. First click opens an IGV tab;
+// later clicks reuse it additively (postMessage tells IgvStandalone to add any
+// new samples and navigate to the new locus).
+//
+// Every failure here used to be silent, which is the whole reason "I click a
+// SNP and no tab opens" was so hard to pin down. Three of them:
+//
+//  1. postMessage into a STALE handle. `w.closed` is false for a tab that is
+//     still open but no longer running this app — which is routine under Open
+//     OnDemand, where the URL carries the compute node and port and both change
+//     when the session is recycled. The message went nowhere, we returned as if
+//     delivered, and nothing happened at all. The viewer now has to ACKNOWLEDGE
+//     it; if no ack arrives we treat the handle as dead and open a fresh tab.
+//  2. `window.open` returning null when a pop-up blocker refuses. Never
+//     checked, so the click did nothing and said nothing. Now reported.
+//  3. The new tab was never focused, so on setups that open it in the
+//     background the user's answer is still "nothing happened".
 (function() {{
+  var ACK_MS = 700;
+
+  window.addEventListener("message", function(ev) {{
+    if (ev.origin !== window.location.origin) return;
+    if (ev.data && ev.data.type === "vsnpIgvAck") window.__vsnpIgvAck = true;
+  }});
+
+  function say(msg) {{
+    var el = document.getElementById("xlsxIgvNote");
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = msg ? "block" : "none";
+  }}
+
+  function openFresh(url) {{
+    // A NAMED target reuses a tab called "vsnp_igv" anywhere in this browser
+    // session, including one left over from an earlier OOD session pointing at
+    // a node and port that no longer exist. That reuse is wanted when the tab
+    // is live and is why the name is here; the ack check above is what stops it
+    // being a dead end when it is not.
+    var win = window.open(url, "vsnp_igv");
+    window.__vsnpIgvWin = win;
+    if (!win) {{
+      say("Your browser blocked the IGV window. Allow pop-ups for this site, "
+          + "then click the cell again. (Ctrl- or Cmd-click opens it directly.)");
+      return;
+    }}
+    say("");
+    try {{ win.focus(); }} catch (e) {{ /* focus is a courtesy, not a requirement */ }}
+  }}
+
   window.__vsnpLaunchIgv = function(url) {{
     var w = window.__vsnpIgvWin;
     if (w && !w.closed) {{
+      window.__vsnpIgvAck = false;
+      var sent = false;
       try {{
         w.postMessage({{ type: "vsnpIgvLaunch", url: url }}, window.location.origin);
+        sent = true;
         w.focus();
+      }} catch (e) {{ sent = false; }}
+      if (sent) {{
+        setTimeout(function() {{
+          if (!window.__vsnpIgvAck) {{
+            window.__vsnpIgvWin = null;
+            openFresh(url);
+          }}
+        }}, ACK_MS);
         return;
-      }} catch (e) {{ /* lost the handle (cross-origin or torn-down) — fall through to a fresh open */ }}
+      }}
     }}
-    window.__vsnpIgvWin = window.open(url, "vsnp_igv");
+    openFresh(url);
   }};
 }})();
 

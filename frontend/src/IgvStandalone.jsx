@@ -180,6 +180,15 @@ export default function IgvStandalone() {
         return;
       }
       if (data.type === "vsnpIgvLaunch" && data.url) {
+        // Answer immediately, before doing the work. The preview page cannot
+        // otherwise tell a live viewer from a tab that is still open but no
+        // longer running this app — `window.closed` is false for both, which is
+        // routine under OOD where the URL carries a compute node and port that
+        // change when the session is recycled. Without this ack it posted into
+        // the void and the click did nothing at all.
+        try {
+          if (ev.source) ev.source.postMessage({ type: "vsnpIgvAck" }, window.location.origin);
+        } catch (e) { /* the ack is best-effort; the launch still proceeds */ }
         handleIgvLaunch(data.url);
         return;
       }

@@ -5813,23 +5813,69 @@ def kraken_dbs():
 
 
 def _resolve_kraken_runtime() -> Dict[str, str]:
-    """Locate the shared Kraken install's python + bin. Falls back to a
-    per-user miniforge env only if the shared env is absent (mirrors the OOD
-    launch script's resolution). Returns {python, gui_root, env_bin}."""
-    shared_env = _KRAKEN_GUI_ROOT / "env"
-    personal_env = Path.home() / "miniforge3" / "envs" / "kraken_id_parse"
-    if (shared_env / "bin" / "python").exists():
-        env_dir = shared_env
-    elif (personal_env / "bin" / "python").exists():
-        env_dir = personal_env
-    else:
-        env_dir = None
-    python = str((env_dir / "bin" / "python")) if env_dir else sys.executable
-    return {
-        "python": python,
-        "gui_root": str(_KRAKEN_GUI_ROOT),
-        "env_bin": str(env_dir / "bin") if env_dir else "",
-    }
+    """Locate the Kraken ID Parse install's python + bin.
+
+    Resolution order:
+      1. BDTOOLS_SIBLING_ENV_KRAKEN_ID_PARSE_GUI — the launcher's own answer.
+         tool_launch.resolve() walks shared -> own -> personal conda env and
+         exports the result, so a dashboard/bdtools launch always hands off to
+         the same env `bdtools doctor` graded. This is the only reliable way
+         to find a NAMED conda env (<conda base>/envs/kraken_id_parse); path
+         guessing cannot.
+      2. <kraken checkout>/env — the server/site layout, where each tool's
+         env lives (or is symlinked) inside its checkout.
+      3. <conda base>/envs/kraken_id_parse across the conda bases this
+         process can see (CONDA_EXE first, then the common home-dir bases) —
+         covers a personal install launched without the dashboard.
+      4. This backend's own interpreter ONLY if its env genuinely carries the
+         kraken toolchain (kraken2 sits next to it) — a deliberately bundled
+         all-in-one env. Otherwise python is returned EMPTY and the caller
+         must refuse to run: silently substituting this interpreter used to
+         turn a clear "kraken env not found" into a ModuleNotFoundError three
+         imports deep in kraken_id_parse.py.
+
+    Returns {python, gui_root, env_bin, looked}; `looked` lists every
+    location tried, for the caller's error message."""
+    looked: List[str] = []
+    candidates: List[Path] = []
+    sib = os.environ.get("BDTOOLS_SIBLING_ENV_KRAKEN_ID_PARSE_GUI", "").strip()
+    if sib:
+        candidates.append(Path(sib))
+    candidates.append(_KRAKEN_GUI_ROOT / "env")
+    conda_bases: List[Path] = []
+    conda_exe = os.environ.get("CONDA_EXE", "").strip()
+    if conda_exe:
+        conda_bases.append(Path(conda_exe).parent.parent)
+    conda_bases += [Path.home() / b for b in
+                    ("miniforge3", "miniconda3", "anaconda3", "mambaforge")]
+    for base in conda_bases:
+        candidates.append(base / "envs" / "kraken_id_parse")
+
+    env_dir = None
+    for cand in candidates:
+        if str(cand) in looked:
+            continue
+        if (cand / "bin" / "python").exists():
+            env_dir = cand
+            break
+        looked.append(str(cand))
+    if env_dir is not None:
+        return {
+            "python": str(env_dir / "bin" / "python"),
+            "gui_root": str(_KRAKEN_GUI_ROOT),
+            "env_bin": str(env_dir / "bin"),
+            "looked": looked,
+        }
+    own_bin = Path(sys.executable).parent
+    if (own_bin / "kraken2").exists():
+        return {
+            "python": sys.executable,
+            "gui_root": str(_KRAKEN_GUI_ROOT),
+            "env_bin": str(own_bin),
+            "looked": looked,
+        }
+    return {"python": "", "gui_root": str(_KRAKEN_GUI_ROOT), "env_bin": "",
+            "looked": looked}
 
 
 class KrakenRunRequest(BaseModel):
@@ -5933,6 +5979,19 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     run_dir.mkdir(parents=True, exist_ok=True)
 
     rt = _resolve_kraken_runtime()
+    if not rt["python"]:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The Kraken ID Parse environment was not found, so this run "
+                "cannot start. Looked at: " + "; ".join(rt["looked"]) + ". "
+                "If Kraken ID Parse lives in a named conda env, link it where "
+                "sibling tools can find it: "
+                f"ln -sfn <env prefix> {_KRAKEN_GUI_ROOT / 'env'} — or launch "
+                "vSNP through the tools dashboard, which passes the resolved "
+                "env in BDTOOLS_SIBLING_ENV_KRAKEN_ID_PARSE_GUI."
+            ),
+        )
     parts = [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
     if r2 is not None:
         parts += ["-r2", shlex.quote(str(r2))]

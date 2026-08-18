@@ -38,11 +38,15 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+from copy import copy
 from pathlib import Path
 from urllib.parse import quote
 
 import openpyxl
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.worksheet.cell_range import CellRange
 
@@ -1031,16 +1035,22 @@ def _build_cf_extras(ws, dxfs) -> dict[str, list[str]]:
     return extras
 
 
-def _cf_fragments_for(cell, row_idx: int, col_idx: int,
-                      cf_ranges: list, dxfs: list, cf_sheet) -> list[str]:
-    """CSS fragments a cell picks up from conditional formatting, first match wins.
+def _cf_dxf_for(cell, row_idx: int, col_idx: int,
+                cf_ranges: list, dxfs: list, cf_sheet):
+    """The differential format a cell picks up from conditional formatting.
 
-    Mirrors _build_cf_extras, but evaluated per cell as the sheet streams past
-    rather than by walking every CF range up front — the ranges in these files
-    span the whole table, so materialising them would defeat the point.
+    First match wins, mirroring _build_cf_extras — but evaluated per cell as the
+    sheet streams past rather than by walking every CF range up front, because
+    the ranges in these files span the whole table and materialising them would
+    defeat the point of streaming.
+
+    Returns the dxf itself rather than styling for one output format. In a real
+    vSNP3 table NOTHING is coloured by a static fill: every colour on screen
+    comes from these rules, so both the HTML preview and the xlsx export of a
+    clade have to resolve them, and they must resolve them identically.
     """
     if not cf_ranges:
-        return []
+        return None
     for cr, rules in cf_ranges:
         if not (cr.min_row <= row_idx <= cr.max_row
                 and cr.min_col <= col_idx <= cr.max_col):
@@ -1053,10 +1063,17 @@ def _cf_fragments_for(cell, row_idx: int, col_idx: int,
                 continue
             if rule.dxfId is None or rule.dxfId >= len(dxfs):
                 continue
-            frags = _dxf_style_fragments(dxfs[rule.dxfId])
-            if frags:
-                return frags
-    return []
+            dxf = dxfs[rule.dxfId]
+            if dxf is not None:
+                return dxf
+    return None
+
+
+def _cf_fragments_for(cell, row_idx: int, col_idx: int,
+                      cf_ranges: list, dxfs: list, cf_sheet) -> list[str]:
+    """CSS fragments a cell picks up from conditional formatting."""
+    dxf = _cf_dxf_for(cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
+    return _dxf_style_fragments(dxf) if dxf is not None else []
 
 
 def ambiguous_stems(row_labels) -> dict:
@@ -1439,6 +1456,11 @@ def render_filtered_window(
     nonexact_cols: dict[int, tuple[set, set]] = {}
     root_vals: dict[int, str] | None = None  # the reference row's calls
     kept_frags: list[list[str]] = []     # per kept row, one fragment per column
+    kept_rows: list[int] = []            # per kept row, its row number in the SHEET
+                                         # — what the xlsx export of this clade
+                                         # copies, so the download is the same
+                                         # subset the page is showing and not a
+                                         # second, differently-filtered answer
     kept_samples: list[str] = []         # per kept row, IGV stem ('' = structural)
     kept_meta: list[dict] = []           # per kept row: how it matched, for the
                                          # ambiguity pass below
@@ -1598,6 +1620,7 @@ def render_filtered_window(
                 attrs = f' class="{" ".join(classes)}"' if classes else ""
                 cells.append(f"<td{attrs}>{value}</td>")
             kept_frags.append(cells)
+            kept_rows.append(row_idx)
             kept_samples.append(row_stem)
             kept_meta.append(meta)
             bytes_so_far += sum(len(c) for c in cells)
@@ -1649,6 +1672,7 @@ def render_filtered_window(
         if dropped_ambiguous:
             surviving_slots = set(keep_idx)
             kept_frags = [kept_frags[i] for i in keep_idx]
+            kept_rows = [kept_rows[i] for i in keep_idx]
             kept_samples = [kept_samples[i] for i in keep_idx]
             kept_meta = [kept_meta[i] for i in keep_idx]
             matched_rows -= dropped_ambiguous
@@ -1752,6 +1776,12 @@ def render_filtered_window(
         "colgroup": "".join(colgroup_parts),
         "rows": ["<tr>" + "".join(r) + "</tr>" for r in rows_cells],
         "row_samples": kept_samples,
+        # The subset in SHEET coordinates. Carried on the window so the xlsx
+        # export reuses the decisions made here — which rows matched the clade,
+        # which columns hold one of its SNPs — instead of re-deriving them and
+        # risking a download that disagrees with the page it came from.
+        "kept_rows": kept_rows,
+        "kept_cols": kept_cols,
         "loci": loci,
         "project": project or "",
         "igv_withheld": igv_withheld,
@@ -1775,6 +1805,149 @@ def render_filtered_window(
             "ignored": None,
         },
     }
+
+
+def write_filtered_xlsx(xlsx_path: Path, dest: Path,
+                        rows: "list[int]", cols: "list[int]",
+                        sheet_title: str | None = None) -> None:
+    """Write the rows x columns of `xlsx_path` named by `rows`/`cols` to `dest`.
+
+    The subset comes from render_filtered_window, so this copies a decision it
+    does not make: the spreadsheet a user downloads from a clade view holds
+    exactly the rows and columns that view is showing. Before this existed the
+    "Download xlsx" link handed back the WHOLE table — every sample in the group
+    and every position in it — because the download branch returned the file
+    before the clade selection was even looked at. On a cascade table that is a
+    35 MB answer to a question about twelve samples.
+
+    Formatting is carried across, and conditional formatting is RESOLVED into
+    static fills rather than re-emitted as rules. In these tables every colour on
+    screen comes from CF (`equal B$2` whitens a reference match, then one rule per
+    base paints the rest), and those formulas are anchored to the sheet they were
+    written for: `B$2` means the reference row is row 2 and the block starts at
+    B3. Re-emitting them over a subset would need that layout to survive column
+    and row removal, and when it did not the file would open MIS-coloured, which
+    is worse than plainly baked colour. Baked colour also guarantees the download
+    matches the page, since both resolve through _cf_dxf_for.
+
+    Streaming, read_only in and write_only out: these tables reach 10 million
+    cells and this runs inside a web request.
+    """
+    if not rows or not cols:
+        raise ValueError("nothing to write: the subset has no rows or no columns")
+    row_set = set(rows)
+    last_row = max(rows)
+    last_col = max(cols)
+    # Source column -> position in the output, so a row can be re-emitted in one
+    # pass without searching the column list per cell.
+    col_order = {c: i for i, c in enumerate(cols)}
+
+    layout = _sheet_layout(xlsx_path)
+    default_width = layout["default_width"] or 8.43
+
+    out = openpyxl.Workbook(write_only=True)
+    ws_out = out.create_sheet(sheet_title or "Sheet1")
+    for i, c in enumerate(cols, start=1):
+        ws_out.column_dimensions[get_column_letter(i)].width = (
+            layout["widths"].get(c, default_width)
+        )
+    # Freeze whatever the source froze, translated into the output's coordinates:
+    # a pane split is a number of leading rows/columns, and dropping some of them
+    # moves it. Counting the kept ones is the translation.
+    #
+    # Set BEFORE the first append, not after: a write-only worksheet streams to
+    # disk, and the pane lives in the sheet header, which is already written by
+    # the time the first row goes out. Assigning it afterwards is silently
+    # ignored — the file saves clean and opens with no frozen header, which on a
+    # SNP table means scrolling right loses the sample names.
+    fr = sum(1 for r in rows if r <= layout["freeze_row"])
+    fc = sum(1 for c in cols if c <= layout["freeze_col"])
+    if fr or fc:
+        ws_out.freeze_panes = f"{get_column_letter(fc + 1)}{fr + 1}"
+
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
+        try:
+            dxfs = list(wb._differential_styles.styles)
+        except Exception:
+            dxfs = []
+        cf_ranges = _cf_from_sheet_xml(xlsx_path) if dxfs else []
+        # The `equal B$2` rule needs row 2 to resolve, and row 2 has streamed
+        # past by the time any sample row asks for it — same capture the HTML
+        # renderer does, for the same reason.
+        cf_sheet = _CapturedRowsSheet()
+        cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
+
+        for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=last_row,
+                             min_col=1, max_col=last_col), start=1):
+            if row_idx in cf_capture_rows:
+                cf_sheet.capture(row_idx, row)
+            if row_idx not in row_set:
+                continue
+            emit: list = [None] * len(cols)
+            for col_idx, cell in enumerate(row, start=1):
+                pos = col_order.get(col_idx)
+                if pos is None:
+                    continue
+                if not hasattr(cell, "column"):     # EmptyCell: no value, no style
+                    continue
+                new_cell = WriteOnlyCell(ws_out, value=cell.value)
+                try:
+                    new_cell.number_format = cell.number_format or "General"
+                    new_cell.font = copy(cell.font)
+                    new_cell.alignment = copy(cell.alignment)
+                    new_cell.border = copy(cell.border)
+                    if cell.fill is not None and getattr(
+                            cell.fill, "patternType", None):
+                        new_cell.fill = copy(cell.fill)
+                except (TypeError, ValueError):
+                    pass   # an unusual style is not worth losing the value over
+                dxf = _cf_dxf_for(cell, row_idx, col_idx,
+                                  cf_ranges, dxfs, cf_sheet)
+                if dxf is not None:
+                    _apply_dxf(new_cell, dxf)
+                emit[pos] = new_cell
+            ws_out.append(emit)
+    finally:
+        wb.close()
+
+    # Written beside the destination and renamed in, so a failed or interrupted
+    # build never leaves a truncated .xlsx for the browser to download.
+    tmp = dest.with_name(dest.name + ".part")
+    out.save(tmp)
+    os.replace(tmp, dest)
+
+
+def _apply_dxf(cell, dxf) -> None:
+    """Bake a conditional format onto a cell as ordinary styling."""
+    fill = getattr(dxf, "fill", None)
+    if fill is not None:
+        # A CF dxf fill carries its colour on bgColor; static fills read fgColor,
+        # so the colour has to be moved across rather than the fill copied.
+        rgb = None
+        for attr in ("bgColor", "fgColor"):
+            colour = getattr(fill, attr, None)
+            raw = getattr(colour, "rgb", None)
+            if isinstance(raw, str) and len(raw) in (6, 8) and raw[:2] != "00":
+                rgb = raw if len(raw) == 8 else f"FF{raw}"
+                break
+        if rgb:
+            cell.fill = PatternFill(fill_type="solid", start_color=rgb,
+                                    end_color=rgb)
+    font = getattr(dxf, "font", None)
+    if font is not None:
+        base = copy(cell.font)
+        # openpyxl's dxf font uses the OOXML short names (.b/.i), not .bold/.italic.
+        if getattr(font, "b", None) is True:
+            base.bold = True
+        if getattr(font, "i", None) is True:
+            base.italic = True
+        colour = getattr(font, "color", None)
+        if colour is not None and getattr(colour, "rgb", None):
+            base.color = copy(colour)
+        cell.font = base
 
 
 def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
@@ -1831,6 +2004,9 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
         if filt.get("dropped_ambiguous"):
             bits += (f'. {filt["dropped_ambiguous"]:,} row(s) whose name could '
                      'not be told apart from another sample were excluded')
+        if window.get("kept_rows") and window.get("kept_cols"):
+            bits += ('. <em>Download this clade</em> above saves exactly these '
+                     'rows and columns, not the whole table')
         notice += f'<div class="xlsx-filter">{bits}. {_clear_filter_link}</div>'
     elif shown_rows < total_rows or shown_cols < total_cols:
         bits = []
@@ -1858,7 +2034,15 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
 
     table_html = (f'<table class="xlsx" id="xlsxTable"><colgroup>{window["colgroup"]}'
                   f'</colgroup><tbody id="xlsxBody">{head}</tbody></table>')
+    # The download follows the view. Saying so on the link is half the fix: the
+    # complaint that started this was "the download does not work", and what had
+    # actually happened was that a clade view handed back the whole group's
+    # table under a label that promised nothing more specific.
+    download_label = ("Download this clade (xlsx)"
+                      if window.get("kept_rows") and window.get("kept_cols")
+                      else "Download xlsx")
     return _PAGE_TEMPLATE.format(
+        download_label=download_label,
         title=html.escape(window["title"]),
         filename=html.escape(window["filename"]),
         sheet=html.escape(window["sheet"]),
@@ -2065,6 +2249,7 @@ def xlsx_to_html(
     # cell its own anchor, so it needs no style palette and has nothing to page
     # through — the lazy-loading and delegated-click machinery simply sits idle.
     page = _PAGE_TEMPLATE.format(
+        download_label="Download xlsx",
         title=display_title,
         filename=html.escape(xlsx_path.name),
         sheet=html.escape(ws.title or "Sheet1"),
@@ -2324,7 +2509,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-bar">
   <span class="filename">{filename}</span>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
-  <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');window.location.href=u.toString();return false;">Download xlsx</a></span>
+  <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');u.searchParams.delete('rows_from');window.location.href=u.toString();return false;">{download_label}</a></span>
 </div>
 {notice}
 <div id="xlsxIgvNote" class="xlsx-igv-note" style="display:none"></div>

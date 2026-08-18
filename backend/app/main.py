@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import Response, FileResponse, HTMLResponse
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from pathlib import Path
 from urllib.parse import quote
@@ -6280,7 +6281,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "10"
+_XLSX_RENDER_VERSION = "11"
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6598,6 +6599,121 @@ def tree_tables(project: str, path: str = Query(...)):
     return {"tables": tables}
 
 
+# The most a SNP alignment can plausibly be, in bytes, before we stop reading it
+# to answer "how many positions". A 4,600-sample MTBC run's alignment is ~50 MB
+# whole, but the FIRST RECORD of even the widest of them is well under a
+# megabyte — so a record that runs past this is not a SNP alignment and the
+# honest answer is that we do not know.
+_ALIGNMENT_FIRST_RECORD_MAX = 8 * 1024 * 1024
+_ALIGNMENT_SUFFIXES = (".fasta", ".fas", ".fa", ".fna")
+
+
+def _sibling_alignment(tree: Path) -> Optional[Path]:
+    """The SNP alignment the tree was built from, or None.
+
+    vSNP3 writes each group's alignment, tree and tables into one directory
+    (`<group>-<stamp>.fasta` beside `<group>_<stamp>.tre`), so directory
+    siblinghood is the pairing here exactly as it is in _sibling_tree. The stems
+    differ in their separator, which is why this matches on longest common
+    prefix rather than on the name.
+    """
+    try:
+        cands = [f for f in tree.parent.iterdir()
+                 if f.is_file() and f.suffix.lower() in _ALIGNMENT_SUFFIXES
+                 and not f.name.startswith((".", "~$"))]
+    except OSError:
+        return None
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    stem = tree.stem
+    if stem.endswith("_labeled"):
+        stem = stem[: -len("_labeled")]
+
+    def _shared(f: Path) -> int:
+        a, b, n = stem, f.stem, 0
+        while n < len(a) and n < len(b) and a[n] == b[n]:
+            n += 1
+        return n
+
+    return max(sorted(cands), key=_shared)
+
+
+def _alignment_length(fasta: Path) -> tuple[Optional[int], str]:
+    """Columns in a FASTA alignment, from its first record — plus why not, if not.
+
+    Only the first record is read. Every record in an alignment is the same
+    length by definition, and reading all of them would mean pulling tens of
+    megabytes off disk to learn a number the first few kilobytes already carry.
+    Line-wrapped records are accumulated, because "vSNP3 writes one long line"
+    is true of vSNP3 today and not of the format.
+    """
+    try:
+        length = 0
+        seen_header = False
+        with fasta.open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if line.startswith(">"):
+                    if seen_header:
+                        break          # start of the second record: done
+                    seen_header = True
+                    continue
+                if not seen_header:
+                    continue           # junk before the first header
+                length += len(line.strip())
+                if length > _ALIGNMENT_FIRST_RECORD_MAX:
+                    return None, ("the first record in this alignment is "
+                                  "implausibly long for a SNP alignment")
+        if not seen_header:
+            return None, "the alignment file has no FASTA records"
+        if length <= 0:
+            return None, "the alignment's first record is empty"
+        return length, ""
+    except OSError as e:
+        return None, f"the alignment could not be read ({e})"
+
+
+@app.get("/api/projects/{project}/tree-scale")
+def tree_scale(project: str, path: str = Query(...)):
+    """How many SNPs one unit of branch length is worth, for this tree.
+
+    RAxML reports branch lengths as substitutions per site of the alignment it
+    was given, and the alignment vSNP3 gives it holds one column per informative
+    position — so a branch's SNP count is its length times the number of columns.
+    That multiplier is the whole content of this endpoint; the viewer applies it
+    to the axis labels and leaves the geometry alone.
+
+    Never an error when the alignment simply isn't there: the tree is still
+    perfectly viewable in substitutions/site, so a missing sibling reports
+    `alignment_length: null` with a reason the viewer can show, and the scale
+    option stays off rather than the page failing to load.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    target = Path(path)
+    if not _serve_path_allowed(target, [project_dir]):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.suffix.lower() not in (".tre", ".tree", ".nwk"):
+        raise HTTPException(status_code=400, detail="Not a tree file")
+    fasta = _sibling_alignment(target)
+    if fasta is None:
+        return {
+            "alignment_length": None,
+            "alignment": None,
+            "reason": ("no SNP alignment (.fasta) sits beside this tree, so the "
+                       "number of positions behind its branch lengths is unknown"),
+        }
+    length, why = _alignment_length(fasta)
+    return {
+        "alignment_length": length,
+        "alignment": fasta.name if length else None,
+        "reason": why,
+    }
+
+
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                  rows_from: Optional[int] = None, rows_count: int = 200,
@@ -6614,7 +6730,13 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
         raise HTTPException(status_code=404, detail="File not found")
     if target.suffix.lower() not in (".xlsx", ".xlsm"):
         raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
-    if download:
+    # NOTE: `download` is handled in two places. The whole-file case is here,
+    # before any rendering; the clade case cannot be, because the subset to
+    # download is decided by the same filtering pass that builds the page, so it
+    # is served further down once that pass has run. This branch used to catch
+    # BOTH — which is why "Download xlsx" from a clade view handed back the entire
+    # group's table, all 35 MB and every sample in it.
+    if download and not selection:
         return FileResponse(
             target,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6818,6 +6940,53 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             # arrived here by clicking a branch.
             filter_ignored=(filt.get("ignored")
                             if selection_samples is not None else None),
+        )
+
+    # The clade download (the second half of the note on the `download` branch
+    # above). Deliberately after the partial check: when the subset had to be
+    # truncated the page shown is the too-large one, whose own download link
+    # asks for the whole file — a truncated subset presented as "the clade" is
+    # the one thing worse than a big download.
+    if download:
+        kept_rows = window.get("kept_rows") or []
+        kept_cols = window.get("kept_cols") or []
+        if not kept_rows or not kept_cols:
+            # No subset was recorded, which happens on the one path where the
+            # filter did not apply at all (the sheet has no locus columns, so it
+            # is not a SNP table and the page is showing it whole). The page's
+            # download link should then hand back what the page is showing.
+            return FileResponse(
+                target,
+                media_type="application/vnd.openxmlformats-officedocument"
+                           ".spreadsheetml.sheet",
+                filename=target.name,
+            )
+        n_samples = (window.get("filter") or {}).get("shown_samples") or 0
+        # Named for what it is, because it will sit in a downloads folder next to
+        # the whole-group table it came from and the two must not be confusable.
+        out_name = f"{target.stem}_clade-{n_samples}-samples{target.suffix}"
+        tmpdir = Path(tempfile.mkdtemp(prefix="vsnp_clade_xlsx_"))
+        try:
+            out_path = tmpdir / out_name
+            xlsx_html.write_filtered_xlsx(
+                target, out_path, kept_rows, kept_cols,
+                sheet_title=window.get("sheet"),
+            )
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not build the clade spreadsheet: {type(e).__name__}: {e}",
+            )
+        # Removed once the response has been sent — not before, or the browser
+        # gets a truncated file, and not never, or every download leaks a temp
+        # directory for the life of the process.
+        return FileResponse(
+            out_path,
+            media_type="application/vnd.openxmlformats-officedocument"
+                       ".spreadsheetml.sheet",
+            filename=out_name,
+            background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
         )
 
     # A scroll request: return just the requested <tr> block. The window is

@@ -132,6 +132,25 @@ export function buildLayout(root) {
   for (let i = 0; i < n; i++) if (xTopo[i] < minTopo) minTopo = xTopo[i];
   if (minTopo < 0) for (let i = 0; i < n; i++) xTopo[i] -= minTopo;
 
+  // Do the internal nodes carry labels? On a vSNP3 tree they do only when Step 2
+  // ran RAxML's bootstrap analysis, and the viewer's Bootstrap control has to
+  // know: a checkbox that ticks and draws nothing reads as a broken viewer,
+  // when the real answer is that the numbers were never computed. Counted here
+  // rather than probed by the component, because the names array is already
+  // laid out and this is one pass over it.
+  let nInternalLabels = 0;
+  let nNumericInternalLabels = 0;
+  for (let i = 0; i < n; i++) {
+    if (isLeaf[i]) continue;
+    const nm = names[i];
+    if (!nm || nm === "root") continue;
+    nInternalLabels++;
+    // Support values specifically: RAxML writes them as bare numbers. A tree
+    // annotated some other way (named clades, FigTree comments) still has
+    // labels worth showing, but it is not bootstrap and must not be called so.
+    if (Number.isFinite(Number.parseFloat(nm))) nNumericInternalLabels++;
+  }
+
   // CSR-style child index, built once: the draw loop and the hit test both walk
   // children per node, and an array-of-arrays allocates 9,200 sub-arrays that
   // the GC then has to keep alive for the life of the tree.
@@ -166,6 +185,8 @@ export function buildLayout(root) {
     // is a single vertical line, so the viewer opens such a tree in topology
     // mode instead of showing the user nothing and waiting to be asked.
     noBranchLengths: maxX <= 0,
+    nInternalLabels,
+    nNumericInternalLabels,
   };
 }
 
@@ -178,6 +199,7 @@ function emptyLayout() {
     rank: new Int32Array(0), row: new Float64Array(0),
     rowMin: new Float64Array(0), rowMax: new Float64Array(0),
     leafRows: new Int32Array(0), maxX: 1, maxRank: 0, noBranchLengths: false,
+    nInternalLabels: 0, nNumericInternalLabels: 0,
   };
 }
 

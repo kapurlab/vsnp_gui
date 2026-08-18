@@ -6,7 +6,10 @@ import {
   fitView, clampView, zoomRows, zoomCols, panBy, revealRows, centreRow,
   LABEL_MIN_ROW_H, REVEAL_ROW_H, MAX_ROW_H,
 } from "./tree/view.js";
-import { drawTree, drawOverview, labelFontSize, PALETTE, THEME } from "./tree/draw.js";
+import {
+  drawTree, drawOverview, labelFontSize, PALETTE, THEME,
+  INTERNAL_LABEL_MIN_ROW_H,
+} from "./tree/draw.js";
 import { pickAt } from "./tree/hit.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
@@ -37,6 +40,13 @@ export default function TreeStandalone() {
   const [status, setStatus] = useState(project && path ? "Loading…" : "Missing project or path.");
   const [showBootstrap, setShowBootstrap] = useState(false);
   const [cladogram, setCladogram] = useState(false);
+  // The axis unit. Branch lengths are substitutions per site; multiplying by the
+  // alignment's column count reads them as SNPs, which is the question actually
+  // asked of these trees. null until the sibling alignment has been looked for.
+  const [snpsPerUnit, setSnpsPerUnit] = useState(null);
+  const [snpAlignment, setSnpAlignment] = useState("");
+  const [snpScaleWhy, setSnpScaleWhy] = useState("");
+  const [snpScale, setSnpScale] = useState(false);
   const [stripSuffix, setStripSuffix] = useState(true);
   const [rerootMode, setRerootMode] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -47,7 +57,7 @@ export default function TreeStandalone() {
   const [selection, setSelection] = useState(null); // {index, tips, range}
   const [opening, setOpening] = useState(false);
   const [layout, setLayout] = useState(null);
-  const [readout, setReadout] = useState({ rowH: 0, rows: 0, labels: false });
+  const [readout, setReadout] = useState({ rowH: 0, rows: 0, labels: false, internal: false });
   const [groups, setGroups] = useState([]); // {colour, range, n}
 
   const canvasRef = useRef(null);
@@ -73,6 +83,11 @@ export default function TreeStandalone() {
     (lay) => xAxis(lay || layoutRef.current || { xLen: [], xTopo: [], maxX: 1 }, cladogram),
     [cladogram]
   );
+
+  // 1 in the tree's own unit; the alignment's column count when the axis is
+  // showing SNPs. In topology mode there is no scale to convert — the axis says
+  // so instead of drawing a ruler — so the multiplier goes back to 1 there.
+  const snpUnit = (snpScale && !cladogram && snpsPerUnit > 0) ? snpsPerUnit : 1;
 
   // ---- drawing ----------------------------------------------------------
 
@@ -100,7 +115,11 @@ export default function TreeStandalone() {
       colourMask: colourMaskRef.current,
       palette: PALETTE,
       hoverIndex: hoverRef.current,
-      showInternalLabels: showBootstrap,
+      unitScale: snpUnit,
+      unitLabel: snpUnit > 1 ? "SNPs" : "",
+      // Gated on the tree, not just on the checkbox: a tree with no internal
+      // labels has nothing to draw here whatever the control says.
+      showInternalLabels: showBootstrap && lay.nInternalLabels > 0,
       cladogram,
       dense: view.rowH < 1.5,
     });
@@ -127,11 +146,12 @@ export default function TreeStandalone() {
         rowH: view.rowH,
         rows: Math.min(rows, lay.nLeaves),
         labels: view.rowH >= LABEL_MIN_ROW_H,
+        internal: view.rowH >= INTERNAL_LABEL_MIN_ROW_H,
       };
       return Math.abs(prev.rowH - next.rowH) < 1e-6 && Math.abs(prev.rows - next.rows) < 0.5
-        && prev.labels === next.labels ? prev : next;
+        && prev.labels === next.labels && prev.internal === next.internal ? prev : next;
     });
-  }, [hits, hitAt, selection, showBootstrap, cladogram, displayName, groups, xFor]);
+  }, [hits, hitAt, selection, showBootstrap, cladogram, displayName, groups, xFor, snpUnit]);
 
   const scheduleDraw = useCallback(() => {
     if (drawPendingRef.current) return;
@@ -297,6 +317,43 @@ export default function TreeStandalone() {
           setStatus("Could not list this tree's SNP tables "
                     + `(${err && err.message ? err.message : err}) — `
                     + "clade selection is unavailable.");
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // How many SNPs one unit of branch length is. Its own request, and its own
+  // failure: the tree is fully usable in substitutions/site, so nothing here may
+  // block or fail the load — a missing alignment just leaves the SNP option off,
+  // with the reason on its tooltip.
+  useEffect(() => {
+    if (!project || !path) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/projects/${encodeURIComponent(project)}/tree-scale?path=${encodeURIComponent(path)}`
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          setSnpScaleWhy(`the alignment length could not be read (HTTP ${res.status})`);
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const n = Number(data && data.alignment_length);
+        if (Number.isFinite(n) && n > 0) {
+          setSnpsPerUnit(n);
+          setSnpAlignment((data && data.alignment) || "");
+        } else {
+          setSnpScaleWhy((data && data.reason) || "the alignment length is unknown");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSnpScaleWhy("the alignment length could not be read "
+                         + `(${err && err.message ? err.message : err})`);
         }
       }
     })();
@@ -612,6 +669,45 @@ export default function TreeStandalone() {
 
   const filename = path ? path.split("/").pop() : "";
   const nLeaves = layout ? layout.nLeaves : 0;
+
+  // Support values exist on a vSNP3 tree only when Step 2 ran RAxML's bootstrap
+  // analysis, which is off by default because it is the expensive part of the
+  // run. Left as a live checkbox, the control ticked and drew nothing, and the
+  // viewer took the blame for a number that was never computed. So: disabled
+  // when the tree has no internal labels, and the tooltip says how to get them.
+  const bootstrapAvailable = !!layout && layout.nInternalLabels > 0;
+  const bootstrapIsNumeric = !!layout && layout.nNumericInternalLabels > 0;
+  // The SNP axis needs the alignment behind the tree; without it the option is
+  // dimmed and says why, rather than offering a conversion it cannot make.
+  const snpScaleAvailable = snpsPerUnit > 0 && !cladogram;
+  const scaleTitle = cladogram
+    ? "Topology mode draws no branch lengths, so there is no scale to convert. "
+      + "Untick Topology to choose a unit."
+    : snpsPerUnit > 0
+      ? `Which unit the ruler across the top is labelled in. RAxML gives branch `
+        + `lengths as substitutions per site of the SNP alignment; `
+        + `${snpAlignment || "this tree's alignment"} is `
+        + `${snpsPerUnit.toLocaleString()} positions wide, so "SNPs" multiplies `
+        + `the labels by that and reads the same branches as SNP counts. Only the `
+        + `labels change — the tree is not redrawn. Read them as substitutions `
+        + `inferred over that many positions rather than as counted differences: `
+        + `RAxML's lengths are model-corrected, so a branch can measure slightly `
+        + `more than the SNPs you would count between two samples by hand.`
+      : `The ruler can only be labelled in substitutions per site here, because `
+        + `${snpScaleWhy || "the alignment length is unknown"}.`;
+  const bootstrapTitle = bootstrapAvailable
+    ? (bootstrapIsNumeric
+        ? `Show the support value on each internal node (${layout.nNumericInternalLabels} of `
+          + `${layout.nInternalLabels} labelled nodes are numeric). Needs room: `
+          + "zoom the rows in if nothing appears."
+        : "This tree's internal nodes carry labels, but they are not numbers — so "
+          + "they are annotations of some kind rather than bootstrap support. "
+          + "Shown as they are written.")
+    : "This tree carries no support values: its internal nodes have no labels at "
+      + "all. RAxML only computes them when it is asked to bootstrap, which Step 2 "
+      + "does not do by default. To get them, re-run Step 2 with Bootstrap "
+      + "(replicates) set — 100 is the usual choice — and open the tree that run "
+      + "writes. Expect the run to take substantially longer.";
   const nSamples = useMemo(() => {
     if (!layout) return 0;
     let c = 0;
@@ -651,8 +747,24 @@ export default function TreeStandalone() {
         <label title="Draw branches by topology only, ignoring branch lengths. Useful when every branch is a fraction of a substitution long.">
           <input type="checkbox" checked={cladogram} onChange={(e) => setCladogram(e.target.checked)} /> Topology
         </label>
+        <label title={scaleTitle}
+               className={snpScaleAvailable ? undefined : "tree-opt-off"}>
+          Scale
+          <select value={snpScale ? "snp" : "subs"}
+                  disabled={!snpScaleAvailable}
+                  onChange={(e) => setSnpScale(e.target.value === "snp")}>
+            <option value="subs">substitutions/site</option>
+            <option value="snp">SNPs</option>
+          </select>
+        </label>
         <label><input type="checkbox" checked={stripSuffix} onChange={(e) => setStripSuffix(e.target.checked)} /> Strip <code>_zc.vcf</code></label>
-        <label><input type="checkbox" checked={showBootstrap} onChange={(e) => setShowBootstrap(e.target.checked)} /> Bootstrap</label>
+        <label title={bootstrapTitle}
+               className={bootstrapAvailable ? undefined : "tree-opt-off"}>
+          <input type="checkbox" checked={showBootstrap && bootstrapAvailable}
+                 disabled={!bootstrapAvailable}
+                 onChange={(e) => setShowBootstrap(e.target.checked)} /> Bootstrap
+          {layout && !bootstrapAvailable ? <span className="tree-dim"> (not in this tree)</span> : null}
+        </label>
         <label title={tables.length ? "While this is on, a branch click reroots the tree instead of selecting a clade." : ""}>
           <input type="checkbox" checked={rerootMode} onChange={(e) => setRerootMode(e.target.checked)} /> Reroot mode
         </label>
@@ -745,6 +857,10 @@ export default function TreeStandalone() {
             <>
               {Math.round(readout.rows).toLocaleString()} of {nLeaves.toLocaleString()} tips shown
               {readout.labels ? "" : " · zoom in for names"}
+              {showBootstrap && bootstrapAvailable && !readout.internal
+                ? " · zoom in for support values" : ""}
+              {snpUnit > 1
+                ? ` · axis in SNPs (× ${snpUnit.toLocaleString()} positions)` : ""}
             </>
           ) : null}
         </div>

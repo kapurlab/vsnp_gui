@@ -201,6 +201,86 @@ def main() -> int:
         assert_eq(stream_green, full.count("#58fa82"),
                   "…and the same variant cells green")
 
+        print("\n[a clade download holds the clade, and only the clade]")
+        # The bug: "Download xlsx" from a clade view handed back the whole
+        # group's table, because the download branch returned the file before
+        # the selection was resolved. The export must now be the SAME subset the
+        # page is showing — same rows, same columns, same colours.
+        clade = tmp / "clade.xlsx"
+        shutil.copy2(refbook, clade)
+        rows, cols = 12, 10
+        picked = ["SAMPLE2", "SAMPLE5", "SAMPLE7"]
+        wf = xlsx_html.render_filtered_window(
+            clade, rows, cols, None, "p", None, None, picked,
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        assert_eq(wf["filter"]["matched"], 3, "the three picked samples matched")
+        assert_true(bool(wf["kept_rows"]) and bool(wf["kept_cols"]),
+                    "the window records the subset in sheet coordinates")
+        # Header + reference + the three samples, and nothing else in this book.
+        assert_eq(wf["kept_rows"][:2], [1, 2], "header and reference row are kept")
+        assert_eq(len(wf["kept_rows"]), 5, "no other rows come along")
+        assert_eq(wf["kept_cols"][0], 1, "the sample-name column is always kept")
+
+        out = tmp / "clade_subset.xlsx"
+        xlsx_html.write_filtered_xlsx(clade, out, wf["kept_rows"], wf["kept_cols"],
+                                      sheet_title=wf["sheet"])
+        assert_true(out.exists() and out.stat().st_size < clade.stat().st_size,
+                    "the subset is a smaller file than the table it came from")
+        got = openpyxl.load_workbook(out)
+        gws = got.active
+        assert_eq(gws.max_column, len(wf["kept_cols"]),
+                  "the export has exactly the kept columns")
+        # Every value must be the one at the corresponding SOURCE coordinate: an
+        # off-by-one in the row or column mapping would put a sample's calls on
+        # another sample's row, which is the one failure that would not look
+        # like a failure.
+        srcws = openpyxl.load_workbook(clade).active
+        mismatched = 0
+        for out_r, src_r in enumerate(wf["kept_rows"], start=1):
+            for out_c, src_c in enumerate(wf["kept_cols"], start=1):
+                if (gws.cell(row=out_r, column=out_c).value
+                        != srcws.cell(row=src_r, column=src_c).value):
+                    mismatched += 1
+        assert_eq(mismatched, 0, "every exported cell holds its source value")
+        # Colour: CF is resolved into static fills, so the export carries the
+        # same palette the page does, and the near-white reference-match rule
+        # still beats the per-base rules.
+        fills = {}
+        for row in gws.iter_rows(min_row=1, max_row=gws.max_row):
+            for c in row:
+                if c.fill is not None and c.fill.patternType:
+                    rgb = c.fill.fgColor.rgb
+                    if isinstance(rgb, str):
+                        fills[rgb[-6:].lower()] = fills.get(rgb[-6:].lower(), 0) + 1
+        assert_true("fdfefe" in fills, "reference-matching cells are near-white")
+        assert_true("58fa82" in fills, "variant cells are green")
+        # And the same counts the page shows for those rows/columns.
+        page_white = sum(
+            sum(len(_re.findall(rf'\b{cls}\b', row)) for row in wf["rows"])
+            for cls in _re.findall(r"\.(k\d+)\{[^}]*#fdfefe", wf["style_css"]))
+        assert_eq(fills["fdfefe"], page_white,
+                  "the export and the page colour the same number of cells white")
+        assert_eq(gws.freeze_panes, None,
+                  "no panes to translate when the source froze none")
+
+        print("\n[the subset re-anchors frozen panes]")
+        # The source freezes at B3 (one name column, two header rows). Both
+        # survive the filter here, so the export must freeze at B3 too — and it
+        # has to be set before the first row is streamed out, or openpyxl drops
+        # it without a word.
+        frozen = tmp / "frozen.xlsx"
+        fwb = openpyxl.load_workbook(clade)
+        fwb.active.freeze_panes = "B3"
+        fwb.save(frozen)
+        fwb.close()
+        wfr = xlsx_html.render_filtered_window(
+            frozen, rows, cols, None, "p", None, None, picked,
+            xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS)
+        fout = tmp / "frozen_subset.xlsx"
+        xlsx_html.write_filtered_xlsx(frozen, fout, wfr["kept_rows"], wfr["kept_cols"])
+        assert_eq(openpyxl.load_workbook(fout).active.freeze_panes, "B3",
+                  "the export freezes the header rows and the name column")
+
         print("\nAll xlsx render tests passed.")
         return 0
     finally:

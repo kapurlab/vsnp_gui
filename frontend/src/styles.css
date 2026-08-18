@@ -1677,6 +1677,9 @@ html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
 }
 .tree-bar button:hover,.tree-clade-bar button:hover { background:#eef4fb;border-color:#1d5fbf; }
 .tree-bar button:disabled,.tree-clade-bar button:disabled { opacity:0.5;cursor:default; }
+.tree-bar select { padding:0.15rem 0.3rem;font-size:0.82rem;
+  border:1px solid #c2c7ce;border-radius:5px;background:#fff;color:#1a2029; }
+.tree-bar select:disabled { opacity:0.6; }
 .tree-meta { color:#6b7480;font-size:0.86rem; }
 .tree-status { color:#b3344a;font-size:0.86rem; }
 
@@ -1694,6 +1697,11 @@ html[data-theme="dark"] .ref-editor-filename { color:var(--muted); }
   background:#eef6ee;font-size:0.9rem; }
 .tree-hint { color:#2f4a2f; }
 .tree-dim { color:#6b7480; }
+/* A toolbar option this tree cannot offer. Dimmed rather than hidden: the
+   control's absence is itself confusing, and its title says how to get the data
+   it would show. */
+.tree-opt-off { opacity:0.55;cursor:help; }
+.tree-opt-off input,.tree-opt-off select { cursor:help; }
 .tree-warn { color:#8a5a10; }
 .tree-linky { border:none !important;background:none !important;color:#1d5fbf !important;
   text-decoration:underline;padding:0 !important;font-size:0.85rem; }

@@ -8,7 +8,7 @@ Local patches we apply on top of the bioconda vsnp3 v3.16 install. These belong 
 
 - `v3.16-kapurlab.patch` — unified diff against pristine v3.16:
   - **column[0] → column.iloc[0]** (3 sites in `bin/vsnp3_fasta_to_snps_table.py`). Fixes `KeyError: 0` on pandas 2.x. Tracked at USDA-VS/vSNP3#22.
-  - **`VSNP3_BOOTSTRAP` env var support**. When set (>0), RAxML runs as `-f a -x 7777 -N $VSNP3_BOOTSTRAP` and the pipeline picks `RAxML_bipartitions.raxml` (best tree with bootstrap proportions on internal branches) instead of `RAxML_bestTree.raxml`. Tracked at USDA-VS/vSNP3#23.
+  - **`VSNP3_BOOTSTRAP` env var support** — *superseded*, see the content fix below. The hunk is still here for a pristine v3.16, but every install we run is newer, and this patch set is skipped on those.
   - **SyntaxWarning fixes** (one site each in `bin/vsnp3_step1.py` and `bin/vsnp3_step2.py`): convert the affected regex literals to raw strings and drop the bogus `\/` escape. Cosmetic — Python still ran the patterns — but every parallel worker emitted a noisy warning at module load. Will become a hard error in a future Python release; raw-string is the correct fix.
 
 - `v3.16-kapurlab-step2-robustness.patch` — applies on top of the base patch:
@@ -21,6 +21,12 @@ Local patches we apply on top of the bioconda vsnp3 v3.16 install. These belong 
 Applied by `apply.sh` before the `.patch` loop, against expressions that are identical across point releases but sit at different line numbers. A line-context diff is too fragile for these; a content match is version-proof.
 
 - **CPU cap** (`vsnp3_step2.py`, `vsnp3_group_on_defining_snps.py`, `vsnp3_fasta_to_snps_table.py`). vsnp3 sizes its worker pools at `int(cpu_count()/1.2)` — 106 on the 128-core shared box. Capped at `min(cpu_count()/1.2, VSNP3_MAX_CPUS or 32)`. This started inside the v3.16-only `.patch` set; it was promoted here because the expression is character-for-character identical in v3.16 and v3.35, and the `.patch` set does not apply to v3.35 at all — so moving to a newer vsnp3 would otherwise have dropped the cap silently. Guarded on `VSNP3_MAX_CPUS` being absent, not on the uncapped expression: the capped form still *contains* the uncapped one, so a presence-only check nests `min(min(x, c), c)` one level deeper per run.
+
+- **Bootstrap support values** (`bin/vsnp3_fasta_to_snps_table.py`, via `bootstrapfix.py`). vsnp3 runs RAxML once, for the best tree only, so no tree it writes has support values on its internal nodes — the tree viewer's "Bootstrap" checkbox has nothing to show. With `VSNP3_BOOTSTRAP=N` (N > 0) the invocation becomes RAxML's rapid-bootstrap analysis (`-f a -x 7777 -N N`) and the tree kept is `RAxML_bipartitions.raxml`: the same ML topology, with bootstrap proportions as internal node labels. Unset or `0` reproduces upstream exactly, which is the default — bootstrapping is the expensive part of Step 2 and is not wanted on most runs.
+
+  vsnp_gui's Step 2 form has set this variable since v0.2, but the hunk implementing it lived only in the v3.16-only `.patch` set above, and `apply.sh` skips that set on anything newer. On the 3.36 install the field therefore set an environment variable that nothing read, and the run produced the same unsupported tree with no sign that the request had been dropped — the same failure the CPU cap was promoted here to avoid. Same reasoning, same remedy.
+
+  v3.36 also restructured the call (`os.system` with an f-string became `vsnp3_run.run` with an argv list), so `bootstrapfix.py` is a content-anchored rewriter rather than a diff: it recognises both shapes, finds the call by bracket-balancing rather than assuming a line count, stamps `__version__` with `+kl.bootstrap1`, keeps a `.pre-bootstrapfix` backup, writes via rename (conda hardlinks env files to the package cache), and **refuses** rather than guesses on an unrecognised release.
 
 - **passQ comma fix** (`bin/vsnp3_step1.py`). `float(fastq_stats.R1.passQ20)` raises `ValueError` on comma-formatted counts (`'9,177'`), failing the whole sample — and it looks like a bcftools error, because the traceback lands after the mpileup log. Strips the thousands separator first.
 

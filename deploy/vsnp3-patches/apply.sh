@@ -81,6 +81,23 @@ if [ -f "${ANNOT_PY}" ]; then
   "${PYBIN}" "${SCRIPT_DIR}/strandfix.py" "${ANNOT_PY}"
 fi
 
+# Bootstrap support values: RAxML is run for the best tree only, so no tree vsnp3
+# writes carries support values on its internal nodes. VSNP3_BOOTSTRAP=N turns
+# the run into RAxML's rapid-bootstrap analysis and keeps RAxML_bipartitions
+# instead. vsnp_gui's Step 2 form has set that variable since v0.2, but the hunk
+# implementing it lived only in the v3.16-only .patch set below -- which is
+# skipped on every other release -- so on the 3.36 installs the field quietly did
+# nothing. Promoted to a content fix for the same reason as the CPU cap: a
+# version-agnostic rewriter keeps working across the next vsnp3 bump. See
+# bootstrapfix.py; idempotent, and it refuses rather than guesses.
+TREE_PY="${PREFIX}/bin/vsnp3_fasta_to_snps_table.py"
+if [ -f "${TREE_PY}" ]; then
+  PYBIN="${PREFIX}/bin/python3"
+  [ -x "${PYBIN}" ] || PYBIN="${PREFIX}/bin/python"
+  [ -x "${PYBIN}" ] || PYBIN="$(command -v python3)"
+  "${PYBIN}" "${SCRIPT_DIR}/bootstrapfix.py" "${TREE_PY}"
+fi
+
 # The .patch set below is unified-diff against v3.16 and does not apply to any
 # other release — v3.35 restructured all four target files, so every hunk fails.
 # We deploy both (/srv carries v3.16, the bdtools checkout env carries v3.35),

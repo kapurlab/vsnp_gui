@@ -220,6 +220,26 @@ test("axis ticks are formatted to the precision the step resolves", () => {
   assert.equal(new Set(labels).size, labels.length, `duplicate tick labels: ${labels}`);
 });
 
+test("a SNP axis is labelled in whole positions, not fractions of one", () => {
+  // The conversion is branch length x alignment columns. On a 52-position
+  // alignment a tree 0.7 substitutions/site wide spans ~36 SNPs, and the ticks
+  // have to read 0 10 20 30 — not 0.0 10.0, and certainly not 7.3 14.6, which
+  // is what choosing the step in substitutions and converting it would give.
+  const scale = 52;
+  const stepD = niceStep((0.7 * scale) / 6);
+  assert.equal(stepD, 5);
+  const labels = [0, stepD, stepD * 2, stepD * 3].map((v) => formatTick(v, stepD));
+  assert.deepEqual(labels, ["0", "5", "10", "15"]);
+});
+
+test("the substitutions/site axis is unchanged by the SNP formatting rule", () => {
+  // The integer shortcut must only fire on steps of 1 or more; these trees are
+  // routinely 0.02 wide end to end.
+  const step = niceStep(0.02 / 6);
+  assert.ok(step < 1);
+  assert.equal(formatTick(step * 2, step), "0.0040");
+});
+
 // ---- hit testing --------------------------------------------------------
 
 const SMALL = buildLayout(

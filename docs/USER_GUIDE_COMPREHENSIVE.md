@@ -950,7 +950,13 @@ Sample5      A      C      N      T    (low quality at 500)
 - Include outgroup for proper rooting
 - Samples with >20 mixed calls → review carefully
 - Compare tree topology with SNP matrix patterns
-- Bootstrap values indicate node support (if calculated)
+- Bootstrap values indicate node support — but they are **not calculated by default**.
+  Step 2's *Bootstrap (replicates)* option (Advanced options) is 0 unless you set it,
+  and with 0 replicates RAxML builds the best tree only: the trees that run writes
+  carry no support values at all, and the tree viewer's **Bootstrap** tick is greyed
+  out with a note saying so. Set 100 replicates to get them. Expect Step 2 to take
+  substantially longer — bootstrapping is the slow part — so leave it off unless the
+  support values are what you are after.
 
 ### Gene Annotations
 

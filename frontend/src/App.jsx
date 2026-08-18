@@ -7355,10 +7355,17 @@ export default function App() {
                     <input type="number" value={s2DensityWindow} placeholder="20" onChange={(e) => setS2DensityWindow(e.target.value)} style={{width:"5em"}} />
                     <span className="muted" style={{fontSize:"0.8em"}}>default: 20</span>
                   </label>
-                  <label className="option-field">
+                  <label className="option-field"
+                         title={"Off by default. With 0 replicates RAxML computes the best tree "
+                                + "only, and the trees this run writes carry no support values — "
+                                + "the tree viewer's Bootstrap control has nothing to show. Set "
+                                + "100 to get them. The bootstrap is the slow part of Step 2: on "
+                                + "a large group it can multiply the tree-building time several "
+                                + "times over, so leave it off unless the support values are what "
+                                + "you are after."}>
                     <span>Bootstrap (replicates)</span>
                     <input type="number" min="0" value={s2Bootstrap} placeholder="0" onChange={(e) => setS2Bootstrap(e.target.value)} style={{width:"5em"}} />
-                    <span className="muted" style={{fontSize:"0.8em"}}>0 = off · 100 typical · RAxML -f a</span>
+                    <span className="muted" style={{fontSize:"0.8em"}}>0 = off (no support values) · 100 typical · much slower</span>
                   </label>
                 </div>
               </div>

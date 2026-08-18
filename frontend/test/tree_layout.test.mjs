@@ -148,12 +148,42 @@ test("selecting the clade that is only the reference tip yields nothing", () => 
   assert.deepEqual(sampleTips(tipNamesUnder(lay, i)), []);
 });
 
+test("internal labels are counted, so the Bootstrap control can be honest", () => {
+  // The viewer disables its Bootstrap tick when there is nothing to show; that
+  // decision is this count. NWK carries 95/80/90 on its three internal nodes.
+  const lay = buildLayout(parse(NWK).nodes);
+  assert.equal(lay.nInternalLabels, 3);
+  assert.equal(lay.nNumericInternalLabels, 3);
+});
+
+test("a tree without support values reports none", () => {
+  // What every Step 2 run produces today: RAxML's best tree, no bootstrap.
+  const lay = buildLayout(parse("((A:0.1,B:0.2):0.05,(C:0.3,D:0.1):0.07);").nodes);
+  assert.equal(lay.nInternalLabels, 0);
+  assert.equal(lay.nNumericInternalLabels, 0);
+});
+
+test("the phantom root label is not counted as a support value", () => {
+  // phylotree wraps the parsed tree in a synthetic node called "root", and a
+  // vSNP3 tree also has a genuine `root` outgroup TIP. Neither is a label the
+  // Bootstrap control should claim to be able to draw.
+  const lay = buildLayout(parse("((A:0.1,B:0.1):0.1,root:0.1);").nodes);
+  assert.equal(lay.nInternalLabels, 0);
+});
+
+test("named clades count as labels but not as bootstrap numbers", () => {
+  const lay = buildLayout(parse("((A:0.1,B:0.2)clade_x:0.05,C:0.3);").nodes);
+  assert.equal(lay.nInternalLabels, 1);
+  assert.equal(lay.nNumericInternalLabels, 0);
+});
+
 test("an empty tree lays out without throwing", () => {
   const lay = buildLayout(null);
   assert.equal(lay.n, 0);
   assert.equal(lay.nLeaves, 0);
   assert.deepEqual(tipNamesUnder(lay, 0), []);
   assert.deepEqual(searchRows(lay, "x", null), []);
+  assert.equal(lay.nInternalLabels, 0);
 });
 
 if (!process.exitCode) console.log(`ok — ${passed} tree layout assertions`);

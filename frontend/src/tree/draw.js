@@ -59,6 +59,11 @@ export function nodeRadius(rowH) {
  * rather than eight ticks all rounding to "0.00" — which is what the old
  * fixed-2-decimal axis showed on trees whose whole width is 0.02.
  */
+// Row height below which an internal-node label has nowhere to go. Exported so
+// the viewer can say "zoom in" rather than leave the Bootstrap tick looking
+// broken at a zoom level where no label could have fitted.
+export const INTERNAL_LABEL_MIN_ROW_H = 9;
+
 export function niceStep(target) {
   if (!(target > 0)) return 1;
   const mag = Math.pow(10, Math.floor(Math.log10(target)));
@@ -70,6 +75,10 @@ export function niceStep(target) {
 /** Format a tick to the precision its own step actually resolves. */
 export function formatTick(value, step) {
   if (value === 0) return "0";
+  // A step of 1 or more resolves nothing after the point. This matters for the
+  // SNP axis, where the unit is a whole count and "5.0 SNPs" is noise; on the
+  // substitutions/site axis the step is always far below 1, so nothing changes.
+  if (step >= 1) return String(Math.round(value));
   const decimals = Math.max(0, Math.ceil(-Math.log10(step)) + 1);
   if (step < 1e-4) return value.toExponential(1);
   return value.toFixed(Math.min(decimals, 8));
@@ -255,7 +264,7 @@ export function drawTree(ctx, o) {
   }
 
   // Internal labels (bootstrap) only when there is room for them.
-  if (o.showInternalLabels && rowH >= 9) {
+  if (o.showInternalLabels && rowH >= INTERNAL_LABEL_MIN_ROW_H) {
     const fs = Math.max(7, Math.min(11, rowH * 0.6));
     ctx.font = `${fs}px system-ui, sans-serif`;
     ctx.fillStyle = th.axisText;
@@ -304,18 +313,43 @@ export function drawAxis(ctx, o) {
     return;
   }
 
-  const span = view.x1 - view.x0;
-  const step = niceStep(span / 6);
-  const first = Math.ceil(view.x0 / step) * step;
+  // The ruler can be labelled in a unit other than the tree's own. Branch
+  // lengths come off RAxML as substitutions per site of the SNP alignment, which
+  // answers "how far" but not the question actually being asked of these trees —
+  // how many SNPs is this branch? Multiplying by the alignment's length converts
+  // one to the other, and it is purely a LABELLING change: the geometry, the
+  // view and every hit test stay in tree units, so nothing downstream has to
+  // know which unit is on show. Tick placement is chosen in the DISPLAY unit,
+  // though — picking a nice step in substitutions and converting it would put
+  // the marks at 7.3 and 14.6 SNPs.
+  const scale = o.unitScale > 0 ? o.unitScale : 1;
+  const stepD = niceStep(((view.x1 - view.x0) * scale) / 6);
+  const firstD = Math.ceil((view.x0 * scale) / stepD) * stepD;
+  const lastD = view.x1 * scale + stepD * 0.001;
+  // Reserved for the unit caption at the right-hand end, so the last tick label
+  // does not print on top of it.
+  const unitW = o.unitLabel ? ctx.measureText(o.unitLabel).width + 8 : 0;
+  const labelLimit = geom.padL + geom.plotW - unitW;
   ctx.beginPath();
-  for (let v = first; v <= view.x1 + step * 0.001; v += step) {
-    const px = xToPx(view, geom, v);
+  // Counted rather than accumulated: `v += step` on a step of ~1e-9 against an
+  // x0 of ~0.7 drifts visibly across a screen's worth of ticks.
+  for (let k = 0; ; k++) {
+    const vD = firstD + k * stepD;
+    if (vD > lastD) break;
+    const px = xToPx(view, geom, vD / scale);
     if (px < geom.padL - 1 || px > geom.padL + geom.plotW + 1) continue;
     ctx.moveTo(px, y);
     ctx.lineTo(px, y + 4);
-    ctx.fillText(formatTick(v, step), px, 2);
+    // The tick mark is always drawn; only its label gives way to the caption.
+    const text = formatTick(vD, stepD);
+    if (px + ctx.measureText(text).width / 2 <= labelLimit) ctx.fillText(text, px, 2);
   }
   ctx.stroke();
+  if (o.unitLabel) {
+    // Right-aligned, so it cannot collide with the "0" tick at the axis origin.
+    ctx.textAlign = "right";
+    ctx.fillText(o.unitLabel, geom.padL + geom.plotW, 2);
+  }
   ctx.restore();
 }
 

@@ -131,16 +131,109 @@ def _restore_upstream_paths_that_exist(deps_file: Path, marker: Path) -> List[st
     return add
 
 
+# File types that mark a directory as a real vsnp3 reference option. A
+# reference dir always carries at least a FASTA (or, for one just created by
+# "Download New Reference", the copied template spreadsheets while the FASTA
+# downloads). Reference ROOTS are often git clones, so without this check
+# `.git` — and any other incidental subdirectory — shows up in the reference
+# dropdowns as a selectable "reference".
+_REF_CONTENT_SUFFIXES = {
+    ".fasta", ".fa", ".fna", ".fas", ".gbk", ".gb", ".gff", ".gff3", ".xlsx",
+}
+
+
+def _is_reference_dir(d: Path) -> bool:
+    try:
+        for entry in d.iterdir():
+            if entry.name.startswith("."):
+                continue
+            if entry.is_file() and entry.suffix.lower() in _REF_CONTENT_SUFFIXES:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
 def list_references(vsnp3_path: Path) -> List[Dict]:
-    refs: List[Dict] = []
-    ref_paths = _load_reference_paths(vsnp3_path)
-    for parent in ref_paths:
+    """Unique reference options across all registered roots, in vsnp3
+    resolution order.
+
+    vsnp3 resolves ``-t <name>`` by directory NAME across the registered
+    roots and the first hit wins, so two roots holding the same name are ONE
+    selectable reference, not two. Each name is returned once with the root
+    it actually resolves to, plus any shadowed copies elsewhere, so the UI
+    can say where a reference comes from instead of listing indistinguishable
+    duplicates. Hidden directories and directories containing no
+    reference-shaped files are skipped (see _REF_CONTENT_SUFFIXES).
+
+    Entry shape: {name, path, root, shadowed: [{path, root}, ...]}.
+    """
+    by_name: Dict[str, Dict] = {}
+    order: List[str] = []
+    for parent in _load_reference_paths(vsnp3_path):
         if not parent.exists():
             continue
         for child in sorted(parent.iterdir()):
-            if child.is_dir():
-                refs.append({"name": child.name, "path": str(child)})
-    return refs
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if not _is_reference_dir(child):
+                continue
+            entry = by_name.get(child.name)
+            if entry is None:
+                by_name[child.name] = {
+                    "name": child.name,
+                    "path": str(child),
+                    "root": str(parent),
+                    "shadowed": [],
+                }
+                order.append(child.name)
+            elif not _same_dir(child, Path(entry["path"])):
+                # Same dir reached twice (a registered symlink of a registered
+                # root) is not a duplicate; a different dir with the same name
+                # is — record it as shadowed by the winning copy.
+                entry["shadowed"].append({"path": str(child), "root": str(parent)})
+    return [by_name[n] for n in order]
+
+
+def reference_locations(vsnp3_path: Path) -> List[Dict]:
+    """Per-registered-root stats for the Reference Locations editor.
+
+    Says what each root actually contributes to the dropdowns — and what it
+    merely duplicates — so removing a redundant location is an informed act
+    instead of a guess. Entry shape:
+    {path, exists, provides, shadowed, implicit} where `provides` is the
+    number of reference names this root resolves (wins), `shadowed` the
+    number it holds that an earlier root already provides, and `implicit`
+    marks the built-in fallback root (vsnp3's own dependencies/ dir, used
+    only when no registry file exists) — shown for transparency, not
+    removable.
+    """
+    refs = list_references(vsnp3_path)
+    wins: Dict[str, int] = {}
+    dups: Dict[str, int] = {}
+    for r in refs:
+        wins[r["root"]] = wins.get(r["root"], 0) + 1
+        for s in r["shadowed"]:
+            dups[s["root"]] = dups.get(s["root"], 0) + 1
+    registered = {str(Path(p)) for p in get_reference_paths(vsnp3_path)}
+    out: List[Dict] = []
+    for root in _load_reference_paths(vsnp3_path):
+        key = str(root)
+        out.append({
+            "path": key,
+            "exists": root.is_dir(),
+            "provides": wins.get(key, 0),
+            "shadowed": dups.get(key, 0),
+            "implicit": key not in registered,
+        })
+    return out
 
 
 def _load_reference_paths(vsnp3_path: Path) -> List[Path]:

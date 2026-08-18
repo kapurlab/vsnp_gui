@@ -66,6 +66,7 @@ from app.refs import (
     get_reference_paths,
     add_reference_path,
     remove_reference_path,
+    reference_locations,
     reference_roots,
     find_gff_for_fasta,
     sanitize_upstream_paths,
@@ -1311,11 +1312,23 @@ def references():
     return list_references(vsnp3_path)
 
 
+def _reference_paths_payload(vsnp3_path: Path) -> Dict:
+    """One consistent answer for every registry read/mutation: the raw paths,
+    per-location stats, and the (deduped) reference list — so the location
+    rows and the reference dropdowns can never disagree about what a change
+    did."""
+    return {
+        "paths": get_reference_paths(vsnp3_path),
+        "locations": reference_locations(vsnp3_path),
+        "references": list_references(vsnp3_path),
+    }
+
+
 @app.get("/api/references/paths")
 def ref_paths():
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
-    return {"paths": get_reference_paths(vsnp3_path)}
+    return _reference_paths_payload(vsnp3_path)
 
 
 @app.post("/api/references/paths")
@@ -1325,18 +1338,16 @@ def ref_path_add(payload: RefPathRequest):
         raise HTTPException(status_code=400, detail=f"Directory not found: {p}")
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
-    updated = add_reference_path(vsnp3_path, str(p))
-    refs = list_references(vsnp3_path)
-    return {"paths": updated, "references": refs}
+    add_reference_path(vsnp3_path, str(p))
+    return _reference_paths_payload(vsnp3_path)
 
 
 @app.delete("/api/references/paths")
 def ref_path_remove(payload: RefPathRequest):
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
-    updated = remove_reference_path(vsnp3_path, payload.path)
-    refs = list_references(vsnp3_path)
-    return {"paths": updated, "references": refs}
+    remove_reference_path(vsnp3_path, payload.path)
+    return _reference_paths_payload(vsnp3_path)
 
 
 _REF_DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -1373,6 +1384,21 @@ def ref_download(payload: RefDownloadRequest):
         subdir_name = display_name
     else:
         subdir_name = accession
+    # A reference with this NAME anywhere in the registered locations is the
+    # same selection to vsnp3 (`-t` resolves by name) — downloading another
+    # copy would only create a shadowed duplicate.
+    existing = next(
+        (r for r in list_references(vsnp3_path) if r["name"] == subdir_name), None
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A reference named '{subdir_name}' is already available "
+                f"(from {existing['path']}). Use a different display name, or "
+                f"remove the existing reference first."
+            ),
+        )
     acc_dir = output_dir / subdir_name
     if acc_dir.exists() and any(acc_dir.iterdir()):
         raise HTTPException(

@@ -5057,13 +5057,13 @@ export default function App() {
                       // out so removing a redundant one is an informed act.
                       let stat = null;
                       if (!loc.exists) {
-                        stat = <span style={{color:"var(--warn, #b26a00)"}}>path not found — contributes nothing</span>;
+                        stat = <span style={{color:"var(--warning, #b26a00)"}}>path not found — contributes nothing</span>;
                       } else if (loc.provides > 0 && loc.shadowed > 0) {
                         stat = <span className="muted">provides {loc.provides} reference{loc.provides === 1 ? "" : "s"}; {loc.shadowed} more here {loc.shadowed === 1 ? "is a duplicate" : "are duplicates"} of an earlier location</span>;
                       } else if (loc.provides > 0) {
                         stat = <span className="muted">provides {loc.provides} reference{loc.provides === 1 ? "" : "s"}</span>;
                       } else if (loc.shadowed > 0) {
-                        stat = <span style={{color:"var(--warn, #b26a00)"}}>all {loc.shadowed} references here duplicate an earlier location — removing this changes nothing in the dropdowns</span>;
+                        stat = <span style={{color:"var(--warning, #b26a00)"}}>all {loc.shadowed} references here duplicate an earlier location — removing this changes nothing in the dropdowns</span>;
                       } else {
                         stat = <span className="muted">no references found here</span>;
                       }
@@ -5182,7 +5182,7 @@ export default function App() {
                   const sel = references.find((r) => r.name === refEditorRef);
                   if (!sel || !sel.shadowed || !sel.shadowed.length) return null;
                   return (
-                    <div className="note" style={{wordBreak:"break-all", marginTop:"0.3em", color:"var(--warn, #b26a00)"}}>
+                    <div className="note" style={{wordBreak:"break-all", marginTop:"0.3em", color:"var(--warning, #b26a00)"}}>
                       Another copy of this reference exists and is ignored (vSNP uses the
                       first location that has a name):
                       {sel.shadowed.map((s) => (

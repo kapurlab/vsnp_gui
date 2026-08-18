@@ -90,6 +90,43 @@ function BusyButton({ onClick, busyLabel, children, disabled, onError, ...rest }
   );
 }
 
+// Middle-elide long filesystem paths for optgroup labels / location rows.
+function shortenPath(p) {
+  if (!p) return p;
+  return p.length > 52 ? `${p.slice(0, 20)}…${p.slice(-30)}` : p;
+}
+
+// One <option> per unique reference name. The backend has already collapsed
+// same-name duplicates to the single copy vsnp3 actually resolves (first
+// registered location wins), so this list never shows one name twice. When
+// more than one location contributes, group by location so it's obvious
+// where each entry comes from.
+function ReferenceOptions({ references }) {
+  const refs = references || [];
+  const roots = [];
+  const byRoot = new Map();
+  refs.forEach((r) => {
+    const root = r.root || "";
+    if (!byRoot.has(root)) {
+      byRoot.set(root, []);
+      roots.push(root);
+    }
+    byRoot.get(root).push(r);
+  });
+  if (roots.length <= 1) {
+    return refs.map((r) => (
+      <option key={r.path || r.name} value={r.name}>{r.name}</option>
+    ));
+  }
+  return roots.map((root) => (
+    <optgroup key={root || "(unknown)"} label={shortenPath(root) || "(unknown location)"}>
+      {byRoot.get(root).map((r) => (
+        <option key={r.path || r.name} value={r.name}>{r.name}</option>
+      ))}
+    </optgroup>
+  ));
+}
+
 export default function App() {
   const [config, setConfig] = useState(null);
   const [projects, setProjects] = useState([]);
@@ -212,6 +249,10 @@ export default function App() {
   // otherwise fire two dispatches; this ref blocks the second instantly.
   const step1DispatchingRef = useRef(false);
   const excludeSaveTimerRef = useRef(null);
+  // Exclusion auto-save status, shown as a small chip in the Step 1 Results
+  // actions (replaces the old Force-save button). phase: idle|saving|saved|error.
+  const [exclSaveState, setExclSaveState] = useState({ phase: "idle", detail: "" });
+  const exclSavedFadeRef = useRef(null);
   const step2BuildExcludeTimerRef = useRef(null);
   const uploadXhrRef = useRef(null);
   const qcRowsRef = useRef([]);
@@ -352,6 +393,9 @@ export default function App() {
   const [showRowRefEditor, setShowRowRefEditor] = useState(true);
   // Item 2: Reference path management
   const [refPaths, setRefPaths] = useState([]);
+  // Per-location stats (provides/shadowed/exists) from the backend, so the
+  // Reference Locations rows can say what removing a location would change.
+  const [refLocations, setRefLocations] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
   const [refPathInput, setRefPathInput] = useState("");
   // Item 3: Genome download
@@ -836,13 +880,19 @@ export default function App() {
     if (picked && Array.isArray(picked) && picked.length) onPick(picked);
   }
 
-  // Item 2: Reference path management
+  // Item 2: Reference path management. Every registry read/mutation applies
+  // the SAME full payload (paths + location stats + deduped references), so
+  // the location rows and every reference dropdown move together — a removed
+  // location can never leave a stale dropdown behind.
+  function _applyRefPathsPayload(data) {
+    setRefPaths(data.paths || []);
+    setRefLocations(data.locations || []);
+    if (data.references) setReferences(data.references);
+  }
+
   async function loadRefPaths() {
     const res = await fetch(`${API_BASE}/api/references/paths`);
-    if (res.ok) {
-      const data = await res.json();
-      setRefPaths(data.paths || []);
-    }
+    if (res.ok) _applyRefPathsPayload(await res.json());
   }
 
   async function addRefPath(dirPath) {
@@ -852,9 +902,10 @@ export default function App() {
       body: JSON.stringify({ path: dirPath })
     });
     if (res.ok) {
-      const data = await res.json();
-      setRefPaths(data.paths || []);
-      setReferences(data.references || []);
+      _applyRefPathsPayload(await res.json());
+    } else {
+      const err = await res.json().catch(() => ({}));
+      window.alert(err.detail || `Could not add reference location (HTTP ${res.status})`);
     }
   }
 
@@ -865,9 +916,10 @@ export default function App() {
       body: JSON.stringify({ path: dirPath })
     });
     if (res.ok) {
-      const data = await res.json();
-      setRefPaths(data.paths || []);
-      setReferences(data.references || []);
+      _applyRefPathsPayload(await res.json());
+    } else {
+      const err = await res.json().catch(() => ({}));
+      window.alert(err.detail || `Could not remove reference location (HTTP ${res.status})`);
     }
   }
 
@@ -1258,6 +1310,7 @@ export default function App() {
         fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
       ]);
       setRefPaths(paths.paths || []);
+      setRefLocations(paths.locations || []);
       setProjects(proj);
       setReferences(refs);
       setVcfDbFolders(dbFolders || []);
@@ -1283,6 +1336,22 @@ export default function App() {
   useEffect(() => {
     loadAll();
   }, []);
+
+  // Flush a pending (debounced) exclusion save when the tab is hidden or
+  // closed, so a checkbox toggled just before leaving isn't lost. keepalive
+  // lets the request outlive the page — best effort only (huge sample lists
+  // can exceed the keepalive body cap), and a Step 2 run re-sends the
+  // authoritative exclusion set regardless.
+  useEffect(() => {
+    const flush = () => {
+      if (!excludeSaveTimerRef.current) return;
+      clearTimeout(excludeSaveTimerRef.current);
+      excludeSaveTimerRef.current = null;
+      _persistExclusions({ keepalive: true });
+    };
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, [selectedProject]);
 
   useEffect(() => {
     document.title = `vSNP GUI ${serverVersion || APP_VERSION}`;
@@ -2382,28 +2451,40 @@ export default function App() {
   async function _persistExclusions(opts = {}) {
     if (!selectedProject) return { ok: false };
     const samples = _collectExcludedSamples();
+    if (exclSavedFadeRef.current) {
+      clearTimeout(exclSavedFadeRef.current);
+      exclSavedFadeRef.current = null;
+    }
+    setExclSaveState({ phase: "saving", detail: "" });
     try {
       const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ samples: Array.from(samples) })
+        body: JSON.stringify({ samples: Array.from(samples) }),
+        ...(opts.keepalive ? { keepalive: true } : {})
       });
       if (!res.ok) {
-        if (opts.alertOnError) {
-          const msg = await res.json().catch(() => ({}));
-          window.alert(msg.detail || "Failed to save exclusions");
-        }
+        const msg = await res.json().catch(() => ({}));
+        setExclSaveState({ phase: "error", detail: msg.detail || `HTTP ${res.status}` });
         return { ok: false };
       }
+      setExclSaveState({ phase: "saved", detail: "" });
+      exclSavedFadeRef.current = setTimeout(() => {
+        exclSavedFadeRef.current = null;
+        setExclSaveState((s) => (s.phase === "saved" ? { phase: "idle", detail: "" } : s));
+      }, 2500);
       return { ok: true, count: samples.size };
     } catch (e) {
-      if (opts.alertOnError) window.alert(`Save failed: ${e.message}`);
+      setExclSaveState({ phase: "error", detail: e.message || String(e) });
       return { ok: false };
     }
   }
 
   // Toggle handler: applies the change locally, then debounces a save so a
   // user click-storming through the QC table only POSTs once after they stop.
+  // The save reports itself in the small status chip next to the QC actions;
+  // there is no manual save button (a failed save shows a Retry there, and a
+  // run re-sends the authoritative exclusion set regardless).
   function toggleExcluded(row, checked) {
     setExcluded((prev) => ({ ...prev, [excludeKey(row)]: checked }));
     if (excludeSaveTimerRef.current) {
@@ -2415,15 +2496,14 @@ export default function App() {
     }, 400);
   }
 
-  // Manual save button — flushes any pending debounce immediately and surfaces
-  // errors via alert. Kept as a belt-and-suspenders affordance.
-  async function saveExclusions() {
+  // Flush any pending debounce and save now. Used by the failed-save Retry
+  // chip and the pagehide flush.
+  async function saveExclusions(opts = {}) {
     if (excludeSaveTimerRef.current) {
       clearTimeout(excludeSaveTimerRef.current);
       excludeSaveTimerRef.current = null;
     }
-    const result = await _persistExclusions({ alertOnError: true });
-    if (result.ok) window.alert(`Exclusions saved (${result.count})`);
+    return _persistExclusions(opts);
   }
 
   async function linkLocal(pathOverride = "") {
@@ -4153,7 +4233,7 @@ export default function App() {
       <main className="layout">
         <datalist id="reference-options">
           {references.map((ref) => (
-            <option key={ref.name} value={ref.name} />
+            <option key={ref.path || ref.name} value={ref.name} />
           ))}
         </datalist>
         {!configLoaded ? (
@@ -4366,9 +4446,7 @@ export default function App() {
                 style={{ minWidth: "10rem" }}
               >
                 <option value="">-- reference (optional) --</option>
-                {references.map((r) => (
-                  <option key={r.name} value={r.name}>{r.name}</option>
-                ))}
+                <ReferenceOptions references={references} />
               </select>
               <button onClick={createProject}>Create</button>
             </div>
@@ -4974,12 +5052,37 @@ export default function App() {
                 <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
                   <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em"}}>Reference Locations</summary>
                   <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
-                    {refPaths.length ? refPaths.map((p, i) => (
-                      <div key={i} className="ref-path-item" style={{display:"flex", alignItems:"center", gap:"0.3em", marginBottom:"0.2em"}}>
-                        <span className="muted" style={{wordBreak:"break-all", flex:1}}>{p}</span>
-                        <button className="ghost-btn danger" style={{fontSize:"0.8em"}} onClick={() => removeRefPath(p)}>x</button>
-                      </div>
-                    )) : <div className="muted">No custom reference paths configured.</div>}
+                    {(refLocations.length ? refLocations : refPaths.map((p) => ({ path: p, exists: true }))).map((loc) => {
+                      // What does this location actually contribute? Spell it
+                      // out so removing a redundant one is an informed act.
+                      let stat = null;
+                      if (!loc.exists) {
+                        stat = <span style={{color:"var(--warn, #b26a00)"}}>path not found — contributes nothing</span>;
+                      } else if (loc.provides > 0 && loc.shadowed > 0) {
+                        stat = <span className="muted">provides {loc.provides} reference{loc.provides === 1 ? "" : "s"}; {loc.shadowed} more here {loc.shadowed === 1 ? "is a duplicate" : "are duplicates"} of an earlier location</span>;
+                      } else if (loc.provides > 0) {
+                        stat = <span className="muted">provides {loc.provides} reference{loc.provides === 1 ? "" : "s"}</span>;
+                      } else if (loc.shadowed > 0) {
+                        stat = <span style={{color:"var(--warn, #b26a00)"}}>all {loc.shadowed} references here duplicate an earlier location — removing this changes nothing in the dropdowns</span>;
+                      } else {
+                        stat = <span className="muted">no references found here</span>;
+                      }
+                      return (
+                        <div key={loc.path} className="ref-path-item" style={{display:"flex", alignItems:"flex-start", gap:"0.3em", marginBottom:"0.35em"}}>
+                          <div style={{flex:1, minWidth:0}}>
+                            <div className="muted" style={{wordBreak:"break-all"}} title={loc.path}>{loc.path}</div>
+                            <div style={{fontSize:"0.9em"}}>
+                              {stat}
+                              {loc.implicit ? <span className="muted"> (built-in fallback — vSNP3's own dependencies folder)</span> : null}
+                            </div>
+                          </div>
+                          {!loc.implicit ? (
+                            <button className="ghost-btn danger" style={{fontSize:"0.8em"}} title="Remove this location from the reference registry (no files are deleted)" onClick={() => removeRefPath(loc.path)}>x</button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                    {!refLocations.length && !refPaths.length ? <div className="muted">No reference locations configured.</div> : null}
                     <div style={{display:"flex", gap:"0.3em", marginTop:"0.3em"}}>
                       <input
                         placeholder="/path/to/reference_root"
@@ -5068,15 +5171,26 @@ export default function App() {
                   }}
                 >
                   <option value="">Choose a reference...</option>
-                  {references.map((r) => (
-                    <option key={r.name} value={r.name}>{r.name}</option>
-                  ))}
+                  <ReferenceOptions references={references} />
                 </select>
                 {refEditorPath ? (
                   <div className="note" style={{wordBreak:"break-all", marginTop:"0.5em"}}>
                     Directory: {refEditorPath}
                   </div>
                 ) : null}
+                {(() => {
+                  const sel = references.find((r) => r.name === refEditorRef);
+                  if (!sel || !sel.shadowed || !sel.shadowed.length) return null;
+                  return (
+                    <div className="note" style={{wordBreak:"break-all", marginTop:"0.3em", color:"var(--warn, #b26a00)"}}>
+                      Another copy of this reference exists and is ignored (vSNP uses the
+                      first location that has a name):
+                      {sel.shadowed.map((s) => (
+                        <div key={s.path} style={{marginTop:2}}>{s.path}</div>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
             </section>
             <section className="panel">
@@ -5423,9 +5537,7 @@ export default function App() {
                   >
                     <option value="">Select reference</option>
                     <option value="__auto__">Auto-detect (best match)</option>
-                    {references.map((r) => (
-                      <option key={r.name} value={r.name}>{r.name}</option>
-                    ))}
+                    <ReferenceOptions references={references} />
                   </select>
                   {refLock.references && refLock.references.length > 1 ? (
                     <div className="note error">
@@ -5706,14 +5818,20 @@ export default function App() {
                     </button>
                     <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
                     <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
-                    <button
-                      onClick={saveExclusions}
-                      disabled={!selectedProject}
-                      className="ghost"
-                      title="Exclusions auto-save when you toggle a checkbox; this button forces an immediate save and confirms with an alert."
-                    >
-                      Force-save Exclusions
-                    </button>
+                    {exclSaveState.phase === "saving" ? (
+                      <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Saving exclusions…</span>
+                    ) : exclSaveState.phase === "saved" ? (
+                      <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Exclusions saved ✓</span>
+                    ) : exclSaveState.phase === "error" ? (
+                      <button
+                        onClick={() => saveExclusions()}
+                        className="ghost"
+                        style={{ color: "var(--danger, #c62828)" }}
+                        title={`Exclusion save failed${exclSaveState.detail ? `: ${exclSaveState.detail}` : ""}. Click to retry. A Step 2 run re-sends your exclusions either way, so a failed background save never silently changes a run.`}
+                      >
+                        Exclusion save failed — Retry
+                      </button>
+                    ) : null}
                   </>
                 ) : (
                   <>

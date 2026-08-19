@@ -222,12 +222,15 @@ export default function App() {
   // "full" (classify + parse reads + identify) or "kraken_only" (Kraken2 +
   // Krona graph only). Streams the live pipeline log via /api/jobs/{id}/events.
   const [krakenModal, setKrakenModal] = useState({
-    open: false, project: "", sample: "", mode: "full", taxon: "", db: "",
+    open: false, project: "", sample: "", mode: "full", taxon: "", db: "", blastDb: "",
     running: false, jobId: null, status: "idle", log: [],
   });
   // Kraken2 DBs known to the Kraken ID Parse tool (its Settings own the list);
   // {current, databases} from /api/kraken/dbs, loaded when the modal opens.
   const [krakenDbInfo, setKrakenDbInfo] = useState({ current: "", databases: [] });
+  // {current, databases} from /api/kraken/blast-dbs — the BLAST databases the
+  // Kraken ID Parse tool has saved. Only a full identification run uses one.
+  const [krakenBlastDbInfo, setKrakenBlastDbInfo] = useState({ current: "", databases: [] });
   // Taxon presets are loaded from the shared kraken config/taxa.yaml via
   // /api/kraken/taxa; this list is only a fallback if that fetch fails.
   const [krakenTaxonPresets, setKrakenTaxonPresets] = useState([
@@ -3740,7 +3743,7 @@ export default function App() {
       }
       if (krakenEsRef.current && !m.running) { krakenEsRef.current.close(); krakenEsRef.current = null; }
       return {
-        open: true, project, sample, mode: "full", taxon: "", db: "",
+        open: true, project, sample, mode: "full", taxon: "", db: "", blastDb: "",
         running: false, jobId: null, status: "idle", log: [],
       };
     });
@@ -3748,6 +3751,10 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : { current: "", databases: [] }))
       .then((info) => setKrakenDbInfo({ current: info.current || "", databases: info.databases || [] }))
       .catch(() => setKrakenDbInfo({ current: "", databases: [] }));
+    fetch(`${API_BASE}/api/kraken/blast-dbs`)
+      .then((r) => (r.ok ? r.json() : { current: "", databases: [] }))
+      .then((info) => setKrakenBlastDbInfo({ current: info.current || "", databases: info.databases || [] }))
+      .catch(() => setKrakenBlastDbInfo({ current: "", databases: [] }));
   }
 
   // Closing while a run is in progress just hides the modal — the job keeps
@@ -3761,7 +3768,7 @@ export default function App() {
   }
 
   async function runKrakenForSample() {
-    const { project, sample, mode, taxon, db, running } = krakenModal;
+    const { project, sample, mode, taxon, db, blastDb, running } = krakenModal;
     if (running || !project || !sample) return;
     if ((mode === "full" || mode === "parse_only") && !taxon.trim()) return;
     setKrakenModal((m) => ({ ...m, running: true, status: "running", log: [] }));
@@ -3771,7 +3778,12 @@ export default function App() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sample, mode, taxon: taxon.trim() || null, kraken_db: (db || "").trim() || null }),
+          body: JSON.stringify({
+            sample, mode, taxon: taxon.trim() || null,
+            kraken_db: (db || "").trim() || null,
+            // Only a full run BLASTs; the other modes ignore this server-side.
+            blast_db: mode === "full" ? ((blastDb || "").trim() || null) : null,
+          }),
         }
       );
       if (!res.ok) {
@@ -4245,7 +4257,7 @@ export default function App() {
         ) : !settingsReady ? (
           <div className="panel alert-banner">
             <strong>Setup required:</strong> Set vSNP3 path, projects root, and conda env in Settings,
-            then click Save + Preflight.
+            then click Save &amp; Refresh + Preflight.
           </div>
         ) : null}
         <section className="status-strip">
@@ -4415,7 +4427,7 @@ export default function App() {
               </div>
             </div>
             <div style={{display:"flex", justifyContent:"flex-end", marginTop:"12px"}}>
-              <button onClick={saveSettings} title="Save settings">Save</button>
+              <button onClick={saveSettings} title="Save these settings and reload the app with them — a new path only takes effect once this is clicked">Save &amp; Refresh</button>
             </div>
             </section>
           </div>
@@ -6516,6 +6528,32 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {/* BLAST database — only a full identification run reaches the
+                  BLAST step, so it is shown only for that mode. Same
+                  arrangement as the Kraken2 picker above: the list is the one
+                  the Kraken ID Parse tool's Settings manages. */}
+              {krakenModal.mode === "full" ? (
+                <div style={{ marginBottom: 8 }}>
+                  <label className="label">BLAST database</label>
+                  <select
+                    value={krakenModal.blastDb || krakenBlastDbInfo.current}
+                    disabled={krakenModal.running}
+                    onChange={(e) => setKrakenModal((m) => ({ ...m, blastDb: e.target.value }))}
+                  >
+                    {krakenBlastDbInfo.databases.map((p) => (
+                      <option key={p} value={p}>
+                        {p}{p === krakenBlastDbInfo.current ? "  (current)" : ""}
+                        {p === "nt" ? "  — NCBI remote" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
+                    Used by the identification BLAST at the end of the run. Add databases in the
+                    Kraken ID Parse app's Settings; they appear here.
+                  </div>
+                </div>
+              ) : null}
 
               {krakenModal.mode === "full" || krakenModal.mode === "parse_only" ? (
                 <div style={{ marginBottom: 8 }}>

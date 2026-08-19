@@ -5813,6 +5813,36 @@ def kraken_dbs():
     return {"current": current, "databases": options}
 
 
+@app.get("/api/kraken/blast-dbs")
+def kraken_blast_dbs():
+    """BLAST databases available to a vSNP-launched Kraken run, and which one a
+    run would use right now.
+
+    Same arrangement as /api/kraken/dbs: the Kraken ID Parse tool owns database
+    configuration, and this mirrors its saved list so the vSNP Kraken dialog can
+    offer the same choices. Without this the dialog silently used whatever that
+    tool last set, with no way to see or change it from here — which is exactly
+    what a full identification run BLASTs against."""
+    cfg = load_config()
+    _kgui = _kraken_gui_config()
+    current = (cfg.get("blast_db", "") or "").strip() \
+        or str(_kgui.get("blast_db", "") or "").strip() \
+        or _existing_site_blast_db()
+    options: List[str] = []
+    for p in [current,
+              str(_kgui.get("blast_db", "") or "").strip(),
+              *(_kgui.get("saved_blast_dbs") or []),
+              _existing_site_blast_db()]:
+        p = str(p or "").strip()
+        if p and p not in options:
+            options.append(p)
+    # NCBI's remote nt is always reachable and is the pipeline's own default, so
+    # it stays selectable even when no local database is configured.
+    if "nt" not in options:
+        options.append("nt")
+    return {"current": current or "nt", "databases": options}
+
+
 def _resolve_kraken_runtime() -> Dict[str, str]:
     """Locate the Kraken ID Parse install's python + bin.
 

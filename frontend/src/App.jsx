@@ -192,6 +192,7 @@ export default function App() {
   const [qcError, setQcError] = useState("");
   const [qcScan, setQcScan] = useState(null);                     // {done,total} while the server-side stats scan runs
   const [qcRenderCap, setQcRenderCap] = useState(QC_RENDER_CHUNK); // how many Results rows are mounted (chunked rendering)
+  const [qcSort, setQcSort] = useState({ key: null, dir: "asc" });  // Step 1 Results column sort
   const qcLoadSeq = useRef(0);                                    // drops stale qc_summary polls on project switch
   const [showFlaggedOnly, setShowFlaggedOnly] = useState(false);
   const [qcFilter, setQcFilter] = useState("");                   // as-you-type sample filter for Step 1 Results
@@ -530,7 +531,57 @@ export default function App() {
   // The filtered Results rows, computed once per render (the table body, the
   // header checkbox and the counts all read this same array — recomputing it
   // per call site cost four full passes over 8000+ rows every render).
-  const visibleQcRows = computeVisibleQcRows();
+  const _visibleQcRows = computeVisibleQcRows();
+
+  /* Step 1 Results column sorting. null key = the order the scanner returned,
+     which is the sensible default; a header click takes over, and a third
+     click gives that default back. */
+  const QC_LEVEL_RANK = { fail: 0, review: 1, pass: 2 };
+  function qcSortValue(row, key) {
+    switch (key) {
+      case "qc": return QC_LEVEL_RANK[qcLevel(row)] ?? 9;
+      case "sample": return row._sample || row.sample || "";
+      case "read_type": return row.read_type || "";
+      case "run_date": return row._run_date || "";
+      case "mapping": return qcMappingRate(row);
+      default: return row[key];
+    }
+  }
+  function qcCompare(a, b) {
+    const blankA = a === null || a === undefined || a === "" || a === "-";
+    const blankB = b === null || b === undefined || b === "" || b === "-";
+    // Blanks sink in both directions — a screen of dashes is never the answer.
+    if (blankA && blankB) return 0;
+    if (blankA) return 1;
+    if (blankB) return -1;
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    const na = Number(String(a).replace(/[,%\s]/g, "").replace(/[Xx×]$/, ""));
+    const nb = Number(String(b).replace(/[,%\s]/g, "").replace(/[Xx×]$/, ""));
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+  }
+  const visibleQcRows = qcSort.key
+    ? [...(_visibleQcRows)].sort((a, b) =>
+        (qcSort.dir === "desc" ? -1 : 1) * qcCompare(qcSortValue(a, qcSort.key), qcSortValue(b, qcSort.key)))
+    : _visibleQcRows;
+  function toggleQcSort(key) {
+    setQcSort((s) => {
+      if (s.key !== key) return { key, dir: "asc" };
+      if (s.dir === "asc") return { key, dir: "desc" };
+      return { key: null, dir: "asc" };
+    });
+  }
+  const QcSortTh = ({ sortKey, children }) => (
+    <th className={`qc-sortable ${qcSort.key === sortKey ? "qc-sorted" : ""}`}>
+      <button type="button" className="qc-sort-btn" onClick={() => toggleQcSort(sortKey)}
+              title="Sort by this column">
+        {children}
+        <span className="qc-sort-arrow" aria-hidden="true">
+          {qcSort.key === sortKey ? (qcSort.dir === "asc" ? "▲" : "▼") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
 
   // Aggregate state for the header "exclude all in current view" checkbox.
   function excludeAllState() {
@@ -5948,20 +5999,20 @@ export default function App() {
                             <span>Exclude</span>
                           </div>
                         </th>
-                        <th>QC</th>
-                        <th>Sample</th>
-                        <th>Read type</th>
-                        <th>Run date</th>
+                        <QcSortTh sortKey="qc">QC</QcSortTh>
+                        <QcSortTh sortKey="sample">Sample</QcSortTh>
+                        <QcSortTh sortKey="read_type">Read type</QcSortTh>
+                        <QcSortTh sortKey="run_date">Run date</QcSortTh>
                         <th>Files</th>
-                        <th>Reference</th>
-                        <th>Avg Depth</th>
-                        <th>Mapping %</th>
-                        <th>Zero Cov %</th>
-                        <th>Dup %</th>
-                        <th>R1 Q20</th>
-                        <th>R2 Q20</th>
-                        <th>Genome Cov</th>
-                        <th>Quality SNPs</th>
+                        <QcSortTh sortKey="Reference">Reference</QcSortTh>
+                        <QcSortTh sortKey="Average Depth">Avg Depth</QcSortTh>
+                        <QcSortTh sortKey="mapping">Mapping %</QcSortTh>
+                        <QcSortTh sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
+                        <QcSortTh sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
+                        <QcSortTh sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
+                        <QcSortTh sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
+                        <QcSortTh sortKey="Genome with Coverage">Genome Cov</QcSortTh>
+                        <QcSortTh sortKey="Quality SNPs">Quality SNPs</QcSortTh>
                       </tr>
                     </thead>
                     <tbody>

@@ -7629,7 +7629,24 @@ export default function App() {
                     <details key={group.name} className="results-group">
                       <summary>
                         <div className="group-summary">
-                          <span>{group.name}</span>
+                          <span className="group-name">
+                            {group.name}
+                            {/* The group's shape, deliberately quieter than the
+                                name: lighter, smaller, not bold. It answers "how
+                                big is this group" without competing for the eye
+                                with the thing you are actually scanning for. */}
+                            {group.sample_count > 0 && group.snp_count > 0 ? (
+                              <span className="group-dims"
+                                    title={`${group.sample_count.toLocaleString()} sample`
+                                           + `${group.sample_count === 1 ? "" : "s"} × `
+                                           + `${group.snp_count.toLocaleString()} SNP position`
+                                           + `${group.snp_count === 1 ? "" : "s"} — the shape of `
+                                           + "this group's SNP tables, read off its alignment "
+                                           + "(the reference/outgroup is not counted as a sample)"}>
+                                {group.sample_count.toLocaleString()}×{group.snp_count.toLocaleString()}
+                              </span>
+                            ) : null}
+                          </span>
                           <div className="group-actions">
                             {(() => {
                               const canRunPosthoc = snpToolAvailable && group.posthoc_possible;

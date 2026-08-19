@@ -6131,15 +6131,41 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
                 return matches[-1]
         return None
 
-    def _count_fasta_sequences(fasta_path: Optional[Path]) -> int:
+    def _fasta_dims(fasta_path: Optional[Path]) -> tuple[int, int, bool]:
+        """(records, alignment columns, is one of them the outgroup) — one pass.
+
+        The record count already had to be read here to decide whether the
+        SNP-distance tool can run, so the group's SHAPE comes free with it: every
+        record in an alignment is the same length, so the first one's length is
+        the number of SNP positions, and that is exactly the column count of the
+        group's SNP tables (verified equal on every group of a 63-group run).
+
+        Taking it from the alignment rather than from a table is not just cheaper,
+        it is the only source that gives ONE number for a wide group: vSNP3 splits
+        a cascade table at 10,000 columns, so MTBC0-All's 102,165 positions arrive
+        as eleven files, and no single one of them describes the group.
+
+        Only the first record's lines are measured — the `records == 1` test costs
+        a comparison per line and saves reading 100 MB of sequence into strings.
+        """
         if not fasta_path or not fasta_path.exists():
-            return 0
-        count = 0
-        with fasta_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                if line.startswith(">"):
-                    count += 1
-        return count
+            return 0, 0, False
+        records = 0
+        columns = 0
+        has_outgroup = False
+        try:
+            with fasta_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if line.startswith(">"):
+                        records += 1
+                        if line[1:].strip().lower() == "root":
+                            has_outgroup = True
+                        continue
+                    if records == 1:
+                        columns += len(line.strip())
+        except OSError:
+            return 0, 0, False
+        return records, columns, has_outgroup
 
     top = []
     html_files = sorted(output_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
@@ -6177,7 +6203,12 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
         if d.name.startswith("."):
             continue
         fasta_path = _find_group_fasta(d)
-        fasta_count = _count_fasta_sequences(fasta_path)
+        fasta_count, fasta_columns, fasta_has_outgroup = _fasta_dims(fasta_path)
+        # The reference/outgroup is a record in the alignment but not a sample of
+        # the group, so it is not counted as one. Only subtracted when it is
+        # actually there — a group aligned without an outgroup would otherwise be
+        # reported one sample short.
+        sample_count = fasta_count - 1 if fasta_has_outgroup else fasta_count
         # If a *_labeled.tre exists for a base group tree, hide the unlabeled
         # sibling — labeled has the lineage prefix prepended to each leaf
         # (e.g. L4_ERR2704709_zc.vcf), which is what makes the tree useful
@@ -6218,6 +6249,12 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
                 "posthoc_possible": fasta_count >= 3,
                 "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
                 "posthoc_sequence_count": fasta_count,
+                # The group's shape, for the results pane to show beside its name.
+                # Zero on the degenerate groups vSNP3 marks TOO_FEW_SAMPLES (a
+                # header and no sequence); the pane shows nothing rather than
+                # "1 x 0".
+                "sample_count": sample_count,
+                "snp_count": fasta_columns,
             })
     return {"top": top, "groups": groups, "run_id": output_dir.name if output_dir != step2_dir else "legacy"}
 

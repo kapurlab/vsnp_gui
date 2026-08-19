@@ -1235,6 +1235,26 @@ button:hover:not(:disabled) {
   gap: 12px;
 }
 
+/* The group name keeps the summary's own weight; the size beside it does not.
+   The name is what people scan this list for, so the count has to read as an
+   annotation on it rather than as a second label of equal standing. */
+.group-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.group-dims {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .group-actions {
   display: flex;
   align-items: center;

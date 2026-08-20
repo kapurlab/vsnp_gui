@@ -89,7 +89,6 @@ DB_ROOT = _resolve_db_root()
 _SHARED_VSNP3 = TOOLS_ROOT / "vsnp3"
 _PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
 _DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
-_DEFAULT_BCFTOOLS = str(_DEFAULT_VSNP3_PATH / "bin" / "bcftools")
 
 # Shared projects root (T-12a). Surfaces in /api/config; backend's project
 # listing scans both this and per-user projects_root. Multi-user server installs
@@ -113,13 +112,99 @@ _DEFAULT_SHARED_VCF_DB_ROOT = (
     str(_SHARED_VCF_DB_ROOT) if _SHARED_VCF_DB_ROOT.is_dir() else ""
 )
 
+# --- Site-derived paths -----------------------------------------------------
+# These keys are functions of the LAUNCH CONTEXT (site.conf, launcher env vars,
+# checkout position), not user data. They used to sit in DEFAULTS and get
+# frozen into each user's config.json by their FIRST launch — so whichever
+# context a user happened to launch from first (often a personal dev install
+# in $HOME) decided the vsnp3 every later session ran, including shared OOD
+# sessions, and no update could ever heal it. Now they are recomputed on every
+# load; config.json stores only an explicit user choice, under
+# "path_overrides", so a deliberate override survives while stale frozen
+# defaults self-repair the next time the app starts.
+SITE_DERIVED_KEYS = (
+    "vsnp3_path",
+    "bcftools_path",
+    "shared_projects_root",
+    "vcf_db_folders_root",
+    "vsnp_gui_deploy_path",
+    "audit_root",
+    "vsnp3_reference_options_root",
+)
+
+
+def site_path_defaults(vsnp3_effective: str = "") -> Dict[str, str]:
+    """The launch context's own answer for every site-derived key.
+
+    bcftools ships inside the vsnp3 env, so its default follows the EFFECTIVE
+    vsnp3 path (a user's override included), not the site default."""
+    d = {
+        "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
+        "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
+        "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
+        "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
+        "audit_root": str(_SITE_ROOT / "audit"),
+        "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
+    }
+    base = (vsnp3_effective or "").strip() or d["vsnp3_path"]
+    d["bcftools_path"] = str(Path(base) / "bin" / "bcftools")
+    return d
+
+
+def _clean_path_overrides(raw: Any) -> Dict[str, str]:
+    """Only known keys, only non-empty strings. Anything else is dropped."""
+    out: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        for k in SITE_DERIVED_KEYS:
+            v = str(raw.get(k, "") or "").strip()
+            if v:
+                out[k] = v
+    return out
+
+
+def set_path_override(cfg: Dict[str, Any], key: str, value: str) -> None:
+    """Record (or clear) a user's explicit choice for one site-derived path.
+
+    Empty value = back to the site default. A value EQUAL to the current site
+    default is also stored as "no override": accepting the default is not a
+    choice worth freezing — freezing it is exactly the bug this replaces."""
+    if key not in SITE_DERIVED_KEYS:
+        return
+    overrides = _clean_path_overrides(cfg.get("path_overrides"))
+    value = (value or "").strip()
+    defaults = site_path_defaults(overrides.get("vsnp3_path", ""))
+    if not value or value == defaults.get(key, ""):
+        overrides.pop(key, None)
+    else:
+        overrides[key] = value
+    cfg["path_overrides"] = overrides
+
+
+def apply_site_paths(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill the effective value of every site-derived key: override, else the
+    freshly computed site default. The launcher's word on the shared projects
+    root stays authoritative when present (even empty — that's how a
+    single-user local launch collapses to one Projects root)."""
+    overrides = _clean_path_overrides(cfg.get("path_overrides"))
+    cfg["path_overrides"] = overrides
+    defaults = site_path_defaults(overrides.get("vsnp3_path", ""))
+    for k in SITE_DERIVED_KEYS:
+        cfg[k] = overrides.get(k) or defaults[k]
+    if _ENV_SHARED_PROJECTS_ROOT is not None:
+        cfg["shared_projects_root"] = _ENV_SHARED_PROJECTS_ROOT.strip()
+    return cfg
+
+
 DEFAULTS: Dict[str, Any] = {
-    "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
     "projects_root": str(HOME_DIR / "projects"),
-    "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
     # Curated, user-managed Projects-root bookmarks (Settings: save/remove/jump).
     "saved_project_roots": [],
-    "bcftools_path": _DEFAULT_BCFTOOLS,
+    # Same idea for the vSNP3 install path (Settings: jump between installs;
+    # the site default is always offered first and needs no bookmark).
+    "saved_vsnp3_paths": [],
+    # Explicit user choices for SITE_DERIVED_KEYS — the ONLY path state that
+    # persists. Everything else is re-derived from the launch context.
+    "path_overrides": {},
     "step1_max_parallel": 3,
     "sra": {
         "use_sratoolkit_first": True,
@@ -127,19 +212,12 @@ DEFAULTS: Dict[str, Any] = {
         "max_parallel": 2
     },
     "vcf_db_folders": [],
-    "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
     # T-46 dispatch junk-floor: paired fastqs where either read is smaller than
     # this are auto-skipped as likely junk/incomplete. Default 50 KB catches the
     # ~43-47 KB SRA-submission-error files we've seen while still passing
     # legitimately small viral/amplicon reads (e.g. SARS-CoV-2 ~200 KB). Raise
     # it for bacterial-WGS-only sites if you want a stricter floor.
     "step1_min_fastq_bytes": 50 * 1024,
-    # Shared-tree paths the provenance writer (T-07) reads. Derived from
-    # SITE_ROOT so they're correct at any site; were previously hard-coded to
-    # /srv/kapurlab inside provenance_writer.py, which 500'd Step 1 elsewhere.
-    "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
-    "audit_root": str(_SITE_ROOT / "audit"),
-    "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
     # Per-user opt-out for shared DBs: paths the user has chosen to skip in
     # their analyses. Shared entries are visible but unchecked when in here.
     "disabled_vcf_db_paths": [],
@@ -166,20 +244,25 @@ def load_config() -> Dict[str, Any]:
         cfg = json.load(f)
     cfg.pop("igv_app_path", None)
     cfg.pop("figtree_app_path", None)
-    # Backfill any keys added in newer schema versions (e.g. shared_projects_root
-    # added in T-12a). Existing users get sensible defaults without losing
-    # whatever they've customized.
+    # Older versions froze the site-derived paths into this file at first
+    # launch. Drop any stored copy — the effective values are recomputed below,
+    # and a deliberate choice lives in "path_overrides", not here. This is the
+    # one-time migration for every pre-existing config.json, applied on every
+    # load so a file written by an old version at any point stays harmless.
+    for k in SITE_DERIVED_KEYS:
+        cfg.pop(k, None)
+    # Backfill any keys added in newer schema versions (e.g. saved_vsnp3_paths).
+    # Existing users get sensible defaults without losing what they customized.
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
-    # A present VSNP_GUI_SHARED_PROJECTS_ROOT overrides any saved/default value
-    # on every load, so a single-user launcher setting it to "" reliably
-    # disables the shared root regardless of what was persisted earlier.
-    if _ENV_SHARED_PROJECTS_ROOT is not None:
-        cfg["shared_projects_root"] = _ENV_SHARED_PROJECTS_ROOT.strip()
-    return cfg
+    return apply_site_paths(cfg)
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Never persist the effective site-derived values load_config() filled in —
+    # a frozen copy of a computed default is precisely the multi-user bug this
+    # layout replaced. "path_overrides" carries the user's explicit choices.
+    to_write = {k: v for k, v in cfg.items() if k not in SITE_DERIVED_KEYS}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, sort_keys=True)
+        json.dump(to_write, f, indent=2, sort_keys=True)

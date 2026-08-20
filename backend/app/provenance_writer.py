@@ -51,16 +51,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:  # normal app import layout
-    from app.config import DEFAULTS as _CFG_DEFAULTS
+    from app.config import site_path_defaults as _site_path_defaults
 except Exception:  # pragma: no cover - when app/ is the import root
-    from config import DEFAULTS as _CFG_DEFAULTS
+    from config import site_path_defaults as _site_path_defaults
 
 
 def _cfg_path(cfg: dict, key: str) -> str:
     """cfg value with the config module's own (site-resolved) default — never a
     baked-in /srv/kapurlab literal, which is only right on the machine it was
-    written for and silently wrong everywhere else."""
-    return cfg.get(key) or str(_CFG_DEFAULTS.get(key, ""))
+    written for and silently wrong everywhere else. The site-derived paths
+    moved out of DEFAULTS (they're recomputed per launch now), so the fallback
+    asks site_path_defaults(); a cfg that came through load_config() already
+    carries the effective values and never reaches it."""
+    return cfg.get(key) or str(_site_path_defaults().get(key, ""))
 
 
 # ---------------------------------------------------------------------------

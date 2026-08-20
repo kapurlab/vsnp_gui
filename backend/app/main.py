@@ -43,7 +43,10 @@ _STEP1_DISPATCH_LOCK = threading.Lock()
 # dict get/set are atomic enough that no extra lock is warranted.
 _STEP1_STATUS_CACHE: Dict[str, tuple] = {}
 
-from app.config import load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT
+from app.config import (
+    load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT,
+    apply_site_paths, set_path_override, site_path_defaults,
+)
 from app.jobs import JobManager
 from app.request_safety import install_request_safety
 from app import qc_verdict
@@ -972,6 +975,7 @@ class ConfigUpdate(BaseModel):
     projects_root: Optional[str] = None
     shared_projects_root: Optional[str] = None
     saved_project_roots: Optional[List[str]] = None
+    saved_vsnp3_paths: Optional[List[str]] = None
     bcftools_path: Optional[str] = None
     step1_max_parallel: Optional[int] = None
     sra: Optional[Dict] = None
@@ -1100,6 +1104,11 @@ def get_config():
     cfg["gui_root"] = str(root_dir)
     # Deployed checkout's version (git describe) — what the dashboard shows.
     cfg["app_version"] = APP_VERSION
+    # What this launch context would use on its own, so Settings can label the
+    # effective values "Site default" vs "Custom" and offer a one-click reset.
+    cfg["path_defaults"] = site_path_defaults(
+        (cfg.get("path_overrides") or {}).get("vsnp3_path", "")
+    )
     shared_root = cfg.get("shared_projects_root", "").strip()
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
@@ -1110,31 +1119,43 @@ def get_config():
     return cfg
 
 
+def _cleaned_path_list(paths: List[str]) -> List[str]:
+    # Curated, user-managed bookmarks (add/remove in Settings). Store a
+    # de-duplicated, order-preserving list of non-empty paths.
+    seen, cleaned = set(), []
+    for r in paths:
+        r = (r or "").strip()
+        if r and r not in seen:
+            seen.add(r)
+            cleaned.append(r)
+    return cleaned
+
+
 @app.post("/api/config")
 def update_config(update: ConfigUpdate):
     cfg = load_config()
+    # Site-derived paths: an explicit value is stored as a per-user override;
+    # empty — or exactly the site default — clears it, so the setting follows
+    # the launch context again (set_path_override in config.py).
     if update.vsnp3_path is not None:
-        cfg["vsnp3_path"] = update.vsnp3_path
+        set_path_override(cfg, "vsnp3_path", update.vsnp3_path)
+    if update.bcftools_path is not None:
+        set_path_override(cfg, "bcftools_path", update.bcftools_path)
+    if update.shared_projects_root is not None:
+        set_path_override(cfg, "shared_projects_root", update.shared_projects_root)
     if update.projects_root is not None:
         cfg["projects_root"] = update.projects_root
-    if update.shared_projects_root is not None:
-        cfg["shared_projects_root"] = update.shared_projects_root
     if update.saved_project_roots is not None:
-        # Curated, user-managed bookmarks (add/remove in Settings). Store a
-        # de-duplicated, order-preserving list of non-empty paths.
-        seen, cleaned = set(), []
-        for r in update.saved_project_roots:
-            r = (r or "").strip()
-            if r and r not in seen:
-                seen.add(r)
-                cleaned.append(r)
-        cfg["saved_project_roots"] = cleaned
-    if update.bcftools_path is not None:
-        cfg["bcftools_path"] = update.bcftools_path
+        cfg["saved_project_roots"] = _cleaned_path_list(update.saved_project_roots)
+    if update.saved_vsnp3_paths is not None:
+        cfg["saved_vsnp3_paths"] = _cleaned_path_list(update.saved_vsnp3_paths)
     if update.step1_max_parallel is not None:
         cfg["step1_max_parallel"] = update.step1_max_parallel
     if update.sra is not None:
         cfg["sra"].update(update.sra)
+    # Recompute the effective values from the (possibly changed) overrides so
+    # the response reflects what the next run will actually use.
+    apply_site_paths(cfg)
     save_config(cfg)
     return cfg
 

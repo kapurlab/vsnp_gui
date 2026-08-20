@@ -138,7 +138,8 @@ export default function App() {
     projects_root: "",
     bcftools_path: "",
     step1_max_parallel: 3,
-    sra_allow_insecure_https: false
+    sra_allow_insecure_https: false,
+    saved_vsnp3_paths: []
   });
   // Version of the deployed checkout as reported by the backend (git
   // describe — the same string the Diagnostic Tools Dashboard shows).
@@ -1325,7 +1326,8 @@ export default function App() {
       bcftools_path: cfg.bcftools_path || "",
       step1_max_parallel: cfg.step1_max_parallel ?? 3,
       sra_allow_insecure_https: Boolean(cfg.sra?.allow_insecure_https),
-      saved_project_roots: Array.isArray(cfg.saved_project_roots) ? cfg.saved_project_roots : []
+      saved_project_roots: Array.isArray(cfg.saved_project_roots) ? cfg.saved_project_roots : [],
+      saved_vsnp3_paths: Array.isArray(cfg.saved_vsnp3_paths) ? cfg.saved_vsnp3_paths : []
     });
     // The deployed checkout's real version (git describe, same string the
     // Diagnostic Tools Dashboard shows). Empty on installs without git —
@@ -1844,6 +1846,7 @@ export default function App() {
         vsnp3_path: settings.vsnp3_path,
         projects_root: settings.projects_root,
         saved_project_roots: settings.saved_project_roots,
+        saved_vsnp3_paths: settings.saved_vsnp3_paths,
         bcftools_path: settings.bcftools_path,
         step1_max_parallel: settings.step1_max_parallel,
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
@@ -1878,6 +1881,34 @@ export default function App() {
   }
   function jumpToLocation(path) {
     if (path) persistProjectRoots({ projects_root: path });
+  }
+
+  // vSNP3 install choice. The backend re-derives the site default from the
+  // launch context on every load and persists ONLY an explicit override
+  // ("path_overrides" in config.json) — posting "" (or the site default
+  // itself) clears the override, so the app follows this deployment's shared
+  // install again. Each action persists immediately, like the Projects-root
+  // bookmarks above.
+  async function persistVsnp3(body) {
+    await fetch(`${API_BASE}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    await loadAll();
+  }
+  function saveCurrentVsnp3Location() {
+    const cur = (settings.vsnp3_path || "").trim();
+    const list = settings.saved_vsnp3_paths || [];
+    if (!cur || list.includes(cur)) return;
+    persistVsnp3({ saved_vsnp3_paths: [...list, cur] });
+  }
+  function removeSavedVsnp3Location(path) {
+    persistVsnp3({ saved_vsnp3_paths: (settings.saved_vsnp3_paths || []).filter((r) => r !== path) });
+  }
+  function jumpToVsnp3Location(value) {
+    if (!value) return;
+    persistVsnp3({ vsnp3_path: value === "__site_default__" ? "" : value });
   }
 
   async function runPreflight() {
@@ -4378,6 +4409,62 @@ export default function App() {
                     ) : (
                       <span style={{color:"var(--danger)", fontWeight:600, fontSize:"14px"}}>&#10007;</span>
                     )}
+                  </span>
+                </div>
+                <div className="settings-row">
+                  <label className="label" />
+                  <span style={{fontSize:"12px", color:"var(--muted)", display:"inline-flex", alignItems:"center", gap:"8px", flexWrap:"wrap", minWidth:0}}>
+                    {config?.path_overrides?.vsnp3_path ? (
+                      <>
+                        <span style={{fontWeight:600, color:"var(--warning)"}}>Custom path</span>
+                        <span style={{minWidth:0, overflowWrap:"anywhere"}}>
+                          site default: {config?.path_defaults?.vsnp3_path || "(none detected)"}
+                        </span>
+                        <button
+                          className="ghost action"
+                          onClick={() => persistVsnp3({ vsnp3_path: "" })}
+                          title="Clear the custom path and follow this deployment's shared vSNP3 install"
+                        >Use site default</button>
+                      </>
+                    ) : (
+                      <span>Site default — follows this deployment&apos;s shared tools location.</span>
+                    )}
+                  </span>
+                  <span />
+                </div>
+                <div className="settings-row">
+                  <label className="label">Saved vSNP3 paths</label>
+                  <span style={{display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap", minWidth:0}}>
+                    <select
+                      value=""
+                      style={{flex:"1 1 240px", minWidth:0}}
+                      onChange={(e) => jumpToVsnp3Location(e.target.value)}
+                      title="Jump the vSNP3 path to the site default or a saved location"
+                    >
+                      <option value="">↦ Jump to a location…</option>
+                      <option value="__site_default__">
+                        ⌂ Site default{config?.path_defaults?.vsnp3_path ? ` — ${config.path_defaults.vsnp3_path}` : ""}
+                      </option>
+                      {(settings.saved_vsnp3_paths || []).map((r) => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="ghost action"
+                      onClick={saveCurrentVsnp3Location}
+                      disabled={
+                        !settings.vsnp3_path ||
+                        settings.vsnp3_path === (config?.path_defaults?.vsnp3_path || "") ||
+                        (settings.saved_vsnp3_paths || []).includes(settings.vsnp3_path)
+                      }
+                      title="Save the current vSNP3 path as a bookmark (the site default is always offered)"
+                    >★ Save current</button>
+                    <button
+                      className="ghost action"
+                      onClick={() => removeSavedVsnp3Location(settings.vsnp3_path)}
+                      disabled={!(settings.saved_vsnp3_paths || []).includes(settings.vsnp3_path)}
+                      title="Remove the current vSNP3 path from saved locations"
+                    >Remove</button>
                   </span>
                 </div>
                 <div className="settings-row">

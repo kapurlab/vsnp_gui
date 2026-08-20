@@ -1933,8 +1933,8 @@ def _resolve_ref_file(ref_name: str, filename: str) -> Path:
 def ref_preview_xlsx(ref_name: str, filename: str = Query(...), download: int = 0):
     """Render a reference-dir xlsx as a self-contained HTML page. With
     ?download=1, return the raw xlsx instead — used by the "Download xlsx"
-    link inside the preview page (JS handler in xlsx_html appends
-    download=1 to the current URL preserving the filename param)."""
+    link inside the preview page (a real relative link that re-enters this
+    route with the filename param preserved)."""
     target = _resolve_ref_file(ref_name, filename)
     if target.suffix.lower() not in (".xlsx", ".xlsm"):
         raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
@@ -1946,7 +1946,10 @@ def ref_preview_xlsx(ref_name: str, filename: str = Query(...), download: int = 
         )
     from app import xlsx_html
     try:
-        html_page = xlsx_html.xlsx_to_html(target)
+        html_page = xlsx_html.xlsx_to_html(
+            target,
+            download_href=f"?filename={quote(filename, safe='')}&download=1",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)
@@ -5374,7 +5377,9 @@ def step1_sample_stats_preview(project: str, sample: str, download: int = 0):
         )
     from app import xlsx_html
     try:
-        html_page = xlsx_html.xlsx_to_html(target)
+        # This route's identity is all in the path, so the download link needs
+        # no params — "?download=1" resolves against the page's own URL.
+        html_page = xlsx_html.xlsx_to_html(target, download_href="?download=1")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"xlsx render failed: {type(e).__name__}: {e}")
     return HTMLResponse(content=html_page)
@@ -6870,6 +6875,18 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                 status_code=400,
             )
         selection_samples = list(sel_data.get("samples") or [])
+    # Relative links for the page's own bar: query-only URLs re-enter this
+    # route through any proxy prefix (OOD /rnode, the dashboard's /t/<tool>).
+    # Built server-side and emitted as REAL anchors — the JS-assembled
+    # same-tab navigation they replace was silently dropped by Safari in tabs
+    # the app had opened with noopener, so the click produced no request at
+    # all (nothing in any proxy or uvicorn log). The download opens in a new
+    # tab, the mechanism the Step 2 Results buttons already use everywhere.
+    _q_path = quote(path, safe="")
+    download_href = (f"?path={_q_path}"
+                     + (f"&selection={quote(selection, safe='')}" if selection else "")
+                     + "&download=1")
+    full_table_href = f"?path={_q_path}"
     # Build sets of samples loadable in IGV so the cascade-table render
     # can correctly enable / grey out the "↗ this" affordance per row:
     #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
@@ -6962,6 +6979,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
                     target, project=project,
                     samples_with_bams=samples_with_bams,
                     samples_with_vcfs=samples_with_vcfs,
+                    download_href=download_href,
                 ))
             else:
                 # It fits, so render ALL of it — every row and every column.
@@ -7085,7 +7103,9 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
         count = max(1, min(int(rows_count or 200), 1000))
         return HTMLResponse(content="".join(window["rows"][start:start + count]))
 
-    return HTMLResponse(content=xlsx_html.compose_page(window))
+    return HTMLResponse(content=xlsx_html.compose_page(
+        window, download_href=download_href, full_href=full_table_href,
+    ))
 
 
 @app.get("/api/projects/{project}/download-file")

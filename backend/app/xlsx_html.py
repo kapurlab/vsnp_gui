@@ -1950,12 +1950,43 @@ def _apply_dxf(cell, dxf) -> None:
         cell.font = base
 
 
-def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
+def download_link(label: str, href: str | None) -> str:
+    """The bar's download anchor.
+
+    A REAL link when the caller supplies the relative href
+    (``?path=…&download=1`` resolves against this page's own URL, so it
+    survives any proxy prefix), opening in a fresh tab — the exact mechanism
+    the Step 2 Results download buttons use, which is the one download path
+    proven to work everywhere this suite is served. The JS-assembled same-tab
+    navigation this replaces could be dropped silently by the browser: the
+    click ran, location.href was set, and no request ever reached the server
+    (observed in Safari on tabs the app had opened with noopener — the same
+    page's other JS links still worked). A native anchor has no such moving
+    parts, and right-click "Download Linked File" works on it too.
+
+    The JS fallback remains only for callers that cannot know their own URL.
+    """
+    esc = html.escape(label)
+    if href:
+        return (f'<a href="{html.escape(href, quote=True)}" '
+                f'target="_blank" rel="noopener">{esc}</a>')
+    return ('<a href="#" onclick="var u=new URL(window.location.href);'
+            "u.searchParams.set('download','1');u.searchParams.delete('rows_from');"
+            f'window.location.href=u.toString();return false;">{esc}</a>')
+
+
+def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
+                 download_href: str | None = None,
+                 full_href: str | None = None) -> str:
     """Build the preview page from a rendered window.
 
     Only the first `initial_rows` rows are inlined; the rest are fetched by the
     page as it is scrolled. A 1,000 x 1,000 window is a million cells — fine to
     hold on the server, far too much to hand a browser in one document.
+
+    ``download_href``/``full_href`` are RELATIVE URLs (query-only) built by the
+    endpoint, so they re-enter the same route through any proxy prefix. See
+    download_link() for why these are real anchors rather than JS navigation.
     """
     rows = window["rows"]
     head = "".join(rows[:initial_rows])
@@ -1963,14 +1994,17 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
     shown_rows, shown_cols = window["shown_rows"], window["shown_cols"]
     filt = window.get("filter")
 
-    # The link target is the same preview minus the selection — assembled in
-    # JS from the live URL so it survives the OOD proxy prefix, exactly like
-    # the Download link above it.
-    _clear_filter_link = (
-        '<a href="#" onclick="var u=new URL(window.location.href);'
-        "u.searchParams.delete('selection');u.searchParams.delete('rows_from');"
-        'window.location.href=u.toString();return false;">Show the full table</a>'
-    )
+    # The link target is the same preview minus the selection. Same-tab is
+    # right here — the destination is a page, not a file.
+    if full_href:
+        _clear_filter_link = (f'<a href="{html.escape(full_href, quote=True)}">'
+                              'Show the full table</a>')
+    else:
+        _clear_filter_link = (
+            '<a href="#" onclick="var u=new URL(window.location.href);'
+            "u.searchParams.delete('selection');u.searchParams.delete('rows_from');"
+            'window.location.href=u.toString();return false;">Show the full table</a>'
+        )
 
     notice = ""
     if filt and filt.get("ignored"):
@@ -2042,7 +2076,7 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS) -> str:
                       if window.get("kept_rows") and window.get("kept_cols")
                       else "Download xlsx")
     return _PAGE_TEMPLATE.format(
-        download_label=download_label,
+        download_link=download_link(download_label, download_href),
         title=html.escape(window["title"]),
         filename=html.escape(window["filename"]),
         sheet=html.escape(window["sheet"]),
@@ -2067,6 +2101,7 @@ def xlsx_to_html(
     samples_with_vcfs: set[str] | None = None,
     max_cells: int = DEFAULT_MAX_CELLS,
     max_rows: int = DEFAULT_MAX_ROWS,
+    download_href: str | None = None,
 ) -> str:
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
@@ -2249,7 +2284,7 @@ def xlsx_to_html(
     # cell its own anchor, so it needs no style palette and has nothing to page
     # through — the lazy-loading and delegated-click machinery simply sits idle.
     page = _PAGE_TEMPLATE.format(
-        download_label="Download xlsx",
+        download_link=download_link("Download xlsx", download_href),
         title=display_title,
         filename=html.escape(xlsx_path.name),
         sheet=html.escape(ws.title or "Sheet1"),
@@ -2509,7 +2544,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-bar">
   <span class="filename">{filename}</span>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
-  <span style="margin-left: auto;"><a href="#" onclick="var u=new URL(window.location.href);u.searchParams.set('download','1');u.searchParams.delete('rows_from');window.location.href=u.toString();return false;">{download_label}</a></span>
+  <span style="margin-left: auto;">{download_link}</span>
 </div>
 {notice}
 <div id="xlsxIgvNote" class="xlsx-igv-note" style="display:none"></div>

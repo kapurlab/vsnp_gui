@@ -3,6 +3,7 @@ import igv from "igv";
 import { APP_VERSION } from "./version";
 import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
+import CopyLogButton from "./CopyLogButton";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -5935,6 +5936,7 @@ export default function App() {
                     <div className="log-title" style={{ fontWeight: 700 }}>Log: {step1LogSample}</div>
                     <pre>{step1LogLoading ? "Loading..." : (step1LogText || "No log content")}</pre>
                     <div className="modal-actions">
+                      <CopyLogButton text={() => step1LogText} />
                       <button onClick={() => setStep1LogSample("")}>Close</button>
                     </div>
                   </div>
@@ -6728,6 +6730,9 @@ export default function App() {
               ) : null}
 
               {krakenModal.log.length > 0 || krakenModal.running ? (
+                <><div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                  <CopyLogButton text={() => krakenModal.log.join("\n")} />
+                </div>
                 <div className="log" ref={krakenLogRef} style={{ maxHeight: "32vh", overflow: "auto", marginTop: 8 }}>
                   {krakenModal.log.length === 0 ? (
                     <span className="log-placeholder">Starting…</span>
@@ -6736,7 +6741,7 @@ export default function App() {
                       <div key={i} className={line.startsWith("ERROR") ? "log-line error" : "log-line"}>{line}</div>
                     ))
                   )}
-                </div>
+                </div></>
               ) : null}
 
               {krakenModal.running ? (
@@ -7925,6 +7930,7 @@ export default function App() {
 
         <div className="row-header">
           <h2>Logs</h2>
+          <CopyLogButton text={() => logs.join("\n")} />
           <button className="ghost" onClick={() => setShowRowLogs(!showRowLogs)}>
             {showRowLogs ? "Hide" : "Show"}
           </button>

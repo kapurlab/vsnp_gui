@@ -6087,8 +6087,15 @@ def kraken_run(project: str, payload: KrakenRunRequest):
     # launcher exports a ready-made prefix; the conda-meta derivation is the
     # self-contained fallback so a backend started outside the suite launcher
     # behaves identically.
-    arch_pin = os.environ.get("BDTOOLS_SIBLING_ARCH_KRAKEN_ID_PARSE_GUI", "").strip()
-    if not arch_pin and sys.platform == "darwin" and os.path.exists("/usr/bin/arch"):
+    # Derived from the runtime RESOLVED FOR THIS REQUEST, never from
+    # BDTOOLS_SIBLING_ARCH_* : that variable is stamped once at backend launch,
+    # while _resolve_kraken_runtime re-resolves the kraken env on every request
+    # — rebuild that env for the other platform mid-flight and a stamped pin is
+    # exactly wrong. The local derivation reads the same conda-meta the
+    # launcher's export reads, so when nothing changed they agree; when
+    # something changed, the fresh answer wins.
+    arch_pin = ""
+    if sys.platform == "darwin" and os.path.exists("/usr/bin/arch"):
         arch_pin = _sibling_arch_pin(rt.get("env_bin") or "")
     parts = ([arch_pin] if arch_pin else []) + [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
     if r2 is not None:

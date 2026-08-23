@@ -5869,6 +5869,34 @@ def kraken_blast_dbs():
     return {"current": current or "nt", "databases": options}
 
 
+def _sibling_arch_pin(env_bin: str) -> str:
+    """'/usr/bin/arch -arm64' (or -x86_64) for the env holding env_bin, else ''.
+
+    Reads the platform the env was BUILT for off its conda-meta records —
+    majority vote over per-package "subdir", the same rule the suite's
+    launchers use — and returns the pin that makes every universal binary in
+    that env run its matching slice. Empty when the env records nothing
+    (noarch-only, or not a conda env): asserting nothing is the honest default.
+    """
+    if not env_bin:
+        return ""
+    meta = Path(env_bin).parent / "conda-meta"
+    counts: dict = {}
+    try:
+        for mj in meta.glob("*.json"):
+            try:
+                sd = json.loads(mj.read_text(encoding="utf-8")).get("subdir", "")
+            except Exception:
+                continue
+            if sd and sd != "noarch":
+                counts[sd] = counts.get(sd, 0) + 1
+    except OSError:
+        return ""
+    top = max(counts, key=counts.get) if counts else ""
+    return {"osx-arm64": "/usr/bin/arch -arm64",
+            "osx-64": "/usr/bin/arch -x86_64"}.get(top, "")
+
+
 def _resolve_kraken_runtime() -> Dict[str, str]:
     """Locate the Kraken ID Parse install's python + bin.
 
@@ -6049,7 +6077,20 @@ def kraken_run(project: str, payload: KrakenRunRequest):
                 "env in BDTOOLS_SIBLING_ENV_KRAKEN_ID_PARSE_GUI."
             ),
         )
-    parts = [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
+    # Pin the hand-off to the KRAKEN env's own architecture, not this backend's.
+    # This backend is arch-pinned by its launcher for the VSNP env — but the
+    # sibling env may be built for a different platform (real on lab Macs:
+    # osx-64 and osx-arm64 envs side by side), and a universal binary in it
+    # (the August 2026 incident: kraken's perl) picks its slice from the
+    # inherited preference. Enforcing the sibling env's recorded platform here
+    # makes the hand-off run the way the Kraken GUI itself runs it. The
+    # launcher exports a ready-made prefix; the conda-meta derivation is the
+    # self-contained fallback so a backend started outside the suite launcher
+    # behaves identically.
+    arch_pin = os.environ.get("BDTOOLS_SIBLING_ARCH_KRAKEN_ID_PARSE_GUI", "").strip()
+    if not arch_pin and sys.platform == "darwin" and os.path.exists("/usr/bin/arch"):
+        arch_pin = _sibling_arch_pin(rt.get("env_bin") or "")
+    parts = ([arch_pin] if arch_pin else []) + [shlex.quote(rt["python"]), "-u", shlex.quote(str(script)), "-r1", shlex.quote(str(r1))]
     if r2 is not None:
         parts += ["-r2", shlex.quote(str(r2))]
     if taxon:

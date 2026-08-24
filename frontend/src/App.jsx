@@ -4,6 +4,8 @@ import { APP_VERSION } from "./version";
 import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
+import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
+import { PaneSplitters } from "./SplitPane";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -126,6 +128,28 @@ function ReferenceOptions({ references }) {
       ))}
     </optgroup>
   ));
+}
+
+/* Module scope, NOT redefined inside App on every render. A component declared
+   in the render body is a NEW type each time, so React unmounts and remounts
+   the whole header row on every keystroke in the Step 1 filter box — which
+   threw away keyboard focus on a resize grip after a single nudge. Taking the
+   sort state as props keeps the type stable and the DOM in place. */
+function QcSortTh({ sortKey, children, sort, onSort }) {
+  return (
+    <th className={`qc-sortable ${sort.key === sortKey ? "qc-sorted" : ""}`}>
+      <button type="button" className="qc-sort-btn" onClick={() => onSort(sortKey)}
+              title="Sort by this column">
+        {/* Wrapped so a narrowed column truncates the label with an ellipsis:
+            a bare text node inside a flex row cannot be given one. */}
+        <span className="rt-th-label">{children}</span>
+        <span className="qc-sort-arrow" aria-hidden="true">
+          {sort.key === sortKey ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}
+        </span>
+      </button>
+      <Grip label={typeof children === "string" ? children : sortKey} />
+    </th>
+  );
 }
 
 export default function App() {
@@ -573,17 +597,15 @@ export default function App() {
       return { key: null, dir: "asc" };
     });
   }
-  const QcSortTh = ({ sortKey, children }) => (
-    <th className={`qc-sortable ${qcSort.key === sortKey ? "qc-sorted" : ""}`}>
-      <button type="button" className="qc-sort-btn" onClick={() => toggleQcSort(sortKey)}
-              title="Sort by this column">
-        {children}
-        <span className="qc-sort-arrow" aria-hidden="true">
-          {qcSort.key === sortKey ? (qcSort.dir === "asc" ? "▲" : "▼") : "↕"}
-        </span>
-      </button>
-    </th>
-  );
+  // Sort state for the header component, which lives at module scope.
+  const qcSortProps = { sort: qcSort, onSort: toggleQcSort };
+
+  /* Column widths for the two wide QC tables, remembered per browser. Owned
+     here rather than inside ResizableTable so the panel header can offer a
+     Reset — thirteen columns of run statistics is exactly the table someone
+     drags around and then wants put back. */
+  const step1ColWidths = useColumnWidths("step1-results");
+  const posthocColWidths = useColumnWidths("step1-posthoc");
 
   // Aggregate state for the header "exclude all in current view" checkbox.
   function excludeAllState() {
@@ -4306,6 +4328,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Draggable dividers for every two-pane row on the page (see
+          SplitPane.jsx). One element, no per-row wiring. */}
+      <PaneSplitters />
       <header className="app-header">
         <div className="app-brand">
           <img className="app-logo" src="vSNP_icon_align_256.png" alt="vSNP alignment icon" />
@@ -5480,11 +5505,15 @@ export default function App() {
                               </div>
                               {metaRows.length > 0 ? (
                                 <div style={{overflowX:"auto", maxHeight:"14em", overflowY:"auto", marginBottom:"0.5em", fontSize:"0.82em"}}>
-                                  <table style={{width:"100%", borderCollapse:"collapse"}}>
+                                  <ResizableTable id="sample-metadata" style={{width:"100%", borderCollapse:"collapse"}}>
                                     <thead>
                                       <tr>
-                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)", whiteSpace:"nowrap"}}>Original name</th>
-                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)"}}>Display label</th>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)", whiteSpace:"nowrap"}}>
+                                          <span className="rt-th-label">Original name</span><Grip label="Original name" />
+                                        </th>
+                                        <th style={{textAlign:"left", padding:"0.15em 0.4em", borderBottom:"1px solid var(--border,#ccc)"}}>
+                                          <span className="rt-th-label">Display label</span><Grip label="Display label" />
+                                        </th>
                                       </tr>
                                     </thead>
                                     <tbody>
@@ -5495,7 +5524,7 @@ export default function App() {
                                         </tr>
                                       ))}
                                     </tbody>
-                                  </table>
+                                  </ResizableTable>
                                 </div>
                               ) : (
                                 <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.5em"}}>File exists but contains no rows yet.</div>
@@ -5970,6 +5999,15 @@ export default function App() {
                     </button>
                     <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
                     <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
+                    {/* Only once there is something to undo — an always-present
+                        Reset invites "reset to what?" of a table nobody has
+                        touched. */}
+                    {step1ColWidths.resized ? (
+                      <button className="ghost rt-reset" onClick={step1ColWidths.reset}
+                              title="Put every column back to its automatic width">
+                        Reset widths
+                      </button>
+                    ) : null}
                     {exclSaveState.phase === "saving" ? (
                       <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Saving exclusions…</span>
                     ) : exclSaveState.phase === "saved" ? (
@@ -5998,6 +6036,12 @@ export default function App() {
                     <button onClick={loadPosthoc} disabled={!posthocFolders.length || posthocLoading}>
                       {posthocLoading ? "Loading..." : "Load"}
                     </button>
+                    {posthocColWidths.resized ? (
+                      <button className="ghost rt-reset" onClick={posthocColWidths.reset}
+                              title="Put every column back to its automatic width">
+                        Reset widths
+                      </button>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -6072,7 +6116,7 @@ export default function App() {
                 {qcError ? <div className="note error">{qcError}</div> : null}
                 <QcCriteriaWidget />
                 <div className="qc-table scrollable">
-                  <table>
+                  <ResizableTable widths={step1ColWidths}>
                     <thead>
                       <tr>
                         <th title="Toggle Exclude for every sample currently shown (honors the date / name / flagged filters).">
@@ -6087,21 +6131,22 @@ export default function App() {
                             />
                             <span>Exclude</span>
                           </div>
+                          <Grip label="Exclude" />
                         </th>
-                        <QcSortTh sortKey="qc">QC</QcSortTh>
-                        <QcSortTh sortKey="sample">Sample</QcSortTh>
-                        <QcSortTh sortKey="read_type">Read type</QcSortTh>
-                        <QcSortTh sortKey="run_date">Run date</QcSortTh>
-                        <th>Files</th>
-                        <QcSortTh sortKey="Reference">Reference</QcSortTh>
-                        <QcSortTh sortKey="Average Depth">Avg Depth</QcSortTh>
-                        <QcSortTh sortKey="mapping">Mapping %</QcSortTh>
-                        <QcSortTh sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
-                        <QcSortTh sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
-                        <QcSortTh sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
-                        <QcSortTh sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
-                        <QcSortTh sortKey="Genome with Coverage">Genome Cov</QcSortTh>
-                        <QcSortTh sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="qc">QC</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="sample">Sample</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="read_type">Read type</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="run_date">Run date</QcSortTh>
+                        <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
+                        <QcSortTh {...qcSortProps} sortKey="Reference">Reference</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
                       </tr>
                     </thead>
                     <tbody>
@@ -6213,7 +6258,7 @@ export default function App() {
                           );
                         })}
                     </tbody>
-                  </table>
+                  </ResizableTable>
                 </div>
                 {visibleQcRows.length > qcRenderCap ? (
                   <div className="note" style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
@@ -6294,22 +6339,22 @@ export default function App() {
                   <>
                   <QcCriteriaWidget />
                   <div className="qc-table scrollable">
-                    <table>
+                    <ResizableTable widths={posthocColWidths}>
                       <thead>
                         <tr>
-                          <th>Source</th>
-                          <th>QC</th>
-                          <th>Sample</th>
-                          <th>Files</th>
-                          <th>Reference</th>
-                          <th>Avg Depth</th>
-                          <th>Mapping %</th>
-                          <th>Zero Cov %</th>
-                          <th>Dup %</th>
-                          <th>R1 Q20</th>
-                          <th>R2 Q20</th>
-                          <th>Genome Cov</th>
-                          <th>Quality SNPs</th>
+                          <th><span className="rt-th-label">Source</span><Grip label="Source" /></th>
+                          <th><span className="rt-th-label">QC</span><Grip label="QC" /></th>
+                          <th><span className="rt-th-label">Sample</span><Grip label="Sample" /></th>
+                          <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
+                          <th><span className="rt-th-label">Reference</span><Grip label="Reference" /></th>
+                          <th><span className="rt-th-label">Avg Depth</span><Grip label="Avg Depth" /></th>
+                          <th><span className="rt-th-label">Mapping %</span><Grip label="Mapping %" /></th>
+                          <th><span className="rt-th-label">Zero Cov %</span><Grip label="Zero Cov %" /></th>
+                          <th><span className="rt-th-label">Dup %</span><Grip label="Dup %" /></th>
+                          <th><span className="rt-th-label">R1 Q20</span><Grip label="R1 Q20" /></th>
+                          <th><span className="rt-th-label">R2 Q20</span><Grip label="R2 Q20" /></th>
+                          <th><span className="rt-th-label">Genome Cov</span><Grip label="Genome Cov" /></th>
+                          <th><span className="rt-th-label">Quality SNPs</span><Grip label="Quality SNPs" /></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -6413,7 +6458,7 @@ export default function App() {
                           </tr>
                         )})}
                       </tbody>
-                    </table>
+                    </ResizableTable>
                   </div>
                   </>
                 ) : (
@@ -6503,12 +6548,14 @@ export default function App() {
                 <div className="note">No files in this folder.</div>
               ) : (
                 <div className="folder-modal-files" style={{ maxHeight: "60vh", overflow: "auto" }}>
-                  <table>
+                  <ResizableTable id="folder-modal.files">
                     <thead>
                       <tr>
-                        <th>File</th>
-                        <th>Type</th>
-                        <th style={{ textAlign: "right" }}>Size</th>
+                        <th><span className="rt-th-label">File</span><Grip label="File" /></th>
+                        <th><span className="rt-th-label">Type</span><Grip label="Type" /></th>
+                        <th style={{ textAlign: "right" }}>
+                          <span className="rt-th-label">Size</span><Grip label="Size" />
+                        </th>
                         <th></th>
                       </tr>
                     </thead>
@@ -6524,7 +6571,7 @@ export default function App() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                  </ResizableTable>
                 </div>
               )}
               {!folderModal.loading && !folderModal.error ? (
@@ -6540,11 +6587,11 @@ export default function App() {
                         <div className="muted" style={{ wordBreak: "break-all", marginBottom: 4 }}>{folderModal.krakenDir}</div>
                       ) : null}
                       <div className="folder-modal-files" style={{ maxHeight: "30vh", overflow: "auto" }}>
-                        <table>
+                        <ResizableTable id="folder-modal.kraken">
                           <thead>
                             <tr>
-                              <th>File</th>
-                              <th>Type</th>
+                              <th><span className="rt-th-label">File</span><Grip label="File" /></th>
+                              <th><span className="rt-th-label">Type</span><Grip label="Type" /></th>
                               <th style={{ textAlign: "right" }}>Size</th>
                               <th></th>
                             </tr>
@@ -6576,7 +6623,7 @@ export default function App() {
                               );
                             })}
                           </tbody>
-                        </table>
+                        </ResizableTable>
                       </div>
                     </>
                   )}

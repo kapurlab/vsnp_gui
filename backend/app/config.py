@@ -32,10 +32,17 @@ HOME_DIR = Path.home()
 #   1. VSNP_GUI_SITE_ROOT — the launcher's explicit word (OOD script, bdtools)
 #   2. BDTOOLS_SITE_ROOT  — the umbrella's site.conf, exported by tool_launch
 #   3. the grandparent dir when this checkout sits at <root>/tools/vsnp_gui
-#   4. /srv/kapurlab ONLY if it exists — reference-install (wgs3) compat for
-#      dev checkouts launched outside bdtools on that machine
-#   5. a per-user placeholder that exists nowhere, so every shared-tree feature
+#   4. a per-user placeholder that exists nowhere, so every shared-tree feature
 #      degrades honestly instead of pointing at another site's layout
+#
+# There used to be a step between 3 and 4: the reference install's own root,
+# taken when that directory existed, for a dev checkout launched outside
+# bdtools on that machine. It was dead on the machine it was written for —
+# a checkout there sits at <root>/tools/vsnp_gui, so step 3 already returns the
+# same answer — and it was the only remaining thing in this file that named one
+# site. A dev checkout somewhere else on that host now falls through to step 4,
+# and the way to point it at the shared tree is the way step 1 already
+# documents: export VSNP_GUI_SITE_ROOT.
 def _resolve_site_root() -> Path:
     for var in ("VSNP_GUI_SITE_ROOT", "BDTOOLS_SITE_ROOT"):
         val = os.environ.get(var, "").strip()
@@ -44,9 +51,6 @@ def _resolve_site_root() -> Path:
     checkout = Path(__file__).resolve().parents[2]   # .../vsnp_gui
     if checkout.parent.name == "tools":
         return checkout.parent.parent
-    legacy = Path("/srv/kapurlab")
-    if legacy.is_dir():
-        return legacy
     return HOME_DIR / ".local" / "share" / "vsnp_gui" / "site"
 
 

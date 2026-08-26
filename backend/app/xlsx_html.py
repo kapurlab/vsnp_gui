@@ -1975,6 +1975,58 @@ def download_link(label: str, href: str | None) -> str:
             f'window.location.href=u.toString();return false;">{esc}</a>')
 
 
+def view_controls(loci: dict, row_samples: "list[str]") -> str:
+    """The view aids in the page bar: the identical-position toggle and the
+    colour-marking hint.
+
+    Both are statements about samples-at-positions, so they appear only on
+    variant tables — locus columns recognised and at least one sample row.
+    And both are VIEW aids, applied by the page itself: hiding a column or
+    colouring a row changes what is emphasised, never what was rendered, so
+    the download links keep handing back every position the view was built
+    from.
+
+    The toggle exists for the clade view: a clade's table keeps every position
+    where any member differs from the reference, which includes the positions
+    the whole clade shares — informative about the clade, noise when the
+    question is what differs WITHIN it. "Identical" is exact-match across the
+    shown sample rows; the JS says so on the tooltip and reports the count it
+    hid.
+
+    With one sample every position is trivially identical and the toggle
+    would blank the table, so it renders disabled with the reason on its
+    tooltip — a control that comes and goes between views reads as broken.
+    """
+    n = sum(1 for s in (row_samples or []) if s)
+    if not loci or n < 1:
+        return ""
+    if n >= 2:
+        title = (
+            f"Hide every position where all {n} shown samples have exactly "
+            "the same call — including positions where the whole group "
+            "shares one difference from the reference. A position stays "
+            "whenever any two shown samples disagree, and comes back when "
+            "this is unticked. The download links are unaffected."
+        )
+        box = '<input type="checkbox" id="xlsxInvariant">'
+        cls = "xlsx-ctl"
+    else:
+        title = ("Only one sample row is shown, so every position is "
+                 "trivially identical — there is nothing to compare against.")
+        box = '<input type="checkbox" id="xlsxInvariant" disabled>'
+        cls = "xlsx-ctl xlsx-ctl-off"
+    return (
+        f'<label class="{cls}" title="{html.escape(title, quote=True)}">'
+        f'{box} Hide identical positions</label>'
+        '<span class="xlsx-ctl-note" id="xlsxInvariantNote"></span>'
+        '<span class="xlsx-ctl-note" title="The colours cycle through the '
+        'tree viewer&#39;s palette. Click the same name or header again to '
+        'remove its mark.">Click a sample name or position header to colour '
+        'it.</span>'
+        '<a href="#" id="xlsxHlClear" style="display:none">clear colours</a>'
+    )
+
+
 def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
                  download_href: str | None = None,
                  full_href: str | None = None) -> str:
@@ -2090,6 +2142,8 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
         project=html.escape(window["project"], quote=True),
         loci_json=json.dumps(window["loci"]),
         samples_json=json.dumps(window["row_samples"]),
+        controls=view_controls(window.get("loci") or {},
+                               window.get("row_samples") or []),
     )
 
 
@@ -2191,11 +2245,18 @@ def xlsx_to_html(
             freeze_row, freeze_col = 0, 0
 
     rows_html: list[str] = []
+    # One entry per emitted <tr>, aligned by construction (appended in the same
+    # loop): the sample stem for a sample row, "" for everything else. This is
+    # what lets the view aids (colour marks, the identical-position toggle)
+    # tell a sample row from root/MQ/annotation on this path too.
+    row_samples_full: list[str] = []
     for row in ws.iter_rows():
         if not row:
             continue
         # Per-row height. Excel stores row height in points (1pt ≈ 1.333px).
         row_idx = row[0].row
+        row_samples_full.append(
+            vtable["samples"].get(row_idx, "") if vtable else "")
         row_dim = ws.row_dimensions.get(row_idx)
         row_style = ""
         if row_dim and row_dim.height:
@@ -2278,7 +2339,21 @@ def xlsx_to_html(
 
     display_title = html.escape(title or xlsx_path.name)
     colgroup = "<colgroup>" + "".join(colgroup_parts) + "</colgroup>"
-    table_html = '<table class="xlsx">' + colgroup + "".join(rows_html) + "</table>"
+    table_html = ('<table class="xlsx" id="xlsxTable">' + colgroup
+                  + '<tbody id="xlsxBody">' + "".join(rows_html)
+                  + "</tbody></table>")
+
+    # The view aids resolve a cell by its DOM position, which matches sheet
+    # coordinates only while nothing is merged — a merge removes cells and
+    # shifts every index after it. vSNP3 tables never merge; a sheet that does
+    # simply renders without the aids (loci/samples stay empty, so the page
+    # offers no controls rather than mismapped ones). IGV launching is
+    # unaffected either way: on this path every variant cell carries its own
+    # anchor, which the delegated handler deliberately leaves alone.
+    aids_ok = vtable is not None and not merged_skip and not merge_anchors
+    loci_map = ({str(c): locus for c, locus in vtable["positions"].items()}
+                if aids_ok else {})
+    samples_list = row_samples_full if aids_ok else []
 
     # The full-fidelity path styles every cell inline and gives each variant
     # cell its own anchor, so it needs no style palette and has nothing to page
@@ -2296,8 +2371,9 @@ def xlsx_to_html(
         loaded=0,
         available=0,
         project=html.escape(project or "", quote=True),
-        loci_json="{}",
-        samples_json="[]",
+        loci_json=json.dumps(loci_map),
+        samples_json=json.dumps(samples_list),
+        controls=view_controls(loci_map, samples_list),
     )
     return page
 
@@ -2535,6 +2611,17 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   #xlsxMore button {{
     font: inherit; padding: 4px 10px; cursor: pointer;
   }}
+  /* View aids in the bar: the identical-position toggle and the colour hint. */
+  .xlsx-ctl {{ font-size: 12.5px; white-space: nowrap; }}
+  .xlsx-ctl input {{ vertical-align: -2px; margin: 0 4px 0 0; }}
+  .xlsx-ctl-off {{ color: var(--xlsx-muted); }}
+  .xlsx-ctl-note {{ font-size: 12px; color: var(--xlsx-muted); }}
+  /* Cells that toggle a colour mark: sample names and position headers. */
+  td.xlsx-hl-target {{ cursor: pointer; }}
+  td.xlsx-hl-target:hover {{
+    outline: 2px dashed rgba(15, 22, 33, 0.45);
+    outline-offset: -2px;
+  }}
   /* Per-cell styles, deduplicated into classes — the same handful of fills and
      fonts repeat across every cell of these tables. */
   {style_css}
@@ -2544,6 +2631,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 <div class="xlsx-bar">
   <span class="filename">{filename}</span>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
+  {controls}
   <span style="margin-left: auto;">{download_link}</span>
 </div>
 {notice}
@@ -2627,9 +2715,9 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
 }})();
 
 // ---------------------------------------------------------------------------
-// Delegated variant-cell clicks + load-as-you-scroll.
+// Delegated variant-cell clicks, view aids, and load-as-you-scroll.
 //
-// Both exist for the same reason: a cascade table is far too big to hand the
+// The delegation exists because a cascade table is far too big to hand the
 // browser at once. Giving every variant cell its own <a href onclick title
 // target> cost ~450 bytes a cell, which capped the preview at ~24 columns of a
 // 10,001-column table. A cell now carries only a class; the sample is read from
@@ -2646,6 +2734,11 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   if (!body || !table) return;
 
   table.addEventListener("click", function(ev) {{
+    // Full-fidelity pages give every variant cell its own anchor (and every
+    // no-data cell an explanatory span). Those cells answer for themselves;
+    // acting here as well would launch IGV twice per click — or once for a
+    // sample whose cell was deliberately left unclickable.
+    if (ev.target.closest && ev.target.closest("a, .xlsx-igv-disabled")) return;
     var td = ev.target.closest ? ev.target.closest("td") : null;
     if (!td || !td.classList.contains("xlsx-variant")) return;
     var tr = td.parentNode;
@@ -2662,50 +2755,224 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     window.__vsnpLaunchIgv(url);
   }});
 
-  if (loaded >= available) {{ if (more) more.remove(); return; }}
+  // ---- colour marks -------------------------------------------------------
+  // Click a sample name to mark its row, a position header to mark its
+  // column — the table's version of the tree viewer's "Colour it", in the
+  // same palette. Marks are nth-child CSS rules rather than edits to cells:
+  // rows that lazy-load later pick their marks up on arrival, and a column
+  // mark costs one rule instead of one edit per cell. The marks are drawn as
+  // lane edges and a tinted name/header cell, never as cell fills — in these
+  // tables the fill IS the data (it says which base was called), and a mark
+  // that painted over it would cost exactly the information being compared.
+  var PALETTE = ["#1f77b4", "#d95f02", "#2ca02c", "#9467bd",
+                 "#8c564b", "#e7298a", "#17becf", "#bcbd22"];
+  var hlRows = new Map(), hlCols = new Map(), hlNext = 0;
+  var hlStyle = document.createElement("style");
+  document.head.appendChild(hlStyle);
+  var clearLink = document.getElementById("xlsxHlClear");
 
-  var busy = false, done = false;
+  function tintOf(hex) {{
+    var mix = function(v) {{ return Math.round(255 - (255 - v) * 0.25); }};
+    return "rgb(" + mix(parseInt(hex.slice(1, 3), 16))
+         + "," + mix(parseInt(hex.slice(3, 5), 16))
+         + "," + mix(parseInt(hex.slice(5, 7), 16)) + ")";
+  }}
+
+  function renderMarks() {{
+    var css = [];
+    hlRows.forEach(function(colour, r) {{
+      var tr = "#xlsxBody tr:nth-child(" + (r + 1) + ")";
+      css.push(tr + " td {{ box-shadow: inset 0 2px 0 0 " + colour
+               + ", inset 0 -2px 0 0 " + colour + "; }}");
+      css.push(tr + " td:first-child {{ background-color: " + tintOf(colour)
+               + "; box-shadow: inset 3px 0 0 0 " + colour + "; }}");
+    }});
+    hlCols.forEach(function(colour, c) {{
+      css.push("#xlsxBody td:nth-child(" + c + ") {{ box-shadow: inset 2px 0 0 0 "
+               + colour + ", inset -2px 0 0 0 " + colour + "; }}");
+      css.push("#xlsxBody tr:first-child td:nth-child(" + c
+               + ") {{ background-color: " + tintOf(colour)
+               + "; box-shadow: inset 0 3px 0 0 " + colour + "; }}");
+    }});
+    hlStyle.textContent = css.join(" ");
+    if (clearLink) clearLink.style.display = (hlRows.size || hlCols.size) ? "" : "none";
+  }}
+
+  function toggleMark(map, key) {{
+    if (map.has(key)) map.delete(key);
+    else {{ map.set(key, PALETTE[hlNext++ % PALETTE.length]); }}
+    renderMarks();
+  }}
+
+  if (clearLink) clearLink.addEventListener("click", function(ev) {{
+    ev.preventDefault();
+    hlRows.clear(); hlCols.clear(); hlNext = 0;
+    renderMarks();
+  }});
+
+  table.addEventListener("click", function(ev) {{
+    if (ev.target.closest && ev.target.closest("a")) return;
+    var td = ev.target.closest ? ev.target.closest("td") : null;
+    if (!td) return;
+    var tr = td.parentNode;
+    if (tr.rowIndex === 0 && LOCI[String(td.cellIndex + 1)]) {{
+      toggleMark(hlCols, td.cellIndex + 1);
+    }} else if (td.cellIndex === 0 && SAMPLES[tr.rowIndex]) {{
+      toggleMark(hlRows, tr.rowIndex);
+    }}
+  }});
+
+  // The clickable name/header cells say so on hover. Applied to rows as they
+  // arrive — markTargets() starts where the previous call stopped.
+  var markedTo = 0;
+  function markTargets() {{
+    var rows = body.rows;
+    if (!rows.length) return;
+    if (markedTo === 0) {{
+      var hdr = rows[0].cells;
+      for (var c = 0; c < hdr.length; c++) {{
+        if (LOCI[String(c + 1)]) {{
+          hdr[c].classList.add("xlsx-hl-target");
+          hdr[c].title = "Click to colour this position";
+        }}
+      }}
+    }}
+    for (var r = Math.max(markedTo, 1); r < rows.length; r++) {{
+      if (SAMPLES[r] && rows[r].cells.length) {{
+        rows[r].cells[0].classList.add("xlsx-hl-target");
+        rows[r].cells[0].title = "Click to colour this sample";
+      }}
+    }}
+    markedTo = rows.length;
+  }}
+  markTargets();
+
+  // ---- the identical-position toggle --------------------------------------
+  // "Identical" is exact: a position hides only when every sample row shows
+  // the very same text in its cell — same base, same ambiguity code, same
+  // nothing. Any one sample disagreeing (a different call, a missing '-',
+  // anything) keeps the position on screen.
+  var invBox = document.getElementById("xlsxInvariant");
+  var invNote = document.getElementById("xlsxInvariantNote");
+  var colgroupEl = table.querySelector("colgroup");
+  var allCols = colgroupEl ? Array.prototype.slice.call(colgroupEl.children) : [];
+  var hideStyle = document.createElement("style");
+  document.head.appendChild(hideStyle);
+
+  function identicalCols() {{
+    var rows = body.rows, sampleRows = [];
+    for (var r = 0; r < rows.length; r++) if (SAMPLES[r]) sampleRows.push(rows[r]);
+    var out = [];
+    if (sampleRows.length < 2) return out;   // nothing to compare — hide nothing
+    Object.keys(LOCI).forEach(function(k) {{
+      var c = parseInt(k, 10) - 1;
+      var first = null;
+      for (var i = 0; i < sampleRows.length; i++) {{
+        var cell = sampleRows[i].cells[c];
+        var t = cell ? cell.textContent.trim() : "";
+        if (first === null) first = t;
+        else if (t !== first) return;
+      }}
+      out.push(c + 1);
+    }});
+    return out;
+  }}
+
+  function setHiddenCols(cols) {{
+    // The <col> elements are physically removed (and restored) so the fixed
+    // table layout keeps handing the right width to each cell that remains;
+    // hiding only the cells would shift every column onto its neighbour's
+    // width. The cells themselves hide by nth-child rule — those count DOM
+    // position, so nothing renumbers and the IGV click mapping stays right.
+    var hidden = {{}};
+    cols.forEach(function(c) {{ hidden[c] = true; }});
+    while (colgroupEl.firstChild) colgroupEl.removeChild(colgroupEl.firstChild);
+    for (var i = 0; i < allCols.length; i++) {{
+      if (!hidden[i + 1]) colgroupEl.appendChild(allCols[i]);
+    }}
+    var sels = cols.map(function(c) {{ return "#xlsxTable td:nth-child(" + c + ")"; }});
+    var rules = [];
+    for (var j = 0; j < sels.length; j += 400) {{
+      rules.push(sels.slice(j, j + 400).join(",") + " {{ display: none; }}");
+    }}
+    hideStyle.textContent = rules.join(" ");
+  }}
+
+  if (invBox && !invBox.disabled && colgroupEl) {{
+    invBox.addEventListener("change", function() {{
+      if (!invBox.checked) {{
+        setHiddenCols([]);
+        invNote.textContent = "";
+        return;
+      }}
+      invNote.textContent = "checking every row…";
+      loadAllRows().then(function() {{
+        var cols = identicalCols();
+        setHiddenCols(cols);
+        invNote.textContent = cols.length
+          ? "hiding " + cols.length + " of " + Object.keys(LOCI).length + " positions"
+          : "no position is identical across the shown samples";
+      }}).catch(function() {{
+        invBox.checked = false;
+        invNote.textContent = "could not load the remaining rows — nothing was hidden";
+      }});
+    }});
+  }}
+
+  // ---- load-as-you-scroll -------------------------------------------------
+  var done = loaded >= available, inflight = null;
   function status() {{
+    if (!more) return;
     more.innerHTML = done
       ? ""
       : "Showing " + loaded + " of " + available + " rows. "
         + "<button type=\\"button\\" id=\\"xlsxMoreBtn\\">Load more</button>";
     var b = document.getElementById("xlsxMoreBtn");
-    if (b) b.addEventListener("click", function() {{ fetchMore(); }});
+    if (b) b.addEventListener("click", function() {{ fetchMore().catch(function() {{}}); }});
   }}
   function fetchMore() {{
-    if (busy || done) return;
-    busy = true;
+    if (done) return Promise.resolve();
+    if (inflight) return inflight;
     more.textContent = "Loading rows " + (loaded + 1) + "-"
                      + Math.min(loaded + 200, available) + "…";
     var u = new URL(window.location.href);
     u.searchParams.set("rows_from", loaded);
     u.searchParams.set("rows_count", 200);
-    fetch(u.toString(), {{ headers: {{ "Accept": "text/html" }} }})
+    inflight = fetch(u.toString(), {{ headers: {{ "Accept": "text/html" }} }})
       .then(function(r) {{ if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }})
       .then(function(htmlText) {{
+        inflight = null;
         if (!htmlText.trim()) {{ done = true; status(); return; }}
         body.insertAdjacentHTML("beforeend", htmlText);
         loaded = body.rows.length;
         if (loaded >= available) done = true;
-        busy = false;
+        markTargets();
         status();
       }})
       .catch(function(e) {{
-        busy = false;
+        inflight = null;
         more.textContent = "Could not load more rows (" + e.message + "). ";
         var b = document.createElement("button");
         b.textContent = "Retry";
-        b.addEventListener("click", function() {{ more.textContent = ""; fetchMore(); }});
+        b.addEventListener("click", function() {{ more.textContent = ""; fetchMore().catch(function() {{}}); }});
         more.appendChild(b);
+        throw e;
       }});
+    return inflight;
   }}
+  // Every window row, before the toggle answers: a claim about "all samples"
+  // must not be computed from whatever prefix happened to be scrolled in.
+  function loadAllRows() {{
+    return done ? Promise.resolve() : fetchMore().then(loadAllRows);
+  }}
+
+  if (done) {{ if (more) more.remove(); return; }}
   // Load the next batch as the bottom of the table comes into view, and keep
   // the button as the manual fallback (and for browsers without the observer).
   status();
   if (window.IntersectionObserver) {{
     new IntersectionObserver(function(entries) {{
-      if (entries.some(function(e) {{ return e.isIntersecting; }})) fetchMore();
+      if (entries.some(function(e) {{ return e.isIntersecting; }})) fetchMore().catch(function() {{}});
     }}, {{ rootMargin: "600px" }}).observe(more);
   }}
 }})();

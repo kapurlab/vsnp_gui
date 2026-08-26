@@ -1,0 +1,14 @@
+# Bytecode caches. v0.4.73 committed a set by accident, and they went stale on
+# the very next edit — every checkout then showed a page of modified .pyc it
+# never touched. Python regenerates these; they are never release content.
+__pycache__/
+*.pyc
+
+# The backend venv the launcher builds beside the checkout.
+env/
+.venv/
+
+# Reference data staged next to the checkout by the installer, not source.
+# No trailing slash: on installed machines this is a SYMLINK into the shared
+# refs tree, and a dir-only pattern would leave it showing as untracked.
+vSNP_reference_options

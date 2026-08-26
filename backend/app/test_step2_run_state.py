@@ -42,8 +42,11 @@ from app.main import (
     _dir_holds_a_file,
     _resolve_step2_output_dir,
     _step2_read_run_metadata,
+    _step2_run_dirs,
     _step2_run_shape,
     _step2_run_state,
+    _step2_runs_newest_first,
+    _step2_split_run_name,
 )
 import app.main as main_mod
 
@@ -84,6 +87,89 @@ def make_staged_run(step2: Path, ts: str, vcfs: int = 25) -> Path:
 def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="step2_run_state_"))
     try:
+        print("\n[labelled comparison names are recognised and split]")
+        # Every one of these is a real folder name from the Ames influenza
+        # projects, and every one was invisible to the GUI: the old rule required
+        # the name to be EXACTLY a stamp, so 203 folders across three projects —
+        # precisely the ones someone had cared enough to name — never appeared in
+        # the Comparison list at all.
+        for name, stamp, label in [
+            ("2026-06-05_13-11-21", "2026-06-05_13-11-21", ""),
+            ("2026-04-01_08-21-32_owl_subset", "2026-04-01_08-21-32", "owl_subset"),
+            ("2026-02-24_13-52-45_all_vcf", "2026-02-24_13-52-45", "all_vcf"),
+            ("2026-05-28_14-55-36_HPAI_D1-1_AZ-dairy", "2026-05-28_14-55-36", "HPAI_D1-1_AZ-dairy"),
+            ("2025-05-08_13-21-49-milk-product", "2025-05-08_13-21-49", "milk-product"),
+            ("2026-04-24_D1-1_Group-2d2b", "2026-04-24", "D1-1_Group-2d2b"),
+            ("2025-04-25", "2025-04-25", ""),
+            ("2025-08-19_16-02-32]", "2025-08-19_16-02-32", "]"),
+        ]:
+            got = _step2_split_run_name(name)
+            assert_true(got is not None, f"recognised: {name}")
+            assert_eq((got["stamp"], got["label"]), (stamp, label), f"split: {name}")
+
+        # A leading date is still required, so step2/ housekeeping is not swept in.
+        for name in ("vcf_database", "vcf_starting_files", "test", "runs",
+                     "step2_is_running__individual_folders_may_be_complete"):
+            assert_eq(_step2_split_run_name(name), None, f"not a comparison: {name}")
+
+        print("\n[chronological order, which raw name order gets wrong]")
+        # Lexicographically, 2026-04-24_D1-1_Group-2d2b (no time at all) sorts
+        # AHEAD of 2026-04-24_23-59-59, while a bare 2025-04-25 sorts BEHIND
+        # every timed folder of its own day — two opposite conventions in one
+        # list. "Newest with results" picks the default comparison, so this has
+        # to come from the parsed stamp, not the string.
+        same_day = [
+            "2026-04-24_09-33-17",
+            "2026-04-24_09-33-17_D1-1_Group-2d2b",
+            "2026-04-24_D1-1_Group-2d2b",
+            "2026-04-24_23-59-59",
+        ]
+        assert_eq(_step2_runs_newest_first(same_day)[0], "2026-04-24_23-59-59",
+                  "23:59 is the newest of its day, not the untimed folder")
+        assert_eq(_step2_runs_newest_first(same_day)[-1], "2026-04-24_D1-1_Group-2d2b",
+                  "an untimed folder sorts at the START of its day (00-00-00)")
+        assert_eq(_step2_runs_newest_first(["2025-04-25", "2025-04-25_09-00-00"]),
+                  ["2025-04-25_09-00-00", "2025-04-25"],
+                  "bare date is older than the same day's timed run")
+        assert_eq(_step2_runs_newest_first(
+                      ["2025-12-31_23-00-00", "2026-01-01_00-00-01", "2025-06-01_12-00-00"]),
+                  ["2026-01-01_00-00-01", "2025-12-31_23-00-00", "2025-06-01_12-00-00"],
+                  "ordinary chronology still holds across years")
+        # A legacy step2/runs/<name> that parses as nothing must not break the sort.
+        assert_eq(_step2_runs_newest_first(["2026-01-01_00-00-00", "legacy-run"]),
+                  ["2026-01-01_00-00-00", "legacy-run"],
+                  "unparseable names sort last instead of raising")
+
+        print("\n[the two patterns keep their separate jobs]")
+        # The permissive rule identifies comparisons. The strict one is used where
+        # the question is "is this a nested run folder rather than a results
+        # group" — using the permissive rule there would HIDE a group legitimately
+        # named with a leading date, which is the same bug in reverse.
+        assert_true(main_mod._STEP2_COMPARISON_RE.match("2026-04-24_D1-1_Group-2d2b"),
+                    "permissive rule accepts a labelled comparison")
+        assert_eq(bool(main_mod._STEP2_STAMP_ONLY_RE.match("2026-04-24_D1-1_Group-2d2b")),
+                  False, "strict rule rejects it, so such a GROUP stays visible")
+        assert_true(main_mod._STEP2_STAMP_ONLY_RE.match("2026-04-24_09-33-17"),
+                    "strict rule still catches a real nested run folder")
+
+        print("\n[labelled folders reach the Comparison list and the resolver]")
+        lab = tmp / "labelled" / "step2"
+        lab.mkdir(parents=True)
+        make_finished_run(lab, "2026-04-01_08-21-32_owl_subset", groups=2)
+        make_finished_run(lab, "2026-03-01_08-00-00", groups=2)
+        make_staged_run(lab, "2026-04-24_D1-1_Group-2d2b", vcfs=5)
+        (lab / "vcf_database").mkdir()
+        found = _step2_run_dirs(lab)
+        assert_eq(sorted(found.keys()),
+                  ["2026-03-01_08-00-00", "2026-04-01_08-21-32_owl_subset",
+                   "2026-04-24_D1-1_Group-2d2b"],
+                  "all three found, vcf_database excluded")
+        # The untimed labelled folder has no results AND sorts to 2026-04-24
+        # 00:00:00, so the newest WITH results is the labelled owl_subset run.
+        assert_eq(_resolve_step2_output_dir(lab, None).name,
+                  "2026-04-01_08-21-32_owl_subset",
+                  "a labelled comparison can be the default the pane opens")
+
         print("\n[_dir_holds_a_file agrees with what the pane renders]")
         d = tmp / "probe"
         (d / "empty_group").mkdir(parents=True)
@@ -323,7 +409,7 @@ def main() -> int:
 
 def _step2_run_dirs_names(step2: Path):
     return [d.name for d in step2.iterdir()
-            if d.is_dir() and main_mod._STEP2_RUN_RE.match(d.name)]
+            if d.is_dir() and main_mod._STEP2_STAMP_ONLY_RE.match(d.name)]
 
 
 if __name__ == "__main__":

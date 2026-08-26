@@ -165,12 +165,12 @@ function QcSortTh({ sortKey, children, sort, onSort }) {
 // Everything here comes from `reason`, which the backend derives from the folder
 // itself, so it is as accurate for a run made at the command line as for one the
 // GUI launched.
-function Step2EmptyPane({ reason, runId, busy, onResume, onJumpTo }) {
-  const when = runId && runId !== "legacy" ? runId.replace(/_/g, " ") : "";
+function Step2EmptyPane({ reason, runId, runTitle, jumpTitle, busy, onResume, onJumpTo }) {
+  const when = runTitle || (runId && runId !== "legacy" ? runId.replace(/_/g, " ") : "");
   const jump = reason && reason.newest_with_results;
   const jumpButton = jump ? (
     <button className="small" onClick={() => onJumpTo(jump)}
-            title={`Open ${jump.replace(/_/g, " ")}, the most recent comparison that has results.`}>
+            title={`Open ${jumpTitle || jump}, the most recent comparison that has results.`}>
       Show the newest comparison with results
     </button>
   ) : null;
@@ -2291,6 +2291,18 @@ export default function App() {
   // resolver exists to prevent. Runs arrive newest-first, so find() is "newest
   // that qualifies". Older backends send neither field: both find()s miss and
   // the previous behaviour stands.
+  // Timestamp, then the name someone gave the comparison. The two arrive split
+  // because formatting the folder name wholesale cannot work once labels exist:
+  // replacing every underscore with a space turned
+  // "2026-05-28_14-55-36_HPAI_D1-1_AZ-dairy" into "…HPAI D1-1 AZ-dairy", which
+  // is not what anyone typed. Falls back to the raw id on older backends.
+  function step2RunTitle(r) {
+    if (r.run_id === "legacy") return "Legacy (flat)";
+    if (!r.stamp) return r.run_id.replace(/_/g, " ");
+    const when = r.stamp.replace(/_/g, " ");
+    return r.label ? `${when} — ${r.label}` : when;
+  }
+
   // What a comparison holds, spelled out in the dropdown. The state is derived
   // server-side from the folder itself, so it reads the same for a run made at
   // the command line as for one the GUI launched. Before this, a folder that had
@@ -2300,19 +2312,22 @@ export default function App() {
   function step2RunStateSuffix(r) {
     const n = r.staged_vcfs || 0;
     const vcfs = n ? n.toLocaleString() : "";
+    // A middle dot, not another em dash: the em dash already separates the
+    // stamp from the label someone gave the run, and "14-55-36 — AZ-dairy —
+    // 3 groups" makes the reader work out which half is the name.
     switch (r.state) {
       case "results":
-        return r.group_count > 0 ? ` — ${r.group_count} groups` : " — results";
+        return r.group_count > 0 ? ` · ${r.group_count} groups` : " · results";
       case "running":
-        return " — running now";
+        return " · running now";
       case "staged":
-        return ` — staged, never ran${vcfs ? ` (${vcfs} VCFs waiting)` : ""}`;
+        return ` · staged, never ran${vcfs ? ` (${vcfs} VCFs waiting)` : ""}`;
       case "interrupted":
-        return ` — interrupted${vcfs ? ` (${vcfs} VCFs staged)` : ""}`;
+        return ` · interrupted${vcfs ? ` (${vcfs} VCFs staged)` : ""}`;
       case "empty":
-        return " — empty";
+        return " · empty";
       case "unreadable":
-        return " — could not be read";
+        return " · could not be read";
       default:
         // Older backend, no state field: keep exactly what it used to show.
         return (r.status === "ok" ? " ✓" : r.status === "failed" ? " ✗" : r.status === "running" ? " …" : "")
@@ -7898,7 +7913,7 @@ export default function App() {
                 >
                   {step2Runs.map((r) => (
                     <option key={r.run_id} value={r.run_id}>
-                      {r.run_id === "legacy" ? "Legacy (flat)" : r.run_id.replace(/_/g, " ").replace("T", " ")}
+                      {step2RunTitle(r)}
                       {step2RunStateSuffix(r)}
                     </option>
                   ))}
@@ -8153,6 +8168,15 @@ export default function App() {
                 <Step2EmptyPane
                   reason={step2EmptyReason}
                   runId={step2SelectedRun}
+                  runTitle={(() => {
+                    const row = step2Runs.find((r) => r.run_id === step2SelectedRun);
+                    return row ? step2RunTitle(row) : "";
+                  })()}
+                  jumpTitle={(() => {
+                    const id = step2EmptyReason && step2EmptyReason.newest_with_results;
+                    const row = id && step2Runs.find((r) => r.run_id === id);
+                    return row ? step2RunTitle(row) : "";
+                  })()}
                   busy={step2Running}
                   onResume={(id) => step2Run(id)}
                   onJumpTo={(id) => setStep2SelectedRun(id)}

@@ -668,14 +668,74 @@ def _load_vcf_label_map(cfg: Dict[str, str], label_style: str) -> Dict[str, str]
     return out
 
 
-# Step 2 run directories are timestamp-named (vsnp3 step2 run stamp), created
-# directly under step2/ (e.g. step2/2026-06-05_13-11-21). Older projects nested
-# them under step2/runs/<ts>; those are still recognized for reads.
-_STEP2_RUN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+# Step 2 comparison folders live directly under step2/, named by the vsnp3 run
+# stamp (e.g. step2/2026-06-05_13-11-21). Older projects nested them under
+# step2/runs/<ts>; those are still recognized for reads.
+#
+# TWO patterns, because the question is asked for two different reasons.
+#
+# _STEP2_COMPARISON_RE identifies a comparison folder. It accepts a LABEL after
+# the stamp, because people name their comparisons and the GUI used to punish
+# them for it: an exact-match-only rule made 203 folders across three influenza
+# projects invisible — 2026-04-01_08-21-32_owl_subset,
+# 2026-05-28_14-55-36_HPAI_D1-1_AZ-dairy, 2026-02-24_13-52-45_all_vcf, and so on
+# — which is precisely the subset someone cared enough about to name. The time is
+# optional too (2026-04-24_D1-1_Group-2d2b, 2025-04-25 are both real). A leading
+# date is still required, so an unrelated folder under step2/ is not swept in.
+#
+# _STEP2_STAMP_ONLY_RE stays exact, and is used where the question is "is this a
+# nested run folder rather than a results group". Only the GUI creates those, and
+# it always names them exactly, so the strict rule is right there — and using the
+# permissive one would hide a group legitimately named with a leading date, which
+# is the same class of bug (results present, GUI cannot see them) in reverse.
+_STEP2_COMPARISON_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})(?:_(?P<time>\d{2}-\d{2}-\d{2}))?(?P<label>.*)$"
+)
+_STEP2_STAMP_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
 
 # Dirs under step2/ that are NOT analysis-group output dirs (the VCF database,
 # the legacy runs/ wrapper, and the provenance store).
 _STEP2_NON_GROUP_DIRS = ("vcf_database", "vcf_source", "runs", "_provenance")
+
+
+def _step2_split_run_name(name: str) -> Optional[Dict[str, str]]:
+    """Split a comparison folder name into stamp / sort key / label, or None.
+
+    `sort_key` is what chronological ordering must use instead of the raw name.
+    Sorting the names themselves is subtly wrong once labels exist: of four real
+    same-day folders, plain lexicographic order puts 2026-04-24_D1-1_Group-2d2b
+    — which carries no time at all — AHEAD of 2026-04-24_23-59-59, while a bare
+    2025-04-25 sorts BEHIND every timed folder of its own day. Two opposite
+    conventions in one list, and "newest with results" is what the results pane
+    relies on to choose a default. Missing time reads as 00-00-00, so a
+    date-only folder sorts at the start of its day, and the label only ever
+    breaks ties.
+    """
+    m = _STEP2_COMPARISON_RE.match(name)
+    if not m:
+        return None
+    date, time = m.group("date"), m.group("time")
+    label = m.group("label").lstrip("_- ").strip()
+    return {
+        "stamp": f"{date}_{time}" if time else date,
+        "sort_key": f"{date}_{time or '00-00-00'}",
+        "label": label,
+    }
+
+
+def _step2_runs_newest_first(run_ids) -> List[str]:
+    """Comparison ids, newest first, ordered by their parsed stamp.
+
+    Shared by every caller that used to say sorted(..., reverse=True) on the raw
+    names, so the dropdown, the default-run resolver and the "where are my
+    results" pointer can never disagree about which comparison is newest.
+    """
+    def key(run_id: str):
+        parts = _step2_split_run_name(run_id)
+        # Anything unparseable (a legacy step2/runs/<name>) sorts last rather
+        # than crashing the ordering.
+        return (parts["sort_key"], parts["label"]) if parts else ("", run_id)
+    return sorted(run_ids, key=key, reverse=True)
 
 
 def _step2_run_dirs(step2_dir: Path) -> Dict[str, Path]:
@@ -687,7 +747,7 @@ def _step2_run_dirs(step2_dir: Path) -> Dict[str, Path]:
     runs: Dict[str, Path] = {}
     if step2_dir.is_dir():
         for d in step2_dir.iterdir():
-            if d.is_dir() and _STEP2_RUN_RE.match(d.name):
+            if d.is_dir() and _STEP2_COMPARISON_RE.match(d.name):
                 runs[d.name] = d
     legacy = step2_dir / "runs"
     if legacy.is_dir():
@@ -827,7 +887,7 @@ def _step2_run_shape(run_dir: Path) -> Dict[str, Any]:
                     continue
                 if name.startswith(".") or name in _STEP2_NON_GROUP_DIRS:
                     continue
-                if _STEP2_RUN_RE.match(name):
+                if _STEP2_STAMP_ONLY_RE.match(name):
                     continue
                 try:
                     if not entry.is_dir(follow_symlinks=False):
@@ -5083,7 +5143,7 @@ def step2_runs_list(project: str):
     if run_dirs:
         # One liveness lookup for the whole listing, not one per folder.
         live_run_id = _step2_live_run_id(step2_dir)
-        for run_id in sorted(run_dirs.keys(), reverse=True):
+        for run_id in _step2_runs_newest_first(run_dirs.keys()):
             run_entry = run_dirs[run_id]
             # Per-run isolation. One folder must never be able to empty this
             # list: a 500 here is swallowed by the frontend, so the failure
@@ -5092,12 +5152,18 @@ def step2_runs_list(project: str):
                 meta = _step2_read_run_metadata(run_entry)
                 shape = _step2_run_shape(run_entry)
                 state = _step2_run_state(shape, run_id == live_run_id)
+                parts = _step2_split_run_name(run_id) or {}
                 results.append({
                     "run_id": run_id,
                     "started_at": meta["started_at"],
                     "status": meta["status"],
                     "reference": meta["reference"],
                     "group_count": shape["groups"],
+                    # The stamp and the name someone gave it, split apart so the
+                    # dropdown can show the label instead of mangling the
+                    # underscores of "..._HPAI_D1-1_AZ-dairy" into spaces.
+                    "stamp": parts.get("stamp", run_id),
+                    "label": parts.get("label", ""),
                     # Derived from the folder itself, so it is just as true for
                     # a command-line run as for one the GUI launched.
                     "state": state,
@@ -5114,6 +5180,8 @@ def step2_runs_list(project: str):
                     "status": "unknown",
                     "reference": "",
                     "group_count": 0,
+                    "stamp": run_id,
+                    "label": "",
                     "state": "unreadable",
                     "live": False,
                     "staged_vcfs": 0,
@@ -5132,6 +5200,8 @@ def step2_runs_list(project: str):
                 "status": "ok",
                 "reference": "",
                 "group_count": len(groups),
+                "stamp": "",
+                "label": "",
                 "state": "results",
                 "live": False,
                 "staged_vcfs": 0,
@@ -6551,7 +6621,7 @@ def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
     if not run_dirs:
         return step2_dir  # legacy flat
 
-    newest_first = sorted(run_dirs.keys(), reverse=True)
+    newest_first = _step2_runs_newest_first(run_dirs.keys())
     live_run_id = _step2_live_run_id(step2_dir)
 
     current_file = step2_dir / ".current_run"
@@ -6659,7 +6729,7 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
     for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_RUN_RE.match(d.name):
+        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_STAMP_ONLY_RE.match(d.name):
             continue
         if d.name.startswith("."):
             continue
@@ -6733,7 +6803,7 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
         state = _step2_run_state(shape, is_live)
         newest_with_results = ""
         sibling_runs = _step2_run_dirs(step2_dir)
-        for candidate in sorted(sibling_runs.keys(), reverse=True):
+        for candidate in _step2_runs_newest_first(sibling_runs.keys()):
             if candidate == resolved_run_id:
                 continue
             # sibling_runs, not step2_dir/candidate — pre-2026-06 projects keep
@@ -6776,7 +6846,7 @@ def step2_trees(project: str, run_id: Optional[str] = Query(None)):
     for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
-        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_RUN_RE.match(d.name) or d.name.startswith("."):
+        if d.name in _STEP2_NON_GROUP_DIRS or _STEP2_STAMP_ONLY_RE.match(d.name) or d.name.startswith("."):
             continue
         tre_files = sorted(d.glob("*.tre"), key=lambda p: p.stat().st_mtime)
         if not tre_files:

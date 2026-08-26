@@ -152,6 +152,100 @@ function QcSortTh({ sortKey, children, sort, onSort }) {
   );
 }
 
+
+// What the results pane shows when the selected comparison has nothing to draw.
+//
+// It used to say "No Step 2 outputs found yet." for every such case, which on
+// the one that matters was not merely unhelpful but false: the comparison this
+// pane had landed on held 8,017 staged VCFs and had never been started, so its
+// outputs were not pending — nothing had ever been asked to produce them. Two
+// hundred and ninety-four finished comparisons sat in the same folder, and the
+// pane gave no hint that they existed or that this one could be run.
+//
+// Everything here comes from `reason`, which the backend derives from the folder
+// itself, so it is as accurate for a run made at the command line as for one the
+// GUI launched.
+function Step2EmptyPane({ reason, runId, busy, onResume, onJumpTo }) {
+  const when = runId && runId !== "legacy" ? runId.replace(/_/g, " ") : "";
+  const jump = reason && reason.newest_with_results;
+  const jumpButton = jump ? (
+    <button className="small" onClick={() => onJumpTo(jump)}
+            title={`Open ${jump.replace(/_/g, " ")}, the most recent comparison that has results.`}>
+      Show the newest comparison with results
+    </button>
+  ) : null;
+
+  // No reason block: an older backend, or the flat legacy layout. Keep the
+  // original wording rather than inventing a diagnosis we do not have.
+  if (!reason) {
+    return <div className="note">No Step 2 outputs found yet.</div>;
+  }
+
+  if (reason.state === "running" || reason.live) {
+    return (
+      <div className="note">
+        <strong>This comparison is running now.</strong>{" "}
+        {reason.staged_vcfs > 0
+          ? `${reason.staged_vcfs.toLocaleString()} VCFs are staged and waiting to be read. `
+          : ""}
+        Groups appear here as vsnp3 finishes them — use Refresh, or watch the
+        pipeline log. {jumpButton}
+      </div>
+    );
+  }
+
+  if (reason.state === "staged" || reason.state === "interrupted") {
+    const n = (reason.staged_vcfs || 0).toLocaleString();
+    return (
+      <div className="note warning">
+        <div>
+          <strong>
+            {reason.state === "staged"
+              ? "This comparison was prepared but never ran."
+              : "This comparison was interrupted before it produced results."}
+          </strong>{" "}
+          {when ? `Started ${when}. ` : ""}
+          It holds {n} VCFs staged and ready, and no results. Step 2 copies the
+          VCFs it will compare into the comparison folder first and then runs
+          vsnp3 over those copies; here the copying finished and the run did not
+          happen, so there is nothing to show and nothing has been lost.
+        </div>
+        <div style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
+          {reason.can_resume ? (
+            <button
+              className="small"
+              disabled={busy}
+              title={`Run vsnp3 over the ${n} VCFs already staged in this folder. Nothing is re-copied.`}
+              onClick={() => onResume(runId)}
+            >
+              {busy ? "Starting…" : "Run this comparison"}
+            </button>
+          ) : null}
+          {jumpButton}
+        </div>
+      </div>
+    );
+  }
+
+  if (reason.state === "unreadable") {
+    return (
+      <div className="note warning">
+        <strong>This comparison folder could not be read.</strong> Its permissions
+        may not allow it, or the storage may be unavailable. {jumpButton}
+      </div>
+    );
+  }
+
+  // "empty": the folder exists and holds neither staged VCFs nor results.
+  return (
+    <div className="note">
+      <strong>This comparison is empty.</strong>{" "}
+      {when ? `Created ${when}, ` : ""}it holds no staged VCFs and no results, so
+      there is nothing to run and nothing to show. {jumpButton}
+    </div>
+  );
+}
+
 export default function App() {
   const [config, setConfig] = useState(null);
   const [projects, setProjects] = useState([]);
@@ -317,6 +411,13 @@ export default function App() {
   const [step2Outputs, setStep2Outputs] = useState([]);
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
+  // Why the Comparison list is missing. It used to fail silently, so a 500 from
+  // one damaged run folder — or a listing that ran past the OOD proxy's read
+  // timeout — left no dropdown and nothing on screen to explain its absence.
+  const [step2RunsError, setStep2RunsError] = useState("");
+  // What the selected comparison holds when it has nothing to render, so the
+  // pane can say WHY instead of "No Step 2 outputs found yet."
+  const [step2EmptyReason, setStep2EmptyReason] = useState(null);
   const [step2EditedCount, setStep2EditedCount] = useState(0);
   const [posthocTools, setPosthocTools] = useState([]);
   const [posthocStatus, setPosthocStatus] = useState({});
@@ -2182,18 +2283,77 @@ export default function App() {
     setQcLoading(false);
   }
 
+  // Which comparison to open by default. This MUST agree with the backend
+  // resolver (_resolve_step2_output_dir): an explicit run_id always wins there,
+  // so sending runs[0].run_id unconditionally would pin the pane to the newest
+  // folder even when that folder is a staging directory holding nothing but
+  // loose VCFs — reintroducing, from this side, the exact blank pane the
+  // resolver exists to prevent. Runs arrive newest-first, so find() is "newest
+  // that qualifies". Older backends send neither field: both find()s miss and
+  // the previous behaviour stands.
+  // What a comparison holds, spelled out in the dropdown. The state is derived
+  // server-side from the folder itself, so it reads the same for a run made at
+  // the command line as for one the GUI launched. Before this, a folder that had
+  // staged its VCFs and then never started looked identical here to a finished
+  // comparison, which is how one came to be selected by default and reported as
+  // having no outputs.
+  function step2RunStateSuffix(r) {
+    const n = r.staged_vcfs || 0;
+    const vcfs = n ? n.toLocaleString() : "";
+    switch (r.state) {
+      case "results":
+        return r.group_count > 0 ? ` — ${r.group_count} groups` : " — results";
+      case "running":
+        return " — running now";
+      case "staged":
+        return ` — staged, never ran${vcfs ? ` (${vcfs} VCFs waiting)` : ""}`;
+      case "interrupted":
+        return ` — interrupted${vcfs ? ` (${vcfs} VCFs staged)` : ""}`;
+      case "empty":
+        return " — empty";
+      case "unreadable":
+        return " — could not be read";
+      default:
+        // Older backend, no state field: keep exactly what it used to show.
+        return (r.status === "ok" ? " ✓" : r.status === "failed" ? " ✗" : r.status === "running" ? " …" : "")
+             + (r.group_count > 0 ? ` (${r.group_count} groups)` : "");
+    }
+  }
+
+  function pickDefaultRun(runs) {
+    const live = runs.find((r) => r.live);
+    if (live) return live.run_id;
+    const withResults = runs.find((r) => r.has_results);
+    if (withResults) return withResults.run_id;
+    return runs[0].run_id;
+  }
+
   async function loadStep2Runs(autoSelectLatest = false) {
     if (!selectedProject) return;
+    setStep2RunsError("");
     try {
       const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/runs`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        let detail = "";
+        try { detail = (await res.json()).detail || ""; } catch { /* not JSON */ }
+        setStep2RunsError(
+          detail || `Could not list this project's comparisons (HTTP ${res.status}).`
+        );
+        return;
+      }
       const runs = await res.json();
       setStep2Runs(runs);
       if (autoSelectLatest && runs.length > 0) {
-        setStep2SelectedRun(runs[0].run_id);
+        setStep2SelectedRun(pickDefaultRun(runs));
       }
     } catch {
-      // keep existing state on network error
+      // A timeout lands here, and silence was the bug: on a project with
+      // hundreds of comparisons this request can outlive the proxy's read
+      // timeout, and the only symptom was a dropdown that never appeared.
+      setStep2RunsError(
+        "Could not list this project's comparisons — the request did not complete. " +
+        "On a project with hundreds of them it may have timed out. Retry to try again."
+      );
     }
   }
 
@@ -2212,7 +2372,9 @@ export default function App() {
     if (Array.isArray(data)) {
       setStep2Outputs(data);
       setStep2Groups([]);
+      setStep2EmptyReason(null);
     } else {
+      setStep2EmptyReason(data.empty_reason || null);
       setStep2Outputs(data.top || []);
       groups = data.groups || [];
       setStep2Groups(groups);
@@ -3502,12 +3664,18 @@ export default function App() {
     }
   }
 
-  async function step2Run() {
+  // resumeRunId dispatches vsnp3 into an existing comparison folder whose VCFs
+  // are already staged, instead of building a new one. Same endpoint, same
+  // dispatch path — only the staging step is skipped, so a resumed run can
+  // never drift away from a normal one.
+  async function step2Run(resumeRunId = null) {
     if (!selectedProject || !settingsReady || step2Running) return;
     // The setup pane's source ticks / pasted list decide what this run compares.
     // Refuse to start on an empty selection rather than quietly comparing the
-    // whole database (or nothing at all).
-    if (step2SetSamples.length && step2RunSelection.keep.size === 0) {
+    // whole database (or nothing at all). A resume is exempt: its comparison set
+    // was fixed when the VCFs were staged, and it is those copies vsnp3 reads —
+    // today's ticks say nothing about it.
+    if (!resumeRunId && step2SetSamples.length && step2RunSelection.keep.size === 0) {
       window.alert(
         step2Mode === "list"
           ? "None of the pasted sample names matched a sample in this project. Nothing to compare."
@@ -3567,7 +3735,8 @@ export default function App() {
           dp: s2Dp,
           density_threshold: s2DensityThreshold !== "" ? parseInt(s2DensityThreshold, 10) : null,
           density_window: s2DensityWindow !== "" ? parseInt(s2DensityWindow, 10) : null,
-          bootstrap: s2Bootstrap !== "" ? parseInt(s2Bootstrap, 10) || 0 : 0
+          bootstrap: s2Bootstrap !== "" ? parseInt(s2Bootstrap, 10) || 0 : 0,
+          resume_run_id: resumeRunId || null
         })
       });
     } catch (e) {
@@ -3593,7 +3762,11 @@ export default function App() {
     // Only warn if we asked to exclude but NOTHING was excluded AND nothing was
     // legitimately kept via a reference panel (otherwise it's the intended
     // panel-override, not a silent miss).
-    if (uiExclude.length > 0 && excludedCount === 0 && panelExempt === 0) {
+    // Not applicable to a resume: the removal list that governs it is the
+    // remove_by_name.xlsx already sitting in the folder, written when those
+    // VCFs were staged. Comparing it against today's UI exclusions would stop a
+    // perfectly good resume over a disagreement that does not affect the run.
+    if (!resumeRunId && uiExclude.length > 0 && excludedCount === 0 && panelExempt === 0) {
       if (data.job_id) {
         try { await fetch(`${API_BASE}/api/jobs/${data.job_id}/stop`, { method: "POST" }); } catch {}
       }
@@ -3611,6 +3784,10 @@ export default function App() {
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
+    setStep2EmptyReason(null);
+    // Follow the folder that is now running, so a resumed comparison fills in
+    // under the user's eyes instead of leaving them on the one they came from.
+    if (data.run_id) setStep2SelectedRun(data.run_id);
     // May come back "queued" if the global concurrency cap is full — it will
     // start automatically when a slot frees.
     setStep2JobStatus(data.status || "running");
@@ -7722,11 +7899,16 @@ export default function App() {
                   {step2Runs.map((r) => (
                     <option key={r.run_id} value={r.run_id}>
                       {r.run_id === "legacy" ? "Legacy (flat)" : r.run_id.replace(/_/g, " ").replace("T", " ")}
-                      {r.status === "ok" ? " ✓" : r.status === "failed" ? " ✗" : r.status === "running" ? " …" : ""}
-                      {r.group_count > 0 ? ` (${r.group_count} groups)` : ""}
+                      {step2RunStateSuffix(r)}
                     </option>
                   ))}
                 </select>
+              </div>
+            ) : null}
+            {step2RunsError ? (
+              <div className="note warning" style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                <span><strong>Comparison list unavailable:</strong> {step2RunsError}</span>
+                <button className="ghost-btn" onClick={() => loadStep2Runs(true)}>Retry</button>
               </div>
             ) : null}
             {step2EditedCount > 0 && settings.projects_root && selectedProject ? (
@@ -7968,7 +8150,13 @@ export default function App() {
                 </div>
               ) : null}
               {!step2Outputs.length && !step2Groups.length ? (
-                <div className="note">No Step 2 outputs found yet.</div>
+                <Step2EmptyPane
+                  reason={step2EmptyReason}
+                  runId={step2SelectedRun}
+                  busy={step2Running}
+                  onResume={(id) => step2Run(id)}
+                  onJumpTo={(id) => setStep2SelectedRun(id)}
+                />
               ) : null}
                   </div>
                   {totalCount > 8 ? <div className="scroll-hint">Scroll for more results</div> : null}

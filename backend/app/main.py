@@ -697,6 +697,236 @@ def _step2_run_dirs(step2_dir: Path) -> Dict[str, Path]:
     return runs
 
 
+# ---------------------------------------------------------------------------
+# What a run folder actually holds.
+#
+# A comparison folder passes through states the GUI had no name for, and the one
+# it could not name is the one that broke it. step2/run works in this order:
+# make the folder, copy every comparison VCF into it, then launch vsnp3 against
+# it. vsnp3 consumes those VCFs and writes group folders in their place. So
+# "thousands of loose VCFs and no group folders" is the NORMAL state of every
+# run for as long as staging takes — minutes on the 8,000-VCF influenza project
+# — and the PERMANENT state of a run whose job never started, or died before
+# vsnp3 ran.
+#
+# The results pane counts group folders, so it read that state as "newest
+# comparison, no results" and printed "No Step 2 outputs found yet." with 294
+# finished comparisons sitting beside it. Naming the state is what lets the
+# resolver skip it, the dropdown label it, and the pane explain it.
+# ---------------------------------------------------------------------------
+
+_STEP2_STAGED_VCF_SUFFIXES = (".vcf", ".vcf.gz")
+
+# vsnp3 drops this in its working directory while a comparison is in flight. It
+# is the only in-band progress signal a command-line run leaves behind, and
+# nothing in the GUI read it before.
+_STEP2_VSNP3_RUNNING_MARKER = "step2_is_running__individual_folders_may_be_complete"
+
+# Written by provenance_writer.append_run_command at dispatch, so its presence
+# means the GUI, not the command line, prepared this folder.
+_STEP2_GUI_CMD_FILE = "vsnp_gui_step2_run_cmd.txt"
+
+# Top-level files that are themselves a result, so a run holding one is never
+# reported empty. Mirrors what step2_outputs puts in `top`.
+_STEP2_TOP_OUTPUT_SUFFIXES = (".html", ".zip")
+_STEP2_TOP_OUTPUT_NAMES = ("mismatch_report.csv",)
+
+# Suffixes settled by name alone — see _step2_run_shape for why that matters.
+_STEP2_INERT_SUFFIXES = (
+    ".xlsx", ".xls", ".txt", ".json", ".csv", ".tsv", ".log", ".png", ".pdf",
+    ".svg", ".fasta", ".fa", ".fna", ".tre", ".nwk", ".newick",
+)
+
+
+def _dir_holds_a_file(d: Path) -> bool:
+    """True on the FIRST file found, so a wide group folder is never walked.
+
+    Mirrors what step2_outputs will actually render for a group: files at the
+    top of the folder, plus anything under its posthoc/ subfolder. The two
+    predicates have to agree — if this one says yes where the pane says no, the
+    resolver lands on a folder the pane then draws as empty, which is the
+    original bug wearing a different hat.
+    """
+    posthoc = None
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    if e.is_file(follow_symlinks=True):
+                        return True
+                    if e.name == "posthoc" and e.is_dir(follow_symlinks=False):
+                        posthoc = e.path
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    if posthoc is None:
+        return False
+    try:
+        with os.scandir(posthoc) as it:
+            for e in it:
+                try:
+                    if e.is_file(follow_symlinks=True):
+                        return True
+                except OSError:
+                    continue
+    except OSError:
+        return False
+    return False
+
+
+def _step2_run_shape(run_dir: Path) -> Dict[str, Any]:
+    """What one run folder holds: one readdir, and no os.stat it can avoid.
+
+    Cost is the point. The listing this feeds runs over every comparison in the
+    project — 282 of them on the Ames owl project — and a staging folder among
+    them holds one copy of every VCF in the comparison. The previous spelling,
+    ``sum(1 for d in run_entry.iterdir() if d.is_dir())``, paid an os.stat per
+    entry, so 8,000 loose VCFs cost 8,000 stats. That is where an 89-second run
+    listing came from on modified_NL_not_annotated — past the OOD proxy's ~60 s
+    read timeout, so its dropdown never arrived at all.
+
+    Two things keep it cheap. Entries carrying a data-file suffix are settled by
+    NAME, before is_dir() is ever called, so the staging case does no stat
+    whatsoever — including on a filesystem whose readdir returns no d_type,
+    where scandir would otherwise fall back to lstat. And nothing is counted
+    that is not needed: group folders are counted because the dropdown shows the
+    number, but only enough of them are opened to answer "did this run produce
+    anything", which stops at the first non-empty one.
+    """
+    shape: Dict[str, Any] = {
+        "readable": True,
+        "groups": 0,
+        "staged_vcfs": 0,
+        "has_top_output": False,
+        "has_gui_cmd": False,
+        "running_marker": False,
+        "has_results": False,
+    }
+    group_paths: List[str] = []
+    try:
+        with os.scandir(run_dir) as it:
+            for entry in it:
+                name = entry.name
+                low = name.lower()
+                # Name-only decisions first. Every `continue` below is one stat
+                # not performed, which is what makes a staging folder cheap.
+                if low.endswith(_STEP2_STAGED_VCF_SUFFIXES):
+                    shape["staged_vcfs"] += 1
+                    continue
+                if low.endswith(_STEP2_TOP_OUTPUT_SUFFIXES) or low in _STEP2_TOP_OUTPUT_NAMES:
+                    shape["has_top_output"] = True
+                    continue
+                if name == _STEP2_GUI_CMD_FILE:
+                    shape["has_gui_cmd"] = True
+                    continue
+                if name == _STEP2_VSNP3_RUNNING_MARKER:
+                    shape["running_marker"] = True
+                    continue
+                if low.endswith(_STEP2_INERT_SUFFIXES):
+                    continue
+                if name.startswith(".") or name in _STEP2_NON_GROUP_DIRS:
+                    continue
+                if _STEP2_RUN_RE.match(name):
+                    continue
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                shape["groups"] += 1
+                group_paths.append(entry.path)
+    except OSError:
+        shape["readable"] = False
+        return shape
+
+    if shape["has_top_output"]:
+        shape["has_results"] = True
+    else:
+        for path in group_paths:
+            if _dir_holds_a_file(Path(path)):
+                shape["has_results"] = True
+                break
+    return shape
+
+
+def _step2_run_state(shape: Dict[str, Any], is_live: bool) -> str:
+    """Name the state, from the folder plus whether a job is alive on it.
+
+    The marker alone cannot mean "running": vsnp3 leaves it behind when it is
+    killed, and a stale marker reported as running forever is the same silent
+    dead end in different words. Liveness decides; the marker only separates
+    "was interrupted" from "was never started".
+    """
+    if not shape["readable"]:
+        return "unreadable"
+    if shape["has_results"]:
+        return "results"
+    if is_live:
+        return "running"
+    if shape["running_marker"]:
+        return "interrupted"
+    if shape["staged_vcfs"]:
+        return "staged"
+    return "empty"
+
+
+def _step2_live_run_id(step2_dir: Path) -> str:
+    """The run id a live Step 2 job is working in, or "".
+
+    Costs one JobManager lookup (plus, for a run orphaned by a backend restart,
+    one liveness check) — resolved ONCE per listing, not per run folder.
+    """
+    if not _step2_active_job(step2_dir):
+        return ""
+    try:
+        return (step2_dir / ".current_run").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _step2_read_run_metadata(run_dir: Path) -> Dict[str, Any]:
+    """started_at / status / reference from run_metadata.json, defensively.
+
+    The guard is wider than it looks like it needs to be, for a reason. These
+    folders are written by vsnp3 from the command line as often as by the GUI,
+    and the previous spelling caught only JSONDecodeError and OSError around the
+    read — so FIVE conditions in any ONE folder returned a 500 for the whole
+    listing: dispatch_state present but null, a reference stored as a bare
+    string by an older schema, `null` as the file's entire contents, one
+    non-UTF-8 byte (UnicodeDecodeError is a ValueError, not an OSError, so it
+    walked straight through), and an unreadable file. The frontend dropped that
+    500 without a word, so one bad folder out of 282 left no dropdown, no
+    comparisons, and no error anywhere in the UI.
+    """
+    out: Dict[str, Any] = {"started_at": None, "status": "unknown", "reference": ""}
+    meta_path = run_dir / "run_metadata.json"
+    try:
+        if not meta_path.exists():
+            # No record at all: a command-line run, or a GUI run whose
+            # provenance write failed. Neither is a reason to claim "running" —
+            # the derived state below is the honest answer for those.
+            return out
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return out
+    if not isinstance(meta, dict):
+        return out
+    started = meta.get("started_at")
+    out["started_at"] = started if isinstance(started, str) else None
+    status = meta.get("status")
+    out["status"] = status if isinstance(status, str) and status else "running"
+    dispatch = meta.get("dispatch_state")
+    if isinstance(dispatch, dict):
+        ref = dispatch.get("reference")
+        if isinstance(ref, dict):
+            name = ref.get("name")
+            out["reference"] = name if isinstance(name, str) else ""
+        elif isinstance(ref, str):
+            out["reference"] = ref
+    return out
+
+
 def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
     if not vcf_source_dir.exists():
         return
@@ -1052,6 +1282,13 @@ class Step2Request(BaseModel):
     # Deprecated merged field (older frontends). Treated as build-list (tier C)
     # so it is never panel-exempted — safe default.
     exclude: Optional[List[str]] = None
+    # Dispatch vsnp3 into an EXISTING run folder whose VCFs are already staged,
+    # instead of making a new folder and copying them again. Set by the results
+    # pane's "Run this comparison" button on a run that staged and then never
+    # started. Re-staging 8,000 VCFs that are already sitting there is minutes
+    # of pointless copying, and it would strand the original folder for the
+    # resolver to keep stepping over.
+    resume_run_id: Optional[str] = None
 
 
 class PosthocRunRequest(BaseModel):
@@ -3714,10 +3951,41 @@ def step2_run(project: str, payload: Step2Request):
     # Timestamped run directory — each run gets its own subdirectory directly
     # under step2/ (e.g. step2/2026-06-05_13-11-21) so multiple comparisons
     # accumulate without overwriting previous outputs.
-    from datetime import datetime as _dt
-    run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = step2_dir / run_ts
-    run_dir.mkdir(parents=True, exist_ok=True)
+    #
+    # resume_run_id reuses one that already exists: the folder was created and
+    # staged by an earlier dispatch whose job never ran, so its VCFs are sitting
+    # in place and only the vsnp3 call is missing. Everything past this point is
+    # the ordinary dispatch path, unchanged — that is deliberate, so resume can
+    # never drift away from a normal run.
+    resume = (payload.resume_run_id or "").strip()
+    if resume:
+        resumable = _step2_run_dirs(step2_dir)
+        if resume not in resumable:
+            raise HTTPException(status_code=404, detail=f"No comparison folder named {resume}")
+        run_ts = resume
+        run_dir = resumable[resume]
+        resume_shape = _step2_run_shape(run_dir)
+        if resume_shape["has_results"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Comparison {resume} already has results. Open it from the "
+                    "Comparison list instead of re-running it."
+                ),
+            )
+        if not resume_shape["staged_vcfs"]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Comparison {resume} has no staged VCFs to compare, so there "
+                    "is nothing to resume. Start a new Step 2 run instead."
+                ),
+            )
+    else:
+        from datetime import datetime as _dt
+        run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_dir = step2_dir / run_ts
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     # Effective removal set = Step 1 QC exclusions (remove_from_analysis.xlsx)
     # ∪ Step 2 build-list exclusions (.step2_build_excluded.json) ∪ the
@@ -3760,17 +4028,56 @@ def step2_run(project: str, payload: Step2Request):
     # Ames project. stage_step2_vcfs skips exactly what vsnp3's removal would
     # drop; -remove_by_name is still passed below, so a skipped-vs-removed
     # disagreement can only cost time, never correctness.
-    try:
-        copied_vcfs, skipped_excluded, staged_vcf_names = stage_step2_vcfs(
-            vcf_source_dir, run_dir, effective_removals,
-        )
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to stage VCFs into the run folder: {exc}",
-        )
+    #
+    # On resume the copy has already happened, and re-running it would be worse
+    # than wasteful: stage_step2_vcfs skips by TODAY's exclusion set, so a
+    # second pass over a folder vsnp3 has not yet read could add or withhold
+    # samples the original dispatch did not choose. Take what is on disk as the
+    # staged set, which is what vsnp3 will actually read from -wd.
+    if resume:
+        try:
+            staged_vcf_names = sorted(
+                p.name for p in run_dir.iterdir()
+                if p.name.lower().endswith(_STEP2_STAGED_VCF_SUFFIXES)
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to read the staged VCFs in {run_ts}: {exc}",
+            )
+        copied_vcfs, skipped_excluded = len(staged_vcf_names), 0
+    else:
+        try:
+            copied_vcfs, skipped_excluded, staged_vcf_names = stage_step2_vcfs(
+                vcf_source_dir, run_dir, effective_removals,
+            )
+        except OSError as exc:
+            # Deliberately not cleaned up: staging may have copied part of the
+            # set before failing, and a partial folder is evidence, not litter.
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to stage VCFs into the run folder: {exc}",
+            )
+    def _abandon_new_run_dir() -> None:
+        """Take back the folder this request just made, when no run will use it.
+
+        os.rmdir, never a recursive delete: it succeeds only while the folder is
+        still empty, so it can never carry data off with it, and it declines by
+        design if staging had already copied something in. Left behind, every
+        refused run added an empty timestamped comparison to the project — and an
+        empty comparison folder is precisely what used to capture the results
+        pane by virtue of being the newest name in step2/.
+        """
+        if resume:
+            return  # not ours to remove; it predates this request
+        try:
+            os.rmdir(run_dir)
+        except OSError:
+            pass
+
     if not copied_vcfs:
         if skipped_excluded:
+            _abandon_new_run_dir()
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -3779,6 +4086,7 @@ def step2_run(project: str, payload: Step2Request):
                     "Tick a source or list at least one sample that is in the set."
                 ),
             )
+        _abandon_new_run_dir()
         raise HTTPException(
             status_code=400,
             detail=(
@@ -3788,8 +4096,13 @@ def step2_run(project: str, payload: Step2Request):
         )
 
     remove_arg = ""
-    if effective_removals:
-        remove_file = run_dir / "remove_by_name.xlsx"
+    remove_file = run_dir / "remove_by_name.xlsx"
+    if resume and remove_file.exists():
+        # The original dispatch's list, matching the VCFs actually staged in this
+        # folder. Overwriting it with today's exclusions would hand vsnp3 a
+        # removal set that disagrees with the copies it is about to read.
+        remove_arg = f" -remove_by_name {shlex.quote(str(remove_file))}"
+    elif effective_removals:
         try:
             import pandas as pd  # vsnp3 env
             pd.DataFrame(effective_removals).to_excel(remove_file, header=False, index=False)
@@ -4768,35 +5081,45 @@ def step2_runs_list(project: str):
     run_dirs = _step2_run_dirs(step2_dir)
     results = []
     if run_dirs:
+        # One liveness lookup for the whole listing, not one per folder.
+        live_run_id = _step2_live_run_id(step2_dir)
         for run_id in sorted(run_dirs.keys(), reverse=True):
             run_entry = run_dirs[run_id]
-            meta_path = run_entry / "run_metadata.json"
-            started_at = None
-            status = "unknown"
-            reference = ""
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    started_at = meta.get("started_at")
-                    status = meta.get("status", "running")
-                    reference = (
-                        meta.get("dispatch_state", {})
-                        .get("reference", {})
-                        .get("name", "")
-                    )
-                except (json.JSONDecodeError, OSError):
-                    pass
-            else:
-                # run_metadata.json missing → job is still running or very new
-                status = "running"
-            group_count = sum(1 for d in run_entry.iterdir() if d.is_dir() and not d.name.startswith("_"))
-            results.append({
-                "run_id": run_id,
-                "started_at": started_at,
-                "status": status,
-                "reference": reference,
-                "group_count": group_count,
-            })
+            # Per-run isolation. One folder must never be able to empty this
+            # list: a 500 here is swallowed by the frontend, so the failure
+            # showed up as a missing dropdown with no error to chase.
+            try:
+                meta = _step2_read_run_metadata(run_entry)
+                shape = _step2_run_shape(run_entry)
+                state = _step2_run_state(shape, run_id == live_run_id)
+                results.append({
+                    "run_id": run_id,
+                    "started_at": meta["started_at"],
+                    "status": meta["status"],
+                    "reference": meta["reference"],
+                    "group_count": shape["groups"],
+                    # Derived from the folder itself, so it is just as true for
+                    # a command-line run as for one the GUI launched.
+                    "state": state,
+                    "live": run_id == live_run_id,
+                    "staged_vcfs": shape["staged_vcfs"],
+                    "has_results": shape["has_results"],
+                    "gui_launched": shape["has_gui_cmd"],
+                })
+            except Exception:
+                logger.exception("step2/runs: could not read run folder %s", run_entry)
+                results.append({
+                    "run_id": run_id,
+                    "started_at": None,
+                    "status": "unknown",
+                    "reference": "",
+                    "group_count": 0,
+                    "state": "unreadable",
+                    "live": False,
+                    "staged_vcfs": 0,
+                    "has_results": False,
+                    "gui_launched": False,
+                })
     else:
         # Legacy flat layout: group dirs directly under step2/ (no run dirs).
         def _is_group(d):
@@ -4809,6 +5132,11 @@ def step2_runs_list(project: str):
                 "status": "ok",
                 "reference": "",
                 "group_count": len(groups),
+                "state": "results",
+                "live": False,
+                "staged_vcfs": 0,
+                "has_results": True,
+                "gui_launched": False,
             })
     return results
 
@@ -6195,25 +6523,54 @@ def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
 
     Priority:
     1. Explicit run_id → step2/{run_id}/ (or legacy step2/runs/{run_id}/)
-    2. .current_run sentinel → that run's dir
-    3. Latest run by directory name (lexicographic = chronological)
-    4. Legacy flat layout: step2/ itself
+    2. .current_run, but ONLY while a job is alive in it, or if it has output
+    3. Newest run by name that actually produced something
+    4. Newest run by name, whatever state it is in
+    5. Legacy flat layout: step2/ itself
+
+    Steps 2 and 3 are the whole fix for a blank results pane. Picking the newest
+    name unconditionally meant the pane defaulted to whatever folder step2/run
+    had just created — and for as long as staging takes, that folder holds
+    nothing but loose VCFs, so the pane went blank on every large run and stayed
+    blank forever on a run whose job never started. Skipping to the newest run
+    that has output makes the incident invisible: the user sees their last good
+    comparison instead of a false "no outputs" on a project holding 294 of them.
+
+    A live run still wins, because watching a comparison you just launched fill
+    in is the point; the pane explains the running state rather than blanking.
     """
     run_dirs = _step2_run_dirs(step2_dir)
     if run_id and run_id != "legacy":
+        # An explicit choice is always honoured, even when it has nothing to
+        # show. The pane explains that folder's state; silently substituting a
+        # different run would be worse than an honest empty one.
         if run_id in run_dirs:
             return run_dirs[run_id]
     if run_id == "legacy":
         return step2_dir
+    if not run_dirs:
+        return step2_dir  # legacy flat
+
+    newest_first = sorted(run_dirs.keys(), reverse=True)
+    live_run_id = _step2_live_run_id(step2_dir)
+
     current_file = step2_dir / ".current_run"
-    if current_file.exists():
-        current_ts = current_file.read_text(encoding="utf-8").strip()
-        if current_ts in run_dirs:
+    current_ts = ""
+    try:
+        if current_file.exists():
+            current_ts = current_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        current_ts = ""
+    if current_ts in run_dirs:
+        if current_ts == live_run_id or _step2_run_shape(run_dirs[current_ts])["has_results"]:
             return run_dirs[current_ts]
-    if run_dirs:
-        latest = sorted(run_dirs.keys(), reverse=True)[0]
-        return run_dirs[latest]
-    return step2_dir  # legacy flat
+
+    for candidate in newest_first:
+        if candidate == live_run_id or _step2_run_shape(run_dirs[candidate])["has_results"]:
+            return run_dirs[candidate]
+    # Nothing anywhere has output. Return the newest so the pane can say what
+    # state it is in rather than falling through to the flat legacy layout.
+    return run_dirs[newest_first[0]]
 
 
 @app.get("/api/projects/{project}/step2_outputs")
@@ -6360,7 +6717,50 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
                 "sample_count": sample_count,
                 "snp_count": fasta_columns,
             })
-    return {"top": top, "groups": groups, "run_id": output_dir.name if output_dir != step2_dir else "legacy"}
+    resolved_run_id = output_dir.name if output_dir != step2_dir else "legacy"
+
+    # When there is nothing to draw, say WHY. "No Step 2 outputs found yet." was
+    # not merely unhelpful here, it was false: the run this pane had landed on
+    # held 8,017 staged VCFs and had never been started, so its outputs were not
+    # pending — nothing had ever been asked to produce them. Everything below is
+    # derived from the folder, so it is as accurate for a command-line run as
+    # for one the GUI launched.
+    empty_reason = None
+    if not top and not groups and output_dir != step2_dir:
+        shape = _step2_run_shape(output_dir)
+        live_run_id = _step2_live_run_id(step2_dir)
+        is_live = resolved_run_id == live_run_id
+        state = _step2_run_state(shape, is_live)
+        newest_with_results = ""
+        sibling_runs = _step2_run_dirs(step2_dir)
+        for candidate in sorted(sibling_runs.keys(), reverse=True):
+            if candidate == resolved_run_id:
+                continue
+            # sibling_runs, not step2_dir/candidate — pre-2026-06 projects keep
+            # their runs under step2/runs/<ts> and the map already knows where.
+            if _step2_run_shape(sibling_runs[candidate])["has_results"]:
+                newest_with_results = candidate
+                break
+        empty_reason = {
+            "state": state,
+            "live": is_live,
+            "staged_vcfs": shape["staged_vcfs"],
+            "group_dirs": shape["groups"],
+            "gui_launched": shape["has_gui_cmd"],
+            # Resumable means: VCFs are staged and waiting, and no job is
+            # working in the folder. vsnp3 takes the staged copies from -wd, so
+            # a stalled run needs dispatching, not re-staging.
+            "can_resume": bool(shape["staged_vcfs"]) and not is_live
+                          and state in ("staged", "interrupted"),
+            "newest_with_results": newest_with_results,
+        }
+
+    return {
+        "top": top,
+        "groups": groups,
+        "run_id": resolved_run_id,
+        "empty_reason": empty_reason,
+    }
 
 
 @app.get("/api/projects/{project}/step2/trees")

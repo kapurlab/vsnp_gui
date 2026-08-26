@@ -6139,6 +6139,7 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="run_date">Run date</QcSortTh>
                         <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
                         <QcSortTh {...qcSortProps} sortKey="Reference">Reference</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
@@ -6246,6 +6247,7 @@ export default function App() {
                                 </details>
                               </td>
                               <td>{row.Reference || "-"}</td>
+                              <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                               <td>{row["Average Depth"] || "-"}</td>
                               <td>{fmtPercent1(qcMappingRate(row))}</td>
                               <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
@@ -6347,6 +6349,7 @@ export default function App() {
                           <th><span className="rt-th-label">Sample</span><Grip label="Sample" /></th>
                           <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
                           <th><span className="rt-th-label">Reference</span><Grip label="Reference" /></th>
+                          <th><span className="rt-th-label">Groups</span><Grip label="Groups" /></th>
                           <th><span className="rt-th-label">Avg Depth</span><Grip label="Avg Depth" /></th>
                           <th><span className="rt-th-label">Mapping %</span><Grip label="Mapping %" /></th>
                           <th><span className="rt-th-label">Zero Cov %</span><Grip label="Zero Cov %" /></th>
@@ -6447,6 +6450,7 @@ export default function App() {
                               </details>
                             </td>
                             <td>{row.Reference || "-"}</td>
+                            <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                             <td>{row["Average Depth"] || "-"}</td>
                             <td>{fmtPercent1(qcMappingRate(row))}</td>
                             <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>

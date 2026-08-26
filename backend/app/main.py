@@ -381,9 +381,27 @@ def _is_shared_project(cfg: Dict, project_dir: Path) -> bool:
         return False
 
 
+# Per-sample-dir memo for _step1_sample_names: path -> (mtime_ns, has_fastq).
+# Adding or removing a read inside a sample dir bumps that dir's own mtime, so
+# invalidation is inherent; the cap only guards against unbounded growth across
+# many projects, and a clear() merely costs one re-listing pass.
+_STEP1_NAMES_CACHE: Dict[str, tuple] = {}
+_STEP1_NAMES_CACHE_MAX = 50_000
+
+
 def _step1_sample_names(step1_dir: Path) -> List[str]:
-    """Discover step1 sample names: subdirs with at least one *_R1*.fastq.gz
-    (or fallback patterns matching the bash script's R1 detection).
+    """Discover step1 sample names: subdirs holding at least one *.fastq.gz.
+
+    One name-suffix test replaces the old three-glob chain
+    (*_R1*.fastq.gz or *_1*.fastq.gz or *.fastq.gz): any name the first two
+    patterns match necessarily ends in .fastq.gz, so the boolean is identical —
+    and one scandir per sample dir replaces three directory walks. The result
+    per dir is then memoized on the dir's mtime, because this function runs
+    inside step2/vcf_count, the hottest request in the Step 2 pane: at 8,179
+    samples the un-memoized listing cost 8k–24k directory reads per call,
+    seconds on cold GPFS and minutes on WSL's drvfs, repeated on every
+    comparison switch. Dot-prefixed read names are skipped explicitly to keep
+    glob's hidden-file exclusion.
 
     Filters out hidden / underscore-prefixed dirs (the writer's _provenance/
     sibling) so they don't get treated as samples.
@@ -393,12 +411,47 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
     dispatch a batch should use `_step1_dispatch_plan()` which applies the
     stricter "paired + non-junk" gate.
     """
+    if len(_STEP1_NAMES_CACHE) > _STEP1_NAMES_CACHE_MAX:
+        _STEP1_NAMES_CACHE.clear()
     samples = []
-    for p in sorted(step1_dir.iterdir()):
-        if not p.is_dir() or p.name.startswith(("_", ".")):
+    try:
+        with os.scandir(step1_dir) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        return []
+    for entry in entries:
+        if entry.name.startswith(("_", ".")):
             continue
-        if any(p.glob("*_R1*.fastq.gz")) or any(p.glob("*_1*.fastq.gz")) or any(p.glob("*.fastq.gz")):
-            samples.append(p.name)
+        try:
+            if not entry.is_dir():
+                continue
+            mtime_ns = entry.stat().st_mtime_ns
+        except OSError:
+            continue
+        hit = _STEP1_NAMES_CACHE.get(entry.path)
+        if hit is not None and hit[0] == mtime_ns:
+            has_fastq = hit[1]
+        else:
+            has_fastq = False
+            try:
+                with os.scandir(entry.path) as files:
+                    for f in files:
+                        if f.name.endswith(".fastq.gz") and not f.name.startswith("."):
+                            has_fastq = True
+                            break
+            except OSError:
+                has_fastq = False
+            # The racy-timestamp guard (same rule make and ccache use): only
+            # cache an answer whose dir mtime is comfortably in the past. On a
+            # coarse-timestamp filesystem (1 s NFS/SMB mounts, stale drvfs
+            # attribute caches) a dir scanned in the same tick its first read
+            # lands in would otherwise pin has_fastq=False with an mtime the
+            # arrival does not change. A dir still being written to just gets
+            # re-listed next call — the pre-memo cost, only while it is hot.
+            if time.time_ns() - mtime_ns > 2_000_000_000:
+                _STEP1_NAMES_CACHE[entry.path] = (mtime_ns, has_fastq)
+        if has_fastq:
+            samples.append(entry.name)
     return samples
 
 
@@ -943,6 +996,73 @@ def _step2_live_run_id(step2_dir: Path) -> str:
         return (step2_dir / ".current_run").read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         return ""
+
+
+def _find_group_fasta(group_dir: Path) -> Optional[Path]:
+    for pattern in ("*.fasta", "*.fa", "*.fna"):
+        matches = sorted(group_dir.glob(pattern))
+        if matches:
+            return matches[-1]
+    return None
+
+
+# str(path) -> (mtime_ns, size, (records, columns, has_outgroup)). A finished
+# run's alignments are write-once, so the key is exact: one fstat replaces a
+# full read for an unchanged file, and a rewritten file changes size/mtime and
+# recomputes. Without this, step2_outputs streamed EVERY group's alignment on
+# EVERY call — 116 MB and ~1.5–3 s of line iteration per request on a 63-group
+# run, repeated 2–3× per project switch and every 3 s while a posthoc job was
+# being polled: the dominant steady-state load on a shared login node.
+_FASTA_DIMS_CACHE: Dict[str, tuple] = {}
+_FASTA_DIMS_CACHE_MAX = 8192
+
+
+def _fasta_dims(fasta_path: Optional[Path]) -> tuple[int, int, bool]:
+    """(records, alignment columns, is one of them the outgroup) — one pass.
+
+    The record count already had to be read here to decide whether the
+    SNP-distance tool can run, so the group's SHAPE comes free with it: every
+    record in an alignment is the same length, so the first one's length is
+    the number of SNP positions, and that is exactly the column count of the
+    group's SNP tables (verified equal on every group of a 63-group run).
+
+    Taking it from the alignment rather than from a table is not just cheaper,
+    it is the only source that gives ONE number for a wide group: vSNP3 splits
+    a cascade table at 10,000 columns, so MTBC0-All's 102,165 positions arrive
+    as eleven files, and no single one of them describes the group.
+
+    Only the first record's lines are measured — the `records == 1` test costs
+    a comparison per line and saves reading 100 MB of sequence into strings.
+    """
+    if not fasta_path:
+        return 0, 0, False
+    try:
+        st = fasta_path.stat()
+    except OSError:
+        return 0, 0, False
+    key = str(fasta_path)
+    hit = _FASTA_DIMS_CACHE.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    records = 0
+    columns = 0
+    has_outgroup = False
+    try:
+        with fasta_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if line.startswith(">"):
+                    records += 1
+                    if line[1:].strip().lower() == "root":
+                        has_outgroup = True
+                    continue
+                if records == 1:
+                    columns += len(line.strip())
+    except OSError:
+        return 0, 0, False
+    if len(_FASTA_DIMS_CACHE) > _FASTA_DIMS_CACHE_MAX:
+        _FASTA_DIMS_CACHE.clear()
+    _FASTA_DIMS_CACHE[key] = (st.st_mtime_ns, st.st_size, (records, columns, has_outgroup))
+    return records, columns, has_outgroup
 
 
 def _step2_read_run_metadata(run_dir: Path) -> Dict[str, Any]:
@@ -4959,6 +5079,53 @@ def posthoc_status(project: str, group: str, tool: str = "snp_analysis", run_id:
     return {"running": running, "outputs": outputs}
 
 
+@app.get("/api/projects/{project}/posthoc/status_all")
+def posthoc_status_all(project: str, tool: str = "snp_analysis", run_id: Optional[str] = Query(None)):
+    """Every group's posthoc status in ONE response.
+
+    The per-group endpoint above stays for older frontends, but one request per
+    group meant a 63-group comparison cost 63 round trips through the OnDemand
+    proxy per Step 2 Results load — and again every 3 seconds while a
+    SNP-distance job was polled, with each request re-resolving the output dir.
+    Here the dir resolves once and one pass over its group folders answers for
+    all of them. Purely additive; the response value per group is identical to
+    what /posthoc/status returns.
+    """
+    cfg = load_config()
+    tool_obj = posthoc_get_tool(tool)
+    if not tool_obj:
+        raise HTTPException(status_code=404, detail="Unknown posthoc tool")
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    if not step2_dir.exists():
+        return {"groups": {}}
+    output_dir = _resolve_step2_output_dir(step2_dir, run_id)
+    groups: Dict[str, Any] = {}
+    try:
+        with os.scandir(output_dir) as it:
+            for entry in it:
+                name = entry.name
+                if (name in _STEP2_NON_GROUP_DIRS or name.startswith(".")
+                        or _STEP2_STAMP_ONLY_RE.match(name)):
+                    continue
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                group_dir = Path(entry.path)
+                lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
+                _posthoc_clear_stale_lock(lock_path)
+                outputs = []
+                for rel in tool_obj.outputs:
+                    path = group_dir / rel
+                    outputs.append({"path": str(path), "exists": path.exists()})
+                groups[name] = {"running": lock_path.exists(), "outputs": outputs}
+    except OSError:
+        return {"groups": {}}
+    return {"groups": groups}
+
+
 @app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
@@ -5009,11 +5176,9 @@ def step2_vcf_count(project: str):
     vcf_source_dir = vcf_db_dir(project_dir / "step2")
     if not vcf_source_dir.exists():
         return {"count": 0}
-    vcfs = list(vcf_source_dir.glob("*.vcf")) + list(vcf_source_dir.glob("*.vcf.gz"))
-    edited_samples = set()
-    for vcf in vcfs:
-        if _vcf_is_edited(vcf):
-            edited_samples.add(_sample_from_vcf(vcf))
+    # One scandir answers both questions — the names and which are edited —
+    # instead of two globs plus a Path.resolve() per file (see _scan_vcf_db).
+    vcf_names, edited_samples = _scan_vcf_db(vcf_source_dir)
     # Comparison breakdown, same rule as step2/setup: excluded = tier A (reference
     # blocklist) ∪ tier B (Step 1 Results exclusions); those stay in the DB but
     # are dropped from the Step 2 comparison at run time. comparison = total −
@@ -5025,13 +5190,13 @@ def step2_vcf_count(project: str):
     )
     comparison_stems: List[str] = []
     excluded = 0
-    for vcf in vcfs:
-        stem = vcf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
+    for name in vcf_names:
+        stem = name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
         if stem in excluded_names:
             excluded += 1
         else:
             comparison_stems.append(stem)
-    total = len(vcfs)
+    total = len(vcf_names)
     # Composition of the comparison set by source database. Each comparison-set
     # VCF is assigned to the FIRST enabled panel whose accession list contains
     # it; whatever no panel claims is attributed to this project's own
@@ -5467,20 +5632,37 @@ def _read_step2_build_exclusions(step2_dir: Path) -> List[str]:
     return []
 
 
+# path -> (mtime_ns, size, names). A blocklist workbook changes only when
+# someone edits the reference, yet pandas.read_excel was re-parsing it
+# (~50–300 ms) on every step2/vcf_count call — the hottest request in the
+# Step 2 pane. An edit changes mtime and misses the cache.
+_REMOVE_XLSX_CACHE: Dict[str, tuple] = {}
+
+
 def _read_remove_xlsx_names(path: Path) -> List[str]:
     """Read sample names from a header-less single-column remove xlsx."""
-    if not path.exists():
+    try:
+        st = path.stat()
+    except OSError:
         return []
+    key = str(path)
+    hit = _REMOVE_XLSX_CACHE.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return list(hit[2])
     try:
         import pandas as pd  # vsnp3 env
         df = pd.read_excel(path, header=None)
-        return [
+        names = [
             str(s).strip()
             for s in df.iloc[:, 0].tolist()
             if str(s).strip() and str(s).strip().lower() != "nan"
         ]
     except Exception:
         return []
+    if len(_REMOVE_XLSX_CACHE) > 512:
+        _REMOVE_XLSX_CACHE.clear()
+    _REMOVE_XLSX_CACHE[key] = (st.st_mtime_ns, st.st_size, names)
+    return list(names)
 
 
 @app.get("/api/projects/{project}/step2/build-exclusions")
@@ -5503,6 +5685,11 @@ def step2_build_exclusions_set(project: str, payload: ExcludeRequest):
         return {"samples": [], "count": 0}
     p.write_text(json.dumps(samples), encoding="utf-8")
     return {"samples": samples, "count": len(samples)}
+
+
+# (summary path, mtime_ns, size) -> (groups dict, sample_count). See the cache
+# note in step2_groupings for why entries are copied out, never handed over.
+_GROUPINGS_CACHE: Dict[tuple, tuple] = {}
 
 
 def _parse_step2_groupings(html_text: str) -> tuple[Dict[str, List[str]], int]:
@@ -5556,11 +5743,30 @@ def step2_groupings(project: str, run_id: Optional[str] = Query(None)):
     if not summaries:
         return {"groups": {}, "summary_html": None, "sample_count": 0}
     summary = summaries[-1]
+    # The summary HTML of a finished run never changes, so its parse is cached
+    # on (path, mtime, size). Groups are DEEP-COPIED out of the cache because
+    # the label-token loop below appends into the member lists — handing it the
+    # cached lists would grow them again on every request.
+    cache_key = None
     try:
-        html_text = summary.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to read summary: {exc}")
-    groups, sample_count = _parse_step2_groupings(html_text)
+        st = summary.stat()
+        cache_key = (str(summary), st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+    hit = _GROUPINGS_CACHE.get(cache_key) if cache_key else None
+    if hit is not None:
+        groups = {k: list(v) for k, v in hit[0].items()}
+        sample_count = hit[1]
+    else:
+        try:
+            html_text = summary.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read summary: {exc}")
+        groups, sample_count = _parse_step2_groupings(html_text)
+        if cache_key:
+            if len(_GROUPINGS_CACHE) > 64:
+                _GROUPINGS_CACHE.clear()
+            _GROUPINGS_CACHE[cache_key] = ({k: list(v) for k, v in groups.items()}, sample_count)
     # The summary's Groupings table carries RAW accessions (e.g. ERR1462610),
     # but the tree leaves the user sees are lineage-labeled (e.g. Caprae_ERR1462610)
     # via the vcf_refs label map. So a search for "Caprae" found nothing. Append
@@ -6609,13 +6815,31 @@ def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
     A live run still wins, because watching a comparison you just launched fill
     in is the point; the pane explains the running state rather than blanking.
     """
-    run_dirs = _step2_run_dirs(step2_dir)
     if run_id and run_id != "legacy":
         # An explicit choice is always honoured, even when it has nothing to
         # show. The pane explains that folder's state; silently substituting a
         # different run would be worse than an honest empty one.
+        #
+        # Fast path first: an explicit id that names a real folder costs two
+        # stats instead of listing every run dir — which matters because the
+        # run_id-scoped requests are the MANY ones (a comparison selection on
+        # the 400-folder Ames project made ~65 of them, each paying a ~400-stat
+        # listing just to look up a key it already had). The two name guards
+        # reproduce exactly what map membership used to protect against:
+        # _STEP2_COMPARISON_RE pins the shape (so "vcf_database" or "runs"
+        # cannot be addressed), and the basename check stops path traversal.
+        if _STEP2_COMPARISON_RE.match(run_id) and Path(run_id).name == run_id:
+            direct = step2_dir / run_id
+            if direct.is_dir():
+                return direct
+            legacy_direct = step2_dir / "runs" / run_id
+            if legacy_direct.is_dir():
+                return legacy_direct
+        run_dirs = _step2_run_dirs(step2_dir)
         if run_id in run_dirs:
             return run_dirs[run_id]
+    else:
+        run_dirs = _step2_run_dirs(step2_dir)
     if run_id == "legacy":
         return step2_dir
     if not run_dirs:
@@ -6654,49 +6878,6 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
 
     def _safe_name(value: str) -> str:
         return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
-
-    def _find_group_fasta(group_dir: Path) -> Optional[Path]:
-        for pattern in ("*.fasta", "*.fa", "*.fna"):
-            matches = sorted(group_dir.glob(pattern))
-            if matches:
-                return matches[-1]
-        return None
-
-    def _fasta_dims(fasta_path: Optional[Path]) -> tuple[int, int, bool]:
-        """(records, alignment columns, is one of them the outgroup) — one pass.
-
-        The record count already had to be read here to decide whether the
-        SNP-distance tool can run, so the group's SHAPE comes free with it: every
-        record in an alignment is the same length, so the first one's length is
-        the number of SNP positions, and that is exactly the column count of the
-        group's SNP tables (verified equal on every group of a 63-group run).
-
-        Taking it from the alignment rather than from a table is not just cheaper,
-        it is the only source that gives ONE number for a wide group: vSNP3 splits
-        a cascade table at 10,000 columns, so MTBC0-All's 102,165 positions arrive
-        as eleven files, and no single one of them describes the group.
-
-        Only the first record's lines are measured — the `records == 1` test costs
-        a comparison per line and saves reading 100 MB of sequence into strings.
-        """
-        if not fasta_path or not fasta_path.exists():
-            return 0, 0, False
-        records = 0
-        columns = 0
-        has_outgroup = False
-        try:
-            with fasta_path.open("r", encoding="utf-8", errors="ignore") as handle:
-                for line in handle:
-                    if line.startswith(">"):
-                        records += 1
-                        if line[1:].strip().lower() == "root":
-                            has_outgroup = True
-                        continue
-                    if records == 1:
-                        columns += len(line.strip())
-        except OSError:
-            return 0, 0, False
-        return records, columns, has_outgroup
 
     top = []
     html_files = sorted(output_dir.glob("*.html"), key=lambda p: p.stat().st_mtime)
@@ -6892,7 +7073,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "12"
+_XLSX_RENDER_VERSION = "13"  # 13: identical-positions memo in the page JS
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -6909,6 +7090,57 @@ _XLSX_RENDER_VERSION = "12"
 #   VSNP_GUI_PREVIEW_CACHE_DIR  put the cache somewhere other than $HOME
 #                               (scratch, node-local storage, a project volume)
 _XLSX_CACHE_DEFAULT_MB = 400
+
+# In-process memo of the most recently used PARSED windows, keyed by the disk
+# cache entry's hash name (which already encodes every render input, so a
+# different render is a different key and invalidation is inherent). Two
+# entries: the table being scrolled plus the one it is being compared against.
+# Without this, every 200-row scroll batch re-read and re-json.loads'd the
+# whole ~34 MB window from disk to serve ~700 KB of rows.
+_XLSX_WINDOW_MEMO: Dict[str, Any] = {}
+_XLSX_WINDOW_MEMO_MAX = 2
+_XLSX_WINDOW_MEMO_LOCK = threading.Lock()
+
+
+def _etag_matches(if_none_match: str, etag: str) -> bool:
+    """RFC 9110 If-None-Match against our entity tag (the cache file name).
+
+    Handles the header as clients actually send it: a comma-separated list,
+    each member optionally weak-prefixed (W/) and normally DQUOTE-wrapped,
+    plus the '*' form. Weak comparison is correct for a conditional GET.
+    """
+    if not if_none_match:
+        return False
+    if if_none_match.strip() == "*":
+        return True
+    for member in if_none_match.split(","):
+        candidate = member.strip()
+        if candidate.startswith("W/"):
+            candidate = candidate[2:].strip()
+        if candidate.startswith('"') and candidate.endswith('"') and len(candidate) >= 2:
+            candidate = candidate[1:-1]
+        if candidate == etag:
+            return True
+    return False
+
+
+def _xlsx_window_memo_put(name: str, window: Any) -> None:
+    # The lock is not optional. preview_xlsx is a sync endpoint, so requests
+    # run CONCURRENTLY on FastAPI's threadpool, and the unguarded version of
+    # this eviction loop — next(iter(dict)) then pop() — measurably raised
+    # KeyError and "dictionary changed size during iteration" under 8 threads
+    # on the deployed Python 3.12: two threads pick the same oldest key, the
+    # second pop explodes, and a user's scroll batch 500s. The critical
+    # section is three dict operations; contention is microseconds.
+    with _XLSX_WINDOW_MEMO_LOCK:
+        # pop-then-insert so a re-put refreshes recency (plain reassignment
+        # would leave the key in its old insertion slot and evict the wrong
+        # entry).
+        _XLSX_WINDOW_MEMO.pop(name, None)
+        _XLSX_WINDOW_MEMO[name] = window
+        while len(_XLSX_WINDOW_MEMO) > _XLSX_WINDOW_MEMO_MAX:
+            # dicts iterate in insertion order; drop the oldest entry.
+            _XLSX_WINDOW_MEMO.pop(next(iter(_XLSX_WINDOW_MEMO)))
 
 
 def _xlsx_cache_budget_bytes() -> int:
@@ -7326,7 +7558,7 @@ def tree_scale(project: str, path: str = Query(...)):
 
 
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
-def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
+def preview_xlsx(request: Request, project: str, path: str = Query(...), download: int = 0,
                  rows_from: Optional[int] = None, rows_count: int = 200,
                  selection: Optional[str] = None):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
@@ -7454,18 +7686,50 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
         target, project, samples_with_bams, samples_with_vcfs,
         extra=f"sel:{selection}" if selection_samples is not None else "",
     )
+    # The cache file's hash NAME already encodes every input that can change
+    # the rendered output (file identity, renderer version, project, bam/vcf
+    # sets, selection token), which makes it two things at once:
+    #
+    #   * The ETag. A browser that already holds this exact render sends it
+    #     back as If-None-Match and gets an empty 304 instead of a multi-MB
+    #     page — re-opening an unchanged table (routine when comparing groups)
+    #     stops re-shipping everything.
+    #   * The in-process memo key. A disk-cache HIT still cost a full read and
+    #     json.loads of a ~34 MB window PER REQUEST — including every 200-row
+    #     scroll batch, so paging a big table re-parsed the whole window five
+    #     times over. The parsed dict is kept for the most recent windows;
+    #     invalidation is inherent because a different render is a different
+    #     file name.
+    etag = cached.name if cached is not None else None
+    if etag and not download and cached.exists() \
+            and _etag_matches(request.headers.get("if-none-match", ""), etag):
+        try:
+            os.utime(cached, None)  # still counts as recently used
+        except OSError:
+            pass
+        return Response(status_code=304, headers={
+            "ETag": f'"{etag}"',
+            "Cache-Control": "no-cache",
+            "Vary": "Accept-Encoding",
+        })
     window = None
     if cached is not None and cached.exists():
-        try:
-            window = json.loads(cached.read_text(encoding="utf-8"))
+        window = _XLSX_WINDOW_MEMO.get(cached.name)
+        if window is not None:
+            _xlsx_window_memo_put(cached.name, window)  # refresh recency
+        else:
+            try:
+                window = json.loads(cached.read_text(encoding="utf-8"))
+                _xlsx_window_memo_put(cached.name, window)
+            except (OSError, ValueError):
+                window = None  # unreadable or stale entry: re-render below
+        if window is not None:
             # Mark it recently used so pruning drops the tables nobody opens,
             # not the one being read right now.
             try:
                 os.utime(cached, None)
             except OSError:
                 pass
-        except (OSError, ValueError):
-            window = None  # unreadable or stale entry: re-render below
 
     if window is None:
         try:
@@ -7537,6 +7801,7 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             raise HTTPException(status_code=500,
                                 detail=f"xlsx render failed: {type(e).__name__}: {e}")
         if cached is not None:
+            _xlsx_window_memo_put(cached.name, window)
             try:
                 cached.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cached.with_suffix(".part")
@@ -7613,17 +7878,27 @@ def preview_xlsx(project: str, path: str = Query(...), download: int = 0,
             background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
         )
 
+    # ETag on both response shapes; Cache-Control: no-cache means "revalidate
+    # every time" — the browser always asks, and an unchanged render costs a
+    # 304 instead of the body. (Never "immutable": the etag changes when the
+    # bam/vcf sample sets change, and the browser must notice.)
+    resp_headers = (
+        {"ETag": f'"{etag}"', "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
+        if etag else None
+    )
+
     # A scroll request: return just the requested <tr> block. The window is
     # rendered once and cached, so paging through a big table costs one parse in
     # total rather than one per batch.
     if rows_from is not None:
         start = max(0, int(rows_from))
         count = max(1, min(int(rows_count or 200), 1000))
-        return HTMLResponse(content="".join(window["rows"][start:start + count]))
+        return HTMLResponse(content="".join(window["rows"][start:start + count]),
+                            headers=resp_headers)
 
     return HTMLResponse(content=xlsx_html.compose_page(
         window, download_href=download_href, full_href=full_table_href,
-    ))
+    ), headers=resp_headers)
 
 
 @app.get("/api/projects/{project}/download-file")
@@ -8059,15 +8334,51 @@ def _vcf_is_edited(path: Path) -> bool:
     return "vcf_edits" in resolved.parts
 
 
+def _scan_vcf_db(vcf_source_dir: Path) -> tuple[List[str], set]:
+    """One scandir over the VCF database: (sorted vcf basenames, edited samples).
+
+    The predecessor called Path.resolve() on EVERY file to learn whether it
+    lives under vcf_edits/ — a full per-component path walk, ~6–8 syscalls per
+    file, or ~50–65k filesystem calls per request at the Ames project's 8,017
+    VCFs, inside the hottest endpoint in the Step 2 pane (step2/vcf_count).
+    But a regular, non-symlink file sitting in this directory cannot resolve
+    anywhere else: only SYMLINKED entries (the edited VCFs — typically a
+    handful) can point into vcf_edits/, so only they pay a resolve(). The one
+    case a per-entry check cannot see — the database directory ITSELF being a
+    symlink into vcf_edits/ — is covered by resolving the directory once.
+    The (names, edited) answer is identical to the old per-file walk.
+    """
+    names: List[str] = []
+    edited: set = set()
+    try:
+        dir_is_edited = "vcf_edits" in vcf_source_dir.resolve().parts
+    except OSError:
+        dir_is_edited = False
+    try:
+        with os.scandir(vcf_source_dir) as it:
+            for entry in it:
+                # Case-sensitive suffix and an explicit dot-skip, matching
+                # exactly what glob("*.vcf") + glob("*.vcf.gz") returned.
+                if not entry.name.endswith((".vcf", ".vcf.gz")) or entry.name.startswith("."):
+                    continue
+                names.append(entry.name)
+                is_edited = dir_is_edited
+                if not is_edited:
+                    try:
+                        if entry.is_symlink():
+                            is_edited = "vcf_edits" in Path(entry.path).resolve().parts
+                    except OSError:
+                        is_edited = False
+                if is_edited:
+                    edited.add(_sample_from_vcf(Path(entry.name)))
+    except OSError:
+        return [], set()
+    names.sort()
+    return names, edited
+
+
 def _edited_samples_in_dir(vcf_source_dir: Path) -> List[str]:
-    edited = set()
-    if not vcf_source_dir.exists():
-        return []
-    vcfs = list(vcf_source_dir.glob("*.vcf")) + list(vcf_source_dir.glob("*.vcf.gz"))
-    for vcf in vcfs:
-        if _vcf_is_edited(vcf):
-            edited.add(_sample_from_vcf(vcf))
-    return sorted(edited)
+    return sorted(_scan_vcf_db(vcf_source_dir)[1])
 
 
 def _write_step2_edit_summary(step2_dir: Path, edited_samples: List[str]) -> None:

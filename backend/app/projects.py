@@ -153,13 +153,23 @@ def create_project(roots: RootsLike, name: str, scope: Optional[str] = None, ref
 def update_project_meta(project_dir: Path, updates: Dict) -> Dict:
     meta_path = project_meta_path(project_dir)
     meta: Dict[str, Any] = {}
-    if meta_path.exists():
+    existed = meta_path.exists()
+    if existed:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-    meta.update(updates)
+    merged = dict(meta)
+    merged.update(updates)
+    # Skip the write when it would change nothing. This is not an optimization
+    # nicety: reference_lock calls this on EVERY visit to a single-reference
+    # project, and each write bumped project.json's mtime — which invalidated
+    # the counts cache (forcing a full ~10-40s recount of the big project on
+    # the next /api/projects) and floated the project to "most recent activity"
+    # merely for having been looked at. On-disk state is identical either way.
+    if existed and merged == meta:
+        return meta
     with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, sort_keys=True)
-    return meta
+        json.dump(merged, f, indent=2, sort_keys=True)
+    return merged
 
 
 def _project_last_activity(project_dir: Path) -> float:

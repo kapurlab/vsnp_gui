@@ -292,6 +292,26 @@ export default function App() {
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
+  // Live Logs retention + append batching (see the SSE onmessage handler).
+  const LOG_KEEP = 2000;
+  const logBufRef = useRef([]);
+  const logFlushRef = useRef(null);
+  // True once older lines have been trimmed from the view, so the Copy button
+  // and the panel can say so instead of passing a silent tail off as the
+  // whole log (the complete log stays on disk with the job).
+  const [logsTrimmed, setLogsTrimmed] = useState(false);
+  // Whether the backend has the batched posthoc/status_all endpoint:
+  // null = not probed yet, true/false = remembered answer for this session.
+  const posthocBatchSupportRef = useRef(null);
+  // Supersede sequence for loadStep2Outputs (same pattern as qcLoadSeq).
+  const step2OutSeqRef = useRef(0);
+  // Live mirrors of the current selection, for async callbacks whose render
+  // closures go stale across awaits (same pattern as qcRowsRef). A completion
+  // callback captured at job start compares against THESE, not its closure,
+  // so a response landing after a project or run switch can neither load nor
+  // write the wrong project's data.
+  const selectedProjectRef = useRef(null);
+  const step2SelectedRunRef = useRef(null);
   const [uploadStatus, setUploadStatus] = useState("");
   const [inputs, setInputs] = useState({ files: [], total_bytes: 0, count: 0 });
   const [inputsLoading, setInputsLoading] = useState(false);
@@ -599,6 +619,8 @@ export default function App() {
   // current state at fire time, not the stale closure capture from when the
   // timer was scheduled.
   useEffect(() => { qcRowsRef.current = qcRows; }, [qcRows]);
+  useEffect(() => { selectedProjectRef.current = selectedProject; }, [selectedProject]);
+  useEffect(() => { step2SelectedRunRef.current = step2SelectedRun; }, [step2SelectedRun]);
   // Keep the Kraken run modal's log scrolled to the latest line.
   useEffect(() => {
     const el = krakenLogRef.current;
@@ -655,10 +677,18 @@ export default function App() {
       });
   }
 
-  // The filtered Results rows, computed once per render (the table body, the
-  // header checkbox and the counts all read this same array — recomputing it
-  // per call site cost four full passes over 8000+ rows every render).
-  const _visibleQcRows = computeVisibleQcRows();
+  // The filtered Results rows, memoized on their actual inputs. "Computed once
+  // per render" was still too often: EVERY render paid three filter passes
+  // over 8,000+ rows, and a Step 1 batch re-renders once per streamed log
+  // line — thousands of times per run — which is what made typing lag while
+  // jobs were running. The filters read only qcRows plus these four controls
+  // (isFlagged/qcRunDate derive from fields already on each row), so the
+  // dependency list is exact and the recompute now happens only when one of
+  // them actually changes.
+  const _visibleQcRows = useMemo(
+    computeVisibleQcRows,
+    [qcRows, showFlaggedOnly, qcFilter, qcDateStart, qcDateEnd]
+  );
 
   /* Step 1 Results column sorting. null key = the order the scanner returned,
      which is the sensible default; a header click takes over, and a third
@@ -687,10 +717,17 @@ export default function App() {
     if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
     return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
   }
-  const visibleQcRows = qcSort.key
-    ? [...(_visibleQcRows)].sort((a, b) =>
-        (qcSort.dir === "desc" ? -1 : 1) * qcCompare(qcSortValue(a, qcSort.key), qcSortValue(b, qcSort.key)))
-    : _visibleQcRows;
+  // Sorting memoized separately from filtering, so a filter keystroke re-sorts
+  // but a sort click never re-filters — and an unrelated render does neither.
+  // An active sort over 8,179 rows is ~106k comparisons of regex-heavy values;
+  // per streamed log line, that alone was 30–100 ms of main-thread work.
+  const visibleQcRows = useMemo(
+    () => (qcSort.key
+      ? [...(_visibleQcRows)].sort((a, b) =>
+          (qcSort.dir === "desc" ? -1 : 1) * qcCompare(qcSortValue(a, qcSort.key), qcSortValue(b, qcSort.key)))
+      : _visibleQcRows),
+    [_visibleQcRows, qcSort]
+  );
   function toggleQcSort(key) {
     setQcSort((s) => {
       if (s.key !== key) return { key, dir: "asc" };
@@ -1618,6 +1655,7 @@ export default function App() {
   useEffect(() => {
     if (!jobId) return;
     setLogs([]);
+    setLogsTrimmed(false);
     setJobStatus("running");
     const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
     es.onmessage = (evt) => {
@@ -1666,13 +1704,42 @@ export default function App() {
         es.close();
         return;
       }
-      setLogs((prev) => [...prev, line]);
+      // Batched, bounded log appends. One setState per SSE line meant one
+      // whole-app re-render per line — a long Step 1 batch streams thousands,
+      // and by mid-run each append also copied a tens-of-thousands-entry
+      // array, so the browser visibly froze late in big runs. Lines buffer in
+      // a ref and flush on a 250 ms timer (N lines -> one render), and only
+      // the newest LOG_KEEP lines are retained — the display is a tail; the
+      // complete log is on disk and served whole by the job log endpoints.
+      logBufRef.current.push(line);
+      if (!logFlushRef.current) {
+        logFlushRef.current = setTimeout(() => {
+          logFlushRef.current = null;
+          const batch = logBufRef.current;
+          logBufRef.current = [];
+          setLogs((prev) => {
+            const next = prev.concat(batch);
+            if (next.length > LOG_KEEP) {
+              setLogsTrimmed(true);
+              return next.slice(-LOG_KEEP);
+            }
+            return next;
+          });
+        }, 250);
+      }
     };
     es.onerror = () => {
       setJobStatus("error");
       es.close();
     };
-    return () => es.close();
+    return () => {
+      es.close();
+      if (logFlushRef.current) {
+        clearTimeout(logFlushRef.current);
+        logFlushRef.current = null;
+      }
+      logBufRef.current = [];
+    };
   }, [jobId]);
 
   useEffect(() => {
@@ -1692,9 +1759,13 @@ export default function App() {
     setStep2JobStatus("");
     setStep2Controllable(true);
     setStep2JobId("");
+    // No direct loadStep2Outputs() here: loadStep2Runs(true) settles the run
+    // selection and exactly one outputs load follows from that (see its
+    // comment). The old direct call here ran the whole cascade an extra time —
+    // against the PREVIOUS project's run id, since step2SelectedRun had not
+    // been re-picked yet.
     loadStep2Runs(true);
     loadStep2Active();
-    loadStep2Outputs();
     loadVcfSourceSamples();
     loadInputs(selectedProject);
     loadSraReport(selectedProject);
@@ -1827,13 +1898,30 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
-    const hasRunning = Object.values(posthocStatus).some((status) => status?.running);
-    if (!hasRunning) return;
-    const id = setInterval(() => {
-      loadStep2Outputs();
+    const runningNames = Object.keys(posthocStatus).filter((n) => posthocStatus[n]?.running);
+    if (!runningNames.length) return;
+    // Poll only what can change: the group STATUSES. The old body re-ran the
+    // entire Step 2 outputs cascade every 3 seconds — on a 63-group run that
+    // was ~66 requests per tick (~1,300/minute through the OnDemand proxy),
+    // each tick re-deriving group shapes and the VCF-database breakdown that
+    // cannot change while a SNP-distance job runs. The full outputs reload now
+    // happens exactly once, when a group's status flips running -> finished,
+    // which is the moment its new files exist to be listed.
+    const proj = selectedProject;
+    const id = setInterval(async () => {
+      // clearInterval cannot cancel an in-flight tick, so the tick itself
+      // refuses to write once the project changed out from under it.
+      const map = await loadPosthocStatuses(step2Groups, {
+        merge: true,
+        stale: () => selectedProjectRef.current !== proj,
+      });
+      if (!map) return;
+      if (runningNames.some((n) => map[n] && !map[n].running)) {
+        loadStep2Outputs();
+      }
     }, 3000);
     return () => clearInterval(id);
-  }, [selectedProject, settingsReady, posthocStatus]);
+  }, [selectedProject, settingsReady, posthocStatus, step2Groups]);
 
   async function createProject() {
     if (!newProjectName.trim()) return;
@@ -2345,23 +2433,51 @@ export default function App() {
 
   async function loadStep2Runs(autoSelectLatest = false) {
     if (!selectedProject) return;
+    // Project guard: this is called from completion callbacks whose closures
+    // were captured at job START, and from the switch cascade — a slow
+    // response must neither write another project's run list nor trigger an
+    // outputs load for it. The ref is the live selection; the closure is not.
+    const proj = selectedProject;
+    const stale = () => selectedProjectRef.current !== proj;
     setStep2RunsError("");
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/runs`);
+      const res = await fetch(`${API_BASE}/api/projects/${proj}/step2/runs`);
+      if (stale()) return;
       if (!res.ok) {
         let detail = "";
         try { detail = (await res.json()).detail || ""; } catch { /* not JSON */ }
+        if (stale()) return;
         setStep2RunsError(
           detail || `Could not list this project's comparisons (HTTP ${res.status}).`
         );
         return;
       }
       const runs = await res.json();
+      if (stale()) return;
       setStep2Runs(runs);
-      if (autoSelectLatest && runs.length > 0) {
-        setStep2SelectedRun(pickDefaultRun(runs));
+      if (autoSelectLatest) {
+        // Exactly ONE outputs load per settled selection. Setting the state
+        // fires the [step2SelectedRun] effect, which loads outputs — so this
+        // function must NOT also call loadStep2Outputs() for that case, and
+        // the project-switch effect must not either (it used to, which ran
+        // the whole cascade 2–3 times per click, once with the PREVIOUS
+        // project's run id). The direct call below covers the two cases the
+        // effect cannot: the pick equals the current value (no state change,
+        // no effect), and a zero-runs project (legacy flat layout).
+        //
+        // Compared against the LIVE selection (the ref), not this closure's
+        // render-time value: a completion callback holds the selection as of
+        // job start, and comparing against that could skip a needed load or
+        // silently swap the pane's contents under an unchanged dropdown.
+        const pick = runs.length > 0 ? pickDefaultRun(runs) : null;
+        if (pick === step2SelectedRunRef.current) {
+          loadStep2Outputs();
+        } else {
+          setStep2SelectedRun(pick);
+        }
       }
     } catch {
+      if (stale()) return;
       // A timeout lands here, and silence was the bug: on a project with
       // hundreds of comparisons this request can outlive the proxy's read
       // timeout, and the only symptom was a dropdown that never appeared.
@@ -2374,15 +2490,27 @@ export default function App() {
 
   async function loadStep2Outputs() {
     if (!selectedProject) return;
+    // Supersede guard (same pattern as qcLoadSeq): a slower older call must
+    // never write its response over a newer one's. Checked after every await.
+    // Project staleness is part of the SAME predicate — sequence order alone
+    // is not enough, because a late call started for a previously-viewed
+    // project takes a NEWER sequence number and would otherwise win.
+    const proj = selectedProject;
+    const mySeq = ++step2OutSeqRef.current;
+    const superseded = () =>
+      step2OutSeqRef.current !== mySeq || selectedProjectRef.current !== proj;
     setStep2OutputsError("");
     const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2_outputs${runParam}`);
+    const res = await fetch(`${API_BASE}/api/projects/${proj}/step2_outputs${runParam}`);
+    if (superseded()) return;
     if (!res.ok) {
       const msg = await res.json();
+      if (superseded()) return;
       setStep2OutputsError(msg.detail || "Failed to load Step 2 outputs");
       return;
     }
     const data = await res.json();
+    if (superseded()) return;
     let groups = [];
     if (Array.isArray(data)) {
       setStep2Outputs(data);
@@ -2394,10 +2522,12 @@ export default function App() {
       groups = data.groups || [];
       setStep2Groups(groups);
     }
-    loadStep2Groupings();
-    const countRes = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_count`);
+    loadStep2Groupings({ stale: superseded });
+    const countRes = await fetch(`${API_BASE}/api/projects/${proj}/step2/vcf_count`);
+    if (superseded()) return;
     if (countRes.ok) {
       const countData = await countRes.json();
+      if (superseded()) return;
       setStep2VcfCount(countData.count || 0);
       setStep2EditedCount(countData.edited_count || 0);
       setStep2ComparisonCount(
@@ -2414,7 +2544,7 @@ export default function App() {
       setStep2Duplicates(0);
     }
     if (groups.length) {
-      loadPosthocStatuses(groups);
+      loadPosthocStatuses(groups, { stale: superseded });
     } else {
       setPosthocStatus({});
     }
@@ -2550,24 +2680,61 @@ export default function App() {
   // Parse the run's vSNP3 summary into {groupName: [sample names]} so the
   // Step 2 Results search can filter groups by sample (incl. metadata in the
   // name). Loaded alongside Step 2 outputs.
-  async function loadStep2Groupings() {
+  async function loadStep2Groupings({ stale = null } = {}) {
     if (!selectedProject) { setStep2Groupings({}); return; }
     const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/groupings${runParam}`);
+    // The parent cascade's supersede predicate: a stale response must not
+    // overwrite the groupings a newer cascade already wrote.
+    if (stale && stale()) return;
     if (res.ok) {
       const data = await res.json();
+      if (stale && stale()) return;
       setStep2Groupings(data.groups || {});
     } else {
       setStep2Groupings({});
     }
   }
 
-  async function loadPosthocStatuses(groups, { merge = false } = {}) {
-    if (!selectedProject) return;
+  async function loadPosthocStatuses(groups, { merge = false, stale = null } = {}) {
+    if (!selectedProject) return null;
+    const isStale = () => Boolean(stale && stale());
     // Groups belong to a specific step2 run; pass run_id so the backend looks
     // under step2/<run_id>/<group> (not step2/<group>, which no longer exists).
     const runParam = step2SelectedRun ? `&run_id=${encodeURIComponent(step2SelectedRun)}` : "";
     const statusMap = {};
+    // One batched request for every group, when the backend has it — the
+    // per-group loop below cost 63 round trips through the OnDemand proxy per
+    // Step 2 Results load on a 63-group run, and again per 3 s poll tick. The
+    // probe result is remembered so an older backend costs one 404, once.
+    if (posthocBatchSupportRef.current !== false) {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/projects/${selectedProject}/posthoc/status_all?tool=snp_analysis${runParam}`
+        );
+        if (res.ok) {
+          posthocBatchSupportRef.current = true;
+          const data = await res.json();
+          if (isStale()) return null;
+          const all = data.groups || {};
+          // Filter to the requested groups so merge semantics stay exactly
+          // what the per-group loop produced (a single-group refresh must not
+          // clobber unrelated entries with a full replace).
+          for (const g of groups) {
+            // A requested group ABSENT from the scan is gone from disk (the
+            // run was deleted mid-poll): report it not-running with no
+            // outputs, so a merge cannot preserve a phantom "running" chip
+            // and the poll's transition check can see it stop.
+            statusMap[g.name] = all[g.name] || { running: false, outputs: [] };
+          }
+          setPosthocStatus((prev) => (merge ? { ...prev, ...statusMap } : statusMap));
+          return statusMap;
+        }
+        if (res.status === 404) posthocBatchSupportRef.current = false;
+      } catch {
+        // fall through to the per-group loop
+      }
+    }
     await Promise.all(
       groups.map(async (group) => {
         try {
@@ -2582,9 +2749,11 @@ export default function App() {
         }
       })
     );
+    if (isStale()) return null;
     // merge: keep other groups' statuses when refreshing just one (post-run),
     // so their "posthoc ready" chips don't vanish. Full loads replace.
     setPosthocStatus((prev) => (merge ? { ...prev, ...statusMap } : statusMap));
+    return statusMap;
   }
 
   async function runPosthoc(groupName) {
@@ -3725,6 +3894,47 @@ export default function App() {
       ...Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
       ...selectionExclude,
     ]));
+    // Staging watch: the dispatch request copies every comparison VCF into the
+    // new run folder BEFORE it answers — minutes, on an 8,000-VCF comparison —
+    // and the OnDemand proxy kills requests at ~60 s while the server keeps
+    // copying. So while the POST is in flight, poll the runs list (cheap since
+    // v0.4.76: the new folder reports a live staged_vcfs count) and show real
+    // progress instead of a frozen "Starting…". Skipped on resume: its VCFs
+    // are already staged, so dispatch answers fast and there is nothing to
+    // watch. The run id is not known until the POST answers, so the newest
+    // list entry — which a just-created folder is, by stamp — stands in.
+    let stagingPoll = null;
+    let stagingStopped = false;
+    const dispatchProject = selectedProject;
+    const stopStagingWatch = () => {
+      stagingStopped = true;
+      if (stagingPoll) { clearInterval(stagingPoll); stagingPoll = null; }
+    };
+    if (!resumeRunId) {
+      stagingPoll = setInterval(async () => {
+        // clearInterval cannot cancel a tick already awaiting its fetch, so
+        // the stopped flag is re-checked AFTER the awaits — otherwise an
+        // in-flight tick lands its "staging…" message on top of the POST's
+        // outcome message and it sticks there for the whole run. The project
+        // check keeps a watch started on project A from stamping A's progress
+        // into project B's pane after a mid-staging switch (and stops the
+        // watch outright, so it cannot leak for the life of the page).
+        if (selectedProjectRef.current !== dispatchProject) { stopStagingWatch(); return; }
+        try {
+          const r = await fetch(`${API_BASE}/api/projects/${dispatchProject}/step2/runs`);
+          if (stagingStopped || selectedProjectRef.current !== dispatchProject) return;
+          if (!r.ok) return;
+          const runs = await r.json();
+          if (stagingStopped || selectedProjectRef.current !== dispatchProject) return;
+          const newest = runs && runs[0];
+          if (newest && newest.staged_vcfs > 0 && !newest.has_results) {
+            setStep2SetupMsg(
+              `Starting Step 2 — staging the comparison: ${Number(newest.staged_vcfs).toLocaleString()} VCFs copied so far…`
+            );
+          }
+        } catch { /* keep waiting; the POST outcome decides */ }
+      }, 2000);
+    }
     let res;
     try {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/run`, {
@@ -3755,11 +3965,33 @@ export default function App() {
         })
       });
     } catch (e) {
+      stopStagingWatch();
       setStep2Running(false);
-      setStep2SetupMsg("");
-      window.alert(`Step 2 failed to start: ${e.message || "network error"}`);
+      if (resumeRunId) {
+        setStep2SetupMsg("");
+        window.alert(`Step 2 failed to start: ${e.message || "network error"}`);
+      } else {
+        // The likeliest cause on a big comparison is the proxy timing the
+        // request out while the server is still copying — the run is not
+        // necessarily lost. Say so instead of a bare "failed", and leave a
+        // note in place of the spinner; the Comparison list's own state labels
+        // ("staged, never ran" with a Run button) take it from here.
+        if (selectedProjectRef.current === dispatchProject) {
+          setStep2SetupMsg(
+            "The start request did not complete — on a large comparison the proxy can time out while VCFs are still being staged."
+          );
+        }
+        window.alert(
+          `Step 2 start did not complete: ${e.message || "network error"}.\n\n` +
+          "If this is a large comparison, staging may still be running on the server. " +
+          "Refresh the Comparison list in a minute: the new folder will show either " +
+          "“running now” (it made it) or “staged, never ran” — " +
+          "which offers a Run button that starts it without re-copying anything."
+        );
+      }
       return;
     }
+    stopStagingWatch();
     if (!res.ok) {
       setStep2Running(false);
       setStep2SetupMsg("");
@@ -8193,7 +8425,14 @@ export default function App() {
 
         <div className="row-header">
           <h2>Logs</h2>
-          <CopyLogButton text={() => logs.join("\n")} />
+          <CopyLogButton text={() => (logsTrimmed
+            ? `[… earlier lines trimmed from this view — the complete log is saved with the job on the server]\n${logs.join("\n")}`
+            : logs.join("\n"))} />
+          {logsTrimmed ? (
+            <span className="muted" style={{ fontSize: "0.78em" }}>
+              showing the last {LOG_KEEP.toLocaleString()} lines
+            </span>
+          ) : null}
           <button className="ghost" onClick={() => setShowRowLogs(!showRowLogs)}>
             {showRowLogs ? "Hide" : "Show"}
           </button>

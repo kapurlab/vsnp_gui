@@ -2854,6 +2854,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   // anything) keeps the position on screen.
   var invBox = document.getElementById("xlsxInvariant");
   var invNote = document.getElementById("xlsxInvariantNote");
+  var invColsMemo = null;   // computed once; see the note at the toggle
   var colgroupEl = table.querySelector("colgroup");
   var allCols = colgroupEl ? Array.prototype.slice.call(colgroupEl.children) : [];
   var hideStyle = document.createElement("style");
@@ -2905,9 +2906,22 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         invNote.textContent = "";
         return;
       }}
+      // Memoized after the first computation: the answer walks every sample
+      // cell of every row (~1M textContent reads near the full-view bound),
+      // and it cannot change afterwards — loadAllRows() has fetched the whole
+      // window and row text is static (colour marks are CSS classes, not text
+      // edits). Re-ticking the box is instant instead of a multi-second walk.
+      if (invColsMemo !== null) {{
+        setHiddenCols(invColsMemo);
+        invNote.textContent = invColsMemo.length
+          ? "hiding " + invColsMemo.length + " of " + Object.keys(LOCI).length + " positions"
+          : "no position is identical across the shown samples";
+        return;
+      }}
       invNote.textContent = "checking every row…";
       loadAllRows().then(function() {{
         var cols = identicalCols();
+        invColsMemo = cols;
         setHiddenCols(cols);
         invNote.textContent = cols.length
           ? "hiding " + cols.length + " of " + Object.keys(LOCI).length + " positions"

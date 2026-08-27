@@ -75,7 +75,9 @@ from app.refs import (
     find_gff_for_fasta,
     sanitize_upstream_paths,
 )
-from app.sra import expand_accessions, expand_accessions_with_mapping, build_download_script, SRAExpansionError, write_crosswalk_tsv
+from app.sra import (expand_accessions, expand_accessions_with_mapping, build_download_script,
+                     SRAExpansionError, write_crosswalk_tsv,
+                     is_valid_accession as sra_is_valid_accession)
 from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
 
 app = FastAPI(title="vSNP GUI API")
@@ -1369,7 +1371,11 @@ for path in tree_files:
     script = (
         script.replace("__MAPPING_CSV__", str(mapping_csv))
         .replace("__STEP2_DIR__", str(step2_dir))
-        .replace("__LABEL_STYLE__", label_style)
+        # Substituted into a Python string literal in the generated program, so
+        # a value containing a quote would inject code. Only "short" and "rich"
+        # mean anything (see _load_vcf_label_map); anything else was already
+        # treated as "short", so pinning it here changes no behaviour.
+        .replace("__LABEL_STYLE__", label_style if label_style in ("short", "rich") else "short")
     )
     script_path.write_text(script, encoding="utf-8")
     return script_path
@@ -1791,6 +1797,36 @@ def ref_path_remove(payload: RefPathRequest):
 
 _REF_DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# A reference type / NCBI accession as it may appear on a generated command line.
+# Same charset as the display-name rule above, which was already applied to
+# display_name while the sibling values went unchecked. Real values are things
+# like "Mycobacterium_AF2122", "NC_045512_wuhan-hu-1", "para-CP033688",
+# "NC_000962.3" — all covered.
+_REF_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _require_ref_token(value: str, field: str) -> str:
+    """Reject a reference/accession that could not be a real one.
+
+    These values reach generated shell scripts. Rather than rely only on
+    quoting at each of the several interpolation sites, the value is refused at
+    the door if it is not shaped like a reference name — a whitelist, so a
+    future call site that forgets to quote cannot be exploited either. vsnp3
+    keeps ownership of "no such reference": a well-formed but unknown name
+    passes here and fails downstream with vsnp3's own message, so a renamed or
+    removed reference still reports the way it always did.
+    """
+    v = (value or "").strip()
+    if not v:
+        return v
+    if len(v) > 128 or not _REF_TOKEN_RE.match(v):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Invalid {field}: {v!r}. A reference name or accession may "
+                    "contain only letters, digits, dot, underscore and hyphen."),
+        )
+    return v
+
 
 @app.post("/api/references/download")
 def ref_download(payload: RefDownloadRequest):
@@ -1799,6 +1835,10 @@ def ref_download(payload: RefDownloadRequest):
     accession = payload.accession.strip()
     if not accession:
         raise HTTPException(status_code=400, detail="Accession is required")
+    # The sibling display_name below was already allowlisted with the same rule;
+    # accession was not, and it reaches a generated bash script (and the cd path,
+    # since subdir_name defaults to it).
+    accession = _require_ref_token(accession, "accession")
     output_dir = Path(payload.output_dir).expanduser().resolve()
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1857,8 +1897,8 @@ def ref_download(payload: RefDownloadRequest):
     lines = [
         "#!/bin/bash",
         "set -euo pipefail",
-        f"cd \"{acc_dir}\"",
-        f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {accession} -fbg",
+        f"cd {shlex.quote(str(acc_dir))}",
+        f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {shlex.quote(accession)} -fbg",
     ]
     script_content = "\n".join(lines) + "\n"
     script_path = acc_dir / "download_ref.sh"
@@ -2993,9 +3033,31 @@ def project_input_delete(project: str, filename: str):
     return {"deleted": filename}
 
 
+def _require_valid_accessions(accessions) -> None:
+    """400 on any accession that is not shaped like one.
+
+    Checked here, before expansion, purely so the MESSAGE is right: the
+    generator and the expander both refuse bad values too (defence in depth),
+    but SRAExpansionError is reported as a 502 with NCBI rate-limit advice,
+    which would be a confusing thing to tell someone who simply typed a stray
+    character.
+    """
+    bad = [a for a in (accessions or []) if str(a).strip()
+           and not sra_is_valid_accession(str(a))]
+    if bad:
+        shown = ", ".join(repr(b) for b in bad[:5])
+        more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Not valid accessions: {shown}{more}. An accession may "
+                    "contain only letters, digits, dot, underscore and hyphen."),
+        )
+
+
 @app.post("/api/projects/{project}/sra/expand")
 def sra_expand(project: str, payload: SraRequest):
     _ = project
+    _require_valid_accessions(payload.accessions)
     try:
         expanded = expand_accessions(payload.accessions, strict=True)
     except SRAExpansionError as e:
@@ -3010,6 +3072,7 @@ def sra_download(project: str, payload: SraRequest):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
+    _require_valid_accessions(payload.accessions)
     try:
         expanded, mapping = expand_accessions_with_mapping(payload.accessions, strict=True)
     except SRAExpansionError as e:
@@ -3219,7 +3282,12 @@ def _step1_dispatch(
     # Auto-populate reference from project.json if not supplied in payload
     if not payload.reference:
         payload.reference = _project_reference(project_dir)
-    ref_arg = f"-t {payload.reference}" if payload.reference else ""
+    # Validated even when it came from project.json rather than the request: on a
+    # shared project that file is writable by every member, so it is untrusted
+    # input too. Quoted as well as validated — the value lands inside a bash
+    # string that is later re-parsed.
+    payload.reference = _require_ref_token(payload.reference, "reference")
+    ref_arg = f"-t {shlex.quote(payload.reference)}" if payload.reference else ""
     if payload.reference:
         update_project_meta(project_dir, {
             "reference": payload.reference,
@@ -3309,15 +3377,24 @@ def _step1_dispatch(
             # ont (nanopore alignment — auto-detected or forced), else single.
             "  if [ -n \"$R2\" ]; then echo paired > .provenance/read_type; elif [ -n \"$NP\" ]; then echo ont > .provenance/read_type; else echo single > .provenance/read_type; fi",
             "  date -u +%s.%N > .provenance/started_at",
-            # Build the exact command as a shell variable so we can BOTH record it
-            # verbatim to .provenance AND run it (via eval) — guaranteeing the
-            # recorded line is literally what executed. This is the per-sample
-            # "what ran on the command line" provenance the sample folder shows.
-            f"  if [ -n \"$R2\" ]; then",
-            f"    RUN_CMD=\"vsnp3_step1.py -r1 \\\"$R1\\\" -r2 \\\"$R2\\\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP\"",
-            "  else",
-            f"    RUN_CMD=\"vsnp3_step1.py -r1 \\\"$R1\\\" {ref_arg} {debug_flag} {assemble_unmap_flag} $NP\"",
-            "  fi",
+            # Build the command as an ARRAY, not a string, and run the array
+            # directly. The predecessor built one string and ran it through
+            # `eval`, which re-parsed it — so a FASTQ filename containing
+            # $(...) or backticks (a file anyone with write access to a shared
+            # project could drop in) executed as this user at Run time.
+            # A quoted array expansion passes each filename as exactly one
+            # argument and never re-parses it.
+            #
+            # Arrays and "${arr[@]}" are bash 3.2 features, so this stays
+            # portable to macOS /bin/bash (3.2.57) — unlike `mapfile`, which is
+            # bash 4+. See the `wait -n` note above for why 3.2 matters here.
+            #
+            # ref_arg/debug_flag/assemble_unmap_flag/$NP are unquoted on purpose:
+            # they are server-built option tokens that must word-split into
+            # separate argv entries, and each is now validated or a fixed literal.
+            "  RUN_ARGS=(vsnp3_step1.py -r1 \"$R1\")",
+            "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
+            f"  RUN_ARGS+=({ref_arg} {debug_flag} {assemble_unmap_flag} $NP)",
             "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
             "  PROV_SAMPLE=$(basename \"$d\")",
             "  PROV_CWD=$(pwd)",
@@ -3331,10 +3408,10 @@ def _step1_dispatch(
             "    echo \"# tool:        $PROV_VSNP3\"",
             "    echo \"# ----------------------------------------------------------------\"",
             "    echo \"# Command executed (copy/paste to reproduce):\"",
-            "    echo \"$RUN_CMD\"",
+            "    printf '%q ' \"${RUN_ARGS[@]}\"; echo \"\"",
             "    echo \"\"",
             "  } >> .provenance/vsnp_gui_step1_run_cmd.txt 2>/dev/null || true",
-            "  eval \"$RUN_CMD\" >> \"$LOG\" 2>&1",
+            "  \"${RUN_ARGS[@]}\" >> \"$LOG\" 2>&1",
             "  STATUS=$?",
             "  echo $STATUS > .provenance/exit_code",
             "  date -u +%s.%N > .provenance/finished_at",
@@ -4321,7 +4398,11 @@ def step2_run(project: str, payload: Step2Request):
     # -wd is the dated run folder holding the staged COPIES (see the copy loop
     # above), not step2/vcf_database — vsnp3 removes VCFs from its -wd, so the
     # cumulative database must never be handed to it directly.
-    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(run_dir))} {flags_str} -t {payload.reference}{remove_arg}"
+    # -t was the one value on this line that was neither validated nor quoted.
+    # The guard above only compares against refs when exactly one is inferred,
+    # so an import-only project (empty step1/) reached here unchecked.
+    safe_reference = _require_ref_token(payload.reference, "reference")
+    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(run_dir))} {flags_str} -t {shlex.quote(safe_reference)}{remove_arg}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:
@@ -7073,7 +7154,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "13"  # 13: identical-positions memo in the page JS
+_XLSX_RENDER_VERSION = "14"  # 14: escape cell text in <script>, sanitize font names
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to

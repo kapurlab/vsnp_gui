@@ -147,6 +147,15 @@ class FilterMatchError(ValueError):
     message, not an empty grid."""
 
 
+def _json_for_script(value) -> str:
+    """json.dumps, safe to embed inside a <script> element."""
+    return (json.dumps(value)
+            .replace("</", "<\\/")
+            .replace("<!--", "<\\u0021--")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
 def _strip_vcf_suffix(s: str) -> str:
     """Reduce a variant-table sample label to the stem used by Step 1.
 
@@ -826,7 +835,17 @@ def _cell_inline_style(cell) -> str:
         if font.size and font.size != _DEFAULT_FONT_SIZE:
             parts.append(f"font-size: {float(font.size):.1f}px")
         if font.name and font.name not in ("Calibri", "Arial"):
-            parts.append(f"font-family: '{font.name}', sans-serif")
+            # A font name is attacker-controlled: it comes out of the workbook,
+            # and workbooks arrive from imports and from shared projects. This
+            # one string is interpolated BOTH into a style="..." attribute and
+            # into a <style> block, so a name containing a quote or "</style>"
+            # broke out of the page in two different ways. Sanitizing at the
+            # source fixes both. Real font names are words, digits and spaces;
+            # anything else is dropped rather than escaped, because a font-family
+            # value has no legitimate use for punctuation here.
+            safe_font = re.sub(r"[^A-Za-z0-9 _-]", "", font.name).strip()[:64]
+            if safe_font:
+                parts.append(f"font-family: '{safe_font}', sans-serif")
 
     # Alignment
     align = cell.alignment
@@ -2140,8 +2159,13 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
         loaded=len(rows[:initial_rows]),
         available=len(rows),
         project=html.escape(window["project"], quote=True),
-        loci_json=json.dumps(window["loci"]),
-        samples_json=json.dumps(window["row_samples"]),
+        # json.dumps does NOT escape "<", so a cell value containing the literal
+        # "</script>" ended the block early and everything after it was parsed as
+        # HTML — stored XSS from a spreadsheet, same-origin with the whole API.
+        # Escaping "</" as "<\/" is inert inside a JS string (it means "/") and
+        # cannot terminate the element; "<!--" is escaped for the same reason.
+        loci_json=_json_for_script(window["loci"]),
+        samples_json=_json_for_script(window["row_samples"]),
         controls=view_controls(window.get("loci") or {},
                                window.get("row_samples") or []),
     )

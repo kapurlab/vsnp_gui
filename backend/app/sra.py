@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -83,6 +84,11 @@ def expand_accessions_with_mapping(
         acc = acc.strip()
         if not acc:
             continue
+        if not is_valid_accession(acc):
+            raise SRAExpansionError(
+                f"{acc!r} is not a valid accession (letters, digits, dot, "
+                "underscore and hyphen only)"
+            )
         if acc.startswith(("SRR", "ERR", "DRR")):
             expanded.append(acc)
             mapping.append((acc, [acc]))
@@ -117,6 +123,18 @@ def write_crosswalk_tsv(download_dir: Path, mapping: List[tuple[str, List[str]]]
         for inp, runs in mapping:
             fh.write(f"{inp}\t{','.join(runs)}\n")
     return crosswalk_path
+
+
+# An SRA/ENA/DDBJ accession as it may appear in a generated shell script.
+# Real values are SRR/ERR/DRR/SRX/SRS/SRP/PRJNA/SAMN + digits; the charset also
+# admits the dot/underscore/hyphen forms NCBI occasionally returns. Anything
+# else is refused rather than quoted, because these values are interpolated into
+# a bash array literal inside DOUBLE quotes, where $(...) and `...` expand.
+_SRA_ACC_RE = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
+
+
+def is_valid_accession(acc: str) -> bool:
+    return bool(_SRA_ACC_RE.match((acc or "").strip()))
 
 
 def _expand_single(accession: str) -> List[str]:
@@ -172,6 +190,11 @@ def build_download_script(
     samples a skipped one leaves no other on-screen trace."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
+    # Re-validated at the interpolation site itself: accessions also arrive from
+    # eutils XML, and this is the line that becomes shell.
+    for _a in accessions:
+        if not is_valid_accession(_a):
+            raise SRAExpansionError(f"refusing to build a download script for {_a!r}")
     acc_block = "\n".join([f'    "{a}"' for a in accessions])
     # Empty string disables the Step 1 skip check (older callers / no project).
     step1_dir_str = str(step1_dir) if step1_dir is not None else ""

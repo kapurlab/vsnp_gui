@@ -58,7 +58,16 @@ def stage_step2_vcfs(
         if vsnp3_would_remove(src.name, removal_set):
             skipped += 1
             continue
-        shutil.copy2(src, run_dir / src.name)
+        dest = run_dir / src.name
+        # Refuse to write THROUGH a symlink. The run folder is created with
+        # exist_ok=True inside a group-writable project, so another member could
+        # pre-plant <run>/<sample>_zc.vcf as a link to a file elsewhere and
+        # copy2 would follow it and overwrite the target as this user. Removing
+        # the link (never the thing it points at) keeps staging correct — the
+        # real VCF is written in its place — and cannot destroy data.
+        if dest.is_symlink():
+            dest.unlink()
+        shutil.copy2(src, dest)
         copied += 1
         staged.add(src.name)
     return copied, skipped, staged

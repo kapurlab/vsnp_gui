@@ -701,6 +701,7 @@ export default function App() {
       case "read_type": return row.read_type || "";
       case "run_date": return row._run_date || "";
       case "mapping": return qcMappingRate(row);
+      case "read_length": return qcReadLengthMean(row);
       default: return row[key];
     }
   }
@@ -2178,6 +2179,39 @@ export default function App() {
 
   function fmtPercent1(value) {
     return typeof value === "number" ? `${value.toFixed(1)}%` : "-";
+  }
+
+  /* Average read length, straight from the stats workbook vsnp3 writes:
+     'R1 Ave Length' / 'R2 Ave Length'. seqkit hands those over as strings and
+     comma-groups the big ones (an ONT run reads "5,432.1"), so Number() alone
+     returns NaN — strip the separators first. R2 is absent, not empty, for
+     single-end and ONT samples, which is why this returns a list rather than
+     a pair. */
+  function qcReadLengths(row) {
+    return ["R1 Ave Length", "R2 Ave Length"]
+      .map((key) => {
+        const raw = row?.[key];
+        if (raw === undefined || raw === null || raw === "") return null;
+        const n = Number(String(raw).replace(/,/g, "").trim());
+        return Number.isFinite(n) && n > 0 ? n : null;
+      })
+      .filter((n) => n !== null);
+  }
+
+  // One number to sort on: the mean across whatever mates the sample has, so
+  // a paired sample sorts by its actual read length rather than by R1 alone.
+  function qcReadLengthMean(row) {
+    const lens = qcReadLengths(row);
+    if (!lens.length) return null;
+    return lens.reduce((a, b) => a + b, 0) / lens.length;
+  }
+
+  // Per-mate, not averaged: R1 and R2 differing is itself worth seeing, and
+  // averaging them away is exactly the detail a read-length column is for.
+  function fmtReadLengths(row) {
+    const lens = qcReadLengths(row);
+    if (!lens.length) return "-";
+    return lens.map((n) => n.toFixed(1)).join(" / ");
   }
 
   // Strip the trailing " < N% fail threshold" / " < N× pass threshold" suffix
@@ -6568,6 +6602,7 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
+                        <QcSortTh {...qcSortProps} sortKey="read_length">Avg Read Len</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
@@ -6676,6 +6711,7 @@ export default function App() {
                               <td>{fmtPercent1(qcMappingRate(row))}</td>
                               <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
                               <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                              <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
                               <td>{formatPercent(row["R1 Passing Q20"])}</td>
                               <td>{formatPercent(row["R2 Passing Q20"])}</td>
                               <td>{formatPercent(row["Genome with Coverage"])}</td>
@@ -6778,6 +6814,7 @@ export default function App() {
                           <th><span className="rt-th-label">Mapping %</span><Grip label="Mapping %" /></th>
                           <th><span className="rt-th-label">Zero Cov %</span><Grip label="Zero Cov %" /></th>
                           <th><span className="rt-th-label">Dup %</span><Grip label="Dup %" /></th>
+                          <th><span className="rt-th-label">Avg Read Len</span><Grip label="Avg Read Len" /></th>
                           <th><span className="rt-th-label">R1 Q20</span><Grip label="R1 Q20" /></th>
                           <th><span className="rt-th-label">R2 Q20</span><Grip label="R2 Q20" /></th>
                           <th><span className="rt-th-label">Genome Cov</span><Grip label="Genome Cov" /></th>
@@ -6879,6 +6916,7 @@ export default function App() {
                             <td>{fmtPercent1(qcMappingRate(row))}</td>
                             <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
                             <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                            <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
                             <td>{formatPercent(row["R1 Passing Q20"])}</td>
                             <td>{formatPercent(row["R2 Passing Q20"])}</td>
                             <td>{formatPercent(row["Genome with Coverage"])}</td>

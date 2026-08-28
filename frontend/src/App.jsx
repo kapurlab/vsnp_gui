@@ -511,6 +511,10 @@ export default function App() {
   const [vcfSourceSamples, setVcfSourceSamples] = useState([]);
   const [vcfSourceFilter, setVcfSourceFilter] = useState("");
   const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
+  // The browse list shows what THIS RUN will compare, not everything the
+  // folder holds: samples whose source is unticked are hidden by default and
+  // revealed struck through by this toggle (the files themselves stay put).
+  const [vcfSourceShowLeftOut, setVcfSourceShowLeftOut] = useState(false);
   // Step 2 build-list exclusions (separate from Step 1 QC exclusions): a map
   // of {sampleName: true} for samples checked "Exclude" in the Build VCF set
   // list, plus a sample->display-label map for showing reference metadata.
@@ -1031,6 +1035,15 @@ export default function App() {
     step2Mode, step2SetSamples, step2AvailablePanels, step2UseVcfDb,
     step2ProjectSamples, step2ProjectSamplesInSet, step2ListResolution, step2ListIncludeDbs,
   ]);
+
+  // The samples the browse list hides: physically in vcf_database, but left out
+  // of this run because the source they came from is unticked. Build tab only —
+  // on the List tab the resolution panel already spells out what matched, and
+  // the browse list stays a plain inventory of the folder.
+  const step2LeftOutSet = useMemo(
+    () => (step2Mode === "list" ? new Set() : new Set(step2RunSelection.leaveOut)),
+    [step2Mode, step2RunSelection]
+  );
 
   // "Files in download" shows only samples not yet run in Step 1 and not in
   // Quarantine — once a sample is run its reads are copied into step1/ (and a
@@ -7683,7 +7696,8 @@ export default function App() {
                       <strong>This run will skip {step2RunSelection.leaveOut.length} sample
                       {step2RunSelection.leaveOut.length === 1 ? "" : "s"}.</strong> {step2RunSelection.leaveOut.length === 1 ? "It is" : "They are"} in{" "}
                       <strong>{vcfsFolderName || "vcf_database"}</strong>, but the source {step2RunSelection.leaveOut.length === 1 ? "it came" : "they came"} from is
-                      unticked above, so {step2RunSelection.leaveOut.length === 1 ? "it is" : "they are"} left out of the comparison. The files are not deleted —
+                      unticked above, so {step2RunSelection.leaveOut.length === 1 ? "it is" : "they are"} left out of the comparison and
+                      {step2RunSelection.leaveOut.length === 1 ? " is" : " are"} hidden from the sample list below. The files are not deleted —
                       tick the source again to include {step2RunSelection.leaveOut.length === 1 ? "it" : "them"}.
                     </div>
                   ) : null}
@@ -7868,7 +7882,10 @@ export default function App() {
                       onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); }}
                       style={{fontSize:"0.85em"}}
                     >
-                      {vcfSourceOpen ? "▲ Hide" : "▼ Browse"} {vcfSourceSamples.length} samples
+                      {vcfSourceOpen ? "▲ Hide" : "▼ Browse"}{" "}
+                      {vcfSourceShowLeftOut
+                        ? vcfSourceSamples.length
+                        : vcfSourceSamples.length - step2LeftOutSet.size} samples
                     </button>
                     {vcfSourceOpen && (
                       <div style={{marginTop:"6px", border:"1px solid var(--border)", borderRadius:"4px", overflow:"hidden"}}>
@@ -7885,22 +7902,44 @@ export default function App() {
                         <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
                           {(() => {
                             const q = vcfSourceFilter.trim().toLowerCase();
-                            const filtered = q
+                            const matching = q
                               ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
-                            const excludedCount = vcfSourceSamples.filter(s =>
-                              step2Blocklist[s.sample]
-                              || step2BuildExcluded[s.sample]
-                              || (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample])  // panel overrides Step 1 exclusion
+                            // Untick a source and its VCFs leave the run, so they leave this
+                            // list too — showing them unmarked reads as "still included".
+                            // The files are untouched; the toggle brings them back struck through.
+                            const filtered = vcfSourceShowLeftOut
+                              ? matching
+                              : matching.filter(s => !step2LeftOutSet.has(s.sample));
+                            const listedTotal = vcfSourceShowLeftOut
+                              ? vcfSourceSamples.length
+                              : vcfSourceSamples.length - step2LeftOutSet.size;
+                            const excludedCount = filtered.filter(s =>
+                              !step2LeftOutSet.has(s.sample)
+                              && (step2Blocklist[s.sample]
+                                || step2BuildExcluded[s.sample]
+                                || (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))  // panel overrides Step 1 exclusion
                             ).length;
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
-                                  {filtered.length === vcfSourceSamples.length
+                                  {filtered.length === listedTotal
                                     ? `${filtered.length} samples`
-                                    : `${filtered.length} of ${vcfSourceSamples.length} samples`}
+                                    : `${filtered.length} of ${listedTotal} samples`}
                                   {excludedCount > 0 && (
                                     <span style={{color:"var(--danger, #a94442)"}}> · {excludedCount} excluded from Step 2</span>
+                                  )}
+                                  {step2LeftOutSet.size > 0 && (
+                                    <span style={{color:"var(--warning, #8a6d3b)"}}>
+                                      {" · "}{step2LeftOutSet.size} not in this run (source unticked){" — "}
+                                      <button
+                                        type="button"
+                                        onClick={() => setVcfSourceShowLeftOut(v => !v)}
+                                        style={{background:"none", border:"none", padding:0, font:"inherit", color:"inherit", textDecoration:"underline", cursor:"pointer"}}
+                                      >
+                                        {vcfSourceShowLeftOut ? "hide them" : "show them"}
+                                      </button>
+                                    </span>
                                   )}
                                 </div>
                                 {filtered.map(s => {
@@ -7913,26 +7952,33 @@ export default function App() {
                                   const effectiveQc = qcExcludedRaw && !inPanel;
                                   const locked = lockedByBlocklist || effectiveQc; // tier A/B — not toggleable here
                                   const isExcluded = !!step2BuildExcluded[s.sample] || locked;
+                                  // Only visible when the user asked to see what this run drops.
+                                  const leftOut = step2LeftOutSet.has(s.sample);
+                                  const struck = isExcluded || leftOut;
                                   const metaLabel = step2BuildMeta[s.sample];
                                   return (
-                                  <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: isExcluded ? 0.55 : 1}}>
+                                  <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
-                                      disabled={locked}
+                                      disabled={locked || leftOut}
                                       onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
-                                      title={lockedByBlocklist
+                                      title={leftOut
+                                        ? "Left out of this run — the source it came from is unticked above; tick that source to include it"
+                                        : lockedByBlocklist
                                         ? "On the reference blocklist (…_remove_from_analysis.xlsx) — never included in any analysis; edit the reference file to change it"
                                         : keptByPanel
                                           ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
                                           : (effectiveQc
                                             ? "Excluded in Step 1 Results — change it there to include in Step 2"
                                             : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
-                                      style={{flexShrink:0, cursor: locked ? "not-allowed" : "pointer"}}
+                                      style={{flexShrink:0, cursor: (locked || leftOut) ? "not-allowed" : "pointer"}}
                                     />
-                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: isExcluded ? "line-through" : "none"}}>
+                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: struck ? "line-through" : "none"}}>
                                       {s.sample}
-                                      {lockedByBlocklist ? (
+                                      {leftOut ? (
+                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic"}}> — source unticked, not in this run</span>
+                                      ) : lockedByBlocklist ? (
                                         <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — blocked (reference)</span>
                                       ) : keptByPanel ? (
                                         <span style={{color:"var(--success, #2e7d32)", fontFamily:"sans-serif", fontStyle:"italic"}}> — in reference panel (kept despite Step 1 exclusion)</span>
@@ -7959,7 +8005,11 @@ export default function App() {
                                   );
                                 })}
                                 {filtered.length === 0 && (
-                                  <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>No samples match</div>
+                                  <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>
+                                    {matching.length > 0
+                                      ? "Every sample here is left out of this run — its source is unticked above."
+                                      : "No samples match"}
+                                  </div>
                                 )}
                               </>
                             );

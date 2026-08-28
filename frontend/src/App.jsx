@@ -3886,8 +3886,13 @@ export default function App() {
   // are already staged, instead of building a new one. Same endpoint, same
   // dispatch path — only the staging step is skipped, so a resumed run can
   // never drift away from a normal one.
-  async function step2Run(resumeRunId = null) {
+  async function step2Run(resumeRunIdArg = null) {
     if (!selectedProject || !settingsReady || step2Running) return;
+    // A resume id is a run-folder name and nothing else. Anything that is not a
+    // string is not an id — most plausibly a click handler's event object,
+    // which is cyclic and would blow up the request's JSON.stringify — so it is
+    // read as "no resume" rather than smuggled into the request body.
+    const resumeRunId = typeof resumeRunIdArg === "string" && resumeRunIdArg ? resumeRunIdArg : null;
     // The setup pane's source ticks / pasted list decide what this run compares.
     // Refuse to start on an empty selection rather than quietly comparing the
     // whole database (or nothing at all). A resume is exempt: its comparison set
@@ -8087,7 +8092,7 @@ export default function App() {
                   </div>
                 ) : null}
                 <button
-                  onClick={step2Run}
+                  onClick={() => step2Run()}
                   className={step2Running ? "is-running" : ""}
                   title={step2Running ? "Step 2 is running — building the SNP matrix and tree" : ""}
                   disabled={

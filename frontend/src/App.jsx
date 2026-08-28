@@ -491,9 +491,12 @@ export default function App() {
   // "vcf_database" is this project's own samples). Counts sum to the comparison
   // total. Refreshed from /step2/vcf_count on every Build and Refresh.
   const [step2Composition, setStep2Composition] = useState([]);
-  // Count of comparison samples whose ID appears in more than one selected
-  // source (this project's vcf_database and/or a reference panel).
-  const [step2Duplicates, setStep2Duplicates] = useState(0);
+  // Overlap in the comparison set, kept as the two distinct facts it is:
+  // samples carried by more than one reference database (what explains the
+  // bucket arithmetic above), and samples a database shares with this project's
+  // own Step 1 run (which says nothing about the databases).
+  const [step2DupDbs, setStep2DupDbs] = useState(0);
+  const [step2DupProject, setStep2DupProject] = useState(0);
   const [step1AutoRefreshPending, setStep1AutoRefreshPending] = useState(false);
   const [step2AutoRefreshPending, setStep2AutoRefreshPending] = useState(false);
   const [importSourcesText, setImportSourcesText] = useState("");
@@ -503,6 +506,10 @@ export default function App() {
   const [importStatus, setImportStatus] = useState("");
   const [importAllowMismatch, setImportAllowMismatch] = useState(false);
   const [importMismatchReport, setImportMismatchReport] = useState("");
+  // Name clashes from the last Build where the two files call different
+  // variants: {samples: [...], report: "<path>"}. Build never overwrites, so
+  // one of the two is silently not being compared — the user has to know which.
+  const [importCollisions, setImportCollisions] = useState(null);
   const [importPrefixDupes, setImportPrefixDupes] = useState(true);
   const [importDedupe, setImportDedupe] = useState(true);
   const [importFuzzyMatch, setImportFuzzyMatch] = useState(true);
@@ -1787,7 +1794,8 @@ export default function App() {
     setStep2BuiltAt("");
     setStep2VcfCount(0);
     setStep2Composition([]);
-    setStep2Duplicates(0);
+    setStep2DupDbs(0);
+    setStep2DupProject(0);
     setVcfSourceSamples([]);
     setVcfSourceFilter("");
     setVcfSourceOpen(false);
@@ -2582,13 +2590,15 @@ export default function App() {
       );
       setStep2ExcludedCount(countData.excluded || 0);
       setStep2Composition(Array.isArray(countData.composition) ? countData.composition : []);
-      setStep2Duplicates(countData.duplicates || 0);
+      setStep2DupDbs(countData.duplicates_across_dbs || 0);
+      setStep2DupProject(countData.duplicates_with_project || 0);
     } else {
       setStep2EditedCount(0);
       setStep2ComparisonCount(0);
       setStep2ExcludedCount(0);
       setStep2Composition([]);
-      setStep2Duplicates(0);
+      setStep2DupDbs(0);
+    setStep2DupProject(0);
     }
     if (groups.length) {
       loadPosthocStatuses(groups, { stale: superseded });
@@ -3577,6 +3587,15 @@ export default function App() {
     }
     const data = await res.json();
     setImportMismatchReport(data.mismatch_report || "");
+    setImportCollisions(
+      data.collisions
+        ? {
+            samples: data.collision_samples || [],
+            dbWins: data.collision_db_wins || [],
+            report: data.collision_report || "",
+          }
+        : null
+    );
     // A missing source path (e.g. a typo'd DB) is now skipped rather than
     // aborting the whole import — surface it prominently so the user knows that
     // database was NOT included (and can fix its path), while the valid ones did.
@@ -3662,7 +3681,8 @@ export default function App() {
     setStep2BuiltAt("");
     setStep2VcfCount(0);
     setStep2Composition([]);
-    setStep2Duplicates(0);
+    setStep2DupDbs(0);
+    setStep2DupProject(0);
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
@@ -3882,7 +3902,8 @@ export default function App() {
       setStep2BuiltAt("");
       setStep2VcfCount(0);
       setStep2Composition([]);
-      setStep2Duplicates(0);
+      setStep2DupDbs(0);
+    setStep2DupProject(0);
       setImportStatus("");
       setImportMismatchReport("");
       setVcfSourceSamples([]);
@@ -6376,6 +6397,23 @@ export default function App() {
                       ].filter(Boolean).join(" • ") || "Up to date"}
                     </div>
                   ) : null}
+                  {vcfsCollectResult?.shadowed?.length ? (
+                    <div className="note warning" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
+                      <strong>
+                        {vcfsCollectResult.shadowed.length} sample
+                        {vcfsCollectResult.shadowed.length === 1 ? "" : "s"} already had a DIFFERENT VCF under
+                        the same name in {vcfsFolderName || "vcf_database"}, so this project's Step 1 call is
+                        not the one being compared:
+                      </strong>{" "}
+                      {vcfsCollectResult.shadowed.slice(0, 10).join(", ")}
+                      {vcfsCollectResult.shadowed.length > 10
+                        ? `, +${vcfsCollectResult.shadowed.length - 10} more`
+                        : ""}.{" "}
+                      Collect never overwrites. Usually a reference database's copy of the same public
+                      accession, imported by an earlier Build. To compare your own call, delete that sample's
+                      VCF from the folder and Collect again.
+                    </div>
+                  ) : null}
                   {(() => {
                     const notCollected = step1Status.filter(s =>
                       !s.in_vcfs_folder &&
@@ -7680,12 +7718,20 @@ export default function App() {
                           <strong>{c.name}</strong>: {c.count}
                         </span>
                       ))}
-                      {step2Composition.length > 1 ? (
+                      {step2DupDbs > 0 ? (
                         <span
                           className="muted"
-                          title="Comparison samples whose ID appears in more than one selected source (this project's vcf_database and/or a reference panel). Each is still included only once; this is the cross-database overlap."
+                          title="Comparison samples carried by two or more of the ticked reference databases. Each is included once, under the first database that claims it — which is why a database's count above can be smaller than the number of VCFs it holds."
                         >
-                          {" "}· duplicates across DBs: <strong>{step2Duplicates}</strong>
+                          {" "}· shared between databases: <strong>{step2DupDbs}</strong>
+                        </span>
+                      ) : null}
+                      {step2DupProject > 0 ? (
+                        <span
+                          className="muted"
+                          title="Comparison samples that are both a reference-database accession and a sample this project ran through Step 1. They are counted under the database above, so this project's own bucket can read 0 even though its samples are all in the comparison."
+                        >
+                          {" "}· also in this project's Step 1: <strong>{step2DupProject}</strong>
                         </span>
                       ) : null}
                       {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
@@ -7866,6 +7912,51 @@ export default function App() {
             )}
 
             <div className="block">
+                {importCollisions && importCollisions.samples.length > 0 ? (
+                  // Two very different pieces of news share this shape. "A database's
+                  // copy disagrees with the call already in the set" is worth knowing
+                  // but needs nothing done — it is not painted as a warning. "A
+                  // database's copy is standing in for this project's own Step 1
+                  // result" is the one to act on, and only that turns the box yellow.
+                  <div
+                    className={importCollisions.dbWins.length > 0 ? "note warning" : "note"}
+                    style={{marginBottom:"6px"}}
+                  >
+                    <strong>
+                      {importCollisions.samples.length} sample
+                      {importCollisions.samples.length === 1 ? "" : "s"} arrived under a name already in{" "}
+                      <code>{vcfsFolderName || "vcf_database"}</code> with <em>different variant calls</em>.
+                    </strong>{" "}
+                    Build never overwrites, so the copy that was already there is the one being compared and the
+                    new one was skipped. (Same accession, same calls, different header — the usual case — is not
+                    counted here.){" "}
+                    {importCollisions.samples.slice(0, 10).join(", ")}
+                    {importCollisions.samples.length > 10 ? `, +${importCollisions.samples.length - 10} more` : ""}.
+                    {importCollisions.dbWins.length > 0 ? (
+                      <div style={{marginTop:"4px"}}>
+                        <strong>{importCollisions.dbWins.length} of these</strong>{" "}
+                        {importCollisions.dbWins.length === 1 ? "is" : "are"} a reference database's VCF standing
+                        in for this project's own Step 1 result:{" "}
+                        {importCollisions.dbWins.slice(0, 10).join(", ")}
+                        {importCollisions.dbWins.length > 10 ? `, +${importCollisions.dbWins.length - 10} more` : ""}.
+                        {" "}To compare your own call instead, delete that sample's VCF from{" "}
+                        {vcfsFolderName || "vcf_database"} and Build again.
+                      </div>
+                    ) : (
+                      <div style={{marginTop:"4px"}} className="muted">
+                        The calls being compared are the ones already in the folder — for a sample this project
+                        ran itself, that is its own Step 1 result. Nothing to do.
+                      </div>
+                    )}
+                    {importCollisions.report ? (
+                      <div style={{marginTop:"4px"}}>
+                        <button className="ghost action" onClick={() => viewInline(importCollisions.report)}>
+                          View collision report
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 {importMismatchReport ? (
                   <button
                     className="ghost action"

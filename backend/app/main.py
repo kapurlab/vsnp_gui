@@ -2823,6 +2823,24 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     seen_samples = {}
     manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
     manifest_exists = manifest_path.exists()
+    # Where each file already in the set came from, so a name clash can name the
+    # copy that is in place instead of reporting an anonymous conflict.
+    existing_sources: Dict[str, str] = {}
+    if manifest_exists:
+        try:
+            with manifest_path.open(encoding="utf-8") as _mf:
+                for _row in csv.DictReader(_mf):
+                    if _row.get("filename"):
+                        existing_sources[_row["filename"]] = _row.get("source_path") or ""
+        except OSError:
+            pass
+    # Name clashes where the incoming file calls DIFFERENT variants from the one
+    # already in the set (see below). Keyed by filename, because one accession
+    # can arrive from several sources at once — SRR10828835 is in both the
+    # mtbc0 minimum_tree and representative panels — and the user cares about
+    # the sample, not about how many folders offered it. The rejected paths are
+    # collected per sample so the report can still name every one of them.
+    collisions: Dict[str, Dict[str, Any]] = {}
     with manifest_path.open("a", encoding="utf-8") as manifest_handle:
         if not manifest_exists:
             manifest_handle.write("filename,source_type,source_path\n")
@@ -2850,6 +2868,63 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             if target.exists():
                 if on_conflict == "skip":
                     already_present += 1
+                    # Build never overwrites, so for a name that is already in
+                    # the set the copy that landed FIRST is the one this project
+                    # compares. When both copies call the same variants that is
+                    # invisible and harmless — the usual case, since a panel and
+                    # a local Step 1 run of the same accession differ only in
+                    # their headers. When the calls differ it is a silent
+                    # substitution of somebody else's genotype for this
+                    # project's own, so record it instead of counting it as one
+                    # more "already present".
+                    same_file = False
+                    try:
+                        same_file = target.samefile(vcf)
+                    except OSError:
+                        same_file = False
+                    if not same_file:
+                        in_place_digest = _vcf_variant_digest(target)
+                        incoming_digest = _vcf_variant_digest(vcf)
+                        if in_place_digest and incoming_digest and in_place_digest != incoming_digest:
+                            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
+                            # WHOSE calls are being compared is the question the
+                            # user actually has, and the manifest cannot answer
+                            # it: once Collect rebuilds the manifest at the
+                            # destination, every source_path reads
+                            # ".../vcf_database/<sample>_zc.vcf" — the file's own
+                            # address, not where it came from. So identify the
+                            # in-place file by its records instead: if they are
+                            # this project's Step 1 output, say so; if the
+                            # rejected file IS the Step 1 output, then whatever
+                            # is in place came from somewhere else.
+                            origin = "unknown"
+                            try:
+                                incoming_path = str(vcf.resolve())
+                            except OSError:
+                                incoming_path = str(vcf)
+                            incoming_is_step1 = (
+                                step1_dir.exists()
+                                and incoming_path.startswith(str(step1_dir.resolve()))
+                            )
+                            if incoming_is_step1:
+                                origin = "reference database"
+                            else:
+                                own = _find_step1_vcf_for_sample(step1_dir, sample)
+                                if own is not None:
+                                    origin = (
+                                        "this project's Step 1"
+                                        if _vcf_variant_digest(own) == in_place_digest
+                                        else "unknown"
+                                    )
+                            row = collisions.setdefault(vcf.name, {
+                                "sample": sample,
+                                "in_place": str(target),
+                                "in_place_origin": origin,
+                                "skipped": [],
+                            })
+                            if row["in_place_origin"] == "unknown" and origin != "unknown":
+                                row["in_place_origin"] = origin
+                            row["skipped"].append(str(vcf))
                     continue
                 if on_conflict == "rename":
                     if payload.prefix_duplicates:
@@ -2871,6 +2946,21 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
                 vcf_path = vcf
             source_type = "step1" if step1_dir.exists() and str(vcf_path).startswith(str(step1_dir.resolve())) else "reference"
             manifest_handle.write(f"{target.name},{source_type},{vcf_path}\n")
+
+    collision_rows = sorted(collisions.values(), key=lambda r: r["sample"])
+    collision_report = ""
+    if collision_rows:
+        report_path = project_dir / "step2" / "collision_report.csv"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("sample,calls_in_use,in_use_file,not_used\n")
+            for row in collision_rows:
+                for skipped in row["skipped"]:
+                    f.write(
+                        f"\"{row['sample']}\",\"{row['in_place_origin']}\","
+                        f"\"{row['in_place']}\",\"{skipped}\"\n"
+                    )
+        collision_report = str(report_path)
 
     mismatch_report = ""
     if mismatched:
@@ -2895,6 +2985,14 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         "detected_reference": detected_ref or payload.reference or "",
         "mismatched": len(mismatched),
         "mismatch_report": mismatch_report,
+        "collisions": len(collision_rows),
+        "collision_samples": [r["sample"] for r in collision_rows],
+        # The subset that matters most: a reference database's calls standing in
+        # for this project's own Step 1 result under the same accession.
+        "collision_db_wins": [
+            r["sample"] for r in collision_rows if r["in_place_origin"] == "reference database"
+        ],
+        "collision_report": collision_report,
         "total_found": len(vcfs),
         "skipped_missing": missing_sources,
     }
@@ -3922,6 +4020,13 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
     already_present: List[str] = []
     no_vcf: List[str] = []
     excluded_skipped: List[str] = []
+    # Samples whose Step 1 VCF is NOT what the database holds under their name.
+    # Collect accumulates and never clobbers, which is right — but when the file
+    # already sitting there calls different variants (typically a reference
+    # panel's copy of the same public accession, imported by an earlier Build),
+    # this project's own result is quietly not the one being compared. Same
+    # calls under a different header is the ordinary case and stays silent.
+    shadowed: List[str] = []
 
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
@@ -3974,6 +4079,11 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
             if target.is_symlink():
                 target.unlink()
                 shutil.copy2(chosen_vcf, target)
+            else:
+                in_place = _vcf_variant_digest(target)
+                mine = _vcf_variant_digest(chosen_vcf)
+                if in_place and mine and in_place != mine:
+                    shadowed.append(sample)
             already_present.append(sample)
             continue
 
@@ -3991,6 +4101,7 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         "already_present": already_present,
         "no_vcf": no_vcf,
         "excluded_skipped": excluded_skipped,
+        "shadowed": sorted(shadowed),
         "total": total,
     }
 
@@ -5287,23 +5398,29 @@ def step2_vcf_count(project: str):
     panels = _reference_panels_by_name(cfg, reference)
     panel_counts = {name: 0 for name, _ in panels}
     own = 0
-    # Duplicate = a comparison sample whose ID (filename stem) is available from
-    # more than one selected source — this project's own Step 1 samples and/or
-    # one or more reference panels. Since vcf_database is a flat directory the
-    # sample is physically present only once; this counts the cross-source
-    # identity overlap so the user can see, at a glance, how many of the
-    # comparison samples the reference databases share with each other or with
-    # the project. It also explains why a panel's bucket above can be smaller
-    # than the panel's raw size (shared IDs are attributed to one bucket only).
+    # Overlap, counted as TWO separate things because they answer two different
+    # questions and a single number conflates them. "Across databases" is what
+    # explains the arithmetic of the buckets above — the mtbc0 minimum_tree
+    # panel is a subset of representative, so 91 panel files are 74 samples, and
+    # representative's bucket reads 40 rather than 57. "With this project" is
+    # the overlap between the panels and this project's own Step 1 samples,
+    # which says nothing about the databases at all: a project sequenced from
+    # public accessions can share every one of its samples with a panel. Summing
+    # them into one "duplicates across DBs" figure reported the second number
+    # under the first one's name.
     step1_dir = project_dir / "step1"
     step1_set = set(_step1_sample_names(step1_dir)) if step1_dir.is_dir() else set()
+    duplicates_across_dbs = 0
+    duplicates_with_project = 0
     duplicates = 0
     for stem in comparison_stems:
-        sources = sum(1 for _, accs in panels if stem in accs)
-        if stem in step1_set:
-            sources += 1
-        if sources >= 2:
-            duplicates += 1
+        in_panels = sum(1 for _, accs in panels if stem in accs)
+        if in_panels >= 2:
+            duplicates_across_dbs += 1
+        if in_panels and stem in step1_set:
+            duplicates_with_project += 1
+        if in_panels + (1 if stem in step1_set else 0) >= 2:
+            duplicates += 1  # backward compat: the old combined figure
         for name, accs in panels:
             if stem in accs:
                 panel_counts[name] += 1
@@ -5323,6 +5440,8 @@ def step2_vcf_count(project: str):
         "reference": reference or "",
         "composition": composition,
         "duplicates": duplicates,
+        "duplicates_across_dbs": duplicates_across_dbs,
+        "duplicates_with_project": duplicates_with_project,
     }
 
 
@@ -8750,6 +8869,52 @@ def _source_prefix(vcf: Path, source_roots: List[Path]) -> str:
         except ValueError:
             continue
     return "source"
+
+
+def _vcf_variant_digest(path: Path) -> Optional[str]:
+    """SHA-256 of a VCF's variant records — every line except the ## header.
+
+    Two VCFs for the same accession routinely differ byte for byte while
+    calling exactly the same variants: the header carries a fileDate, the
+    freebayes version and the absolute path of whoever produced it. A
+    reference panel built in 2024 on a cluster and a Step 1 run of the same
+    accession here in 2026 differ in all three. Hashing the records alone is
+    what distinguishes "the same calls, produced elsewhere" (nothing to warn
+    about) from "different calls under the same name" (worth stopping for).
+
+    Returns None if the file cannot be read; callers treat that as "unknown",
+    never as "they differ".
+    """
+    h = hashlib.sha256()
+    try:
+        opener = gzip.open if path.name.endswith(".gz") else open
+        with opener(path, "rb") as fh:
+            for line in fh:
+                if line.startswith(b"##"):
+                    continue
+                h.update(line)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _find_step1_vcf_for_sample(step1_dir: Path, sample: str) -> Optional[Path]:
+    """This project's own Step 1 VCF for one sample, or None.
+
+    Only used on a name clash, so a per-sample walk is cheap — and the file can
+    sit at step1/<sample>/ or a level below it depending on the vsnp3 layout.
+    """
+    sample_dir = step1_dir / sample
+    if not sample_dir.is_dir():
+        return None
+    for suffix in ("_zc.vcf", "_zc.vcf.gz"):
+        direct = sample_dir / f"{sample}{suffix}"
+        if direct.exists():
+            return direct
+    for pattern in (f"{sample}_zc.vcf", f"{sample}_zc.vcf.gz"):
+        for found in sample_dir.rglob(pattern):
+            return found
+    return None
 
 
 def _sample_from_vcf(vcf: Path) -> str:

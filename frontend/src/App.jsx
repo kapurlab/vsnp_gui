@@ -3826,13 +3826,9 @@ export default function App() {
 
   async function removeStep1Sample(sample) {
     if (!selectedProject || !sample) return;
-    const ok = window.confirm(
-      `Move "${sample}" to Quarantine?\n\n` +
-      "Its reads move out of download/ (so Setup won't re-add it) into Quarantine, " +
-      "where you can Restore or Delete them later — see the Quarantine panel under " +
-      "Inputs. Nothing is permanently deleted. Samples already in vcf_database are unaffected."
-    );
-    if (!ok) return;
+    // No confirm: Remove is not destructive — the reads move to Quarantine,
+    // where Restore puts them back. The Quarantine panel says as much, and a
+    // modal on every row made clearing a batch of samples a click-fest.
     try {
       const res = await fetch(
         `${API_BASE}/api/projects/${selectedProject}/step1/samples/${encodeURIComponent(sample)}`,
@@ -3889,11 +3885,11 @@ export default function App() {
 
   async function deleteQuarantine(sample) {
     if (!selectedProject || !sample) return;
-    const ok = window.confirm(
-      `Permanently delete "${sample}" from Quarantine?\n\n` +
-      "This erases its held reads for good — it cannot be restored afterward."
-    );
-    if (!ok) return;
+    // No confirm, by request. Quarantine is itself the undo step — a sample only
+    // reaches this button after being removed from Step 1 — and the panel above
+    // states that Delete erases the reads for good. Deleting here is one click
+    // with no undo; the reads are still in vcf_database / download if they were
+    // ever there.
     try {
       const res = await fetch(
         `${API_BASE}/api/projects/${selectedProject}/quarantine/${encodeURIComponent(sample)}`,
@@ -6473,7 +6469,7 @@ export default function App() {
                         </button>
                         <button
                           className="ghost small danger-text"
-                          title="Permanently remove this sample from the project (deletes its Step 1 folder + downloaded reads, so Setup won't re-add it)."
+                          title="Move this sample to Quarantine. Its reads move out of download/ (so Grab won't re-add it) and the Step 1 folder goes; nothing is deleted — Restore it from the Quarantine panel under Inputs. Samples already in vcf_database are unaffected."
                           disabled={s.status === "running"}
                           onClick={() => removeStep1Sample(s.sample)}
                         >

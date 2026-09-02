@@ -359,7 +359,7 @@ export default function App() {
   const [folderModal, setFolderModal] = useState({ open: false, project: "", sample: "", files: [], sampleDir: "", loading: false, error: "", krakenPresent: false, krakenFiles: [], krakenDir: "" });
   // Run Kraken ID Parse on a single sample, launched from Step 1. mode is
   // "full" (classify + parse reads + identify) or "kraken_only" (Kraken2 +
-  // Krona graph only). Streams the live pipeline log via /api/jobs/{id}/events.
+  // Krona graph only). Polls the live pipeline log via /api/jobs/{id}/logtext (see job_logtext in backend/app/main.py).
   const [krakenModal, setKrakenModal] = useState({
     open: false, project: "", sample: "", mode: "full", taxon: "", db: "", blastDb: "",
     running: false, jobId: null, status: "idle", log: [],

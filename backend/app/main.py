@@ -4426,18 +4426,18 @@ def step2_run(project: str, payload: Step2Request):
     # Auto-populate reference: project.json first, then reference_lock inference
     if not payload.reference:
         payload.reference = _project_reference(project_dir)
+    # NOTE: the mixed-reference veto that used to sit here read
+    # reference_lock(project) — Step 1's tally over every run every sample has
+    # ever had. That is the wrong population twice over. It is not what this
+    # run compares (a 48-sample list run was refused over 9,394 samples it was
+    # never going to touch, named in the error), and it is not even what the
+    # comparison set holds (Step 1 keeps the row of a sample whose VCF was
+    # dropped from the set months ago, so the veto could not be cleared by
+    # fixing the set). The check now runs over the VCFs THIS run will compare,
+    # below, once the removal set is known. reference_lock is still consulted,
+    # but only to fill in a reference nobody supplied.
     lock = reference_lock(project)
     refs = lock["references"]
-    if len(refs) > 1:
-        # Name the samples behind each reference — "which runs do I split out?"
-        # is the question this error creates, so answer it in the error.
-        by_ref = lock.get("samples_by_reference", {})
-        parts = []
-        for r in refs:
-            samples = sorted(by_ref.get(r, []))
-            shown = ", ".join(samples[:4]) + (f", +{len(samples) - 4} more" if len(samples) > 4 else "")
-            parts.append(f"{r} ({shown})" if shown else r)
-        raise HTTPException(status_code=400, detail=f"Mixed references detected: {'; '.join(parts)}")
     if not payload.reference:
         if len(refs) == 1:
             payload.reference = refs[0]
@@ -4533,6 +4533,53 @@ def step2_run(project: str, payload: Step2Request):
         | _clean(payload.exclude)  # deprecated merged field -> treat as build (not exempted)
     )
     effective_removals = sorted(ref_block | step1_names | build_names)
+
+    # The mixed-reference veto, over exactly what this run will compare.
+    #
+    # Comparing VCFs called against different references produces a matrix of
+    # positions that do not mean the same thing, so this stays a hard refusal —
+    # but it is now scoped to the run's own selection. A list run that names 48
+    # single-reference samples is not blocked by a foreign-reference VCF sitting
+    # elsewhere in the database, and the samples named in the error are always
+    # samples the run would actually have compared.
+    audit = _step2_reference_audit(cfg, project_dir)
+    if audit["project_reference"]:
+        removal_set = set(effective_removals)
+        offenders = [
+            d for d in [*audit["recoverable"], *audit["removable"], *audit["orphans"]]
+            if d["sample"] not in removal_set
+        ]
+        if offenders:
+            by_ref: Dict[str, List[str]] = {}
+            for d in offenders:
+                by_ref.setdefault(d["reference"], []).append(d["sample"])
+            parts = []
+            for r in sorted(by_ref):
+                names = sorted(by_ref[r])
+                shown = ", ".join(names[:4]) + (f", +{len(names) - 4} more" if len(names) > 4 else "")
+                parts.append(f"{r} ({shown})")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"This run would compare {len(offenders)} VCF"
+                    f"{'' if len(offenders) == 1 else 's'} called against a different reference "
+                    f"than the project's {audit['project_reference']}: {'; '.join(parts)}. "
+                    "Fix them under Reference check in the Step 2 pane, or leave them out of the run."
+                ),
+            )
+    elif audit["mixed"]:
+        # No reference recorded for the project, so there is no way to say which
+        # of these is the odd one out — but the set is provably not
+        # single-reference, and that is enough to refuse.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The comparison set holds VCFs called against more than one reference "
+                f"({', '.join(audit['db_references'])}), and this project has no reference "
+                "recorded to say which is correct. Set the project's reference, then use "
+                "Reference check in the Step 2 pane."
+            ),
+        )
 
     # Copy the VCFs out of the persistent database into this dated run folder and
     # run vsnp3 against the COPIES, never the database itself. vsnp3_step2.py

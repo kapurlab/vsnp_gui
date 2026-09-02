@@ -35,6 +35,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fastapi import HTTPException
+
 import app.main as m
 
 FAILURES = []
@@ -343,6 +345,63 @@ def test_dismissal_is_permanent(cfg, proj, db):
     check(r["audit"]["unusable"], ["S2"], "back on the worklist")
 
 
+def test_run_guard_is_scoped_to_the_run(cfg, proj, db, src):
+    """Run must be vetoed by what IT compares, not by Step 1's whole history.
+
+    The reported bug: a list run naming 48 single-reference samples was refused
+    with "Mixed references detected: Mycobacterium_AF2122 (...); mtbc0_v1.1
+    (..., +9394 more)". The guard read reference_lock — every run every sample
+    has ever had — so it named 9,394 samples the run would never touch, and no
+    amount of cleaning the comparison set could clear it.
+    """
+    print("run guard scoped to the run")
+    step1 = proj / "step1"
+    # A Step 1 sample whose stats row records the other reference. It is exactly
+    # what reference_lock reports and what the old guard vetoed on, and its VCF
+    # is NOT in the comparison set — so no run should care.
+    (step1 / "HIST").mkdir(parents=True, exist_ok=True)
+    write_vcf(step1 / "HIST" / f"alignment_{OTHER_REF}" / "HIST_zc.vcf.gz", OTHER_REF, "hist")
+    a = m._step2_reference_audit(cfg, proj)
+    check([d["sample"] for d in a["removable"]], [], "its VCF is not in the set, so nothing to fix")
+
+    def guard(**kw):
+        """The mixed-reference verdict alone.
+
+        step2_run goes on to dispatch vsnp3, which is not installed here and
+        would leave a job registered that the concurrency guard then refuses —
+        so the outcome is reduced to "did the reference guard object", and
+        anything else counts as having got past it.
+        """
+        try:
+            m.step2_run("mtbc0", m.Step2Request(**kw))
+        except HTTPException as e:
+            return str(e.detail)
+        except Exception as e:
+            return f"past the guard: {type(e).__name__}"
+        return "past the guard"
+
+    # Refusal cases first: they raise before dispatch, so no job is left behind.
+    shutil.copy2(src["S2"], db / "S2_zc.vcf.gz")
+    a = m._step2_reference_audit(cfg, proj)
+    check([d["sample"] for d in a["removable"]], ["S2"],
+          "the audit sees the foreign VCF now in the set")
+    out = guard(reference=PROJ_REF)
+    check("different reference" in out, True, "a foreign VCF the run would compare refuses")
+    check("S2" in out, True, "and the error names it")
+    check("+9" in out, False, "and does not drag in samples the run never touches")
+
+    # Excluded from THIS run, the same foreign VCF is no longer its problem.
+    out = guard(reference=PROJ_REF, build_exclude=["S2"])
+    check("different reference" in out, False, "leaving it out of the run gets past the guard")
+
+    (db / "S2_zc.vcf.gz").unlink()
+    # And with the set clean, Step 1's foreign-reference history does not veto.
+    out = guard(reference=PROJ_REF)
+    check("different reference" in out, False,
+          "Step 1 holding a foreign-reference sample does not block a clean run")
+    check("Mixed references detected" in out, False, "the old Step 1 veto is gone")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="ref_audit_"))
     try:
@@ -360,6 +419,7 @@ def main():
         test_collection(cfg, proj, db, src)
         test_worklist_goes_stale(cfg, proj)
         test_dismissal_is_permanent(cfg, proj, db)
+        test_run_guard_is_scoped_to_the_run(cfg, proj, db, src)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

@@ -456,6 +456,15 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
         except Exception as exc:  # one bad sample must not sink the batch
             counters["failed"] += 1
             _log(f"  [FAILED] [{index}/{total}] {sample} — {exc}")
+            # A sample that failed before writing anything (a truncated .gz is
+            # the usual cause) leaves an empty dir behind. Step 1 ignores a dir
+            # with no reads in it, but leaving it invites the user to wonder
+            # what it is.
+            for stray in (step1_dir / sample, step1_dir / (sample + tag)):
+                try:
+                    stray.rmdir()
+                except OSError:
+                    pass
             continue
         for name, value in result.items():
             counters[name] = counters.get(name, 0) + value

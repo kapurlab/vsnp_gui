@@ -2710,7 +2710,8 @@ export default function App() {
   }
 
   async function fixStep2References(action, samples) {
-    if (!selectedProject || !samples || !samples.length) return;
+    if (!selectedProject) return;
+    if (action !== "forget" && (!samples || !samples.length)) return;
     setStep2RefFixBusy(action);
     try {
       const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/reference_audit/fix`, {
@@ -8556,6 +8557,16 @@ export default function App() {
                           >
                             Copy list
                           </button>
+                          <BusyButton
+                            className="ghost small"
+                            busyLabel="Clearing…"
+                            title={"Discards this list. No VCF, sample or run is touched — and a sample "
+                                   + "that still has no run against this project's reference will be "
+                                   + "recorded again by the next Build."}
+                            onClick={() => fixStep2References("forget", ["*"])}
+                          >
+                            Clear list
+                          </BusyButton>
                           {(step2RefAudit.removable || []).length ? (
                             <BusyButton
                               className="danger"

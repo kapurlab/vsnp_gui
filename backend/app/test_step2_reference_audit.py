@@ -258,6 +258,50 @@ def test_stale_worklist(cfg, proj):
     (step2 / m._REF_SKIPPED_BASENAME).unlink()
 
 
+def test_worklist_goes_stale(cfg, proj):
+    """The list must stop naming samples that have stopped needing attention.
+
+    The reported sequence: the panel lists a sample, the user removes it from
+    the project, and the list still names it — even after a Build. Only Build
+    rewrote the record, so Re-check re-read the same stale names and there was
+    no way to clear them.
+    """
+    print("worklist goes stale")
+    step2 = m.vcf_db_dir(proj / "step2")
+    step1 = proj / "step1"
+    rec = lambda names: (step2 / m._REF_SKIPPED_BASENAME).write_text(json.dumps({
+        "reference": PROJ_REF, "logic": m._REF_SKIPPED_LOGIC,
+        "samples": names, "written_at": "2026-09-02T10:00:00",
+    }))
+
+    # S2 still sits there with only its AF2122 run: it genuinely needs action.
+    rec(["S2"])
+    check("S2" in m._step2_reference_audit(cfg, proj)["unusable"], True,
+          "a sample that still has no correct run stays listed")
+
+    # Removed from the project — the list has nothing left to say about it.
+    shutil.move(str(step1 / "S2"), str(step1 / "_S2_removed"))
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["unusable"], [], "a removed sample drops off the list by itself")
+    check(json.loads((step2 / m._REF_SKIPPED_BASENAME).read_text())["samples"], [],
+          "and the pruning is written back, so the file stops asserting it")
+    shutil.move(str(step1 / "_S2_removed"), str(step1 / "S2"))
+
+    # Re-run against the right reference: also nothing left to say.
+    rec(["S2"])
+    fixed = write_vcf(step1 / "S2" / f"alignment_{PROJ_REF}" / "S2_zc.vcf.gz", PROJ_REF, "zz")
+    check(m._step2_reference_audit(cfg, proj)["unusable"], [],
+          "a sample re-run against the project reference drops off too")
+    shutil.rmtree(fixed.parent)
+
+    # And the explicit discard.
+    rec(["S2"])
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="forget"))
+    check(r["audit"]["unusable"], [], "'forget' discards the list")
+    check((step2 / m._REF_SKIPPED_BASENAME).exists(), False, "and removes the record")
+    check((step1 / "S2").is_dir(), True, "without touching the sample")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="ref_audit_"))
     try:
@@ -273,6 +317,7 @@ def main():
         test_recollect(proj, db, src)
         test_drop(proj, db, src)
         test_collection(cfg, proj, db, src)
+        test_worklist_goes_stale(cfg, proj)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

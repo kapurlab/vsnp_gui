@@ -9532,13 +9532,44 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # in the set: this is the "re-run or delete these" worklist, and it has to
     # survive the drop that takes their VCFs out.
     unusable = {d["sample"] for d in removable}
+    recorded: List[str] = []
     try:
         rec = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
         if (rec.get("logic") == _REF_SKIPPED_LOGIC
                 and _same(rec.get("reference") or "", project_reference)):
-            unusable.update(str(x) for x in (rec.get("samples") or []))
+            recorded = [str(x) for x in (rec.get("samples") or [])]
     except Exception:
         pass
+    # Re-checked against the project as it stands NOW, because the record is a
+    # claim that these samples still need a re-run and any of three things can
+    # have made it false since it was written: the sample was removed from the
+    # project, it was re-run against the right reference, or its runs are gone.
+    # Only Build rewrote this file before, so a user who acted on the list then
+    # pressed Re-check was shown the same stale names and had no way to clear
+    # them.
+    for name in recorded:
+        if name in unusable:
+            continue
+        by_ref = alignment_refs(name)
+        if not (step1_dir / name).is_dir() or not by_ref:
+            continue
+        if _key_for(by_ref, project_reference):
+            continue
+        unusable.add(name)
+    # Persist the pruning so the file stops carrying names it no longer means.
+    if recorded and sorted(unusable) != sorted(recorded):
+        try:
+            (step2_dir / _REF_SKIPPED_BASENAME).write_text(
+                json.dumps({
+                    "reference": project_reference,
+                    "logic": _REF_SKIPPED_LOGIC,
+                    "samples": sorted(unusable),
+                    "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     return {
         "project_reference": project_reference,
         "db_references": sorted(db_refs.values()),
@@ -9588,8 +9619,22 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
+    if payload.action == "forget":
+        # Discards the worklist record and nothing else — no VCF, no sample, no
+        # run is touched. Says so plainly rather than implying it resolves
+        # anything: a sample that still has no run against this project's
+        # reference is recorded again by the next Build, which is the honest
+        # behaviour for a list whose job is to be true.
+        step2_dir = vcf_db_dir(project_dir / "step2")
+        try:
+            (step2_dir / _REF_SKIPPED_BASENAME).unlink()
+        except OSError:
+            pass
+        return {"recollected": [], "dropped": [], "skipped": [],
+                "audit": _step2_reference_audit(cfg, project_dir)}
     if payload.action not in ("recollect", "drop"):
-        raise HTTPException(status_code=400, detail="action must be 'recollect' or 'drop'")
+        raise HTTPException(
+            status_code=400, detail="action must be 'recollect', 'drop' or 'forget'")
     audit = _step2_reference_audit(cfg, project_dir)
     if payload.action == "recollect":
         allowed = {d["sample"]: d for d in audit["recoverable"]}

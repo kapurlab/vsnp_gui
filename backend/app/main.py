@@ -4275,6 +4275,7 @@ def step2_setup(project: str):
         (step2_dir / _REF_SKIPPED_BASENAME).write_text(
             json.dumps({
                 "reference": project_reference,
+                "logic": _REF_SKIPPED_LOGIC,
                 "samples": sorted(ref_skipped_samples),
                 "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }),
@@ -9304,6 +9305,14 @@ _VCF_REF_CACHE_VERSION = 1
 # Written by every Build: the samples whose every run is against some other
 # reference, so the audit can keep reporting them after their VCFs are gone.
 _REF_SKIPPED_BASENAME = ".reference_skipped.json"
+# Generation of the reference-matching logic that produced a worklist. v0.4.87
+# compared reference names as strings and so recorded every sample whose
+# alignment dir vsnp3 had truncated (alignment_MTBC0_v1 from MTBC0_v1.1.fasta)
+# as unusable — 8,882 of 9,393 on the mtbc0 project. Those files are wrong, not
+# merely old, and a worklist is a claim about samples the user is asked to act
+# on, so an unstamped or older record is ignored rather than shown. The next
+# Build rewrites it correctly.
+_REF_SKIPPED_LOGIC = 2
 
 
 def _sample_alignment_vcfs(sample_dir: Path) -> Dict[str, List[Path]]:
@@ -9525,7 +9534,8 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     unusable = {d["sample"] for d in removable}
     try:
         rec = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
-        if _same(rec.get("reference") or "", project_reference):
+        if (rec.get("logic") == _REF_SKIPPED_LOGIC
+                and _same(rec.get("reference") or "", project_reference)):
             unusable.update(str(x) for x in (rec.get("samples") or []))
     except Exception:
         pass
@@ -9633,7 +9643,8 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
             path = step2_dir / _REF_SKIPPED_BASENAME
             try:
                 rec = json.loads(path.read_text(encoding="utf-8"))
-                if str(rec.get("reference") or "") == audit["project_reference"]:
+                if (rec.get("logic") == _REF_SKIPPED_LOGIC
+                        and str(rec.get("reference") or "") == audit["project_reference"]):
                     worklist.update(str(x) for x in (rec.get("samples") or []))
             except Exception:
                 pass
@@ -9641,6 +9652,7 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
                 path.write_text(
                     json.dumps({
                         "reference": audit["project_reference"],
+                        "logic": _REF_SKIPPED_LOGIC,
                         "samples": sorted(worklist),
                         "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                     }),

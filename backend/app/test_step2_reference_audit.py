@@ -234,6 +234,30 @@ def test_collection(cfg, proj, db, src):
     check(a["removable"], [], "with nothing left to drop")
 
 
+def test_stale_worklist(cfg, proj):
+    """A worklist from the string-comparing version must not be believed.
+
+    v0.4.87's Build recorded every truncated-name sample as unusable. Reading
+    that file back would show the user 8,882 samples to re-run that are in fact
+    running on the right reference.
+    """
+    print("stale worklist")
+    step2 = m.vcf_db_dir(proj / "step2")
+    (step2 / m._REF_SKIPPED_BASENAME).write_text(json.dumps({
+        "reference": PROJ_REF, "samples": ["S6", "S1"], "written_at": "2026-09-02T10:00:00",
+    }))
+    a = m._step2_reference_audit(cfg, proj)
+    check([x for x in a["unusable"] if x in ("S1", "S6")], [],
+          "an unstamped worklist is ignored, not shown")
+    (step2 / m._REF_SKIPPED_BASENAME).write_text(json.dumps({
+        "reference": PROJ_REF, "logic": m._REF_SKIPPED_LOGIC, "samples": ["S2"],
+        "written_at": "2026-09-02T10:00:00",
+    }))
+    a = m._step2_reference_audit(cfg, proj)
+    check("S2" in a["unusable"], True, "a current worklist is still honoured")
+    (step2 / m._REF_SKIPPED_BASENAME).unlink()
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="ref_audit_"))
     try:
@@ -241,6 +265,7 @@ def main():
         cfg = {"vsnp3_path": str(build_refs(tmp)), "projects_root": str(tmp / "projects")}
         test_reference_matching(cfg)
         test_audit(cfg, proj, db)
+        test_stale_worklist(cfg, proj)
         # The fix endpoints resolve the project through the config the same way
         # every other endpoint does; this harness has no config file.
         m.load_config = lambda: cfg

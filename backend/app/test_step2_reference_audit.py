@@ -65,6 +65,27 @@ PROJ_REF = "mtbc0_v1.1"
 OTHER_REF = "Mycobacterium_AF2122"
 
 
+def build_refs(root: Path) -> Path:
+    """A vsnp3 dependencies tree holding the two references in play.
+
+    The mtbc0 reference dir is named mtbc0_v1.1 and its FASTA is
+    MTBC0_v1.1.fasta — the real Ames layout, and the thing that lets the alias
+    map recognise the truncated MTBC0_v1 that vsnp3 writes into sample dirs.
+    """
+    vsnp3 = root / "vsnp3"
+    refs = root / "refs"
+    for name, fasta in ((PROJ_REF, "MTBC0_v1.1.fasta"), (OTHER_REF, "NC_002945.4.fasta"),
+                        ("Brucella_abortus1", "NC_006932.fasta"),
+                        ("Brucella_abortus10", "NZ_CP007682.fasta")):
+        d = refs / name
+        d.mkdir(parents=True)
+        (d / fasta).write_text(">chrom\nACGT\n")
+    deps = vsnp3 / "dependencies"
+    deps.mkdir(parents=True)
+    (deps / "reference_options_paths.txt").write_text(str(refs) + "\n")
+    return vsnp3
+
+
 def build_project(root: Path):
     """A project holding every shape the audit has to tell apart."""
     proj = root / "projects" / "mtbc0"
@@ -85,6 +106,12 @@ def build_project(root: Path):
     src["S4"] = write_vcf(step1 / "S4" / "alignment_MTBC0_V1.1" / "S4_zc.vcf.gz", PROJ_REF, "eeeee")
     # Pre-GUI layout: reference is not in the directory name.
     src["S5"] = write_vcf(step1 / "S5" / "alignment" / "S5_zc.vcf.gz", PROJ_REF, "ffffff")
+    # What vsnp3 ACTUALLY writes for this reference: MTBC0_v1.1.fasta is copied
+    # in as MTBC0_v1.fasta, so the dir is alignment_MTBC0_v1 and the header
+    # names the truncated file. This is the project's own reference and must
+    # never be read as a foreign one — on the real mtbc0 project 8,882 of the
+    # 9,393 samples look like this.
+    src["S6"] = write_vcf(step1 / "S6" / "alignment_MTBC0_v1" / "S6_zc.vcf.gz", "MTBC0_v1", "hhhhhhhh")
 
     db = proj / "step2" / "vcf_database"
     db.mkdir(parents=True)
@@ -92,6 +119,7 @@ def build_project(root: Path):
     shutil.copy2(src["S2"], db / "S2_zc.vcf.gz")
     shutil.copy2(src["S3_bad"], db / "S3_zc.vcf.gz")   # the stale wrong copy
     shutil.copy2(src["S4"], db / "S4_zc.vcf.gz")
+    shutil.copy2(src["S6"], db / "S6_zc.vcf.gz")
     # Imported / historical: wrong reference, no Step 1 source to swap in.
     write_vcf(db / "S9_zc.vcf.gz", OTHER_REF, "ggggggg")
     return proj, db, src
@@ -99,6 +127,28 @@ def build_project(root: Path):
 
 def samples(entries):
     return [d["sample"] for d in entries]
+
+
+def test_reference_matching(cfg):
+    """Name-level matching, the layer everything else rests on."""
+    print("_same_reference")
+    am = m._reference_alias_map(Path(cfg["vsnp3_path"]))
+    for name, want, why in [
+        ("MTBC0_v1", True, "vsnp3's truncated alignment-dir name"),
+        ("MTBC0_v1.1", True, "the untruncated FASTA stem"),
+        (PROJ_REF, True, "the project's own spelling"),
+        ("MTBC0_V1.1", True, "a case variant"),
+        ("/home/j/2025-04-01/mb/mtbc0/dir10/S/MTBC0_v1.fasta", True,
+         "a full ##reference= header path"),
+        (OTHER_REF, False, "a genuinely different reference"),
+        ("NC_002945.4", False, "that reference by its accession"),
+    ]:
+        check(m._same_reference(name, PROJ_REF, am), want, f"{name} — {why}")
+    # The loose prefix rule merges these two, and they are separate references.
+    # Only reachable when a name matches no configured reference, which is why
+    # the both-configured case has to stop short of it.
+    check(m._same_reference("Brucella_abortus1", "Brucella_abortus10", am), False,
+          "two configured references differing by a trailing digit stay distinct")
 
 
 def test_audit(cfg, proj, db):
@@ -114,6 +164,12 @@ def test_audit(cfg, proj, db):
     # veto Step 2 with an empty list of offenders — an unfixable block, which is
     # the whole failure mode this audit exists to end.
     check("S4" in a["unusable"], False, "a spelling variant is not a second reference")
+    # The regression that mattered most on the real project: without the alias
+    # resolution these 8,882-equivalent samples are all reported unusable, and
+    # the offered repair would delete every one of their good VCFs.
+    check("S6" in a["unusable"], False, "vsnp3's truncated MTBC0_v1 is not a second reference")
+    check(sorted(samples(a["orphans"]) + samples(a["removable"])), ["S2", "S9"],
+          "and it is not offered for dropping either")
     check(a["db_references"], [OTHER_REF, PROJ_REF], "the project's own spelling is the one shown")
     check((db / m._VCF_REF_CACHE_BASENAME).exists(), True, "the stat-signature cache is written")
     warm = m._step2_reference_audit(cfg, proj)
@@ -162,6 +218,8 @@ def test_collection(cfg, proj, db, src):
     )
     check((db / "S2_zc.vcf.gz").exists(), False, "Build does not re-add a sample it cannot compare")
     check(out["ref_skipped"], 1, "and reports how many it left out")
+    check((db / "S6_zc.vcf.gz").exists(), True,
+          "and still collects the truncated-name run, which IS the project's reference")
     check(
         (db / "S5_zc.vcf.gz").exists(),
         True,
@@ -180,7 +238,8 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="ref_audit_"))
     try:
         proj, db, src = build_project(tmp)
-        cfg = {"vsnp3_path": str(tmp / "no_such_vsnp3"), "projects_root": str(tmp / "projects")}
+        cfg = {"vsnp3_path": str(build_refs(tmp)), "projects_root": str(tmp / "projects")}
+        test_reference_matching(cfg)
         test_audit(cfg, proj, db)
         # The fix endpoints resolve the project through the config the same way
         # every other endpoint does; this harness has no config file.

@@ -4190,6 +4190,7 @@ def step2_setup(project: str):
     # tier B (Step 1 exclusions). Both are always filtered out of the comparison
     # at run time. Tier C (build-list) is per-run and shown live in the UI.
     project_reference = _project_reference(project_dir)
+    ref_aliases = _reference_alias_map(Path(cfg["vsnp3_path"])) if project_reference else {}
     excluded_names: set = set(_read_step1_exclusions(project_dir / "step2")) | set(
         _reference_blocklist_names(cfg, project_reference)
     )
@@ -4219,11 +4220,16 @@ def step2_setup(project: str):
         # project-reference run are untouched here: they still collect (the DB
         # is cumulative), and the Step 2 reference audit is what surfaces them.
         if project_reference:
-            want = _canonical_ref_key(project_reference)
             named = [p for p in vcf_candidates if p.parent.name.startswith("alignment_")]
+            # Compared through the alias map, not as strings: vsnp3 truncates a
+            # reference whose name ends in .N when it renames the FASTA into the
+            # sample dir, so this project's own alignment dirs are called
+            # alignment_MTBC0_v1 while the project reference is mtbc0_v1.1. A
+            # string comparison here would read every one of those runs as a
+            # foreign reference and skip the entire project.
             preferred = [
                 p for p in named
-                if _canonical_ref_key(p.parent.name[len("alignment_"):]) == want
+                if _same_reference(p.parent.name[len("alignment_"):], project_reference, ref_aliases)
             ]
             if preferred:
                 vcf_candidates = preferred
@@ -9036,6 +9042,73 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
     return aliases
 
 
+def _resolve_reference_name(ref: str, alias_map: Dict[str, str]) -> str:
+    """The configured reference a recorded reference name refers to.
+
+    vsnp3_step1.py copies the reference FASTA into each sample's alignment dir
+    and strips what looks like an NCBI version suffix while renaming it. That
+    rule is right for `NZ_LS483305.1.fasta` and wrong for a reference whose own
+    name ends in a number after a dot: `MTBC0_v1.1.fasta` lands as
+    `MTBC0_v1.fasta`, the dir becomes `alignment_MTBC0_v1`, and the VCF header
+    points at the truncated name. Nothing downstream can tell that apart from a
+    genuinely different reference by string comparison alone.
+
+    The alias map can, because it is built from the reference dirs' REAL FASTA
+    filenames and indexes both the full stem and the version-stripped form — so
+    `MTBC0_v1` resolves back to the `mtbc0_v1.1` it was cut from. Matched
+    case-insensitively, and on the truncated form as well as the name as
+    recorded, so the project's own spelling and the mangled one land on the
+    same answer. An unconfigured reference is returned unchanged rather than
+    guessed at.
+    """
+    if not ref:
+        return ref
+    # A full path (a ##reference= value) is _normalize_reference's job — it
+    # strips file://, matches a reference dir in the path, and falls back to the
+    # stem. Callers reading VCF headers already pass through it, but a helper
+    # that quietly mishandles a path invites the next caller to get it wrong.
+    if "/" in ref or "\\" in ref or ref.lower().endswith((".fasta", ".fa", ".fna", ".fas")):
+        return _normalize_reference(ref, alias_map)
+    lc = {k.lower(): v for k, v in alias_map.items()}
+    for cand in (ref, re.sub(r"\.\d+$", "", ref)):
+        if cand in alias_map:
+            return alias_map[cand]
+        if cand.lower() in lc:
+            return lc[cand.lower()]
+    return ref
+
+
+def _same_reference(a: str, b: str, alias_map: Dict[str, str]) -> bool:
+    """Whether two recorded reference names are the same reference.
+
+    Exact first, then resolved through the alias map (which is what repairs the
+    truncation above), and only then the loose prefix rule the VCF importer
+    uses.
+
+    Two names that BOTH resolve to configured references and still differ are
+    definitively different, and the loose rule is skipped for them. Without
+    that stop, its prefix test merges Brucella_abortus1 with
+    Brucella_abortus10 — two real, separately configured references — and a
+    genuine reference mismatch between them would go unreported. The loose rule
+    is left for the case it was written for: a name that matches no configured
+    reference at all, where a near-miss is more likely a spelling than a
+    different genome.
+    """
+    if not a or not b:
+        return False
+    if _canonical_ref_key(a) == _canonical_ref_key(b):
+        return True
+    ra = _resolve_reference_name(a, alias_map)
+    rb = _resolve_reference_name(b, alias_map)
+    ka, kb = _canonical_ref_key(ra), _canonical_ref_key(rb)
+    if ka == kb:
+        return True
+    configured = {_canonical_ref_key(v) for v in alias_map.values()}
+    if ka in configured and kb in configured:
+        return False
+    return _refs_match(ra, rb, True)
+
+
 def _refs_match(a: str, b: str, allow_fuzzy: bool) -> bool:
     if allow_fuzzy:
         ca = _canonical_ref_key(a)
@@ -9361,10 +9434,11 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     def _same(a: str, b: str) -> bool:
         """Same reference under a different spelling of its name.
 
-        The alignment dir suffix is whatever `-r` the run was given, so
-        MTBC0_v1.1 and mtbc0_v1.1 are one reference and must not read as two.
+        Covers both a case variant (MTBC0_v1.1 vs mtbc0_v1.1) and the version
+        truncation vsnp3 leaves in the alignment dir name (MTBC0_v1) — see
+        _resolve_reference_name.
         """
-        return bool(a) and bool(b) and _canonical_ref_key(a) == _canonical_ref_key(b)
+        return _same_reference(a, b, alias_map)
 
     def _key_for(by_ref: Dict[str, List[Path]], ref: str) -> Optional[str]:
         return next((k for k in by_ref if _same(k, ref)), None)
@@ -9392,11 +9466,13 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     db_refs: Dict[str, str] = {}
 
     def _note_ref(ref: str) -> None:
-        k = _canonical_ref_key(ref)
         if _same(ref, project_reference):
-            db_refs[k] = project_reference
-        elif k not in db_refs:
-            db_refs[k] = ref
+            db_refs[_canonical_ref_key(project_reference)] = project_reference
+            return
+        resolved = _resolve_reference_name(ref, alias_map)
+        k = _canonical_ref_key(resolved)
+        if k not in db_refs:
+            db_refs[k] = resolved
 
     unknown = 0
     wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
@@ -9512,6 +9588,7 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
     wanted = set(payload.samples) if payload.samples else set(allowed)
     step1_dir = project_dir / "step1"
     step2_dir = vcf_db_dir(project_dir / "step2")
+    fix_aliases = _reference_alias_map(Path(cfg["vsnp3_path"]))
 
     recollected, dropped, skipped = [], [], []
     for sample in sorted(wanted):
@@ -9529,9 +9606,7 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
             continue
         by_ref = _sample_alignment_vcfs(step1_dir / sample)
         want = audit["project_reference"]
-        key = next(
-            (k for k in by_ref if k and _canonical_ref_key(k) == _canonical_ref_key(want)), None
-        )
+        key = next((k for k in by_ref if _same_reference(k, want, fix_aliases)), None)
         candidates = by_ref.get(key) or [] if key else []
         if not candidates:
             skipped.append(sample)

@@ -524,6 +524,12 @@ export default function App() {
   const [importPreset, setImportPreset] = useState("");
   const [importProjectLock, setImportProjectLock] = useState("");
   const [vcfSourceSamples, setVcfSourceSamples] = useState([]);
+  // Reference audit of the comparison set (not of Step 1 — see the backend's
+  // _step2_reference_audit for why those are different questions). null until
+  // the first load lands; { error } when the check itself could not run.
+  const [step2RefAudit, setStep2RefAudit] = useState(null);
+  const [step2RefAuditBusy, setStep2RefAuditBusy] = useState(false);
+  const [step2RefFixBusy, setStep2RefFixBusy] = useState("");
   const [vcfSourceFilter, setVcfSourceFilter] = useState("");
   const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
   // The browse list shows what THIS RUN will compare, not everything the
@@ -1049,6 +1055,51 @@ export default function App() {
   }, [
     step2Mode, step2SetSamples, step2AvailablePanels, step2UseVcfDb,
     step2ProjectSamples, step2ProjectSamplesInSet, step2ListResolution, step2ListIncludeDbs,
+  ]);
+
+  // Why Step 2 cannot run, as one string — so the button, its tooltip and the
+  // note under it can never disagree, and a disabled Run always says what is
+  // wrong. It used to be an unnamed boolean expression on the button, which
+  // meant a veto with no on-screen cause: the mixed-reference case in
+  // particular was invisible, because the note explaining it renders only in
+  // the Step 1 branch that a project-level reference replaces. Empty string =
+  // nothing blocking. First reason wins.
+  const step2RunBlock = useMemo(() => {
+    if (!selectedProject) return "Select a project first.";
+    if (!settingsReady) return "Set the vSNP3 path and Projects root in Settings first.";
+    if (!reference && !projectReference) {
+      return "This project has no reference set — choose one in the Projects panel.";
+    }
+    const inSet = step2VcfCount > 0 || Boolean(selected && selected.step2_vcfs > 0);
+    if (!inSet) return "The comparison set is empty — press Build comparison set above.";
+    if (step2VcfCount > 0 && step2RunSelection.keep.size === 0) {
+      return step2Mode === "list"
+        ? "None of the pasted sample names matched a sample in the comparison set."
+        : "Every source above is unticked, so this run would compare nothing.";
+    }
+    // A mixed set is not a warning, it is a wrong answer: VCFs called against
+    // different references carry different coordinates, and a matrix built
+    // across them is meaningless rather than merely imperfect. An audit that
+    // could not run (`error`) is NOT a veto — see loadStep2ReferenceAudit.
+    if (step2RefAudit && step2RefAudit.mixed) {
+      const n = (step2RefAudit.recoverable || []).length
+        + (step2RefAudit.removable || []).length
+        + (step2RefAudit.orphans || []).length;
+      // No offenders but still mixed means we could not say WHICH VCFs are the
+      // wrong ones — the project has no reference recorded to compare against.
+      if (!n) {
+        return "The comparison set holds more than one reference — see Reference check below.";
+      }
+      return `${n} VCF${n === 1 ? "" : "s"} in the comparison set ${n === 1 ? "was" : "were"} `
+        + `called against a different reference — fix them in Reference check below.`;
+    }
+    if (step2RefAudit === null && step2RefAuditBusy) {
+      return "Checking which references the comparison set was called against\u2026";
+    }
+    return "";
+  }, [
+    selectedProject, settingsReady, reference, projectReference, selected,
+    step2VcfCount, step2RunSelection, step2Mode, step2RefAudit, step2RefAuditBusy,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -1648,6 +1699,7 @@ export default function App() {
     setReference("");
     setImportReference("");
     setRefLock({ references: [] });
+    setStep2RefAudit(null);
     setProjectReference("");
     setVcfsCollectResult(null);
     setVcfsForceSet(new Set());
@@ -2632,6 +2684,61 @@ export default function App() {
     }
   }
 
+  // Which references the comparison set was actually called against, and what
+  // can be done about the ones that do not belong. Cheap on a warm cache (the
+  // backend keys each entry by its stat signature), so it rides along with
+  // every refresh of the set rather than hiding behind a button the user has
+  // to know to press.
+  async function loadStep2ReferenceAudit() {
+    if (!selectedProject) { setStep2RefAudit(null); return; }
+    setStep2RefAuditBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/reference_audit`);
+      if (!res.ok) {
+        const msg = await res.json().catch(() => ({}));
+        setStep2RefAudit({ error: msg.detail || `HTTP ${res.status}`, mixed: false });
+        return;
+      }
+      setStep2RefAudit(await res.json());
+    } catch (e) {
+      // A failed check must not become a silent veto: report it and let the
+      // run proceed rather than blocking on our own inability to look.
+      setStep2RefAudit({ error: e?.message || "network error", mixed: false });
+    } finally {
+      setStep2RefAuditBusy(false);
+    }
+  }
+
+  async function fixStep2References(action, samples) {
+    if (!selectedProject || !samples || !samples.length) return;
+    setStep2RefFixBusy(action);
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/reference_audit/fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, samples })
+      });
+      if (!res.ok) {
+        const msg = await res.json().catch(() => ({}));
+        window.alert(`Could not repair the comparison set: ${msg.detail || `HTTP ${res.status}`}`);
+        return;
+      }
+      const data = await res.json();
+      if (data.audit) setStep2RefAudit(data.audit);
+      if (data.skipped && data.skipped.length) {
+        window.alert(
+          `${data.skipped.length} sample(s) were skipped — the audit no longer lists them ` +
+          `under this action, or the file could not be written:\n\n${data.skipped.slice(0, 20).join("\n")}`
+        );
+      }
+      // The set changed on disk: re-pull the counts and the browse list.
+      await loadVcfSourceSamples();
+      await loadStep2Outputs();
+    } finally {
+      setStep2RefFixBusy("");
+    }
+  }
+
   async function loadVcfSourceSamples() {
     if (!selectedProject) return;
     const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_database/samples`);
@@ -2640,6 +2747,7 @@ export default function App() {
       setVcfSourceSamples(samples);
       setStep2VcfCount(samples.length);
     }
+    loadStep2ReferenceAudit();
     loadStep2BuildExclusions();
     loadStep2QcExclusions();
     loadStep2Blocklist();
@@ -2877,6 +2985,21 @@ export default function App() {
     if (!proj || !path) return;
     const url = `${API_BASE}/api/projects/${encodeURIComponent(proj)}/download-file?path=${encodeURIComponent(path)}&inline=1`;
     window.open(url, "_blank", "noopener");
+  }
+
+  // Copy a block of text (a sample list, typically) to the clipboard. The
+  // textarea beside the button is the fallback the user can always select by
+  // hand, so a clipboard denial here is reported and nothing more.
+  async function copyText(text) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      window.alert(
+        "The browser would not give the page clipboard access — "
+        + "select the list in the box and copy it by hand."
+      );
+    }
   }
 
   // Copy an absolute path to clipboard with a brief confirmation. Used in
@@ -3918,6 +4041,9 @@ export default function App() {
       // Invariant: total = comparison + excluded.
       setStep2SetupMsg(
         `vcf_database total: ${total} · VCFs for Step 2 comparison: ${comparison} · excluded above: ${excluded}`
+        + (data.ref_skipped
+            ? ` · left out (called against another reference): ${data.ref_skipped}`
+            : "")
       );
     }
     await loadAll();
@@ -3959,6 +4085,7 @@ export default function App() {
       setImportStatus("");
       setImportMismatchReport("");
       setVcfSourceSamples([]);
+      setStep2RefAudit(null);
       setVcfSourceFilter("");
       setVcfSourceOpen(false);
       setStep2Outputs([]);
@@ -8328,6 +8455,183 @@ export default function App() {
               </div>
             </details>
 
+            {step2RefAudit
+              && (step2RefAudit.mixed || step2RefAudit.error
+                  || (step2RefAudit.unusable || []).length) ? (
+              <div className="block">
+                <h3 style={{ margin: "0 0 0.3rem" }}>Reference check</h3>
+                {step2RefAudit.error ? (
+                  <div className="note warning">
+                    Could not check the comparison set's references: {step2RefAudit.error}.
+                    Step 2 is not blocked by a check that could not run — but confirm the set is
+                    single-reference before trusting the tree.
+                    <div style={{ marginTop: "0.3rem" }}>
+                      <button className="ghost small" onClick={loadStep2ReferenceAudit}>Re-check</button>
+                    </div>
+                  </div>
+                ) : !step2RefAudit.project_reference ? (
+                  <div className="note error">
+                    The comparison set holds VCFs called against{" "}
+                    <strong>{(step2RefAudit.db_references || []).join(", ")}</strong>, and this project has no
+                    reference recorded — so there is no way to tell which of them are the wrong ones. Set the
+                    project's reference in the Projects panel, then re-check.
+                    <div style={{ marginTop: "0.3rem" }}>
+                      <button className="ghost small" onClick={loadStep2ReferenceAudit}
+                              disabled={step2RefAuditBusy}>
+                        {step2RefAuditBusy ? "Re-checking…" : "Re-check"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    {step2RefAudit.mixed ? (
+                      <div className="note error">
+                        This project's reference is <strong>{step2RefAudit.project_reference}</strong>, but the
+                        comparison set holds VCFs called against{" "}
+                        <strong>{(step2RefAudit.db_references || [])
+                          .filter((r) => r !== step2RefAudit.project_reference).join(", ")}</strong>.
+                        SNP positions from different references are different coordinates, so a matrix built
+                        across them is meaningless — Step 2 stays disabled until the set is single-reference.
+                      </div>
+                    ) : (
+                      <div className="note">
+                        The comparison set is single-reference (<strong>
+                        {step2RefAudit.project_reference}</strong>) and Step 2 can run. The samples below are
+                        left out of it and still need attention.
+                      </div>
+                    )}
+
+                    {(step2RefAudit.recoverable || []).length ? (
+                      <div className="note" style={{ marginTop: "0.4rem" }}>
+                        <strong>{step2RefAudit.recoverable.length} sample
+                        {step2RefAudit.recoverable.length === 1 ? "" : "s"} can be fixed in place.</strong>{" "}
+                        {step2RefAudit.recoverable.length === 1 ? "It has" : "They have"} a run against{" "}
+                        {step2RefAudit.project_reference} as well, so the wrong copy in the set can simply be
+                        swapped for the right one. Nothing in step1 is touched and nothing has to be re-run.
+                        <div style={{ marginTop: "0.35rem" }}>
+                          <BusyButton
+                            busyLabel="Re-collecting…"
+                            onClick={() => fixStep2References(
+                              "recollect", step2RefAudit.recoverable.map((d) => d.sample))}
+                          >
+                            Re-collect {step2RefAudit.recoverable.length} sample
+                            {step2RefAudit.recoverable.length === 1 ? "" : "s"} from the{" "}
+                            {step2RefAudit.project_reference} run
+                          </BusyButton>
+                        </div>
+                        <details style={{ marginTop: "0.35rem" }}>
+                          <summary>Show these {step2RefAudit.recoverable.length}</summary>
+                          <textarea
+                            readOnly
+                            rows={Math.min(12, Math.max(3, step2RefAudit.recoverable.length))}
+                            style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em" }}
+                            value={step2RefAudit.recoverable.map((d) => d.sample).join("\n")}
+                          />
+                        </details>
+                      </div>
+                    ) : null}
+
+                    {(step2RefAudit.unusable || []).length ? (
+                      <div className="note warning" style={{ marginTop: "0.4rem" }}>
+                        <strong>{step2RefAudit.unusable.length} sample
+                        {step2RefAudit.unusable.length === 1 ? " has" : "s have"} no{" "}
+                        {step2RefAudit.project_reference} run at all.</strong>{" "}
+                        Nothing here can fix {step2RefAudit.unusable.length === 1 ? "it" : "them"}:{" "}
+                        {step2RefAudit.unusable.length === 1 ? "it" : "they"} must be re-run against{" "}
+                        {step2RefAudit.project_reference} or removed from the project. Build leaves
+                        {step2RefAudit.unusable.length === 1 ? " it" : " them"} out of the comparison set from
+                        now on, and this list stays here once{" "}
+                        {step2RefAudit.unusable.length === 1 ? "its VCF has" : "their VCFs have"} been
+                        dropped, so you keep the list of what still needs doing.
+                        <textarea
+                          readOnly
+                          rows={Math.min(14, Math.max(3, step2RefAudit.unusable.length))}
+                          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.3rem" }}
+                          value={step2RefAudit.unusable.join("\n")}
+                        />
+                        <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.35rem", flexWrap: "wrap" }}>
+                          <button
+                            className="ghost small"
+                            onClick={() => copyText(step2RefAudit.unusable.join("\n"))}
+                          >
+                            Copy list
+                          </button>
+                          {(step2RefAudit.removable || []).length ? (
+                            <BusyButton
+                              className="danger"
+                              busyLabel="Dropping…"
+                              title={"Deletes these VCFs from step2/vcf_database only. The samples, their "
+                                     + "reads and their step1 alignment directories are left untouched."}
+                              onClick={() => fixStep2References(
+                                "drop", step2RefAudit.removable.map((d) => d.sample))}
+                            >
+                              Drop {step2RefAudit.removable.length} of these from the comparison set
+                            </BusyButton>
+                          ) : (
+                            <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>
+                              None of them is in the comparison set — nothing to drop.
+                            </span>
+                          )}
+                        </div>
+                        {(step2RefAudit.removable || []).length ? (
+                        <div className="muted" style={{ marginTop: "0.35rem", fontSize: "0.85em" }}>
+                          Removing the Step 1 sample does <strong>not</strong> take its VCF out of the
+                          comparison set on its own — the set deliberately keeps VCFs whose Step 1 source is
+                          gone, which is how imported and historical runs survive. Drop
+                          {step2RefAudit.removable.length === 1 ? " it" : " them"} here as well.
+                        </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {(step2RefAudit.orphans || []).length ? (
+                      <div className="note warning" style={{ marginTop: "0.4rem" }}>
+                        <strong>{step2RefAudit.orphans.length} wrong-reference VCF
+                        {step2RefAudit.orphans.length === 1 ? "" : "s"} with no Step 1 source.</strong>{" "}
+                        Imported or historical{" "}
+                        {step2RefAudit.orphans.length === 1 ? "copy" : "copies"} — there is no run here to
+                        swap in, so dropping {step2RefAudit.orphans.length === 1 ? "it" : "them"} is the only
+                        option.
+                        <textarea
+                          readOnly
+                          rows={Math.min(10, Math.max(3, step2RefAudit.orphans.length))}
+                          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.3rem" }}
+                          value={step2RefAudit.orphans.map((d) => d.sample).join("\n")}
+                        />
+                        <div style={{ marginTop: "0.35rem" }}>
+                          <BusyButton
+                            className="danger"
+                            busyLabel="Dropping…"
+                            onClick={() => fixStep2References(
+                              "drop", step2RefAudit.orphans.map((d) => d.sample))}
+                          >
+                            Drop {step2RefAudit.orphans.length} orphaned VCF
+                            {step2RefAudit.orphans.length === 1 ? "" : "s"}
+                          </BusyButton>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {step2RefAudit.unknown ? (
+                      <div className="note" style={{ marginTop: "0.4rem" }}>
+                        {step2RefAudit.unknown} VCF{step2RefAudit.unknown === 1 ? "" : "s"} in the set
+                        record no <code>##reference=</code> header, so {step2RefAudit.unknown === 1
+                          ? "its reference" : "their references"} could not be determined. These are not
+                        counted as mismatches.
+                      </div>
+                    ) : null}
+
+                    <div style={{ marginTop: "0.4rem" }}>
+                      <button className="ghost small" onClick={loadStep2ReferenceAudit}
+                              disabled={step2RefAuditBusy}>
+                        {step2RefAuditBusy ? "Re-checking…" : "Re-check"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : null}
+
             <div className="block">
                 {(reference || projectReference) ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>
@@ -8352,23 +8656,20 @@ export default function App() {
                 <button
                   onClick={() => step2Run()}
                   className={step2Running ? "is-running" : ""}
-                  title={step2Running ? "Step 2 is running — building the SNP matrix and tree" : ""}
-                  disabled={
-                    step2Running ||
-                    !selectedProject ||
-                    !settingsReady ||
-                    (!reference && !projectReference) ||
-                    // Nothing in the database, or nothing that the source ticks /
-                    // pasted list actually select out of it.
-                    (step2VcfCount === 0 && !(selected && selected.step2_vcfs > 0)) ||
-                    (step2VcfCount > 0 && step2RunSelection.keep.size === 0) ||
-                    (refLock.references && refLock.references.length > 1)
-                  }
+                  title={step2Running
+                    ? "Step 2 is running — building the SNP matrix and tree"
+                    : step2RunBlock}
+                  disabled={step2Running || Boolean(step2RunBlock)}
                 >
                 {step2Running
                   ? (<><span className="pulse-dot" />{step2JobStatus === "queued" ? "Queued…" : "Running…"}</>)
                   : "Run"}
               </button>
+              {!step2Running && step2RunBlock ? (
+                <div className="note error" style={{ marginTop: "0.35rem" }}>
+                  <strong>Run is disabled:</strong> {step2RunBlock}
+                </div>
+              ) : null}
               {step2Running && step2Controllable ? (
                 <button
                   className="danger"

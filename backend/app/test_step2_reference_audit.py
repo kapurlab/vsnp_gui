@@ -1,0 +1,203 @@
+"""Unit tests for the Step 2 comparison-set reference audit.
+
+A 9,400-sample mtbc0 project could not run Step 2, and nothing on screen said
+why. Three separate defects stacked up:
+
+  * The Run button's veto read Step 1's reference tally. Step 1 keeps every run
+    a sample has ever had, so a sample re-run against the right reference leaves
+    its old alignment_<ref>/ dir and its old stats row behind forever — the
+    veto could never clear, however clean the comparison set became. What has to
+    be single-reference is the comparison set, and that is what is audited here.
+
+  * The veto had no on-screen cause at all. Its one explanation renders in a
+    Step 1 branch that a project-level reference replaces, so on exactly the
+    projects that hit it the message was unreachable.
+
+  * Build chose each sample's VCF by mtime across all of its alignment_<ref>/
+    dirs, so a stale reference won whenever it happened to be written last —
+    and since the set never clobbers, that wrong VCF then survived every later
+    Build. Collection now prefers the project's reference and refuses to add a
+    sample it cannot compare at all.
+
+Run directly:  python test_step2_reference_audit.py
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import app.main as m
+
+FAILURES = []
+
+
+def check(actual, expected, label):
+    if actual != expected:
+        FAILURES.append(f"{label}: expected {expected!r}, got {actual!r}")
+        print(f"  FAIL {label}: expected {expected!r}, got {actual!r}")
+    else:
+        print(f"  ok   {label}")
+
+
+def write_vcf(path: Path, ref: str, pad: str) -> Path:
+    """A zero-coverage VCF whose header names `ref` and whose size is unique."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt") as fh:
+        fh.write(
+            "##fileformat=VCFv4.2\n"
+            f"##reference=file:///refs/{ref}.fasta\n"
+            f"##padding={pad}\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+        )
+    return path
+
+
+PROJ_REF = "mtbc0_v1.1"
+OTHER_REF = "Mycobacterium_AF2122"
+
+
+def build_project(root: Path):
+    """A project holding every shape the audit has to tell apart."""
+    proj = root / "projects" / "mtbc0"
+    proj.mkdir(parents=True)
+    (proj / "project.json").write_text(json.dumps({"reference": PROJ_REF}))
+    step1 = proj / "step1"
+    src = {}
+    # Clean: one run, the project's reference.
+    src["S1"] = write_vcf(step1 / "S1" / f"alignment_{PROJ_REF}" / "S1_zc.vcf.gz", PROJ_REF, "a")
+    # Unusable: its only run is against another reference.
+    src["S2"] = write_vcf(step1 / "S2" / f"alignment_{OTHER_REF}" / "S2_zc.vcf.gz", OTHER_REF, "bb")
+    # Recoverable: runs against BOTH, and the wrong one is newer on disk — the
+    # exact ordering that made newest-by-mtime collect the wrong VCF.
+    src["S3_good"] = write_vcf(step1 / "S3" / f"alignment_{PROJ_REF}" / "S3_zc.vcf.gz", PROJ_REF, "ccc")
+    time.sleep(0.02)
+    src["S3_bad"] = write_vcf(step1 / "S3" / f"alignment_{OTHER_REF}" / "S3_zc.vcf.gz", OTHER_REF, "dddd")
+    # A spelling variant of the project's reference is the SAME reference.
+    src["S4"] = write_vcf(step1 / "S4" / "alignment_MTBC0_V1.1" / "S4_zc.vcf.gz", PROJ_REF, "eeeee")
+    # Pre-GUI layout: reference is not in the directory name.
+    src["S5"] = write_vcf(step1 / "S5" / "alignment" / "S5_zc.vcf.gz", PROJ_REF, "ffffff")
+
+    db = proj / "step2" / "vcf_database"
+    db.mkdir(parents=True)
+    shutil.copy2(src["S1"], db / "S1_zc.vcf.gz")
+    shutil.copy2(src["S2"], db / "S2_zc.vcf.gz")
+    shutil.copy2(src["S3_bad"], db / "S3_zc.vcf.gz")   # the stale wrong copy
+    shutil.copy2(src["S4"], db / "S4_zc.vcf.gz")
+    # Imported / historical: wrong reference, no Step 1 source to swap in.
+    write_vcf(db / "S9_zc.vcf.gz", OTHER_REF, "ggggggg")
+    return proj, db, src
+
+
+def samples(entries):
+    return [d["sample"] for d in entries]
+
+
+def test_audit(cfg, proj, db):
+    print("_step2_reference_audit")
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["project_reference"], PROJ_REF, "reads the project's reference")
+    check(samples(a["recoverable"]), ["S3"], "a sample with both runs is recoverable")
+    check(samples(a["removable"]), ["S2"], "a sample with no correct run is removable")
+    check(samples(a["orphans"]), ["S9"], "a wrong-reference VCF with no Step 1 source is an orphan")
+    check(a["mixed"], True, "the set is reported mixed")
+    check(a["unknown"], 0, "every VCF's reference was determined")
+    # S4's dir is spelled MTBC0_V1.1. Counting that as a second reference would
+    # veto Step 2 with an empty list of offenders — an unfixable block, which is
+    # the whole failure mode this audit exists to end.
+    check("S4" in a["unusable"], False, "a spelling variant is not a second reference")
+    check(a["db_references"], [OTHER_REF, PROJ_REF], "the project's own spelling is the one shown")
+    check((db / m._VCF_REF_CACHE_BASENAME).exists(), True, "the stat-signature cache is written")
+    warm = m._step2_reference_audit(cfg, proj)
+    check(samples(warm["recoverable"]), ["S3"], "the warm-cache audit agrees with the cold one")
+    return a
+
+
+def test_recollect(proj, db, src):
+    print("reference_audit/fix — recollect")
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="recollect", samples=["S3"]))
+    check(r["recollected"], ["S3"], "S3 re-collected")
+    check(r["skipped"], [], "nothing skipped")
+    check(
+        (db / "S3_zc.vcf.gz").stat().st_size,
+        src["S3_good"].stat().st_size,
+        "the copy in the set is now the project-reference one",
+    )
+    check(
+        src["S3_bad"].exists() and src["S3_good"].exists(),
+        True,
+        "both step1 alignment dirs are left untouched",
+    )
+
+
+def test_drop(proj, db, src):
+    print("reference_audit/fix — drop")
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="drop", samples=["S2", "S9"]))
+    check(sorted(r["dropped"]), ["S2", "S9"], "both dropped")
+    check((db / "S2_zc.vcf.gz").exists() or (db / "S9_zc.vcf.gz").exists(), False, "the files are gone")
+    check(src["S2"].exists(), True, "dropping from the set leaves step1 alone")
+    check(r["audit"]["mixed"], False, "the set is single-reference again, so Run is allowed")
+    # A page held open across someone else's repair must not delete a good VCF.
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="drop", samples=["S1"]))
+    check((r["dropped"], r["skipped"]), ([], ["S1"]), "refuses a sample the audit does not list")
+    check((db / "S1_zc.vcf.gz").exists(), True, "the correct VCF survives that attempt")
+
+
+def test_collection(cfg, proj, db, src):
+    print("step2_setup — collection can no longer reintroduce the problem")
+    (db / "S3_zc.vcf.gz").unlink()          # force a fresh collection
+    out = m.step2_setup("mtbc0")
+    check(
+        (db / "S3_zc.vcf.gz").stat().st_size,
+        src["S3_good"].stat().st_size,
+        "Build prefers the project's reference over the newer wrong-reference VCF",
+    )
+    check((db / "S2_zc.vcf.gz").exists(), False, "Build does not re-add a sample it cannot compare")
+    check(out["ref_skipped"], 1, "and reports how many it left out")
+    check(
+        (db / "S5_zc.vcf.gz").exists(),
+        True,
+        "a pre-GUI plain alignment/ sample still collects (its reference is not in the dir name)",
+    )
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["mixed"], False, "a Build no longer reintroduces a wrong-reference VCF")
+    # The worklist has to outlive the cleanup: S2's VCF is gone from the set,
+    # but S2 still has to be re-run or deleted, and that list is what the user
+    # copies to the command line.
+    check(a["unusable"], ["S2"], "the worklist survives the drop")
+    check(a["removable"], [], "with nothing left to drop")
+
+
+def main():
+    tmp = Path(tempfile.mkdtemp(prefix="ref_audit_"))
+    try:
+        proj, db, src = build_project(tmp)
+        cfg = {"vsnp3_path": str(tmp / "no_such_vsnp3"), "projects_root": str(tmp / "projects")}
+        test_audit(cfg, proj, db)
+        # The fix endpoints resolve the project through the config the same way
+        # every other endpoint does; this harness has no config file.
+        m.load_config = lambda: cfg
+        m._project_dir_for = lambda c, p: proj
+        test_recollect(proj, db, src)
+        test_drop(proj, db, src)
+        test_collection(cfg, proj, db, src)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if FAILURES:
+        print(f"\n{len(FAILURES)} FAILED")
+        for f in FAILURES:
+            print("  -", f)
+        sys.exit(1)
+    print("\nall passed")
+
+
+if __name__ == "__main__":
+    main()

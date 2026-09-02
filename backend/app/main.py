@@ -4189,11 +4189,13 @@ def step2_setup(project: str):
     # Excluded count for the setup breakdown = tier A (reference blocklist) ∪
     # tier B (Step 1 exclusions). Both are always filtered out of the comparison
     # at run time. Tier C (build-list) is per-run and shown live in the UI.
+    project_reference = _project_reference(project_dir)
     excluded_names: set = set(_read_step1_exclusions(project_dir / "step2")) | set(
-        _reference_blocklist_names(cfg, _project_reference(project_dir))
+        _reference_blocklist_names(cfg, project_reference)
     )
 
     count = 0
+    ref_skipped_samples: List[str] = []
     edited_samples = []
     step1_samples: set[str] = set()
     for sample_dir in sorted(step1_dir.glob("*")):
@@ -4207,6 +4209,37 @@ def step2_setup(project: str):
         vcf_candidates = sorted(_align_glob(sample_dir, "*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
         if not vcf_candidates:
             continue
+        # A sample re-run against a new reference KEEPS its old
+        # alignment_<ref>/ dir, and "newest on disk" is not the same question as
+        # "called against this project's reference" — the stale reference wins
+        # whenever it happened to be written last, putting a VCF in the
+        # comparison set that cannot be compared with the rest. Prefer the
+        # project's own reference whenever the sample has a run against it;
+        # mtime only breaks ties within that reference. Samples with no
+        # project-reference run are untouched here: they still collect (the DB
+        # is cumulative), and the Step 2 reference audit is what surfaces them.
+        if project_reference:
+            want = _canonical_ref_key(project_reference)
+            named = [p for p in vcf_candidates if p.parent.name.startswith("alignment_")]
+            preferred = [
+                p for p in named
+                if _canonical_ref_key(p.parent.name[len("alignment_"):]) == want
+            ]
+            if preferred:
+                vcf_candidates = preferred
+            elif len(named) == len(vcf_candidates):
+                # Every VCF this sample has is attributable to a reference by
+                # directory name, and none of them is this project's. Adding it
+                # would put a VCF in the comparison set that cannot be compared
+                # with the rest — and because the set is cumulative and never
+                # clobbers, it would also undo the reference audit's cleanup on
+                # the next Build. Skip it; the audit is what reports it.
+                #
+                # Guarded on `named` so a pre-GUI plain alignment/ sample, whose
+                # reference is not in the directory name, still collects exactly
+                # as it always did rather than silently vanishing from the set.
+                ref_skipped_samples.append(sample)
+                continue
         source_vcf = vcf_candidates[-1]
         patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
         chosen_vcf = patched_vcf or source_vcf
@@ -4225,6 +4258,24 @@ def step2_setup(project: str):
         # Copy (don't symlink) so vcf_database is a standalone, permanent store.
         shutil.copy2(chosen_vcf, target)
         count += 1
+
+    # Record which samples this project's reference makes unusable. Build is
+    # the only pass that walks every sample directory, so it is the only place
+    # this is knowable cheaply — and the audit needs the list to OUTLIVE the
+    # cleanup: once a wrong-reference VCF has been dropped from the set, the
+    # sample disappears from the set's own contents, and with it the user's
+    # list of what still has to be re-run or deleted at the command line.
+    try:
+        (step2_dir / _REF_SKIPPED_BASENAME).write_text(
+            json.dumps({
+                "reference": project_reference,
+                "samples": sorted(ref_skipped_samples),
+                "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
     # Rebuild the manifest from the FINAL database contents so preserved /
     # imported VCFs (those with no step1 source) are recorded too, not just
@@ -4258,6 +4309,9 @@ def step2_setup(project: str):
         "comparison": total - excluded,
         "excluded": excluded,
         "edited": len(set(edited_samples)),
+        # Samples left out because every VCF they have was called against a
+        # different reference than this project's.
+        "ref_skipped": len(ref_skipped_samples),
         # kept for back-compat with older callers:
         "skipped_excluded": excluded,
         "preserved": preserved,
@@ -9155,3 +9209,377 @@ def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Pat
         scope,
     ]
     return " ".join(shlex.quote(part) for part in cmd_parts)
+
+
+# --- Comparison-set reference audit ------------------------------------------
+#
+# Step 2 compares whatever sits in vcf_database, so THAT is the set whose
+# reference spread decides whether a run means anything — not Step 1's history.
+# The two are not the same question, and conflating them is why a mixed-
+# reference project could never be cleared: a sample re-run against the right
+# reference keeps its old alignment_<ref>/ dir and its old stats row, so the
+# Step 1 tally reports both references forever, however clean the comparison
+# set becomes.
+#
+# Reference identity is free to read here: Step 1 writes
+# alignment_<reference>/, so the directory name IS the reference. Only a
+# pre-GUI suffix-less alignment/ and an imported VCF with no Step 1 source need
+# the header read.
+
+_VCF_REF_CACHE_BASENAME = ".vcf_ref_cache.json"
+_VCF_REF_CACHE_VERSION = 1
+# Written by every Build: the samples whose every run is against some other
+# reference, so the audit can keep reporting them after their VCFs are gone.
+_REF_SKIPPED_BASENAME = ".reference_skipped.json"
+
+
+def _sample_alignment_vcfs(sample_dir: Path) -> Dict[str, List[Path]]:
+    """Zero-coverage VCFs for one Step 1 sample, grouped by reference.
+
+    Keyed by the alignment_<reference>/ suffix. A pre-GUI plain alignment/ has
+    no reference in its name and lands under "" for the caller to resolve from
+    the VCF header.
+    """
+    out: Dict[str, List[Path]] = {}
+    for d in sorted(sample_dir.glob("alignment_*")):
+        if not d.is_dir():
+            continue
+        vcfs = sorted([*d.glob("*_zc.vcf"), *d.glob("*_zc.vcf.gz")])
+        if vcfs:
+            out[d.name[len("alignment_"):]] = vcfs
+    legacy = sorted(
+        [*sample_dir.glob("alignment/*_zc.vcf"), *sample_dir.glob("alignment/*_zc.vcf.gz")]
+    )
+    if legacy:
+        out.setdefault("", []).extend(legacy)
+    return out
+
+
+def _db_copy_reference(
+    db_vcf: Path, by_ref: Dict[str, List[Path]], alias_map: Dict[str, str]
+) -> str:
+    """Which reference the vcf_database copy of a sample was called against.
+
+    step2_setup copies with shutil.copy2, which preserves size and mtime, and
+    every alignment dir produces the same target filename — so which run a copy
+    came from is recoverable from its stat signature alone, without
+    decompressing anything. Falls back to the VCF header when the signature
+    matches nothing (a copy predating this scheme, an edited VCF) or matches
+    candidates from more than one reference.
+    """
+    try:
+        st = db_vcf.stat()
+    except OSError:
+        return ""
+    sig = (st.st_size, st.st_mtime_ns)
+    hits = set()
+    for ref, vcfs in by_ref.items():
+        for v in vcfs:
+            try:
+                vst = v.stat()
+            except OSError:
+                continue
+            if (vst.st_size, vst.st_mtime_ns) == sig:
+                hits.add(ref)
+    if len(hits) == 1:
+        only = next(iter(hits))
+        if only:
+            return only
+    return _detect_vcf_reference(db_vcf, alias_map)
+
+
+def _vcf_ref_cache_load(step2_dir: Path) -> Dict[str, Any]:
+    """Resolved reference per vcf_database entry, keyed by name -> {sig, ref}.
+
+    Header reads over a 9,000-VCF set are minutes on a shared filesystem, and
+    the audit is consulted every time the Step 2 pane loads. Correctness never
+    depends on the cache: a missing or unwritable file just means the scan does
+    the work again.
+    """
+    try:
+        data = json.loads((step2_dir / _VCF_REF_CACHE_BASENAME).read_text(encoding="utf-8"))
+        if data.get("version") == _VCF_REF_CACHE_VERSION and isinstance(data.get("files"), dict):
+            return data["files"]
+    except Exception:
+        pass
+    return {}
+
+
+def _vcf_ref_cache_save(step2_dir: Path, files: Dict[str, Any]) -> None:
+    """Atomic, best-effort — an unwritable project simply stays uncached."""
+    path = step2_dir / _VCF_REF_CACHE_BASENAME
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=_VCF_REF_CACHE_BASENAME + ".", dir=str(step2_dir))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"version": _VCF_REF_CACHE_VERSION, "files": files}, fh)
+        os.replace(tmp, path)
+        tmp = None
+        try:
+            os.chmod(path, 0o664)  # share the cache with the project's group
+        except OSError:
+            pass
+    except Exception:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+
+def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
+    """Audit the comparison set against the project's declared reference.
+
+    Every vcf_database entry is resolved to the reference it was called
+    against, then each offending sample is sorted into one of two outcomes:
+
+      recoverable — the sample ALSO has a run against the project reference, so
+                    its stale copy can be swapped for the right one in place.
+                    Nothing is lost and nothing has to be re-run.
+      removable   — the sample has no run against the project reference at all.
+                    Nothing here can fix it: it has to be re-run or dropped,
+                    and its VCF must leave the comparison set either way.
+
+    Removing the Step 1 sample is NOT enough on its own, and the panel says so:
+    step2_setup preserves a vcf_database entry whose Step 1 source has gone
+    (that is how imported and historical VCFs survive), so a wrong-reference
+    copy outlives the sample directory unless it is dropped from the set too.
+    """
+    project_reference = _project_reference(project_dir)
+    step1_dir = project_dir / "step1"
+    step2_dir = vcf_db_dir(project_dir / "step2")
+    if not step2_dir.exists():
+        return {
+            "project_reference": project_reference,
+            "db_references": [], "mixed": False, "total": 0,
+            "recoverable": [], "removable": [], "orphans": [],
+            "unusable": [], "unknown": 0,
+        }
+
+    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+
+    def _same(a: str, b: str) -> bool:
+        """Same reference under a different spelling of its name.
+
+        The alignment dir suffix is whatever `-r` the run was given, so
+        MTBC0_v1.1 and mtbc0_v1.1 are one reference and must not read as two.
+        """
+        return bool(a) and bool(b) and _canonical_ref_key(a) == _canonical_ref_key(b)
+
+    def _key_for(by_ref: Dict[str, List[Path]], ref: str) -> Optional[str]:
+        return next((k for k in by_ref if _same(k, ref)), None)
+
+    cache = _vcf_ref_cache_load(step2_dir)
+    fresh: Dict[str, Any] = {}
+    entries = sorted(
+        [*step2_dir.glob("*_zc.vcf"), *step2_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name
+    )
+
+    by_ref_cache: Dict[str, Dict[str, List[Path]]] = {}
+
+    def alignment_refs(sample: str) -> Dict[str, List[Path]]:
+        if sample not in by_ref_cache:
+            sample_dir = step1_dir / sample
+            by_ref_cache[sample] = (
+                _sample_alignment_vcfs(sample_dir) if sample_dir.is_dir() else {}
+            )
+        return by_ref_cache[sample]
+
+    # Keyed by canonical form so a spelling variant of one reference cannot
+    # read as two — a veto whose offender list is empty is unfixable, which is
+    # the whole failure this audit exists to end. The project's own spelling
+    # wins when it is one of the variants.
+    db_refs: Dict[str, str] = {}
+
+    def _note_ref(ref: str) -> None:
+        k = _canonical_ref_key(ref)
+        if _same(ref, project_reference):
+            db_refs[k] = project_reference
+        elif k not in db_refs:
+            db_refs[k] = ref
+
+    unknown = 0
+    wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
+    for entry in entries:
+        sample = entry.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        sig = [st.st_size, st.st_mtime_ns]
+        hit = cache.get(entry.name)
+        if hit and hit.get("sig") == sig and isinstance(hit.get("ref"), str):
+            ref = hit["ref"]
+        else:
+            ref = _db_copy_reference(entry, alignment_refs(sample), alias_map)
+        fresh[entry.name] = {"sig": sig, "ref": ref}
+        if ref:
+            _note_ref(ref)
+        else:
+            unknown += 1
+        if project_reference and ref and not _same(ref, project_reference):
+            wrong.append((sample, entry, ref))
+    _vcf_ref_cache_save(step2_dir, fresh)
+
+    recoverable: List[Dict[str, Any]] = []
+    removable: List[Dict[str, Any]] = []
+    orphans: List[Dict[str, Any]] = []
+    for sample, entry, ref in wrong:
+        by_ref = alignment_refs(sample)
+        if not by_ref:
+            # No Step 1 source at all: an imported or historical VCF. There is
+            # no correct-reference run to swap in, and no sample directory to
+            # re-run — the only lever is dropping it from the set.
+            orphans.append({"sample": sample, "filename": entry.name, "reference": ref})
+        elif _key_for(by_ref, project_reference):
+            recoverable.append({
+                "sample": sample, "filename": entry.name, "reference": ref,
+                "correct_reference": project_reference,
+            })
+        else:
+            removable.append({
+                "sample": sample, "filename": entry.name, "reference": ref,
+                "references": sorted(r for r in by_ref if r),
+            })
+    key = lambda d: d["sample"]
+    # Samples this project's reference cannot use, from the last Build plus
+    # anything still sitting in the set. Deliberately NOT limited to what is
+    # in the set: this is the "re-run or delete these" worklist, and it has to
+    # survive the drop that takes their VCFs out.
+    unusable = {d["sample"] for d in removable}
+    try:
+        rec = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
+        if _same(rec.get("reference") or "", project_reference):
+            unusable.update(str(x) for x in (rec.get("samples") or []))
+    except Exception:
+        pass
+    return {
+        "project_reference": project_reference,
+        "db_references": sorted(db_refs.values()),
+        # The comparison set is the thing that has to be single-reference. A
+        # set holding one reference that is not the project's is still wrong,
+        # so this is not just "more than one" — and with no project reference
+        # set at all, more than one is all we can go on.
+        "mixed": bool(wrong) or len(db_refs) > 1,
+        "total": len(entries),
+        "unknown": unknown,
+        "recoverable": sorted(recoverable, key=key),
+        "removable": sorted(removable, key=key),
+        "unusable": sorted(unusable),
+        "orphans": sorted(orphans, key=key),
+    }
+
+
+@app.get("/api/projects/{project}/step2/reference_audit")
+def step2_reference_audit(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _step2_reference_audit(cfg, project_dir)
+
+
+class ReferenceAuditFix(BaseModel):
+    action: str                      # "recollect" | "drop"
+    samples: List[str] = []
+
+
+@app.post("/api/projects/{project}/step2/reference_audit/fix")
+def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
+    """Repair the comparison set for the named samples.
+
+    recollect — delete the stale wrong-reference copy and copy the sample's
+                project-reference VCF in its place. Only touches vcf_database;
+                every alignment_<ref>/ dir in step1 is left exactly as it is,
+                so this is reversible by re-running Build.
+    drop       — delete the wrong-reference copy and nothing else. For samples
+                with no project-reference run, whose VCF cannot be replaced.
+
+    Refuses any sample the audit does not currently list under the requested
+    action, so a stale page cannot delete a VCF that is actually correct.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.action not in ("recollect", "drop"):
+        raise HTTPException(status_code=400, detail="action must be 'recollect' or 'drop'")
+    audit = _step2_reference_audit(cfg, project_dir)
+    if payload.action == "recollect":
+        allowed = {d["sample"]: d for d in audit["recoverable"]}
+    else:
+        allowed = {d["sample"]: d for d in [*audit["removable"], *audit["orphans"]]}
+    wanted = set(payload.samples) if payload.samples else set(allowed)
+    step1_dir = project_dir / "step1"
+    step2_dir = vcf_db_dir(project_dir / "step2")
+
+    recollected, dropped, skipped = [], [], []
+    for sample in sorted(wanted):
+        info = allowed.get(sample)
+        if info is None:
+            skipped.append(sample)
+            continue
+        target = step2_dir / info["filename"]
+        if payload.action == "drop":
+            try:
+                target.unlink()
+                dropped.append(sample)
+            except OSError as e:
+                skipped.append(f"{sample} ({e})")
+            continue
+        by_ref = _sample_alignment_vcfs(step1_dir / sample)
+        want = audit["project_reference"]
+        key = next(
+            (k for k in by_ref if k and _canonical_ref_key(k) == _canonical_ref_key(want)), None
+        )
+        candidates = by_ref.get(key) or [] if key else []
+        if not candidates:
+            skipped.append(sample)
+            continue
+        source = sorted(candidates, key=lambda p: p.stat().st_mtime)[-1]
+        patched = _find_patched_vcf(step1_dir / sample, sample, source)
+        chosen = patched or source
+        try:
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            shutil.copy2(chosen, step2_dir / _target_name_for_vcf(source, chosen))
+            recollected.append(sample)
+        except OSError as e:
+            skipped.append(f"{sample} ({e})")
+    # Record what was dropped for the wrong reference onto the durable
+    # worklist. Build writes this file too, but the user can reach the drop
+    # button before ever pressing Build — and then the list of samples still
+    # needing a re-run would vanish along with the VCFs, which is the one thing
+    # it exists to prevent. Orphans are deliberately left off it: they have no
+    # Step 1 directory, so the VCF just deleted was all there was to act on.
+    if payload.action == "drop":
+        worklist = {d["sample"] for d in audit["removable"] if d["sample"] in set(dropped)}
+        if worklist:
+            path = step2_dir / _REF_SKIPPED_BASENAME
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+                if str(rec.get("reference") or "") == audit["project_reference"]:
+                    worklist.update(str(x) for x in (rec.get("samples") or []))
+            except Exception:
+                pass
+            try:
+                path.write_text(
+                    json.dumps({
+                        "reference": audit["project_reference"],
+                        "samples": sorted(worklist),
+                        "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+    # The stat signatures the audit caches are now wrong for everything we
+    # touched; drop the cache rather than trying to patch it entry by entry.
+    try:
+        (step2_dir / _VCF_REF_CACHE_BASENAME).unlink()
+    except OSError:
+        pass
+    return {
+        "recollected": recollected, "dropped": dropped, "skipped": skipped,
+        "audit": _step2_reference_audit(cfg, project_dir),
+    }

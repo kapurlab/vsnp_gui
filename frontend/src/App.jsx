@@ -1107,8 +1107,8 @@ export default function App() {
   // on the List tab the resolution panel already spells out what matched, and
   // the browse list stays a plain inventory of the folder.
   const step2LeftOutSet = useMemo(
-    () => (step2Mode === "list" ? new Set() : new Set(step2RunSelection.leaveOut)),
-    [step2Mode, step2RunSelection]
+    () => new Set(step2RunSelection.leaveOut),
+    [step2RunSelection]
   );
 
   // "Files in download" shows only samples not yet run in Step 1 and not in
@@ -4040,8 +4040,18 @@ export default function App() {
       const excluded = data.excluded ?? data.skipped_excluded ?? 0;
       const comparison = data.comparison ?? (total - excluded);
       // Invariant: total = comparison + excluded.
+      const why = [];
+      if (data.excluded_reference_blocklist) {
+        why.push(`${data.excluded_reference_blocklist} on the reference's remove_from_analysis list`);
+      }
+      if (data.excluded_step1_results) {
+        why.push(`${data.excluded_step1_results} excluded in Step 1 Results`);
+      }
       setStep2SetupMsg(
-        `vcf_database total: ${total} · VCFs for Step 2 comparison: ${comparison} · excluded above: ${excluded}`
+        `vcf_database total: ${total} · VCFs for Step 2 comparison: ${comparison}`
+        + (excluded
+            ? ` · held out: ${excluded}${why.length ? ` (${why.join(", ")})` : ""}`
+            : "")
         + (data.ref_skipped
             ? ` · left out (called against another reference): ${data.ref_skipped}`
             : "")
@@ -8221,7 +8231,10 @@ export default function App() {
                       {vcfSourceOpen ? "▲ Hide" : "▼ Browse"}{" "}
                       {vcfSourceShowLeftOut
                         ? vcfSourceSamples.length
-                        : vcfSourceSamples.length - step2LeftOutSet.size} samples
+                        : vcfSourceSamples.length - step2LeftOutSet.size}{" "}
+                      {step2LeftOutSet.size > 0 && !vcfSourceShowLeftOut
+                        ? "samples in this run"
+                        : `samples in ${vcfsFolderName || "vcf_database"}`}
                     </button>
                     {vcfSourceOpen && (
                       <div style={{marginTop:"6px", border:"1px solid var(--border)", borderRadius:"4px", overflow:"hidden"}}>
@@ -8267,7 +8280,8 @@ export default function App() {
                                   )}
                                   {step2LeftOutSet.size > 0 && (
                                     <span style={{color:"var(--warning, #8a6d3b)"}}>
-                                      {" · "}{step2LeftOutSet.size} not in this run (source unticked){" — "}
+                                      {" · "}{step2LeftOutSet.size} not in this run{" "}
+                                      ({step2Mode === "list" ? "not on your list" : "source unticked"}){" — "}
                                       <button
                                         type="button"
                                         onClick={() => setVcfSourceShowLeftOut(v => !v)}
@@ -8559,13 +8573,14 @@ export default function App() {
                           </button>
                           <BusyButton
                             className="ghost small"
-                            busyLabel="Clearing…"
-                            title={"Discards this list. No VCF, sample or run is touched — and a sample "
-                                   + "that still has no run against this project's reference will be "
-                                   + "recorded again by the next Build."}
-                            onClick={() => fixStep2References("forget", ["*"])}
+                            busyLabel="Dismissing…"
+                            title={"Dismisses these for good: they stop being reported here, and a later "
+                                   + "Build will not bring them back. No VCF, sample or run is touched — "
+                                   + "Build still keeps them out of the comparison set, because their "
+                                   + "reference cannot be compared with the rest."}
+                            onClick={() => fixStep2References("forget", step2RefAudit.unusable)}
                           >
-                            Clear list
+                            Dismiss these {step2RefAudit.unusable.length}
                           </BusyButton>
                           {(step2RefAudit.removable || []).length ? (
                             <BusyButton
@@ -8623,6 +8638,21 @@ export default function App() {
                       </div>
                     ) : null}
 
+                    {(step2RefAudit.ignored || []).length ? (
+                      <div className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85em" }}>
+                        {step2RefAudit.ignored.length} sample
+                        {step2RefAudit.ignored.length === 1 ? "" : "s"} dismissed from this list.
+                        {" "}Still kept out of the comparison set — dismissing changed what is reported,
+                        not what is compared.{" "}
+                        <BusyButton
+                          className="ghost small"
+                          busyLabel="Restoring…"
+                          onClick={() => fixStep2References("unforget", step2RefAudit.ignored)}
+                        >
+                          Show them again
+                        </BusyButton>
+                      </div>
+                    ) : null}
                     {step2RefAudit.unknown ? (
                       <div className="note" style={{ marginTop: "0.4rem" }}>
                         {step2RefAudit.unknown} VCF{step2RefAudit.unknown === 1 ? "" : "s"} in the set
@@ -8695,8 +8725,13 @@ export default function App() {
                   {step2Stopping ? "Shutting down…" : (step2JobStatus === "queued" ? "Cancel" : "Stop")}
                 </button>
               ) : null}
+              {step2SetupMsg ? (
+                <div className="note muted" style={{ fontSize: "0.85em" }}>
+                  Last Build — {step2SetupMsg}
+                </div>
+              ) : null}
               <div className="note">
-                {step2SetupMsg || (() => {
+                {(() => {
                   // Say what THIS RUN will compare, not just how big the
                   // cumulative folder is — "VCFs in set: 9372" next to Run
                   // reads as "9372 will run" when a pasted list picked 10.

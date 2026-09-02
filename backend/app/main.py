@@ -4191,9 +4191,13 @@ def step2_setup(project: str):
     # at run time. Tier C (build-list) is per-run and shown live in the UI.
     project_reference = _project_reference(project_dir)
     ref_aliases = _reference_alias_map(Path(cfg["vsnp3_path"])) if project_reference else {}
-    excluded_names: set = set(_read_step1_exclusions(project_dir / "step2")) | set(
-        _reference_blocklist_names(cfg, project_reference)
-    )
+    # Kept apart so the count can say WHERE an exclusion came from. One number
+    # labelled "excluded above" sent the user hunting through Step 1 Results
+    # for 27 ticks, 25 of which were not there: tier A is a file in the
+    # reference directory, nowhere near "above".
+    step1_excluded_names: set = set(_read_step1_exclusions(project_dir / "step2"))
+    blocklist_names: set = set(_reference_blocklist_names(cfg, project_reference))
+    excluded_names: set = step1_excluded_names | blocklist_names
 
     count = 0
     ref_skipped_samples: List[str] = []
@@ -4271,12 +4275,24 @@ def step2_setup(project: str):
     # cleanup: once a wrong-reference VCF has been dropped from the set, the
     # sample disappears from the set's own contents, and with it the user's
     # list of what still has to be re-run or deleted at the command line.
+    prior_ignored: set = set()
+    try:
+        prior = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
+        if prior.get("logic") == _REF_SKIPPED_LOGIC:
+            prior_ignored = {str(x) for x in (prior.get("ignored") or [])}
+    except Exception:
+        pass
     try:
         (step2_dir / _REF_SKIPPED_BASENAME).write_text(
             json.dumps({
                 "reference": project_reference,
                 "logic": _REF_SKIPPED_LOGIC,
-                "samples": sorted(ref_skipped_samples),
+                # A dismissed sample is still skipped — it still cannot be
+                # compared — but it does not come back onto the worklist. Before
+                # this, Build rewrote the record from scratch and every dismissal
+                # was undone by the next press.
+                "samples": sorted(set(ref_skipped_samples) - prior_ignored),
+                "ignored": sorted(prior_ignored),
                 "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }),
             encoding="utf-8",
@@ -4289,6 +4305,8 @@ def step2_setup(project: str):
     # the freshly linked ones.
     preserved = 0
     excluded = 0
+    excluded_blocklist = 0
+    excluded_step1 = 0
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
@@ -4305,6 +4323,10 @@ def step2_setup(project: str):
                 preserved += 1
             if stem in excluded_names:
                 excluded += 1
+                if stem in blocklist_names:
+                    excluded_blocklist += 1
+                else:
+                    excluded_step1 += 1
             manifest.write(f"{vcf.name},{source_type},{resolved}\n")
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
     total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
@@ -4315,6 +4337,11 @@ def step2_setup(project: str):
         "total": total,
         "comparison": total - excluded,
         "excluded": excluded,
+        # Which of the two exclusion tiers each one came from. Tier A is the
+        # reference's own *_remove_from_analysis.xlsx; tier B is what the user
+        # ticked in Step 1 Results.
+        "excluded_reference_blocklist": excluded_blocklist,
+        "excluded_step1_results": excluded_step1,
         "edited": len(set(edited_samples)),
         # Samples left out because every VCF they have was called against a
         # different reference than this project's.
@@ -9435,7 +9462,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
             "project_reference": project_reference,
             "db_references": [], "mixed": False, "total": 0,
             "recoverable": [], "removable": [], "orphans": [],
-            "unusable": [], "unknown": 0,
+            "unusable": [], "ignored": [], "unknown": 0,
         }
 
     alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
@@ -9533,11 +9560,13 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # survive the drop that takes their VCFs out.
     unusable = {d["sample"] for d in removable}
     recorded: List[str] = []
+    ignored: set = set()
     try:
         rec = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
         if (rec.get("logic") == _REF_SKIPPED_LOGIC
                 and _same(rec.get("reference") or "", project_reference)):
             recorded = [str(x) for x in (rec.get("samples") or [])]
+            ignored = {str(x) for x in (rec.get("ignored") or [])}
     except Exception:
         pass
     # Re-checked against the project as it stands NOW, because the record is a
@@ -9556,6 +9585,14 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         if _key_for(by_ref, project_reference):
             continue
         unusable.add(name)
+    # A sample the user has dismissed stays dismissed, across Builds. Build
+    # still refuses to put its VCF in the comparison set — that is a
+    # correctness rule, not a preference — but it stops being reported as
+    # outstanding work, because the user has decided it is not. The one thing
+    # that overrides a dismissal is a VCF of that sample actually sitting in
+    # the set: that blocks Step 2, so it must be visible whatever was decided.
+    still_in_set = {d["sample"] for d in removable}
+    unusable -= (ignored - still_in_set)
     # Persist the pruning so the file stops carrying names it no longer means.
     if recorded and sorted(unusable) != sorted(recorded):
         try:
@@ -9564,6 +9601,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
                     "reference": project_reference,
                     "logic": _REF_SKIPPED_LOGIC,
                     "samples": sorted(unusable),
+                    "ignored": sorted(ignored),
                     "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 }),
                 encoding="utf-8",
@@ -9583,6 +9621,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         "recoverable": sorted(recoverable, key=key),
         "removable": sorted(removable, key=key),
         "unusable": sorted(unusable),
+        "ignored": sorted(ignored),
         "orphans": sorted(orphans, key=key),
     }
 
@@ -9620,21 +9659,60 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     if payload.action == "forget":
-        # Discards the worklist record and nothing else — no VCF, no sample, no
-        # run is touched. Says so plainly rather than implying it resolves
-        # anything: a sample that still has no run against this project's
-        # reference is recorded again by the next Build, which is the honest
-        # behaviour for a list whose job is to be true.
+        # Dismissing is a DECISION, so it is recorded rather than executed by
+        # deleting the file: emptying the list only made the next Build write
+        # the same names back, which is not what "I have decided I do not want
+        # these" means. The names move to `ignored` and stay there.
+        #
+        # No VCF, sample or run is touched. Build still refuses to put these
+        # samples in the comparison set — that is a correctness rule about
+        # mixing references, not a preference — they simply stop being reported
+        # as outstanding work.
         step2_dir = vcf_db_dir(project_dir / "step2")
+        audit = _step2_reference_audit(cfg, project_dir)
+        wanted = set(payload.samples) if payload.samples else set(audit["unusable"])
+        wanted &= set(audit["unusable"])
+        keep_ignored = set(audit.get("ignored") or []) | wanted
         try:
-            (step2_dir / _REF_SKIPPED_BASENAME).unlink()
+            (step2_dir / _REF_SKIPPED_BASENAME).write_text(
+                json.dumps({
+                    "reference": audit["project_reference"],
+                    "logic": _REF_SKIPPED_LOGIC,
+                    "samples": sorted(set(audit["unusable"]) - wanted),
+                    "ignored": sorted(keep_ignored),
+                    "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return {"recollected": [], "dropped": [], "ignored": sorted(wanted), "skipped": [],
+                "audit": _step2_reference_audit(cfg, project_dir)}
+    if payload.action == "unforget":
+        # Undo: put the dismissed samples back under consideration.
+        step2_dir = vcf_db_dir(project_dir / "step2")
+        audit = _step2_reference_audit(cfg, project_dir)
+        restore = set(payload.samples) if payload.samples else set(audit.get("ignored") or [])
+        remaining = set(audit.get("ignored") or []) - restore
+        try:
+            (step2_dir / _REF_SKIPPED_BASENAME).write_text(
+                json.dumps({
+                    "reference": audit["project_reference"],
+                    "logic": _REF_SKIPPED_LOGIC,
+                    "samples": sorted(set(audit["unusable"]) | (restore - remaining)),
+                    "ignored": sorted(remaining),
+                    "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }),
+                encoding="utf-8",
+            )
         except OSError:
             pass
         return {"recollected": [], "dropped": [], "skipped": [],
                 "audit": _step2_reference_audit(cfg, project_dir)}
     if payload.action not in ("recollect", "drop"):
         raise HTTPException(
-            status_code=400, detail="action must be 'recollect', 'drop' or 'forget'")
+            status_code=400,
+            detail="action must be 'recollect', 'drop', 'forget' or 'unforget'")
     audit = _step2_reference_audit(cfg, project_dir)
     if payload.action == "recollect":
         allowed = {d["sample"]: d for d in audit["recoverable"]}

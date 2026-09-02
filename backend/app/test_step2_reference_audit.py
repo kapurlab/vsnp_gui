@@ -294,12 +294,53 @@ def test_worklist_goes_stale(cfg, proj):
           "a sample re-run against the project reference drops off too")
     shutil.rmtree(fixed.parent)
 
-    # And the explicit discard.
+    # And the explicit dismissal. It records a decision rather than emptying
+    # the file — see test_dismissal_is_permanent for why that distinction is
+    # the whole point.
     rec(["S2"])
     r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="forget"))
-    check(r["audit"]["unusable"], [], "'forget' discards the list")
-    check((step2 / m._REF_SKIPPED_BASENAME).exists(), False, "and removes the record")
+    check(r["audit"]["unusable"], [], "'forget' takes them off the list")
+    check(r["audit"]["ignored"], ["S2"], "by recording the decision")
     check((step1 / "S2").is_dir(), True, "without touching the sample")
+    # Leave the fixture as found, so the next test starts from a clean slate.
+    m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="unforget"))
+    rec(["S2"])
+
+
+def test_dismissal_is_permanent(cfg, proj, db):
+    """Dismissing must survive a Build.
+
+    The reported bug: "Clear list" emptied the record, then the next Build
+    wrote the same names straight back. Emptying a list is not a decision;
+    recording one is.
+    """
+    print("dismissal is permanent")
+    step2 = m.vcf_db_dir(proj / "step2")
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["unusable"], ["S2"], "S2 is on the worklist to start with")
+
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="forget", samples=["S2"]))
+    check(r["audit"]["unusable"], [], "dismissed, so no longer reported")
+    check(r["audit"]["ignored"], ["S2"], "and recorded as a decision, not deleted")
+
+    out = m.step2_setup("mtbc0")
+    check(out["ref_skipped"], 1, "Build still refuses to add it to the comparison set")
+    check((db / "S2_zc.vcf.gz").exists(), False, "so its VCF stays out")
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["unusable"], [], "and Build does NOT put it back on the worklist")
+    check(a["ignored"], ["S2"], "the dismissal survived the Build")
+
+    # A dismissal hides a report; it must never hide a VCF that blocks Step 2.
+    shutil.copy2(m._sample_alignment_vcfs(proj / "step1" / "S2")[OTHER_REF][0],
+                 db / "S2_zc.vcf.gz")
+    a = m._step2_reference_audit(cfg, proj)
+    check(a["mixed"], True, "a dismissed sample's VCF in the set still blocks Step 2")
+    check("S2" in a["unusable"], True, "and is reported again, dismissal notwithstanding")
+    (db / "S2_zc.vcf.gz").unlink()
+
+    r = m.step2_reference_audit_fix("mtbc0", m.ReferenceAuditFix(action="unforget", samples=["S2"]))
+    check(r["audit"]["ignored"], [], "'unforget' restores it")
+    check(r["audit"]["unusable"], ["S2"], "back on the worklist")
 
 
 def main():
@@ -318,6 +359,7 @@ def main():
         test_drop(proj, db, src)
         test_collection(cfg, proj, db, src)
         test_worklist_goes_stale(cfg, proj)
+        test_dismissal_is_permanent(cfg, proj, db)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

@@ -294,8 +294,6 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   // Live Logs retention + append batching (see the SSE onmessage handler).
   const LOG_KEEP = 2000;
-  const logBufRef = useRef([]);
-  const logFlushRef = useRef(null);
   // True once older lines have been trimmed from the view, so the Copy button
   // and the panel can say so instead of passing a silent tail off as the
   // whole log (the complete log stays on disk with the job).
@@ -1678,89 +1676,86 @@ export default function App() {
     setLogs([]);
     setLogsTrimmed(false);
     setJobStatus("running");
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    es.onmessage = (evt) => {
-      const line = evt.data;
-      if (line.startsWith("[job:")) {
-        const status = line.replace("[job:", "").replace("]", "");
-        setJobStatus(status);
-        // Step 1 job reached a terminal state: refresh sample statuses, QC
-        // table, project counts, collect VCFs. "cancelled" is included so a
-        // user-stopped batch still collects the VCFs of samples that finished
-        // before the stop.
-        if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed" || status === "cancelled")) {
-          loadStep1Status();
-          loadQC({ refresh: true });
-          refreshProjects(selectedProject);
-          collectVcfs([]);
+    // POLL, don't stream — see job_logtext in backend/app/main.py for why a
+    // held-open EventSource is hazardous behind the OOD /rnode proxy. The pane
+    // is a tail (LOG_KEEP lines) replaced wholesale each poll, so the 250 ms
+    // line batching the SSE handler needed is gone with it: one setState per
+    // poll, not per line.
+    const id = jobId;
+    let timer = null, finished = false, errors = 0;
+    const applyTerminal = (status) => {
+      setJobStatus(status);
+      // Step 1 job reached a terminal state: refresh sample statuses, QC
+      // table, project counts, collect VCFs. "cancelled" is included so a
+      // user-stopped batch still collects the VCFs of samples that finished
+      // before the stop.
+      if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed" || status === "cancelled")) {
+        loadStep1Status();
+        loadQC({ refresh: true });
+        refreshProjects(selectedProject);
+        collectVcfs([]);
+      }
+      // Step 2 job completed: refresh run list (auto-selects newest → triggers
+      // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
+      if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
+        setStep2Running(false);
+        loadStep2Runs(true);
+        refreshProjects(selectedProject);
+      }
+      // Update SRA status if this was an SRA job
+      if (sraJobId && jobId === sraJobId) {
+        if (status === "succeeded") {
+          setSraStatus("Download complete");
+          loadAll();
+        } else {
+          setSraStatus(`Download ${status}`);
         }
-        // Step 2 job completed: refresh run list (auto-selects newest → triggers
-        // loadStep2Outputs via useEffect([step2SelectedRun])), update project counts
-        if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
-          setStep2Running(false);
-          loadStep2Runs(true);
-          refreshProjects(selectedProject);
+        // Either way, refresh the persistent outcome report (a failed job can
+        // still have skipped/succeeded some accessions before failing).
+        if (selectedProject) loadSraReport(selectedProject);
+      }
+      // Update genome download status if this was a genome download job
+      if (genomeJobId && jobId === genomeJobId) {
+        if (status === "succeeded") {
+          setGenomeDownloadStatus("Download complete. Refreshing references...");
+          loadAll().then(() => setGenomeDownloadStatus("Download complete."));
+        } else {
+          setGenomeDownloadStatus(`Download ${status}`);
         }
-        // Update SRA status if this was an SRA job
-        if (sraJobId && jobId === sraJobId) {
-          if (status === "succeeded") {
-            setSraStatus("Download complete");
-            loadAll();
-          } else {
-            setSraStatus(`Download ${status}`);
+      }
+    };
+    const tick = () => {
+      if (finished) return;
+      fetch(`${API_BASE}/api/jobs/${id}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`http ${r.status}`))))
+        .then((d) => {
+          if (finished) return;
+          errors = 0;
+          if (typeof d.log === "string") {
+            const lines = d.log.split("\n");
+            if (lines.length && lines[lines.length - 1] === "") lines.pop();
+            if (d.truncated || lines.length > LOG_KEEP) setLogsTrimmed(true);
+            setLogs(lines.length > LOG_KEEP ? lines.slice(-LOG_KEEP) : lines);
           }
-          // Either way, refresh the persistent outcome report (a failed job can
-          // still have skipped/succeeded some accessions before failing).
-          if (selectedProject) loadSraReport(selectedProject);
-        }
-        // Update genome download status if this was a genome download job
-        if (genomeJobId && jobId === genomeJobId) {
-          if (status === "succeeded") {
-            setGenomeDownloadStatus("Download complete. Refreshing references...");
-            loadAll().then(() => setGenomeDownloadStatus("Download complete."));
-          } else {
-            setGenomeDownloadStatus(`Download ${status}`);
+          if (d.status === "succeeded" || d.status === "failed" || d.status === "cancelled") {
+            finished = true;
+            applyTerminal(d.status);
+            return;
           }
-        }
-        es.close();
-        return;
-      }
-      // Batched, bounded log appends. One setState per SSE line meant one
-      // whole-app re-render per line — a long Step 1 batch streams thousands,
-      // and by mid-run each append also copied a tens-of-thousands-entry
-      // array, so the browser visibly froze late in big runs. Lines buffer in
-      // a ref and flush on a 250 ms timer (N lines -> one render), and only
-      // the newest LOG_KEEP lines are retained — the display is a tail; the
-      // complete log is on disk and served whole by the job log endpoints.
-      logBufRef.current.push(line);
-      if (!logFlushRef.current) {
-        logFlushRef.current = setTimeout(() => {
-          logFlushRef.current = null;
-          const batch = logBufRef.current;
-          logBufRef.current = [];
-          setLogs((prev) => {
-            const next = prev.concat(batch);
-            if (next.length > LOG_KEEP) {
-              setLogsTrimmed(true);
-              return next.slice(-LOG_KEEP);
-            }
-            return next;
-          });
-        }, 250);
-      }
+          timer = setTimeout(tick, 1500);
+        })
+        .catch(() => {
+          if (finished) return;
+          errors += 1;
+          // Ride out proxy blips; ~80 s of nothing is the backend gone, which
+          // is what the old onerror reported as "error" too.
+          if (errors < 40) { timer = setTimeout(tick, 2000); return; }
+          finished = true;
+          setJobStatus("error");
+        });
     };
-    es.onerror = () => {
-      setJobStatus("error");
-      es.close();
-    };
-    return () => {
-      es.close();
-      if (logFlushRef.current) {
-        clearTimeout(logFlushRef.current);
-        logFlushRef.current = null;
-      }
-      logBufRef.current = [];
-    };
+    tick();
+    return () => { finished = true; if (timer) clearTimeout(timer); };
   }, [jobId]);
 
   useEffect(() => {
@@ -4408,50 +4403,71 @@ export default function App() {
   }
 
   function streamKrakenLog(jobId) {
-    const es = new EventSource(`${API_BASE}/api/jobs/${jobId}/events`);
-    krakenEsRef.current = es;
-    es.onmessage = (evt) => {
-      const data = evt.data;
-      const m = data.match(/^\[job:(succeeded|failed)\]$/);
-      if (m) {
-        es.close();
-        krakenEsRef.current = null;
-        setKrakenModal((mm) => {
-          // Refresh the project's sample browser so the new Kraken outputs
-          // (incl. parsed-read fastqs) appear under the sample, and drop any
-          // stale cached file list for it.
-          if (mm.project) {
-            if (projExpanded[mm.project]) loadProjData(mm.project);
-            // A successful run produced a new Kraken dir → refresh the cached
-            // list so the Step 1 row's "Krona" button appears right away.
-            if (m[1] === "succeeded") loadProjectKrakenDirs(mm.project);
-            // The backend auto-imports the parsed-read fastqs into the project's
-            // inputs (download/) on success; refresh the Inputs pane so they
-            // show up immediately, ready to re-run through vSNP.
-            if (m[1] === "succeeded" && mm.project === selectedProject) {
-              loadInputs(selectedProject);
-            }
-            setSampleKrakenFiles((prev) => {
-              const next = { ...prev };
-              Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
-              return next;
-            });
+    // Polled, not streamed — same OOD /rnode proxy hazard as the job watcher
+    // above (see job_logtext in backend/app/main.py). krakenEsRef keeps its
+    // contract: whoever holds it can still .close().
+    if (krakenEsRef.current) { krakenEsRef.current.close(); krakenEsRef.current = null; }
+    let timer = null, finished = false, errors = 0;
+    const handle = { close() { finished = true; if (timer) { clearTimeout(timer); timer = null; } } };
+    krakenEsRef.current = handle;
+    const stop = () => { handle.close(); if (krakenEsRef.current === handle) krakenEsRef.current = null; };
+    const applyTerminal = (status) => {
+      setKrakenModal((mm) => {
+        // Refresh the project's sample browser so the new Kraken outputs
+        // (incl. parsed-read fastqs) appear under the sample, and drop any
+        // stale cached file list for it.
+        if (mm.project) {
+          if (projExpanded[mm.project]) loadProjData(mm.project);
+          // A successful run produced a new Kraken dir → refresh the cached
+          // list so the Step 1 row's "Krona" button appears right away.
+          if (status === "succeeded") loadProjectKrakenDirs(mm.project);
+          // The backend auto-imports the parsed-read fastqs into the project's
+          // inputs (download/) on success; refresh the Inputs pane so they
+          // show up immediately, ready to re-run through vSNP.
+          if (status === "succeeded" && mm.project === selectedProject) {
+            loadInputs(selectedProject);
           }
-          return { ...mm, running: false, status: m[1] };
-        });
-        // Refresh the sample's cross-tool Kraken files if its folder is open.
-        if (folderModal.open && folderModal.sample) {
-          openStep1FolderModal(folderModal.project, folderModal.sample);
+          setSampleKrakenFiles((prev) => {
+            const next = { ...prev };
+            Object.keys(next).forEach((k) => { if (k.startsWith(`${mm.project}::`)) delete next[k]; });
+            return next;
+          });
         }
-        return;
+        return { ...mm, running: false, status: status };
+      });
+      // Refresh the sample's cross-tool Kraken files if its folder is open.
+      if (folderModal.open && folderModal.sample) {
+        openStep1FolderModal(folderModal.project, folderModal.sample);
       }
-      setKrakenModal((mm) => ({ ...mm, log: [...mm.log, data] }));
     };
-    es.onerror = () => {
-      es.close();
-      krakenEsRef.current = null;
-      setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+    const tick = () => {
+      if (finished) return;
+      fetch(`${API_BASE}/api/jobs/${jobId}/logtext`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`http ${r.status}`))))
+        .then((d) => {
+          if (finished) return;
+          errors = 0;
+          if (typeof d.log === "string") {
+            const lines = d.log.split("\n");
+            if (lines.length && lines[lines.length - 1] === "") lines.pop();
+            setKrakenModal((mm) => ({ ...mm, log: lines }));
+          }
+          if (d.status === "succeeded" || d.status === "failed" || d.status === "cancelled") {
+            stop();
+            applyTerminal(d.status);
+            return;
+          }
+          timer = setTimeout(tick, 1500);
+        })
+        .catch(() => {
+          if (finished) return;
+          errors += 1;
+          if (errors < 40) { timer = setTimeout(tick, 2000); return; }
+          stop();
+          setKrakenModal((mm) => ({ ...mm, running: false, status: mm.status === "running" ? "failed" : mm.status }));
+        });
     };
+    tick();
   }
 
   function downloadFolderFile(project, path) {

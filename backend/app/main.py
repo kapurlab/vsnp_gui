@@ -4788,6 +4788,79 @@ def job_events(job_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ---------------------------------------------------------------------------
+# Plain (non-streaming) log + status in ONE GET — polled by the UI.
+#
+# The SSE route above stays for anything still listening, but the UI no longer
+# uses it. Behind an Open OnDemand /rnode Apache reverse proxy a held-open SSE
+# connection is hazardous: the proxy hands the SSE buffer back as the body of
+# concurrent sibling GETs, so a status poll arrives as log text, JSON parsing
+# fails, and a run that succeeded is reported "failed". The same proxy truncates
+# buffered responses at roughly 43.5 KB. A plain GET returning BOTH the recorded
+# status (from the real exit code) and the current log text, tail-truncated well
+# under that ceiling, drives status and live-ish logs from one proxy-safe poll
+# loop. Pattern from mhc_gui, which polled from the start and never had the bug;
+# the 30000-char tail is the value field-tested behind that proxy (ICAR-NIVEDI).
+#
+# For a Step 1 batch job the payload merges what the SSE route multiplexed: the
+# batch log ("[batch] " prefix) followed by every per-sample run_step1.log
+# ("[<sample>] " prefix). The SSE interleaved those by arrival time; a snapshot
+# cannot, so samples are ordered by LAST WRITE — the tail, which is what the
+# pane shows, is then the sample actually running.
+# ---------------------------------------------------------------------------
+_LOGTEXT_MAX_CHARS = 30000
+
+
+def _job_logtext_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+    """The /logtext body for one job record. Kept apart from the route so the
+    offline test (test_job_logtext.py) can drive it without an HTTP stack."""
+    def read(path: Path) -> List[str]:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+
+    is_step1 = job.get("name") == "step1"
+    parts: List[str] = []
+    lp = job.get("log_path")
+    if lp and Path(lp).is_file():
+        prefix = "[batch] " if is_step1 else ""
+        parts.extend(prefix + line for line in read(Path(lp)))
+    step1_dir = Path(job["cwd"]) if is_step1 and job.get("cwd") else None
+    if step1_dir is not None and step1_dir.is_dir():
+        slogs = []
+        try:
+            for child in step1_dir.iterdir():
+                slog = child / "run_step1.log"
+                if child.is_dir() and slog.is_file():
+                    try:
+                        slogs.append((slog.stat().st_mtime, child.name, slog))
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        for _mtime, sample, slog in sorted(slogs):
+            parts.extend(f"[{sample}] {line}" for line in read(slog))
+    text = "\n".join(parts)
+    truncated = len(text) > _LOGTEXT_MAX_CHARS
+    if truncated:
+        text = "...(earlier log truncated)...\n" + text[-_LOGTEXT_MAX_CHARS:]
+    return {
+        "status": job.get("status"),
+        "exit_code": job.get("exit_code"),
+        "log": text,
+        "truncated": truncated,
+    }
+
+
+@app.get("/api/jobs/{job_id}/logtext")
+def job_logtext(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _job_logtext_payload(job)
+
+
 @app.get("/api/preflight")
 def preflight(debug: bool = Query(False)):
     cfg = load_config()

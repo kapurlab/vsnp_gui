@@ -289,16 +289,21 @@ export default function App() {
   const [assembleUnmap, setAssembleUnmap] = useState(false);
   const [nanoporeMode, setNanoporeMode] = useState(false);
   const [forceRerun, setForceRerun] = useState(false);   // re-align samples already Complete
-  // Trim oversized FASTQs on Grab. A pair of 1 GB+ reads gives far more depth
-  // than a diagnostic alignment needs and just makes Step 1 slow, so the reads
-  // can be capped as they are staged. Off by default — an untrimmed Grab is
-  // still the byte-for-byte copy every existing project expects.
+  // Trim oversized FASTQs before aligning them. A pair of 1 GB+ reads gives far
+  // more depth than a diagnostic alignment needs and just makes Step 1 slow, so
+  // the staged reads can be capped as the run starts. A Run option, alongside
+  // Debug / Assemble unmapped / Nanopore / Force re-run — off by default, and an
+  // untrimmed run aligns exactly what Grab staged.
   const [trimFastq, setTrimFastq] = useState(false);
   const [trimMb, setTrimMb] = useState("200");
   // Grab is a background job now (it can run for a long time when trimming),
   // so its id/status are tracked like the Step 1 and Step 2 batches.
   const [grabJobId, setGrabJobId] = useState("");
   const [grabJobStatus, setGrabJobStatus] = useState("");
+  // A trimming Run is two jobs: the trim, then the batch it hands off to. This
+  // holds the trim's id while it runs, so the status poll can tell the hand-off
+  // ("the server now reports a different job") from an ordinary batch.
+  const [step1TrimJobId, setStep1TrimJobId] = useState("");
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -3786,21 +3791,10 @@ export default function App() {
   async function step1Setup() {
     if (!selectedProject || !settingsReady) return;
     if (grabJobStatus === "running" || grabJobStatus === "queued") return;
-    const mb = parseInt(trimMb, 10);
-    if (trimFastq && (!Number.isFinite(mb) || mb < 1)) {
-      setStep1SetupMsg("Enter a trim size of at least 1 MB, or untick the trim box.");
-      return;
-    }
-    setStep1SetupMsg(
-      trimFastq
-        ? `Staging FASTQs into Step 1, trimming anything over ${mb} MB — follow it in Live Logs below.`
-        : "Staging FASTQs into Step 1 — follow it in Live Logs below."
-    );
+    setStep1SetupMsg("Staging FASTQs into Step 1 — follow it in Live Logs below.");
     try {
       const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trim: trimFastq, trim_mb: trimFastq ? mb : null })
       });
       if (!res.ok) {
         let detail = `Grab failed (HTTP ${res.status})`;
@@ -3853,6 +3847,11 @@ export default function App() {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
     }
+    const mb = parseInt(trimMb, 10);
+    if (trimFastq && (!Number.isFinite(mb) || mb < 1)) {
+      setStep1StatusError("Enter a trim size of at least 1 MB, or untick the trim box.");
+      return;
+    }
     if (step1DispatchingRef.current) return;  // block a same-tick double-click
     step1DispatchingRef.current = true;
     const refValue = effectiveRef === "__auto__" ? null : effectiveRef;
@@ -3872,7 +3871,7 @@ export default function App() {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun })
+        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun, trim: trimFastq, trim_mb: trimFastq ? mb : null })
       });
     } catch (e) {
       step1DispatchingRef.current = false;
@@ -3891,6 +3890,13 @@ export default function App() {
     }
     setJobId(data.job_id);
     setStep1JobId(data.job_id);
+    // phase "trim" means this job only trims; the batch starts when it ends and
+    // the status poll re-points the log pane at it (see loadStep1Status).
+    setStep1TrimJobId(data.phase === "trim" ? data.job_id : "");
+    if (data.phase === "trim") {
+      setStep1StatusError("");
+      setStep2SetupMsg(`Trimming reads to ~${mb} MB before aligning — the batch starts when that finishes. Follow it in Live Logs below.`);
+    }
     setStep1AutoRefreshPending(true);
     // T-46: surface samples auto-skipped from the dispatch (single-end,
     // junk-sized fastqs) so the user knows what didn't run and why. Without
@@ -4398,6 +4404,13 @@ export default function App() {
       const data = await res.json();
       setStep1Status(data.samples || []);
       setStep1JobStatus(data.job_status || "");
+      // The trim finished and the batch it queued has claimed the run: point the
+      // log pane and the Stop button at the batch instead of the spent trim job.
+      if (step1TrimJobId && data.job_id && data.job_id !== step1TrimJobId) {
+        setStep1TrimJobId("");
+        setStep1JobId(data.job_id);
+        setJobId(data.job_id);
+      }
     } catch (err) {
       setStep1StatusError("Failed to load Step 1 status");
     }
@@ -6490,7 +6503,7 @@ export default function App() {
               <div
                 className="checkbox"
                 style={{ flexWrap: "wrap" }}
-                title="A 1 GB pair of FASTQs usually carries far more depth than the alignment needs, and every extra read costs Step 1 time. Tick this and Grab stages the first reads of any FASTQ over the size below instead of the whole file — a pair is cut to the same read count on both sides, so R1 and R2 headers stay matched, and a single-file input (ONT long reads) is cut on whole reads. Trimmed samples are staged as <sample>-trim<MB>, so the alignment, its VCF and the tree label all say the reads were trimmed. Samples already under the size are staged unchanged, under their own name. Grab only stages samples that are not already in Step 1, so ticking this does not re-stage anything you have already run — Remove a sample first if you want to redo it at a different size."
+                title="A 1 GB pair of FASTQs usually carries far more depth than the alignment needs, and every extra read costs Step 1 time. Tick this and Run cuts each staged FASTQ over the size below down to its first reads before aligning it — a pair is cut to the same read count on both sides, so R1 and R2 headers stay matched, and a single-file input (ONT long reads) is cut on whole reads. The sample is renamed <sample>-trim<MB>, so the alignment, its VCF and the tree label all say the reads were trimmed; the untouched originals stay in download/. Samples already under the size are left exactly as they are."
               >
                 <label className="checkbox">
                   <input
@@ -6498,7 +6511,7 @@ export default function App() {
                     checked={trimFastq}
                     onChange={(e) => setTrimFastq(e.target.checked)}
                   />
-                  Trim FASTQs on Grab to
+                  Trim FASTQs to
                 </label>
                 <input
                   type="number"
@@ -6513,11 +6526,11 @@ export default function App() {
               </div>
               {trimFastq ? (
                 <div className="note" style={{ marginTop: "0.4em" }}>
-                  Samples over {parseInt(trimMb, 10) || 0} MB will be staged as their
-                  first reads only, named <b>&lt;sample&gt;-trim{parseInt(trimMb, 10) || 0}</b> —
+                  On <b>Run</b>, samples over {parseInt(trimMb, 10) || 0} MB are cut to their
+                  first reads and renamed <b>&lt;sample&gt;-trim{parseInt(trimMb, 10) || 0}</b> —
                   that name carries through to the VCF and the tree. Paired reads keep
-                  matching headers; samples already under the size are staged unchanged.
-                  Only samples not already in Step 1 are staged.
+                  matching headers; samples already under the size are left as they are,
+                  and the untrimmed originals stay in download/.
                 </div>
               ) : null}
               <div className="step1-actions">

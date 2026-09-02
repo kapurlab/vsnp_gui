@@ -1,23 +1,31 @@
-"""Stage a project's download/ FASTQs into step1/<sample>/, optionally
-subsampling oversized read files on the way in.
+"""Step 1's two read-handling passes: Grab stages, Run trims.
 
-Run as a background job (see step1_setup in app/main.py), not inline in the
-request. Staging was already a long synchronous copy on a big batch; adding a
-decompress→recompress pass over every oversized read file makes it longer still,
-and a POST held open for half an hour is exactly what the OOD /rnode proxy cuts.
-As a job its progress streams to the log the GUI already polls, so the user can
-see which sample is being trimmed and how far along it is.
+**Grab** copies download/'s FASTQs into step1/<sample>/, one folder per sample,
+dashing an underscored sample prefix on the way (vSNP3 splits the sample name
+at the first '_', so Mg_280 and Mg_281 would both collapse to "Mg"). It runs as
+a background job rather than inline in the request: staging a few hundred GB is
+minutes of work, and a POST held open that long is what the OOD /rnode proxy
+cuts. As a job its progress streams to the log the GUI already polls.
+
+**Run** optionally trims those staged reads before the batch aligns them, when
+the Step 1 panel's trim box is ticked — it sits with the other per-run options
+(Debug, Assemble unmapped, Nanopore, Force re-run) and behaves like them. A
+sample whose reads are over the cap is replaced by its first reads and renamed
+<sample>-trimN, folder and FASTQs both: vSNP3 takes the sample name from the
+FASTQ filename, so that is what carries the mark into the VCF, the SNP table
+and the tree label. The untouched originals stay in download/. A sample under
+the cap is left exactly as it is.
 
 Trimming keeps the FIRST N reads of a file (what `seqtk head` / `head -n` do),
 not a spread-out sample: a head slice needs one pass over only the part of the
-file it keeps, and it keeps a pair trivially in sync — record i of R1 and record
-i of R2 are the same fragment, so taking the same count from both leaves every
-header matched. Library fragments are distributed randomly across the flowcell,
-so genome coverage stays even; what a head slice does NOT average over is
-per-tile quality, which is an acceptable trade for a depth-reduction knob.
+file it keeps, and it keeps a pair trivially in sync — record i of R1 and
+record i of R2 are the same fragment, so taking the same count from both leaves
+every header matched. Library fragments are distributed randomly across the
+flowcell, so genome coverage stays even; what a head slice does NOT average
+over is per-tile quality, which is an acceptable trade for a depth knob.
 
 Single-file inputs (ONT long reads, single-end Illumina, an unpaired SRA dump)
-go through the same path as a group of one — records are whole regardless of
+go through both passes as a group of one — records are whole regardless of
 length, so a 100 kb ONT read is never cut in half.
 """
 from __future__ import annotations
@@ -310,39 +318,31 @@ def _stage_group(
     sample: str,
     members: List[Path],
     step1_dir: Path,
-    cap_bytes: int,
-    tag: str,
     already: Dict[str, str],
 ) -> Dict[str, int]:
     """Stage one sample group (a pair, or a single ONT/single-end file).
 
-    Returns per-group counters. The whole group is either trimmed or copied —
-    never a mix — because the members have to end up under one sample name.
+    Grab copies; it does not trim. Trimming happens at Run — see
+    trim_staged_samples — because that is where the checkbox that asks for it
+    lives, alongside the other four per-run options.
     """
     label = f"[{index}/{total}]"
     sizes = [p.stat().st_size for p in members]
     shown = ", ".join(
         f"{p.name} {human_bytes(s)}" for p, s in zip(members, sizes)
     )
-    trimming = cap_bytes > 0 and max(sizes) > cap_bytes
+    sample_dir = step1_dir / sample
+    targets = [sample_dir / p.name for p in members]
 
-    out_sample = sample + tag if trimming else sample
-    sample_dir = step1_dir / out_sample
-    targets = [
-        sample_dir / (trimmed_name(p.name, sample, tag) if trimming else p.name)
-        for p in members
-    ]
-
-    # Already in Step 1 under some other name — staged plain when this Grab
-    # trims, staged trimmed when it doesn't, or trimmed at a different size.
-    # Whichever it is, the sample is not "ready to run", so leave it alone
-    # rather than standing up a second copy of it beside the first.
+    # Already in Step 1 under another name — most often <sample>-trimN, because
+    # a trimmed Run renames the folder. The sample is not "ready to run", so
+    # leave it alone rather than standing a second copy up beside the first.
     landed = already.get(sample)
-    if landed and landed != out_sample:
+    if landed and landed != sample:
         _log(f"{label} {sample} — already in Step 1 as {landed}, leaving it alone")
         return {"skipped": 1}
     if all(t.exists() for t in targets):
-        _log(f"{label} {out_sample} — already staged, nothing to do")
+        _log(f"{label} {sample} — already staged, nothing to do")
         return {"skipped": 1}
 
     sample_dir.mkdir(parents=True, exist_ok=True)
@@ -353,95 +353,222 @@ def _stage_group(
         if part.exists():
             part.unlink()
 
-    if not trimming:
-        if cap_bytes > 0:
-            _log(f"{label} {sample} — {shown} — under the cap, staged unchanged")
-        else:
-            _log(f"{label} {sample} — {shown} — staging")
-        created = 0
-        for source, target in zip(members, targets):
-            if target.exists():
-                continue
-            # Real COPY, not a symlink: the step1 sample folder must retain the
-            # exact reads used for its alignment even if download/ is later moved
-            # or deleted. copy2 follows the source (download/ entries may
-            # themselves be symlinks) so we copy the actual bytes. The reads stay
-            # in download/ too. Cost: ~doubles read storage.
-            #
-            # Only files not already staged are copied, and pre-existing symlink
-            # entries from before that rule are deliberately NOT rewritten into
-            # copies here — that would make the next Grab on a large project
-            # re-copy hundreds of GB. Legacy symlinked samples keep their symlink
-            # until re-staged; migrate them separately if needed.
-            #
-            # Staged via .partial so a stop mid-copy can't leave a short file
-            # that the next Grab would mistake for a finished one.
-            part = _partial(target)
-            shutil.copy2(source, part)
-            os.replace(part, target)
-            created += 1
-        _log(f"  [OK] {label} {out_sample} — {created} file(s) staged")
-        return {"created": created, "unchanged": 1}
+    _log(f"{label} {sample} — {shown} — staging")
+    created = 0
+    for source, target in zip(members, targets):
+        if target.exists():
+            continue
+        # Real COPY, not a symlink: the step1 sample folder must retain the
+        # exact reads used for its alignment even if download/ is later moved
+        # or deleted. copy2 follows the source (download/ entries may
+        # themselves be symlinks) so we copy the actual bytes. The reads stay
+        # in download/ too. Cost: ~doubles read storage.
+        #
+        # Only files not already staged are copied, and pre-existing symlink
+        # entries from before that rule are deliberately NOT rewritten into
+        # copies here — that would make the next Grab on a large project
+        # re-copy hundreds of GB. Legacy symlinked samples keep their symlink
+        # until re-staged; migrate them separately if needed.
+        #
+        # Staged via .partial so a stop mid-copy can't leave a short file
+        # that the next Grab would mistake for a finished one.
+        part = _partial(target)
+        shutil.copy2(source, part)
+        os.replace(part, target)
+        created += 1
+    _log(f"  [OK] {label} {sample} — {created} file(s) staged")
+    return {"created": created}
 
-    kind = "read pairs" if len(members) > 1 else "reads"
+
+def _sample_reads(sample_dir: Path) -> List[Path]:
+    """The reads vsnp3 would align for this sample, in the order the wrapper
+    picks them (R1 before R2, single file on its own)."""
+    reads = [r for r in sorted(sample_dir.glob("*.fastq.gz"))
+             if not r.name.endswith(".partial")]
+    return sorted(reads, key=lambda r: (read_number(r.name), r.name))
+
+
+def plan_trim(step1_dir: Path, samples: List[str], trim_mb: int) -> List[Dict[str, Any]]:
+    """Decide, per selected sample, what a Run-time trim would do to it.
+
+    Kept separate from doing it so the dispatcher can name the samples the run
+    will actually produce — the folder is renamed to <sample>-trimN, and the
+    provenance record and the results table have to agree with that. Reads
+    nothing but sizes and names, so it is cheap to call twice.
+
+    Each entry has: sample, new_sample, action, and (for a trim) sources and
+    targets. Actions other than "trim" leave the sample exactly as it is.
+    """
+    cap = int(trim_mb) * 1024 * 1024 if trim_mb and int(trim_mb) > 0 else 0
+    tag = f"-trim{int(trim_mb)}" if cap else ""
+    plan: List[Dict[str, Any]] = []
+    for name in samples:
+        sample_dir = step1_dir / name
+        entry: Dict[str, Any] = {"sample": name, "new_sample": name, "action": "keep"}
+        reads = _sample_reads(sample_dir) if sample_dir.is_dir() else []
+        if not cap:
+            entry["action"] = "off"
+        elif not reads:
+            entry["action"] = "no-reads"
+        else:
+            existing = _TRIM_TAG_RE.search(name)
+            already_at = existing.group(0) if existing else ""
+            tagged_files = all(_TRIM_TAG_RE.search(
+                _sanitized_sample_and_name(r.name)[0]) for r in reads)
+            if already_at == tag:
+                entry["action"] = "already"
+            elif already_at:
+                # Trimming an already-trimmed sample to a different size would
+                # cut a cut, and the reads to do it properly from are back in
+                # download/. Say so instead of compounding the trim.
+                entry["action"] = "other-size"
+                entry["trimmed_at"] = already_at.lstrip("-")
+            elif tagged_files:
+                # Files carry the tag but the folder doesn't — a trim that was
+                # stopped between replacing the reads and renaming the folder.
+                # Finish the rename; the reads are already the trimmed ones.
+                entry["action"] = "rename-only"
+                entry["new_sample"] = name + tag
+            elif max(r.stat().st_size for r in reads) <= cap:
+                entry["action"] = "under"
+            elif (step1_dir / (name + tag)).exists():
+                entry["action"] = "conflict"
+            else:
+                entry["action"] = "trim"
+                entry["new_sample"] = name + tag
+                entry["sources"] = [str(r) for r in reads]
+                entry["targets"] = [
+                    str(sample_dir / trimmed_name(
+                        r.name, _sanitized_sample_and_name(r.name)[0], tag))
+                    for r in reads
+                ]
+        plan.append(entry)
+    return plan
+
+
+def trim_staged_samples(
+    step1_dir: Path, samples: List[str], trim_mb: int,
+) -> List[str]:
+    """Trim the staged reads of each oversized sample, in place, before the
+    batch aligns them. Returns the sample folder names the run should iterate.
+
+    The reads are REPLACED, not duplicated: the folder keeps exactly the reads
+    its alignment used, which is the property it has always had, and the
+    untouched originals stay in download/. The folder and its FASTQs both take
+    the -trimN mark, because vSNP3 names the sample from the FASTQ filename —
+    that is what carries the mark into the VCF, the SNP table and the tree.
+    """
+    cap = int(trim_mb) * 1024 * 1024 if trim_mb and int(trim_mb) > 0 else 0
+    if not cap:
+        return list(samples)
+
+    plan = plan_trim(step1_dir, samples, trim_mb)
+    todo = [e for e in plan if e["action"] == "trim"]
+    _log(f"== Trimming reads to ~{trim_mb} MB per FASTQ before alignment ==")
     _log(
-        f"{label} {sample} — {shown} — over the cap, trimming each to "
-        f"~{human_bytes(cap_bytes)} → {out_sample}"
+        f"{len(todo)} of {len(plan)} sample(s) are over the cap. A pair keeps the "
+        "same record count on both sides so its headers stay matched; a single "
+        "file (ONT long reads) is cut on whole reads. Trimmed samples are "
+        f"renamed <sample>-trim{int(trim_mb)}; the untrimmed originals stay in "
+        "download/."
     )
+    done = 0
+    out: List[str] = []
+    for entry in plan:
+        name, action = entry["sample"], entry["action"]
+        if action == "trim":
+            done += 1
+            try:
+                _trim_one(step1_dir, entry, cap, done, len(todo))
+            except Exception as exc:
+                # The sample keeps its untrimmed reads and its name; the batch
+                # still aligns it rather than dropping it over a trim failure.
+                _log(f"  [FAILED] {name} — trim failed, aligning it untrimmed: {exc}")
+                for target in entry["targets"]:
+                    part = _partial(Path(target))
+                    if part.exists():
+                        part.unlink()
+                out.append(name)
+                continue
+        elif action == "already":
+            _log(f"   {name} — already trimmed to {trim_mb} MB")
+        elif action == "other-size":
+            _log(
+                f"   [WARN] {name} — already trimmed to {entry['trimmed_at'].replace('trim', '')} MB. "
+                "Trimming it again would cut a cut, so it is left as it is; to "
+                "redo it at this size, Remove it and Grab it again."
+            )
+        elif action == "under":
+            _log(f"   {name} — under the cap, left as it is")
+        elif action == "conflict":
+            _log(
+                f"   [WARN] {name} — {entry['sample']}-trim{int(trim_mb)} already "
+                "exists; leaving this one untrimmed rather than clobbering it"
+            )
+        elif action == "rename-only":
+            try:
+                (step1_dir / name).rename(step1_dir / entry["new_sample"])
+                _log(f"   {name} — reads were already trimmed; folder renamed "
+                     f"to {entry['new_sample']}")
+            except OSError as exc:
+                _log(f"  [WARN] {name} — could not rename to "
+                     f"{entry['new_sample']}: {exc}")
+                out.append(name)
+                continue
+        elif action == "no-reads":
+            _log(f"   [WARN] {name} — no reads found, nothing to trim")
+        out.append(entry["new_sample"])
+    _log("== Trimming done ==")
+    _log("")
+    return out
+
+
+def _trim_one(
+    step1_dir: Path, entry: Dict[str, Any], cap: int, index: int, total: int,
+) -> None:
+    sources = [Path(p) for p in entry["sources"]]
+    targets = [Path(p) for p in entry["targets"]]
+    kind = "read pairs" if len(sources) > 1 else "reads"
+    sizes = ", ".join(f"{p.name} {human_bytes(p.stat().st_size)}" for p in sources)
+    _log(f"[{index}/{total}] {entry['sample']} — {sizes} → trimming each to "
+         f"~{human_bytes(cap)}")
     started = time.monotonic()
 
     def progress(percent: int, out_sizes: List[int], kept: int) -> None:
         done = ", ".join(human_bytes(s) for s in out_sizes)
-        elapsed = time.monotonic() - started
-        _log(
-            f"       {percent:3d}%  {done}  ({kept:,} {kind} so far, "
-            f"{elapsed:.0f}s elapsed)"
-        )
+        _log(f"       {percent:3d}%  {done}  ({kept:,} {kind} so far, "
+             f"{time.monotonic() - started:.0f}s elapsed)")
 
     parts = [_partial(t) for t in targets]
-    try:
-        kept = trim_reads(members, parts, cap_bytes, progress)
-    except Exception:
-        for part in parts:
-            if part.exists():
-                part.unlink()
-        raise
-    for part, target in zip(parts, targets):
+    for part in parts:
+        if part.exists():
+            part.unlink()
+    kept = trim_reads(sources, parts, cap, progress)
+    # Put each trimmed file in place and drop the untrimmed one it replaces, one
+    # at a time, so a kill here can't leave both readable at the top level (the
+    # batch picks its R1 with `ls … | head -n1` and would take whichever sorted
+    # first). download/ still holds the originals.
+    for part, target, source in zip(parts, targets, sources):
         os.replace(part, target)
-    final = ", ".join(
-        f"{t.name} {human_bytes(t.stat().st_size)}" for t in targets
-    )
-    _log(
-        f"  [OK] {label} {out_sample} — kept the first {kept:,} {kind} "
-        f"({final}) in {time.monotonic() - started:.0f}s"
-    )
-    return {"created": len(targets), "trimmed": 1}
+        if source != target and source.exists():
+            source.unlink()
+    final = ", ".join(f"{t.name} {human_bytes(t.stat().st_size)}" for t in targets)
+    (step1_dir / entry["sample"]).rename(step1_dir / entry["new_sample"])
+    _log(f"  [OK] [{index}/{total}] {entry['new_sample']} — kept the first "
+         f"{kept:,} {kind} ({final}) in {time.monotonic() - started:.0f}s")
 
 
-def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, object]:
-    cap_bytes = int(trim_mb) * 1024 * 1024 if trim_mb and trim_mb > 0 else 0
-    tag = f"-trim{int(trim_mb)}" if cap_bytes else ""
-
+def stage(download_dir: Path, step1_dir: Path) -> Dict[str, object]:
     _log("# Grab — stage ready-to-run FASTQs into Step 1")
     _log(f"# download: {download_dir}")
     _log(f"# step1:    {step1_dir}")
-    if cap_bytes:
-        _log(
-            f"# trim:     ON — cap {trim_mb} MB per FASTQ. A sample whose reads are "
-            f"over the cap is staged as its first reads only, under the name "
-            f"<sample>{tag}; a pair keeps the same record count on both sides so "
-            "the headers stay matched. Samples under the cap are staged unchanged."
-        )
-    else:
-        _log("# trim:     off — FASTQs are staged as-is")
     _log("")
 
     fastqs = sorted(download_dir.rglob("*.fastq.gz"))
     if not fastqs:
         _log("No FASTQ files found in download/ — nothing to stage.")
-        return {"created": 0, "renamed": 0, "trimmed": 0, "unchanged": 0,
-                "skipped": 0, "groups": 0, "failed": 0,
-                "message": "No FASTQ files found"}
+        return {"created": 0, "renamed": 0, "skipped": 0, "groups": 0,
+                "failed": 0, "message": "No FASTQ files found"}
 
     # Rename underscored stems in place (Mg_280_R1 -> Mg-280_R1) BEFORE
     # grouping, so vSNP3 never sees an underscore in the sample prefix and both
@@ -492,12 +619,12 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
     # Snapshot before staging anything: a sample staged by THIS run must not
     # then look "already in Step 1" to a later group in the same run.
     already = staged_samples(step1_dir)
-    counters = {"created": 0, "trimmed": 0, "unchanged": 0, "skipped": 0, "failed": 0}
+    counters = {"created": 0, "skipped": 0, "failed": 0}
     for index, ((sample, _key), slot) in enumerate(groups.items(), start=1):
         members = [slot[n] for n in sorted(slot)]
         try:
             result = _stage_group(
-                index, total, sample, members, step1_dir, cap_bytes, tag, already
+                index, total, sample, members, step1_dir, already
             )
         except Exception as exc:  # one bad sample must not sink the batch
             counters["failed"] += 1
@@ -506,11 +633,10 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
             # the usual cause) leaves an empty dir behind. Step 1 ignores a dir
             # with no reads in it, but leaving it invites the user to wonder
             # what it is.
-            for stray in (step1_dir / sample, step1_dir / (sample + tag)):
-                try:
-                    stray.rmdir()
-                except OSError:
-                    pass
+            try:
+                (step1_dir / sample).rmdir()
+            except OSError:
+                pass
             continue
         for name, value in result.items():
             counters[name] = counters.get(name, 0) + value
@@ -518,10 +644,6 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
     _log("")
     _log("─" * 60)
     parts = [f"{counters['created']} file(s) staged"]
-    if counters["trimmed"]:
-        parts.append(f"{counters['trimmed']} sample(s) trimmed to ~{trim_mb} MB")
-    if cap_bytes and counters["unchanged"]:
-        parts.append(f"{counters['unchanged']} already under the cap")
     if counters["skipped"]:
         parts.append(f"{counters['skipped']} already in Step 1")
     if renamed:
@@ -532,25 +654,51 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
     _log(f"Grab finished: {message}")
 
     summary = dict(counters)
-    summary.update({"renamed": renamed, "groups": total, "message": message,
-                    "trim_mb": int(trim_mb) if cap_bytes else 0})
+    summary.update({"renamed": renamed, "groups": total, "message": message})
     return summary
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--download", required=True, type=Path)
     parser.add_argument("--step1", required=True, type=Path)
+    parser.add_argument("--download", type=Path,
+                        help="Grab mode: stage this folder's FASTQs into --step1")
+    parser.add_argument("--trim-samples", action="store_true",
+                        help="Run mode: trim the staged reads of the samples in "
+                             "--samples-file, in place, before the batch aligns "
+                             "them, and rewrite that file with the resulting "
+                             "folder names")
+    parser.add_argument("--samples-file", type=Path, default=None,
+                        help="one sample folder name per line")
     parser.add_argument("--trim-mb", type=int, default=0,
-                        help="cap each staged FASTQ at roughly this many MB "
-                             "(0 = stage unchanged)")
+                        help="cap each FASTQ at roughly this many MB (0 = no trim)")
     parser.add_argument("--summary", type=Path, default=None,
-                        help="write the run's counters here as JSON")
+                        help="Grab mode: write the run's counters here as JSON")
     args = parser.parse_args(argv)
 
+    if args.trim_samples:
+        # A trim failure must not take the batch down with it — every sample
+        # either trims or stays as it was, and the run aligns it either way.
+        if not args.samples_file:
+            parser.error("--trim-samples needs --samples-file")
+        names = [
+            line.strip()
+            for line in args.samples_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        try:
+            final = trim_staged_samples(args.step1, names, args.trim_mb)
+        except Exception as exc:
+            _log(f"[FAILED] Trim pass aborted, aligning everything untrimmed: {exc}")
+            final = names
+        args.samples_file.write_text("\n".join(final) + "\n", encoding="utf-8")
+        return 0
+
+    if not args.download:
+        parser.error("--download is required unless --trim-samples is given")
     failed = 0
     try:
-        summary = stage(args.download, args.step1, args.trim_mb)
+        summary = stage(args.download, args.step1)
         failed = int(summary.get("failed", 0) or 0)
     except Exception as exc:
         _log(f"[FAILED] Grab aborted: {exc}")

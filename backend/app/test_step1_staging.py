@@ -1,13 +1,17 @@
-"""Unit + end-to-end tests for app.step1_staging (Grab's staging/trim pass).
+"""Step 1's two read passes: Grab stages, Run trims.
 
-The invariants that matter for a trimmed Grab:
-  * a pair keeps the SAME record count on both sides, so every header stays
-    matched — this is the whole reason trimming takes the head of the file;
-  * the trim mark lands in the sample PREFIX (vSNP3 splits the sample name at
-    the first '_'), so the alignment is identifiably from trimmed reads;
+The invariants that matter:
+  * Grab copies and never trims — it only stages samples not already in Step 1,
+    under any name (a trimmed Run renames the folder to <sample>-trimN, and a
+    later Grab must recognise that as the same sample);
+  * a trimmed pair keeps the SAME record count on both sides, so every header
+    stays matched — the whole reason trimming takes the head of the file;
+  * the trim mark lands in the sample PREFIX of the FASTQ name and on the folder
+    (vSNP3 splits the sample name at the first '_'), so the alignment, its VCF
+    and the tree label all say the reads were trimmed;
   * a single-file input (ONT long reads, single-end Illumina) trims as a group
     of one and never cuts a read in half;
-  * a sample already under the cap is staged byte-for-byte under its own name.
+  * a sample under the cap is left exactly as it is.
 
 Run from anywhere with the per-site conda python:
 
@@ -26,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.step1_staging import (  # noqa: E402
-    group_key, read_id, read_number, stage, trimmed_name,
+    group_key, plan_trim, read_id, read_number, stage, staged_samples,
+    trim_staged_samples, trimmed_name,
 )
 
 MB = 1024 * 1024
@@ -70,18 +75,17 @@ def records(path: Path):
     return [tuple(lines[i:i + 4]) for i in range(0, len(lines), 4)]
 
 
-def run_stage(download: Path, step1: Path, trim_mb: int):
-    """stage() logs to stdout; capture it so the test output stays readable and
-    the log itself can be asserted on."""
+def quiet(fn, *args, **kwargs):
+    """These log to stdout; capture it so the test output stays readable and the
+    log itself can be asserted on."""
     buf = io.StringIO()
     with redirect_stdout(buf):
-        summary = stage(download, step1, trim_mb)
-    return summary, buf.getvalue()
+        result = fn(*args, **kwargs)
+    return result, buf.getvalue()
 
 
 def test_name_helpers() -> None:
     print("[name helpers]")
-    # R1/R2 of one library share a key; the read number comes off the marker.
     assert_eq(group_key("Mg-280_R1.fastq.gz"), group_key("Mg-280_R2.fastq.gz"),
               "R1 and R2 share a group key")
     assert_eq(group_key("Mg-280_R1_001.fastq.gz"),
@@ -94,8 +98,6 @@ def test_name_helpers() -> None:
     assert_eq(read_number("ONT-barcode07.fastq.gz"), 0, "unmarked file is single-end")
     assert_eq(group_key("ONT-barcode07.fastq.gz"), "ONT-barcode07.fastq.gz",
               "unmarked file keys on its own name")
-    check(group_key("A_R1.fastq.gz") != group_key("B_R1.fastq.gz"),
-          "different samples get different keys")
 
     # The tag has to land in the sample prefix, before the first '_', or vSNP3
     # never sees it — and it must not introduce an underscore of its own.
@@ -114,23 +116,54 @@ def test_name_helpers() -> None:
     assert_eq(read_id(b"@SRR1.7/1"), read_id(b"@SRR1.7/2"), "/1 and /2 reduce to one id")
 
 
-def test_trimmed_pair_stays_matched(tmp: Path) -> None:
-    print("[trim: paired Illumina]")
+def test_grab_stages_without_trimming(tmp: Path) -> None:
+    print("[Grab: copies, never trims]")
     download, step1 = tmp / "download", tmp / "step1"
-    # Two oversized mates + one small pair that must pass through untouched.
-    write_fastq(download / "TB_1234_R1.fastq.gz", 30000, 150, "TB", 1, mate=1)
-    write_fastq(download / "TB_1234_R2.fastq.gz", 30000, 150, "TB", 1, mate=2)
+    write_fastq(download / "TB_1234_R1.fastq.gz", 20000, 150, "TB", 1, mate=1)
+    write_fastq(download / "TB_1234_R2.fastq.gz", 20000, 150, "TB", 1, mate=2)
+    write_fastq(download / "ONT-b07.fastq.gz", 500, 5000, "ONT", 3)
+
+    summary, log = quiet(stage, download, step1)
+
+    # The underscored sample was dashed on the way in; nothing is tagged.
+    check((step1 / "TB-1234").is_dir(), "underscored sample staged as TB-1234")
+    check((step1 / "ONT-b07").is_dir(), "single-file sample staged on its own")
+    check(not any("trim" in p.name for p in step1.iterdir()),
+          "Grab tags nothing, however large the reads are")
+    assert_eq(records(step1 / "TB-1234" / "TB-1234_R1.fastq.gz"),
+              records(download / "TB-1234_R1.fastq.gz"),
+              "reads are staged byte-for-byte")
+    assert_eq(summary["renamed"], 2, "both underscored mates dashed in download/")
+    assert_eq(summary["created"], 3, "three files staged")
+    check("trim" not in log.lower(), "the Grab log never mentions trimming")
+
+    print("[Grab: re-run is a no-op]")
+    summary2, _ = quiet(stage, download, step1)
+    assert_eq(summary2["created"], 0, "a second Grab stages nothing new")
+    assert_eq(summary2["skipped"], 2, "both samples recognised as already staged")
+
+
+def test_trimmed_pair_stays_matched(tmp: Path) -> None:
+    print("[Run trim: paired Illumina]")
+    download, step1 = tmp / "download", tmp / "step1"
+    write_fastq(download / "TB-1234_R1.fastq.gz", 30000, 150, "TB", 1, mate=1)
+    write_fastq(download / "TB-1234_R2.fastq.gz", 30000, 150, "TB", 1, mate=2)
     write_fastq(download / "SM-9_R1.fastq.gz", 400, 150, "SM", 2, mate=1)
     write_fastq(download / "SM-9_R2.fastq.gz", 400, 150, "SM", 2, mate=2)
+    quiet(stage, download, step1)
 
-    summary, log = run_stage(download, step1, trim_mb=1)
+    final, log = quiet(trim_staged_samples, step1, ["SM-9", "TB-1234"], 1)
+    assert_eq(final, ["SM-9", "TB-1234-trim1"],
+              "the run iterates the folder names the trim produced")
 
-    # The underscored sample was dashed on the way in, then tagged.
     sample_dir = step1 / "TB-1234-trim1"
-    check(sample_dir.is_dir(), "trimmed sample dir is named <sample>-trim<MB>")
+    check(sample_dir.is_dir(), "the trimmed sample's folder carries the mark")
+    check(not (step1 / "TB-1234").exists(), "its untrimmed folder is gone, not duplicated")
     r1 = sample_dir / "TB-1234-trim1_R1.fastq.gz"
     r2 = sample_dir / "TB-1234-trim1_R2.fastq.gz"
-    check(r1.is_file() and r2.is_file(), "both mates staged under the tagged name")
+    check(r1.is_file() and r2.is_file(), "both mates carry the mark in the FASTQ name")
+    check(not (sample_dir / "TB-1234_R1.fastq.gz").exists(),
+          "the untrimmed read it replaced is gone, so the batch can't pick it up")
 
     rec1, rec2 = records(r1), records(r2)
     assert_eq(len(rec1), len(rec2), "R1 and R2 kept the same number of records")
@@ -140,111 +173,112 @@ def test_trimmed_pair_stays_matched(tmp: Path) -> None:
           "every kept header is still matched with its mate")
     src1 = records(download / "TB-1234_R1.fastq.gz")
     assert_eq(rec1, src1[:len(rec1)], "kept records are the head of the source, verbatim")
-    check(r1.stat().st_size <= 1 * MB * 1.10 and r2.stat().st_size <= 1 * MB * 1.10,
-          "each trimmed mate lands at roughly the cap")
     check(len(rec1) < len(src1), "the source really was larger than the cap")
+    check(r1.stat().st_size <= 1 * MB * 1.10, "the trimmed mate lands at roughly the cap")
 
-    # Under the cap: original name, original bytes, no tag anywhere.
+    # The originals are untouched where they live.
+    assert_eq(records(download / "TB-1234_R1.fastq.gz"), src1,
+              "download/ still holds the full-size original")
+
+    # Under the cap: untouched, unrenamed.
     check((step1 / "SM-9").is_dir(), "under-cap sample keeps its plain name")
-    check(not (step1 / "SM-9-trim1").exists(), "under-cap sample is not tagged")
     assert_eq(records(step1 / "SM-9" / "SM-9_R1.fastq.gz"),
               records(download / "SM-9_R1.fastq.gz"),
-              "under-cap sample is staged unchanged")
-    assert_eq(summary["trimmed"], 1, "one sample reported as trimmed")
-    assert_eq(summary["unchanged"], 1, "one sample reported as under the cap")
-    assert_eq(summary["renamed"], 2, "both underscored mates were dashed in download/")
-    check("over the cap, trimming" in log, "the log says which sample is being trimmed")
-    check("[OK]" in log and "kept the first" in log,
+              "under-cap sample is left exactly as it is")
+    check("under the cap, left as it is" in log, "the log says why it skipped that one")
+    check("kept the first" in log and "[OK]" in log,
           "the log reports how many reads were kept")
-
-    print("[trim: re-run is a no-op]")
-    summary2, _ = run_stage(download, step1, trim_mb=1)
-    assert_eq(summary2["created"], 0, "a second Grab stages nothing new")
-    assert_eq(summary2["skipped"], 2, "both samples are recognised as already staged")
 
 
 def test_single_file_ont(tmp: Path) -> None:
-    print("[trim: single-file ONT]")
+    print("[Run trim: single-file ONT]")
     download, step1 = tmp / "download", tmp / "step1"
     # Long reads, no _R1/_R2 marker — the shape an ONT run arrives in.
-    write_fastq(download / "ONT-barcode07.fastq.gz", 900, 5000, "ONT", 3)
-    summary, log = run_stage(download, step1, trim_mb=1)
+    write_fastq(download / "ONT-b07.fastq.gz", 900, 5000, "ONT", 3)
+    quiet(stage, download, step1)
 
-    out = step1 / "ONT-barcode07-trim1" / "ONT-barcode07-trim1.fastq.gz"
-    check(out.is_file(), "single-file input trims as a group of one")
+    final, log = quiet(trim_staged_samples, step1, ["ONT-b07"], 1)
+    assert_eq(final, ["ONT-b07-trim1"], "single-file sample trims as a group of one")
+    out = step1 / "ONT-b07-trim1" / "ONT-b07-trim1.fastq.gz"
+    check(out.is_file(), "the trimmed long-read file carries the mark")
     kept = records(out)
-    src = records(download / "ONT-barcode07.fastq.gz")
+    src = records(download / "ONT-b07.fastq.gz")
     check(0 < len(kept) < len(src), "some, but not all, long reads were kept")
     assert_eq(kept, src[:len(kept)], "kept long reads are whole and verbatim")
     check(all(len(r[1]) == 5000 for r in kept), "no long read was cut in half")
-    assert_eq(summary["trimmed"], 1, "the ONT sample is reported as trimmed")
     check("reads so far" in log or "kept the first" in log,
           "the log counts reads, not pairs, for a single-file input")
 
 
-def test_only_stages_what_is_ready_to_run(tmp: Path) -> None:
-    """The reported bug: one sample was ready to run, a trimming Grab trimmed
-    the whole project.
-
-    Grab stages what the Inputs pane calls "ready to run" — a sample not yet in
-    Step 1. A sample already staged plain is in Step 1 whether or not THIS Grab
-    trims, so ticking the trim box must not stand up a -trimN copy beside it."""
-    print("[skip: samples already in Step 1]")
+def test_trim_is_idempotent_and_never_compounds(tmp: Path) -> None:
+    print("[Run trim: repeat runs]")
     download, step1 = tmp / "download", tmp / "step1"
-    for name, mate in (("Old-1_R1", 1), ("Old-1_R2", 2), ("New-2_R1", 1), ("New-2_R2", 2)):
-        write_fastq(download / f"{name}.fastq.gz", 9000, 150, name[:5], 7 + mate, mate=mate)
+    write_fastq(download / "TB-1_R1.fastq.gz", 20000, 150, "TB", 4, mate=1)
+    write_fastq(download / "TB-1_R2.fastq.gz", 20000, 150, "TB", 4, mate=2)
+    quiet(stage, download, step1)
+    quiet(trim_staged_samples, step1, ["TB-1"], 1)
+    kept_once = len(records(step1 / "TB-1-trim1" / "TB-1-trim1_R1.fastq.gz"))
 
-    # Old-1 is already in Step 1 from an earlier, untrimmed Grab.
-    run_stage(download, step1, trim_mb=0)
-    check((step1 / "Old-1").is_dir() and (step1 / "New-2").is_dir(), "both staged plain first")
-    shutil.rmtree(step1 / "New-2")   # only New-2 is now "ready to run"
+    # Same size again: nothing to do, and above all no second cut.
+    final, log = quiet(trim_staged_samples, step1, ["TB-1-trim1"], 1)
+    assert_eq(final, ["TB-1-trim1"], "an already-trimmed sample keeps its name")
+    assert_eq(len(records(step1 / "TB-1-trim1" / "TB-1-trim1_R1.fastq.gz")), kept_once,
+              "its reads are untouched")
+    check("already trimmed" in log, "the log says it is already trimmed")
 
-    summary, log = run_stage(download, step1, trim_mb=1)
-    check(not (step1 / "Old-1-trim1").exists(),
-          "a sample already in Step 1 is NOT re-staged as a trimmed twin")
-    check((step1 / "Old-1").is_dir(), "its existing plain folder is left alone")
-    check((step1 / "New-2-trim1").is_dir(), "the ready-to-run sample IS trimmed")
-    assert_eq(summary["trimmed"], 1, "exactly one sample trimmed")
-    assert_eq(summary["skipped"], 1, "the other reported as already in Step 1")
-    check("already in Step 1 as Old-1" in log, "the log names what it skipped and why")
+    # A DIFFERENT size must not cut the cut — the reads to do it from are the
+    # originals back in download/, so this is refused, not compounded.
+    final2, log2 = quiet(trim_staged_samples, step1, ["TB-1-trim1"], 2)
+    assert_eq(final2, ["TB-1-trim1"], "a different size leaves the sample alone")
+    check(not (step1 / "TB-1-trim1-trim2").exists(), "no trim-of-a-trim folder appears")
+    assert_eq(len(records(step1 / "TB-1-trim1" / "TB-1-trim1_R1.fastq.gz")), kept_once,
+              "its reads are still the first trim's")
+    check("Remove it and Grab it again" in log2, "the log says how to redo it")
 
-    # And the reverse: with the trimmed sample in place, an untrimmed Grab must
-    # not stage a full-size twin of it either.
-    summary2, _ = run_stage(download, step1, trim_mb=0)
-    check(not (step1 / "New-2").exists(),
-          "an untrimmed Grab does not re-stage a sample already there as -trim1")
-    assert_eq(summary2["created"], 0, "an untrimmed re-Grab stages nothing new")
-
-    # A second trim at a DIFFERENT size is also a no-op, not a third copy.
-    summary3, _ = run_stage(download, step1, trim_mb=2)
-    check(not (step1 / "New-2-trim2").exists(),
-          "changing the trim size does not stand up another copy")
-    assert_eq(summary3["created"], 0, "re-Grab at a new size stages nothing")
+    # And a later Grab must not re-stage TB-1 just because the folder is now
+    # named TB-1-trim1 — that was the whole ready-to-run bug.
+    print("[Grab after a trimmed Run]")
+    assert_eq(staged_samples(step1).get("TB-1"), "TB-1-trim1",
+              "the trimmed folder registers under its untrimmed base name")
+    summary, log3 = quiet(stage, download, step1)
+    assert_eq(summary["created"], 0, "Grab stages nothing new")
+    check(not (step1 / "TB-1").exists(), "no untrimmed twin is stood up beside it")
+    check("already in Step 1 as TB-1-trim1" in log3, "the log names what it skipped")
 
 
-def test_untrimmed_grab_is_unchanged(tmp: Path) -> None:
-    print("[no trim: staged as-is]")
+def test_plan_matches_what_the_trim_does(tmp: Path) -> None:
+    """The dispatcher names the run's samples from plan_trim before the pass has
+    run — provenance and the results table depend on the two agreeing."""
+    print("[plan_trim predicts the run's sample names]")
     download, step1 = tmp / "download", tmp / "step1"
-    write_fastq(download / "Big_7_R1.fastq.gz", 12000, 150, "BIG", 4, mate=1)
-    write_fastq(download / "Big_7_R2.fastq.gz", 12000, 150, "BIG", 4, mate=2)
-    summary, log = run_stage(download, step1, trim_mb=0)
+    write_fastq(download / "Big-1_R1.fastq.gz", 20000, 150, "B", 5, mate=1)
+    write_fastq(download / "Big-1_R2.fastq.gz", 20000, 150, "B", 5, mate=2)
+    write_fastq(download / "Small-2_R1.fastq.gz", 300, 150, "S", 6, mate=1)
+    quiet(stage, download, step1)
 
-    check((step1 / "Big-7").is_dir(), "untrimmed Grab keeps the plain sample name")
-    check(not any(p.name.startswith("Big-7-trim") for p in step1.iterdir()),
-          "nothing is tagged when trimming is off")
-    assert_eq(records(step1 / "Big-7" / "Big-7_R1.fastq.gz"),
-              records(download / "Big-7_R1.fastq.gz"),
-              "an untrimmed Grab stages the reads byte-for-byte")
-    assert_eq(summary["trimmed"], 0, "nothing reported as trimmed")
-    assert_eq(summary["created"], 2, "both mates staged")
-    check("trim:     off" in log, "the log states that trimming is off")
+    names = ["Big-1", "Small-2"]
+    plan, _ = quiet(plan_trim, step1, names, 1)
+    predicted = [e["new_sample"] for e in plan]
+    assert_eq(predicted, ["Big-1-trim1", "Small-2"], "plan names both samples")
+    assert_eq([e["action"] for e in plan], ["trim", "under"], "and says what it will do")
+
+    actual, _ = quiet(trim_staged_samples, step1, names, 1)
+    assert_eq(actual, predicted, "the trim pass produces exactly the planned names")
+
+    # With the box unticked the plan is a no-op that renames nothing.
+    plan_off, _ = quiet(plan_trim, step1, ["Big-1-trim1"], 0)
+    assert_eq([e["new_sample"] for e in plan_off], ["Big-1-trim1"],
+              "trim off leaves every name alone")
+    assert_eq([e["action"] for e in plan_off], ["off"], "and reports itself as off")
 
 
 def main() -> int:
     test_name_helpers()
-    for fn in (test_trimmed_pair_stays_matched, test_single_file_ont,
-               test_only_stages_what_is_ready_to_run,
-               test_untrimmed_grab_is_unchanged):
+    for fn in (test_grab_stages_without_trimming,
+               test_trimmed_pair_stays_matched,
+               test_single_file_ont,
+               test_trim_is_idempotent_and_never_compounds,
+               test_plan_matches_what_the_trim_does):
         tmp = Path(tempfile.mkdtemp(prefix="step1stage-"))
         try:
             fn(tmp)

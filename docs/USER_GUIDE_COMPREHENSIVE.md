@@ -340,26 +340,10 @@ Step 1 processes **each sample individually** to:
 - A file with no `_R1`/`_R2` marker (ONT long reads, a single-end dump) is
   staged on its own as a single-file sample
 
-**Optional: Trim FASTQs on Grab**
-
-Tick **Trim FASTQs on Grab to `N` MB** to cap how much read data each sample
-contributes. A 1 GB+ pair of Illumina FASTQs usually carries far more depth than
-the alignment needs, and every extra read costs Step 1 time.
-
-- Grab only stages samples that are **not already in Step 1** — the same set the
-  Inputs pane lists under *Ready to run*. Ticking the trim box does not re-stage
-  a trimmed copy of a sample that is already there. To redo a sample at a
-  different size, **Remove** it from the Samples list first, then Grab again.
-- Only samples whose reads are **over** the size are trimmed; anything under it
-  is staged unchanged, under its own name.
-- A trimmed sample is staged as **`<sample>-trimN`** (e.g. `Sample1-trim200`),
-  so the sample name in the VCF, the SNP table and the tree label all record
-  that the alignment came from trimmed reads.
-- Trimming keeps the **first** reads of the file. For a pair, R1 and R2 keep the
-  same read count, so every header stays matched with its mate. For an ONT run,
-  whole reads are kept — a long read is never cut in half.
-- The originals in `download/` are never modified.
-- The resulting file size is approximate: `200` means roughly 200 MB per FASTQ.
+**What Grab does and does not do:** it only stages samples **not already in
+Step 1** — the same set the Inputs pane lists under *Ready to run*, matched by
+base name so a sample already there as `<sample>-trim200` is recognised. Grab
+copies the reads unchanged; trimming is a **Run** option (see Step 1c).
 
 **Verification:**
 - Check **Step 1 Status** → **Samples** list
@@ -412,7 +396,30 @@ the alignment needs, and every extra read costs Step 1 time.
    - Keeps all intermediate files
    - Useful for troubleshooting
    - Uses more disk space
-3. Click **Run** button
+3. (Optional) Enable **Trim FASTQs to `N` MB** — see below
+4. Click **Run** button
+
+**Optional: Trim FASTQs to `N` MB**
+
+A 1 GB+ pair of Illumina FASTQs usually carries far more depth than the
+alignment needs, and every extra read costs Step 1 time. Tick this and Run cuts
+each oversized staged FASTQ down before aligning it.
+
+- Only samples whose reads are **over** the size are trimmed; anything under it
+  is left exactly as it is, under its own name.
+- A trimmed sample is renamed **`<sample>-trimN`** (e.g. `Sample1-trim200`) —
+  folder and FASTQs both, because vSNP3 takes the sample name from the FASTQ
+  filename. That name carries into the VCF, the SNP table and the tree label,
+  so the result records that it came from trimmed reads.
+- Trimming keeps the **first** reads of the file. For a pair, R1 and R2 keep the
+  same read count, so every header stays matched with its mate. For an ONT run,
+  whole reads are kept — a long read is never cut in half.
+- The untouched originals stay in `download/`; only the staged copy is replaced.
+- The resulting file size is approximate: `200` means roughly 200 MB per FASTQ.
+- A trimming Run is **two jobs**: the trim, then the batch it hands off to. The
+  Live Logs pane follows the trim, then switches to the alignment by itself.
+- Trimming an already-trimmed sample to a *different* size is refused rather
+  than cutting a cut. To redo one at another size, **Remove** it and Grab again.
 
 **What Happens:**
 ```

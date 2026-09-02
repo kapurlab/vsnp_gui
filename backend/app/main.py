@@ -1442,6 +1442,11 @@ class Step1Request(BaseModel):
     assemble_unmap: bool = False
     nanopore: bool = False
     force_rerun: bool = False   # re-align even samples already marked Complete
+    # Cap each staged FASTQ at roughly trim_mb megabytes before aligning it.
+    # Off by default: an untrimmed run aligns exactly the reads Grab staged,
+    # which is what every existing project expects.
+    trim: bool = False
+    trim_mb: Optional[int] = 200
 
 
 class Step2Request(BaseModel):
@@ -3229,19 +3234,11 @@ def sra_download(project: str, payload: SraRequest):
 _FASTQ_SAMPLE_RE = step1_staging._FASTQ_SAMPLE_RE
 _sanitized_sample_and_name = step1_staging._sanitized_sample_and_name
 
-# Trimming is deliberately unbounded at the top end (a 20 GB ONT run capped at
-# 5 GB is a legitimate ask); the floor just rejects a cap so small that no read
-# would survive it.
+# Bounds on the Run panel's trim size. Deliberately unbounded at the top end (a
+# 20 GB ONT run capped at 5 GB is a legitimate ask); the floor just rejects a
+# cap so small that no read would survive it.
 _MIN_TRIM_MB = 1
 _MAX_TRIM_MB = 100000
-
-
-class Step1SetupRequest(BaseModel):
-    # Cap each staged FASTQ at roughly trim_mb megabytes. Off by default: an
-    # untrimmed Grab stages the reads byte-for-byte, which is what every
-    # existing project expects.
-    trim: bool = False
-    trim_mb: Optional[int] = 200
 
 
 def _grab_job(step1_dir: Path) -> Optional[Dict[str, Any]]:
@@ -3262,16 +3259,16 @@ def _grab_running(step1_dir: Path) -> bool:
 
 
 @app.post("/api/projects/{project}/step1/setup")
-def step1_setup(project: str, payload: Optional[Step1SetupRequest] = None):
+def step1_setup(project: str):
     """Stage download/ into step1/<sample>/ as a background job.
 
-    A job, not an inline copy: staging a few hundred GB was already minutes of
-    synchronous work, and trimming adds a decompress→recompress pass on every
-    oversized read file. Held-open requests of that length don't survive the OOD
-    /rnode proxy, and — the reason the user asked for this — a long silent Grab
-    gives no sign it is working. As a job it writes per-sample progress to the
-    log the GUI already polls."""
-    payload = payload or Step1SetupRequest()
+    A job, not an inline copy: staging a few hundred GB is minutes of
+    synchronous work, held-open requests of that length don't survive the OOD
+    /rnode proxy, and a long silent Grab gives no sign it is working. As a job
+    it writes per-sample progress to the log the GUI already polls.
+
+    Grab copies; it does not trim. Trimming is a Run option — see
+    _step1_dispatch — where it sits with the other per-run checkboxes."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
@@ -3279,21 +3276,6 @@ def step1_setup(project: str, payload: Optional[Step1SetupRequest] = None):
     ensure_project_dirs(project_dir)
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
-
-    trim_mb = 0
-    if payload.trim:
-        try:
-            trim_mb = int(payload.trim_mb or 0)
-        except (TypeError, ValueError):
-            trim_mb = 0
-        if not _MIN_TRIM_MB <= trim_mb <= _MAX_TRIM_MB:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Trim size must be between {_MIN_TRIM_MB} and "
-                    f"{_MAX_TRIM_MB} MB (got {payload.trim_mb!r})."
-                ),
-            )
 
     # Grab writes into the same per-sample dirs a batch reads from, and a Grab
     # started mid-batch could swap a sample's reads out from under bwa. Both
@@ -3320,7 +3302,6 @@ def step1_setup(project: str, payload: Optional[Step1SetupRequest] = None):
         sys.executable, "-u", "-m", "app.step1_staging",
         "--download", str(download_dir),
         "--step1", str(step1_dir),
-        "--trim-mb", str(trim_mb),
         "--summary", str(summary_path),
     ])
     job_id = job_manager.start_job(
@@ -3330,7 +3311,7 @@ def step1_setup(project: str, payload: Optional[Step1SetupRequest] = None):
     )
     step1_dir.mkdir(parents=True, exist_ok=True)
     (step1_dir / ".grab_job_id").write_text(job_id, encoding="utf-8")
-    return {"job_id": job_id, "trim_mb": trim_mb}
+    return {"job_id": job_id}
 
 
 @app.get("/api/projects/{project}/step1/setup")
@@ -3370,6 +3351,68 @@ def step1_run(project: str, payload: Step1Request):
     # the job; the second then sees it "running" and gets a 409 (below).
     with _STEP1_DISPATCH_LOCK:
         return _step1_dispatch(project, payload, cfg, project_dir, step1_dir)
+
+
+def _dispatch_trim_phase(
+    project: str, payload: Step1Request, cfg: Dict[str, Any],
+    project_dir: Path, step1_dir: Path, samples: List[str], trim_mb: int,
+) -> Dict[str, Any]:
+    """Start the trim job and hand the batch off to its completion callback.
+
+    Claims .step1_job_id so the concurrency guards treat the trim as the run it
+    is the front half of — a second Run click gets the same 409 it would get
+    mid-batch, and a Grab is refused for the duration."""
+    samples_file = step1_dir / ".step1_trim_samples"
+    samples_file.write_text("\n".join(samples) + "\n", encoding="utf-8")
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.step1_staging",
+        "--trim-samples",
+        "--step1", str(step1_dir),
+        "--samples-file", str(samples_file),
+        "--trim-mb", str(trim_mb),
+    ])
+
+    def _run_after_trim(jid, exit_code, started_at, finished_at):
+        # Fires in the job thread, outside JobManager's lock and inside its
+        # try/except, so a failure here is logged and never masks the trim's
+        # own result. A cancelled or failed trim does NOT start the batch: the
+        # samples are in an unknown half-trimmed state and the user asked for
+        # it to stop.
+        if exit_code != 0:
+            logger.warning(
+                "step1 trim job %s exited %s — batch not started", jid, exit_code)
+            return
+        follow_up = Step1Request(
+            reference=payload.reference,
+            debug=payload.debug,
+            assemble_unmap=payload.assemble_unmap,
+            nanopore=payload.nanopore,
+            force_rerun=payload.force_rerun,
+            trim=False,   # already done; without this it would re-plan forever
+        )
+        with _STEP1_DISPATCH_LOCK:
+            try:
+                _step1_dispatch(project, follow_up, cfg, project_dir, step1_dir)
+            except HTTPException as exc:
+                logger.warning(
+                    "step1 batch after trim was refused: %s", exc.detail)
+
+    job_id = job_manager.start_job(
+        name=f"step1_trim:{project}",
+        command=command,
+        cwd=backend_root,
+        finalize_callback=_run_after_trim,
+    )
+    (step1_dir / ".step1_job_id").write_text(job_id, encoding="utf-8")
+    return {
+        "job_id": job_id,
+        # The GUI follows this job's log, then re-points at the batch when
+        # /step1/status starts reporting a different job id.
+        "phase": "trim",
+        "skipped_samples": [],
+        "provenance_warning": "",
+    }
 
 
 def _step1_dispatch(
@@ -3437,6 +3480,21 @@ def _step1_dispatch(
             ),
         )
 
+    trim_mb = 0
+    if payload.trim:
+        try:
+            trim_mb = int(payload.trim_mb or 0)
+        except (TypeError, ValueError):
+            trim_mb = 0
+        if not _MIN_TRIM_MB <= trim_mb <= _MAX_TRIM_MB:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Trim size must be between {_MIN_TRIM_MB} and "
+                    f"{_MAX_TRIM_MB} MB (got {payload.trim_mb!r})."
+                ),
+            )
+
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
@@ -3470,6 +3528,24 @@ def _step1_dispatch(
         min_bytes=int(cfg.get("step1_min_fastq_bytes", _T46_JUNK_FASTQ_BYTES) or _T46_JUNK_FASTQ_BYTES),
         force_rerun=bool(getattr(payload, "force_rerun", False)),
     )
+    # Trim first, in a job of its own, and dispatch the batch from its
+    # completion — not as a phase inside the batch wrapper. The run's
+    # provenance record has to describe the reads the alignment actually read,
+    # and it is written HERE, at dispatch: trimming replaces a sample's FASTQs
+    # and renames it, so a record written before the trim would name files that
+    # no longer exist at sizes that were never aligned. Doing it first also
+    # means everything below sees trimmed samples as plain samples and needs to
+    # know nothing about trimming at all.
+    if trim_mb:
+        plan = step1_staging.plan_trim(step1_dir, samples, trim_mb)
+        if any(entry["action"] == "trim" for entry in plan):
+            return _dispatch_trim_phase(
+                project, payload, cfg, project_dir, step1_dir, samples, trim_mb
+            )
+
+    # Trimming, when asked for, has already happened in its own job — the
+    # samples reaching here are ordinary samples and the batch knows nothing
+    # about it. See _dispatch_trim_phase.
     samples_bash = " ".join(shlex.quote(s) for s in samples)
     script_path.write_text(
         "\n".join([
@@ -3808,7 +3884,9 @@ def step1_status(project: str):
                 ec_mtime, {k: v for k, v in entry.items() if k not in ("in_vcfs_folder", "reason")}
             )
         statuses.append(entry)
-    return {"job_status": job_status, "samples": statuses}
+    # job_id so the GUI can follow the trim -> batch hand-off: the trim job
+    # finishes, this starts reporting the batch's id, and the log pane re-points.
+    return {"job_status": job_status, "job_id": job_id, "samples": statuses}
 
 
 def _safe_child(parent: Path, name: str) -> Path:

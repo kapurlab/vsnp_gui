@@ -865,15 +865,22 @@ export default function App() {
 
   // Display order for the Step 1 sample list: float not-yet-run samples to the
   // top so newly added files are easy to spot in a large project, then the
-  // in-flight/indeterminate ones, then finished samples last. The backend
-  // returns samples alphabetically; sort is stable so alphabetical order is
-  // preserved within each status group.
+  // in-flight/indeterminate ones, then finished samples. Misfits go dead last:
+  // a folder with no usable reads (ignored, misfiled, or a download that never
+  // landed) is never going to run, so it is not pending work and must not sit
+  // above the samples that are. The backend returns samples alphabetically;
+  // sort is stable so alphabetical order is preserved within each group.
   const step1StatusSorted = useMemo(() => {
-    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4 };
+    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4, misfit: 6 };
     return [...step1Status].sort(
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
   }, [step1Status]);
+
+  const step1MisfitCount = useMemo(
+    () => step1Status.filter((s) => s.status === "misfit").length,
+    [step1Status]
+  );
 
   const step1StatusFiltered = useMemo(() => {
     const q = step1SampleFilter.trim().toLowerCase();
@@ -6605,7 +6612,16 @@ export default function App() {
                 <ul className="sample-list">
                   {step1StatusFiltered.map((s) => (
                     <li key={s.sample}>
-                      <span className={`badge ${s.status}`}>{s.status.replace("_", " ")}</span>
+                      <span
+                        className={`badge ${s.status}`}
+                        title={
+                          s.status === "misfit"
+                            ? "Held out of every Run — this folder has no usable reads, so vsnp3 has nothing to align. Fix the folder, or Remove it to file it in Quarantine."
+                            : ""
+                        }
+                      >
+                        {s.status.replace("_", " ")}
+                      </span>
                       <span className="sample-name" title={s.reason || ""}>
                         {s.sample}
                         {s.reason ? (
@@ -6637,6 +6653,13 @@ export default function App() {
                 <div className="note">No Step 1 samples yet.</div>
               )}
               {step1Status.length > 6 ? <div className="scroll-note">Scroll for more samples.</div> : null}
+              {step1MisfitCount > 0 ? (
+                <div className="note" style={{fontSize:"0.82em", marginTop:"0.3em"}}>
+                  {step1MisfitCount} misfit{step1MisfitCount === 1 ? "" : "s"} at the bottom of the list —
+                  folders with no usable reads (ignored, misfiled, or a download that never landed).
+                  A Run always holds them out; Remove files one in Quarantine if you want it gone.
+                </div>
+              ) : null}
               {step1Status.length > 0 ? (
                 <div style={{borderTop:"1px solid var(--border)", marginTop:"0.5em", paddingTop:"0.5em"}}>
                   <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", fontSize:"0.85em"}}>
@@ -6686,6 +6709,7 @@ export default function App() {
                     const notCollected = step1Status.filter(s =>
                       !s.in_vcfs_folder &&
                       s.status !== "not_started" &&
+                      s.status !== "misfit" &&
                       s.status !== "running"
                     );
                     if (!notCollected.length) return null;

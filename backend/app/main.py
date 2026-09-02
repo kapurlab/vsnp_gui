@@ -586,14 +586,17 @@ def _step1_input_issue(sample_dir: Path, min_bytes: int) -> Optional[str]:
 
 def _step1_status_reason(status: str, sample_dir: Path, min_bytes: int) -> str:
     """Human-readable explanation for a non-complete sample's state, shown inline
-    in the Samples list so 'Not started'/'Error' aren't opaque. Empty string when
-    there's nothing to explain (e.g. a genuinely queued sample, or complete)."""
+    in the Samples list so 'Not started'/'Misfit'/'Error' aren't opaque. Empty
+    string when there's nothing to explain (a genuinely queued sample, or one
+    that completed)."""
     if status == "error":
         return "Failed during Step 1 — open View log for the error."
     if status == "unknown":
         return "Interrupted before finishing (batch killed / OOM / restart) — re-run to retry."
-    if status == "not_started":
+    if status in ("not_started", "misfit"):
         # If the input is unusable it will never run until fixed; say why.
+        # (An unusable input is what makes a sample a misfit in the first
+        # place, so this always returns a reason for that status.)
         return _step1_input_issue(sample_dir, min_bytes) or ""
     return ""
 
@@ -619,6 +622,10 @@ def _step1_dispatch_plan(
          (config: step1_min_fastq_bytes), which catches the 43-47 KB SRA
          submission errors while passing legitimately small viral/amplicon
          reads (SARS-CoV-2 amplicon is ~200 KB).
+
+    Rules 1-3 are the same _step1_input_issue check the status endpoint uses to
+    call a never-run sample a "misfit" — the two must agree, or the Samples list
+    would show something as runnable that a Run then silently holds back.
 
     Both paired-end and single-end inputs are dispatched: vsnp3 accepts a lone
     ``-r1`` (its help: "A single read file can also be supplied to this option")
@@ -3836,7 +3843,8 @@ def step1_status(project: str):
         #   3. log_path exists + job running   → still running.
         #   4. log_path exists + job not running → unknown (sample's bash leg died
         #      before writing the sentinel — kill / OOM / batch interrupted).
-        #   5. else                            → not_started.
+        #   5. never ran + input unusable      → misfit (see below).
+        #   6. else                            → not_started.
         # The previous heuristic grepped the running log for "Error:" / "Exception"
         # / "Traceback", which false-positives on vsnp3's verbose intermediate
         # output (deprecation warnings, etc) and made every sample flicker into
@@ -3861,6 +3869,31 @@ def step1_status(project: str):
             legacy_complete = True
         elif log_path.exists():
             status = "running" if job_status == "running" else "unknown"
+
+        # A never-run sample whose INPUT can't be dispatched is not "Not
+        # started": that badge reads as pending work, sorts to the TOP of the
+        # Samples list, and is counted as something a Run will pick up — none
+        # of which is true. These are the folders that were never samples (a
+        # misfiled or scratch directory with no fastqs at all), plus reads
+        # whose source went away or never finished downloading. They will not
+        # become work until someone fixes the folder, so they get their own
+        # state: "misfit". The dispatcher already holds them out of every Run
+        # (_step1_dispatch_plan rule 1-3); this just stops the list lying about
+        # them, and lets the UI sort them to the bottom.
+        input_issue = ""
+        if status == "not_started":
+            input_issue = _step1_input_issue(sample_dir, min_bytes) or ""
+            if input_issue:
+                status = "misfit"
+
+        if legacy_complete:
+            reason = "aligned before this GUI (legacy alignment/ layout)"
+        elif status in ("not_started", "misfit"):
+            # Already computed above — don't re-glob the sample dir for it.
+            reason = input_issue
+        else:
+            reason = _step1_status_reason(status, sample_dir, min_bytes)
+
         entry = {
             "sample": sample,
             "status": status,
@@ -3869,11 +3902,7 @@ def step1_status(project: str):
             "has_outputs": bool(vcf and nodup) or legacy_complete,
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
-            "reason": (
-                "aligned before this GUI (legacy alignment/ layout)"
-                if legacy_complete
-                else _step1_status_reason(status, sample_dir, min_bytes)
-            ),
+            "reason": reason,
         }
         # Cache terminal samples (exit_code written) so later polls take the
         # fast path above. Store everything except in_vcfs_folder and reason,

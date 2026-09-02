@@ -561,6 +561,15 @@ label {
   border-color: #fecaca;
 }
 
+/* A sample folder with no usable reads: never ran, never will until someone
+   fixes it. Deliberately the quietest chip in the set — dimmer and flatter
+   than Not started — because these sort to the bottom and are not work. */
+.badge.misfit {
+  background: transparent;
+  color: #9ca3af;
+  border-style: dashed;
+}
+
 .badge.edited {
   background: #e0f2fe;
   color: #075985;
@@ -1665,6 +1674,7 @@ html[data-theme="dark"] .badge.running,html[data-theme="dark"] .note.warning { b
 html[data-theme="dark"] .badge.complete,html[data-theme="dark"] .qc-badge-pass { background:#183728;color:#9ed9ad; }
 html[data-theme="dark"] .badge.error,html[data-theme="dark"] .qc-badge-fail { background:#39241e;color:#f0b39d; }
 html[data-theme="dark"] .badge.edited { background:#17364a;color:#9ed8fa; }
+html[data-theme="dark"] .badge.misfit { background:transparent;color:#7c8b95; }
 html[data-theme="dark"] .qc-badge-review { background:#352818;color:#efca8d; }
 html[data-theme="dark"] .qc-row.qc-review td { background:#2d271b; }
 html[data-theme="dark"] .qc-row.qc-fail td { background:#302020; }

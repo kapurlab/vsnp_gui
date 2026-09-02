@@ -6356,7 +6356,7 @@ export default function App() {
               <div
                 className="checkbox"
                 style={{ flexWrap: "wrap" }}
-                title="A 1 GB pair of FASTQs usually carries far more depth than the alignment needs, and every extra read costs Step 1 time. Tick this and Grab stages the first reads of any FASTQ over the size below instead of the whole file — a pair is cut to the same read count on both sides, so R1 and R2 headers stay matched, and a single-file input (ONT long reads) is cut on whole reads. Trimmed samples are staged as <sample>-trim<MB>, so the alignment, its VCF and the tree label all say the reads were trimmed. Samples already under the size are staged unchanged, under their own name."
+                title="A 1 GB pair of FASTQs usually carries far more depth than the alignment needs, and every extra read costs Step 1 time. Tick this and Grab stages the first reads of any FASTQ over the size below instead of the whole file — a pair is cut to the same read count on both sides, so R1 and R2 headers stay matched, and a single-file input (ONT long reads) is cut on whole reads. Trimmed samples are staged as <sample>-trim<MB>, so the alignment, its VCF and the tree label all say the reads were trimmed. Samples already under the size are staged unchanged, under their own name. Grab only stages samples that are not already in Step 1, so ticking this does not re-stage anything you have already run — Remove a sample first if you want to redo it at a different size."
               >
                 <label className="checkbox">
                   <input
@@ -6383,6 +6383,7 @@ export default function App() {
                   first reads only, named <b>&lt;sample&gt;-trim{parseInt(trimMb, 10) || 0}</b> —
                   that name carries through to the VCF and the tree. Paired reads keep
                   matching headers; samples already under the size are staged unchanged.
+                  Only samples not already in Step 1 are staged.
                 </div>
               ) : null}
               <div className="step1-actions">

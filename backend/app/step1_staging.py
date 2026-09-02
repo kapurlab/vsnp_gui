@@ -39,6 +39,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 # let the lane group swallow the real _R1, collapsing Mg_2 back to "Mg".
 _FASTQ_SAMPLE_RE = re.compile(r"(.+)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$")
 
+# The mark a trimmed sample carries, so an already-staged ERR015582-trim200 can
+# be recognised as ERR015582 (anchored at the end: a sample legitimately named
+# "…-trim200" mid-string is untouched).
+_TRIM_TAG_RE = re.compile(r"-trim\d+$")
+
 # Same split, but keeping the three pieces so R1 and R2 of one fragment library
 # can be recognised as members of the same group: prefix + marker + tail, where
 # tail is the optional lane suffix (_001) plus the extension.
@@ -266,6 +271,35 @@ def _warn_on_header_mismatch(records: List[bytes], sources: List[Path]) -> None:
     )
 
 
+def staged_samples(step1_dir: Path) -> Dict[str, str]:
+    """Map every sample already in step1/ to the folder holding it, keyed by BOTH
+    its folder name and its untagged base name.
+
+    Grab stages what the Inputs pane calls "ready to run" — a sample not yet in
+    Step 1. Existence used to be answered by "is this exact file already
+    staged?", which was the same question while the staged name always matched
+    the download name. Trimming breaks that: ERR015582 staged as
+    ERR015582-trim200 is a name no untrimmed target ever matches, so a trimmed
+    Grab re-staged (and re-trimmed) every sample in the project instead of the
+    one that was actually ready to run. Keying on the base name puts the two
+    questions back together.
+
+    A folder counts only if it holds reads, which is the same rule Step 1 uses
+    to recognise a sample at all."""
+    found: Dict[str, str] = {}
+    if not step1_dir.is_dir():
+        return found
+    for child in sorted(step1_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if next(child.glob("*.fastq.gz"), None) is None:
+            continue
+        found.setdefault(child.name, child.name)
+        base = _TRIM_TAG_RE.sub("", child.name)
+        found.setdefault(base, child.name)
+    return found
+
+
 def _partial(target: Path) -> Path:
     return target.with_name(target.name + ".partial")
 
@@ -278,6 +312,7 @@ def _stage_group(
     step1_dir: Path,
     cap_bytes: int,
     tag: str,
+    already: Dict[str, str],
 ) -> Dict[str, int]:
     """Stage one sample group (a pair, or a single ONT/single-end file).
 
@@ -298,6 +333,14 @@ def _stage_group(
         for p in members
     ]
 
+    # Already in Step 1 under some other name — staged plain when this Grab
+    # trims, staged trimmed when it doesn't, or trimmed at a different size.
+    # Whichever it is, the sample is not "ready to run", so leave it alone
+    # rather than standing up a second copy of it beside the first.
+    landed = already.get(sample)
+    if landed and landed != out_sample:
+        _log(f"{label} {sample} — already in Step 1 as {landed}, leaving it alone")
+        return {"skipped": 1}
     if all(t.exists() for t in targets):
         _log(f"{label} {out_sample} — already staged, nothing to do")
         return {"skipped": 1}
@@ -446,12 +489,15 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
         _log(f"{renamed} file(s) renamed in download/ so vSNP sees one sample per name")
     _log("")
 
+    # Snapshot before staging anything: a sample staged by THIS run must not
+    # then look "already in Step 1" to a later group in the same run.
+    already = staged_samples(step1_dir)
     counters = {"created": 0, "trimmed": 0, "unchanged": 0, "skipped": 0, "failed": 0}
     for index, ((sample, _key), slot) in enumerate(groups.items(), start=1):
         members = [slot[n] for n in sorted(slot)]
         try:
             result = _stage_group(
-                index, total, sample, members, step1_dir, cap_bytes, tag
+                index, total, sample, members, step1_dir, cap_bytes, tag, already
             )
         except Exception as exc:  # one bad sample must not sink the batch
             counters["failed"] += 1
@@ -477,7 +523,7 @@ def stage(download_dir: Path, step1_dir: Path, trim_mb: int = 0) -> Dict[str, ob
     if cap_bytes and counters["unchanged"]:
         parts.append(f"{counters['unchanged']} already under the cap")
     if counters["skipped"]:
-        parts.append(f"{counters['skipped']} already staged")
+        parts.append(f"{counters['skipped']} already in Step 1")
     if renamed:
         parts.append(f"{renamed} renamed")
     if counters["failed"]:

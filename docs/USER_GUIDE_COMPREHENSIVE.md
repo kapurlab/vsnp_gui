@@ -346,6 +346,10 @@ Tick **Trim FASTQs on Grab to `N` MB** to cap how much read data each sample
 contributes. A 1 GB+ pair of Illumina FASTQs usually carries far more depth than
 the alignment needs, and every extra read costs Step 1 time.
 
+- Grab only stages samples that are **not already in Step 1** — the same set the
+  Inputs pane lists under *Ready to run*. Ticking the trim box does not re-stage
+  a trimmed copy of a sample that is already there. To redo a sample at a
+  different size, **Remove** it from the Samples list first, then Grab again.
 - Only samples whose reads are **over** the size are trimmed; anything under it
   is staged unchanged, under its own name.
 - A trimmed sample is staged as **`<sample>-trimN`** (e.g. `Sample1-trim200`),

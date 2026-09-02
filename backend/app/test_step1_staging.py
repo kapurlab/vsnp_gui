@@ -182,6 +182,46 @@ def test_single_file_ont(tmp: Path) -> None:
           "the log counts reads, not pairs, for a single-file input")
 
 
+def test_only_stages_what_is_ready_to_run(tmp: Path) -> None:
+    """The reported bug: one sample was ready to run, a trimming Grab trimmed
+    the whole project.
+
+    Grab stages what the Inputs pane calls "ready to run" — a sample not yet in
+    Step 1. A sample already staged plain is in Step 1 whether or not THIS Grab
+    trims, so ticking the trim box must not stand up a -trimN copy beside it."""
+    print("[skip: samples already in Step 1]")
+    download, step1 = tmp / "download", tmp / "step1"
+    for name, mate in (("Old-1_R1", 1), ("Old-1_R2", 2), ("New-2_R1", 1), ("New-2_R2", 2)):
+        write_fastq(download / f"{name}.fastq.gz", 9000, 150, name[:5], 7 + mate, mate=mate)
+
+    # Old-1 is already in Step 1 from an earlier, untrimmed Grab.
+    run_stage(download, step1, trim_mb=0)
+    check((step1 / "Old-1").is_dir() and (step1 / "New-2").is_dir(), "both staged plain first")
+    shutil.rmtree(step1 / "New-2")   # only New-2 is now "ready to run"
+
+    summary, log = run_stage(download, step1, trim_mb=1)
+    check(not (step1 / "Old-1-trim1").exists(),
+          "a sample already in Step 1 is NOT re-staged as a trimmed twin")
+    check((step1 / "Old-1").is_dir(), "its existing plain folder is left alone")
+    check((step1 / "New-2-trim1").is_dir(), "the ready-to-run sample IS trimmed")
+    assert_eq(summary["trimmed"], 1, "exactly one sample trimmed")
+    assert_eq(summary["skipped"], 1, "the other reported as already in Step 1")
+    check("already in Step 1 as Old-1" in log, "the log names what it skipped and why")
+
+    # And the reverse: with the trimmed sample in place, an untrimmed Grab must
+    # not stage a full-size twin of it either.
+    summary2, _ = run_stage(download, step1, trim_mb=0)
+    check(not (step1 / "New-2").exists(),
+          "an untrimmed Grab does not re-stage a sample already there as -trim1")
+    assert_eq(summary2["created"], 0, "an untrimmed re-Grab stages nothing new")
+
+    # A second trim at a DIFFERENT size is also a no-op, not a third copy.
+    summary3, _ = run_stage(download, step1, trim_mb=2)
+    check(not (step1 / "New-2-trim2").exists(),
+          "changing the trim size does not stand up another copy")
+    assert_eq(summary3["created"], 0, "re-Grab at a new size stages nothing")
+
+
 def test_untrimmed_grab_is_unchanged(tmp: Path) -> None:
     print("[no trim: staged as-is]")
     download, step1 = tmp / "download", tmp / "step1"
@@ -203,6 +243,7 @@ def test_untrimmed_grab_is_unchanged(tmp: Path) -> None:
 def main() -> int:
     test_name_helpers()
     for fn in (test_trimmed_pair_stays_matched, test_single_file_ont,
+               test_only_stages_what_is_ready_to_run,
                test_untrimmed_grab_is_unchanged):
         tmp = Path(tempfile.mkdtemp(prefix="step1stage-"))
         try:

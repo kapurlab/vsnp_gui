@@ -289,6 +289,16 @@ export default function App() {
   const [assembleUnmap, setAssembleUnmap] = useState(false);
   const [nanoporeMode, setNanoporeMode] = useState(false);
   const [forceRerun, setForceRerun] = useState(false);   // re-align samples already Complete
+  // Trim oversized FASTQs on Grab. A pair of 1 GB+ reads gives far more depth
+  // than a diagnostic alignment needs and just makes Step 1 slow, so the reads
+  // can be capped as they are staged. Off by default — an untrimmed Grab is
+  // still the byte-for-byte copy every existing project expects.
+  const [trimFastq, setTrimFastq] = useState(false);
+  const [trimMb, setTrimMb] = useState("200");
+  // Grab is a background job now (it can run for a long time when trimming),
+  // so its id/status are tracked like the Step 1 and Step 2 batches.
+  const [grabJobId, setGrabJobId] = useState("");
+  const [grabJobStatus, setGrabJobStatus] = useState("");
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("idle");
   const [logs, setLogs] = useState([]);
@@ -1685,6 +1695,20 @@ export default function App() {
     let timer = null, finished = false, errors = 0;
     const applyTerminal = (status) => {
       setJobStatus(status);
+      // Grab finished: it rewrote download/ (dashed names) and step1/, so pull
+      // the listings back in and report the counts the staging job recorded.
+      if (grabJobId && jobId === grabJobId) {
+        setGrabJobStatus(status);
+        if (status === "cancelled") {
+          setStep1SetupMsg("Grab stopped. Whatever finished staging is kept — run Grab again to stage the rest.");
+        } else if (status === "failed") {
+          setStep1SetupMsg("Grab failed — see the log above for the sample it stopped on.");
+        }
+        loadAll();
+        loadStep1Status();
+        refreshProjects(selectedProject);
+        loadGrabState();   // overwrites the line above with the job's own summary
+      }
       // Step 1 job reached a terminal state: refresh sample statuses, QC
       // table, project counts, collect VCFs. "cancelled" is included so a
       // user-stopped batch still collects the VCFs of samples that finished
@@ -1765,6 +1789,12 @@ export default function App() {
     loadQC();
     loadStep1Status();
     loadQuarantine();
+    // A trimming Grab can outlive the page that started it — re-attach the log
+    // pane to one still running for this project, or show the last one's result.
+    setGrabJobId("");
+    setGrabJobStatus("");
+    setStep1SetupMsg("");
+    loadGrabState({ attach: true });
     setStep2Runs([]);
     setStep2SelectedRun(null);
     // Reset the run/stop UI, then ask the server whether a Step 2 job is still
@@ -3631,11 +3661,23 @@ export default function App() {
 
   async function step1Setup() {
     if (!selectedProject || !settingsReady) return;
-    // Staging copies the reads into step1/, so a few thousand samples is a long
-    // synchronous request. Say so up front rather than leaving the panel blank.
-    setStep1SetupMsg("Staging FASTQs into Step 1 — this can take several minutes on a large batch…");
+    if (grabJobStatus === "running" || grabJobStatus === "queued") return;
+    const mb = parseInt(trimMb, 10);
+    if (trimFastq && (!Number.isFinite(mb) || mb < 1)) {
+      setStep1SetupMsg("Enter a trim size of at least 1 MB, or untick the trim box.");
+      return;
+    }
+    setStep1SetupMsg(
+      trimFastq
+        ? `Staging FASTQs into Step 1, trimming anything over ${mb} MB — follow it in Live Logs below.`
+        : "Staging FASTQs into Step 1 — follow it in Live Logs below."
+    );
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trim: trimFastq, trim_mb: trimFastq ? mb : null })
+      });
       if (!res.ok) {
         let detail = `Grab failed (HTTP ${res.status})`;
         try {
@@ -3646,19 +3688,38 @@ export default function App() {
         return;
       }
       const data = await res.json();
-      await loadAll();
-      await loadStep1Status();
-      setStep1SetupMsg(
-        data.message
-          ? data.message
-          : [
-              `${data.created || 0} file${(data.created || 0) !== 1 ? "s" : ""} staged`,
-              data.renamed ? `${data.renamed} renamed` : null
-            ].filter(Boolean).join(" • ")
-      );
+      // Point the shared Live Logs pane at the Grab job so the user can watch
+      // the per-sample trim progress. loadStep1Status / loadQC already fire off
+      // the jobStatus transitions this drives.
+      attachGrabJob(data.job_id);
     } catch (err) {
       setStep1SetupMsg(err?.message || "Grab failed");
     }
+  }
+
+  function attachGrabJob(id) {
+    if (!id) return;
+    setGrabJobId(id);
+    setGrabJobStatus("running");
+    setJobId(id);
+  }
+
+  // Read back the outcome the Grab job wrote (counts staged / trimmed /
+  // skipped) and, on a reload mid-Grab, re-attach the log pane to a job that is
+  // still running — a trimming Grab can outlast the page.
+  async function loadGrabState({ attach = false } = {}) {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/setup`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (attach && data.job_id && (data.status === "running" || data.status === "queued")) {
+        attachGrabJob(data.job_id);
+        setStep1SetupMsg("A Grab is still staging FASTQs into Step 1 — follow it in Live Logs below.");
+        return;
+      }
+      if (data.message) setStep1SetupMsg(data.message);
+    } catch (_) { /* the summary is a convenience; the log is the record */ }
   }
 
   async function step1Run() {
@@ -6292,19 +6353,62 @@ export default function App() {
                 />
                 Force re-run (re-align samples already Complete)
               </label>
+              <div
+                className="checkbox"
+                style={{ flexWrap: "wrap" }}
+                title="A 1 GB pair of FASTQs usually carries far more depth than the alignment needs, and every extra read costs Step 1 time. Tick this and Grab stages the first reads of any FASTQ over the size below instead of the whole file — a pair is cut to the same read count on both sides, so R1 and R2 headers stay matched, and a single-file input (ONT long reads) is cut on whole reads. Trimmed samples are staged as <sample>-trim<MB>, so the alignment, its VCF and the tree label all say the reads were trimmed. Samples already under the size are staged unchanged, under their own name."
+              >
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={trimFastq}
+                    onChange={(e) => setTrimFastq(e.target.checked)}
+                  />
+                  Trim FASTQs on Grab to
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="50"
+                  value={trimMb}
+                  disabled={!trimFastq}
+                  onChange={(e) => setTrimMb(e.target.value)}
+                  style={{ width: "5em" }}
+                />
+                MB
+              </div>
+              {trimFastq ? (
+                <div className="note" style={{ marginTop: "0.4em" }}>
+                  Samples over {parseInt(trimMb, 10) || 0} MB will be staged as their
+                  first reads only, named <b>&lt;sample&gt;-trim{parseInt(trimMb, 10) || 0}</b> —
+                  that name carries through to the VCF and the tree. Paired reads keep
+                  matching headers; samples already under the size are staged unchanged.
+                </div>
+              ) : null}
               <div className="step1-actions">
-                <BusyButton
+                <button
                   onClick={step1Setup}
-                  disabled={!selectedProject || !settingsReady}
-                  busyLabel="Grabbing…"
-                  title="Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run)."
+                  disabled={!selectedProject || !settingsReady || grabJobStatus === "running" || step1JobStatus === "running"}
+                  title={
+                    grabJobStatus === "running"
+                      ? "A Grab is in progress — watch it in Live Logs below"
+                      : step1JobStatus === "running"
+                        ? "Step 1 batch is in progress — wait for it to finish before grabbing"
+                        : "Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run)."
+                  }
                 >
-                  Grab ready-to-run samples
-                </BusyButton>
+                  {grabJobStatus === "running" ? "Grabbing…" : "Grab ready-to-run samples"}
+                </button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running"}
-                  title={step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish" : ""}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running" || grabJobStatus === "running"}
+                  title={
+                    step1JobStatus === "running"
+                      ? "Step 1 batch is in progress — wait for it to finish"
+                      : grabJobStatus === "running"
+                        ? "A Grab is still staging FASTQs into Step 1 — wait for it to finish"
+                        : ""
+                  }
                 >
                   {step1JobStatus === "running" ? "Running…" : "Run"}
                 </button>

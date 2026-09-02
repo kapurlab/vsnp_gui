@@ -51,6 +51,7 @@ from app.jobs import JobManager
 from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
+from app import step1_staging
 from app.step2_staging import stage_step2_vcfs
 from app.projects import (
     create_project,
@@ -3221,35 +3222,56 @@ def sra_download(project: str, payload: SraRequest):
     return {"job_id": job_id}
 
 
-# Greedy prefix (.+) binds the read marker to the RIGHTMOST _R1/_R2 (or _1/_2),
-# so a sample ID that itself ends in _1/_2 (Mg_2_R1 -> Mg-2) isn't mis-split on
-# the first such token. Non-greedy (.+?) would latch onto the first _1/_2 and
-# let the lane group swallow the real _R1, collapsing Mg_2 back to "Mg".
-_FASTQ_SAMPLE_RE = re.compile(r"(.+)(?:_R?[12])(?:_[^./]+)?\.fastq\.gz$")
+# The FASTQ-name helpers and the staging/trimming work itself live in
+# app.step1_staging so the same code can run in-process (tests) and as the
+# subprocess the Grab job dispatches. Re-exported here because callers — and
+# test_step1_sample_name.py — import it from app.main.
+_FASTQ_SAMPLE_RE = step1_staging._FASTQ_SAMPLE_RE
+_sanitized_sample_and_name = step1_staging._sanitized_sample_and_name
+
+# Trimming is deliberately unbounded at the top end (a 20 GB ONT run capped at
+# 5 GB is a legitimate ask); the floor just rejects a cap so small that no read
+# would survive it.
+_MIN_TRIM_MB = 1
+_MAX_TRIM_MB = 100000
 
 
-def _sanitized_sample_and_name(filename: str) -> Tuple[str, str]:
-    """Return (sample, on-disk filename) for a FASTQ, dashing the sample prefix.
+class Step1SetupRequest(BaseModel):
+    # Cap each staged FASTQ at roughly trim_mb megabytes. Off by default: an
+    # untrimmed Grab stages the reads byte-for-byte, which is what every
+    # existing project expects.
+    trim: bool = False
+    trim_mb: Optional[int] = 200
 
-    vSNP3 derives the sample name from the FASTQ filename by splitting at the
-    FIRST '_'. An underscore *inside* the sample prefix therefore collapses every
-    such sample to the shared prefix — Mg_280, Mg_281, … all become "Mg",
-    silently merging distinct samples into one VCF in Step 2. Replacing the
-    prefix's underscores with '-' (Mg_280 -> Mg-280) keeps each sample distinct
-    while leaving the _R1/_R2 read indicator and any _001 lane suffix intact.
 
-    Returns the original name unchanged when the prefix has no underscore.
-    """
-    m = _FASTQ_SAMPLE_RE.match(filename)
-    sample = m.group(1) if m else filename.split(".")[0]
-    safe = sample.replace("_", "-")
-    if safe == sample:
-        return sample, filename
-    return safe, safe + filename[len(sample):]
+def _grab_job(step1_dir: Path) -> Optional[Dict[str, Any]]:
+    """The project's most recent Grab job record, or None."""
+    job_id_path = step1_dir / ".grab_job_id"
+    if not job_id_path.exists():
+        return None
+    try:
+        job_id = job_id_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return job_manager.get_job(job_id) if job_id else None
+
+
+def _grab_running(step1_dir: Path) -> bool:
+    job = _grab_job(step1_dir)
+    return bool(job and job.get("status") in ("running", "queued"))
 
 
 @app.post("/api/projects/{project}/step1/setup")
-def step1_setup(project: str):
+def step1_setup(project: str, payload: Optional[Step1SetupRequest] = None):
+    """Stage download/ into step1/<sample>/ as a background job.
+
+    A job, not an inline copy: staging a few hundred GB was already minutes of
+    synchronous work, and trimming adds a decompress→recompress pass on every
+    oversized read file. Held-open requests of that length don't survive the OOD
+    /rnode proxy, and — the reason the user asked for this — a long silent Grab
+    gives no sign it is working. As a job it writes per-sample progress to the
+    log the GUI already polls."""
+    payload = payload or Step1SetupRequest()
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
@@ -3258,52 +3280,82 @@ def step1_setup(project: str):
     download_dir = project_dir / "download"
     step1_dir = project_dir / "step1"
 
-    # Group by sample prefix before _R1/_R2 (scan recursively for subfolders)
-    fastqs = list(download_dir.rglob("*.fastq.gz"))
-    if not fastqs:
-        return {"created": 0, "message": "No FASTQ files found"}
+    trim_mb = 0
+    if payload.trim:
+        try:
+            trim_mb = int(payload.trim_mb or 0)
+        except (TypeError, ValueError):
+            trim_mb = 0
+        if not _MIN_TRIM_MB <= trim_mb <= _MAX_TRIM_MB:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Trim size must be between {_MIN_TRIM_MB} and "
+                    f"{_MAX_TRIM_MB} MB (got {payload.trim_mb!r})."
+                ),
+            )
 
-    created = 0
-    renamed = 0
-    for f in fastqs:
-        sample, safe_name = _sanitized_sample_and_name(f.name)
-        # Rename underscored stems in place (Mg_280_R1 -> Mg-280_R1) BEFORE
-        # staging, so vSNP3 never sees an underscore in the sample prefix.
-        # download/ entries may be symlinks (rename moves the link, not the
-        # target) or real files — both are safe to rename. Idempotent: a name
-        # already dashed, or a re-run, is a no-op.
-        if safe_name != f.name:
-            new_path = f.with_name(safe_name)
-            if new_path.exists():
-                # A dashed file is already present (e.g. the project shipped
-                # both Mg_280_R1 and Mg-280_R1). Renaming would clobber it or
-                # leave this one orphaned, so skip this underscored duplicate —
-                # the dashed file is staged on its own pass through `fastqs`.
-                logger.warning(
-                    "step1_setup: dashed target %s already exists; skipping "
-                    "underscored duplicate %s", new_path.name, f.name)
-                continue
-            f.rename(new_path)
-            renamed += 1
-            f = new_path
-        sample_dir = step1_dir / sample
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        target = sample_dir / f.name
-        if not target.exists():
-            # Real COPY, not a symlink: the step1 sample folder must retain the
-            # exact reads used for its alignment even if download/ is later moved
-            # or deleted. copy2 follows the source (download/ entries may
-            # themselves be symlinks) so we copy the actual bytes. The reads stay
-            # in download/ too. Cost: ~doubles read storage.
-            #
-            # Only NEW entries are copied. We deliberately do NOT rewrite existing
-            # symlink entries from before this change into copies here — doing so
-            # would make the next Setup on a large project copy hundreds of GB
-            # synchronously and hang the request. Legacy symlinked samples keep
-            # their symlink until re-staged; migrate them separately if needed.
-            shutil.copy2(f, target)
-            created += 1
-    return {"created": created, "renamed": renamed}
+    # Grab writes into the same per-sample dirs a batch reads from, and a Grab
+    # started mid-batch could swap a sample's reads out from under bwa. Both
+    # directions are refused.
+    if _grab_running(step1_dir):
+        raise HTTPException(
+            status_code=409,
+            detail="A Grab is already running for this project — wait for it to finish.",
+        )
+    if _step1_batch_running(step1_dir):
+        raise HTTPException(
+            status_code=409,
+            detail="Step 1 is running — wait for the batch to finish before grabbing.",
+        )
+
+    summary_path = step1_dir / ".grab_summary.json"
+    if summary_path.exists():
+        try:
+            summary_path.unlink()
+        except OSError:
+            pass
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.step1_staging",
+        "--download", str(download_dir),
+        "--step1", str(step1_dir),
+        "--trim-mb", str(trim_mb),
+        "--summary", str(summary_path),
+    ])
+    job_id = job_manager.start_job(
+        name=f"step1_grab:{project}",
+        command=command,
+        cwd=backend_root,
+    )
+    step1_dir.mkdir(parents=True, exist_ok=True)
+    (step1_dir / ".grab_job_id").write_text(job_id, encoding="utf-8")
+    return {"job_id": job_id, "trim_mb": trim_mb}
+
+
+@app.get("/api/projects/{project}/step1/setup")
+def step1_setup_status(project: str):
+    """State of the project's last Grab, so the GUI can re-attach its log after
+    a reload and report the outcome once the job ends."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    step1_dir = project_dir / "step1"
+    job = _grab_job(step1_dir)
+    summary: Dict[str, Any] = {}
+    summary_path = step1_dir / ".grab_summary.json"
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            summary = {}
+    return {
+        "job_id": (job or {}).get("id", ""),
+        "status": (job or {}).get("status", ""),
+        "message": summary.get("message", ""),
+        "summary": summary,
+    }
 
 
 @app.post("/api/projects/{project}/step1/run")
@@ -3324,6 +3376,17 @@ def _step1_dispatch(
     project: str, payload: Step1Request, cfg: Dict[str, Any],
     project_dir: Path, step1_dir: Path,
 ):
+    # A Grab in flight is still writing (and, when trimming, still creating)
+    # the very sample dirs this batch would align from. Starting now would
+    # align a half-written FASTQ, so refuse until staging is done.
+    if _grab_running(step1_dir):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A Grab is still staging FASTQs into Step 1. Wait for it to "
+                "finish before running the batch."
+            ),
+        )
     # Refuse to spawn a second batch while a prior step1 job is still
     # running — concurrent batches share the same per-sample dirs and race
     # over the SAM / log / .provenance/exit_code files, producing the

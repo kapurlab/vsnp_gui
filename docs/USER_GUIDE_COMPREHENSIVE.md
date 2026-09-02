@@ -315,27 +315,47 @@ Step 1 processes **each sample individually** to:
 5. **Calculate QC metrics** for sequencing and alignment
 6. **Annotate SNPs** with gene/position information
 
-### Step 1a: Setup
+### Step 1a: Grab
 
 **Purpose:** Organize FASTQ files into sample-specific folders
 
 **Steps:**
-1. Click **Setup** button in Step 1 panel
+1. Click **Grab ready-to-run samples** in the Step 1 panel
 2. GUI creates directory structure:
    ```
    step1/
    ├── Sample1/
-   │   ├── Sample1_R1.fastq.gz (symlink)
-   │   └── Sample1_R2.fastq.gz (symlink)
+   │   ├── Sample1_R1.fastq.gz (copy)
+   │   └── Sample1_R2.fastq.gz (copy)
    └── Sample2/
        ├── Sample2_R1.fastq.gz
        └── Sample2_R2.fastq.gz
    ```
+3. Grab runs as a background job — watch its progress in **Live Logs**
 
 **File Pairing Logic:**
 - Pairs R1/R2 files by matching prefix
 - Example: `ERR123456_R1.fastq.gz` pairs with `ERR123456_R2.fastq.gz`
 - Sample name = `ERR123456` (everything before `_R1` or `_R2`)
+- A file with no `_R1`/`_R2` marker (ONT long reads, a single-end dump) is
+  staged on its own as a single-file sample
+
+**Optional: Trim FASTQs on Grab**
+
+Tick **Trim FASTQs on Grab to `N` MB** to cap how much read data each sample
+contributes. A 1 GB+ pair of Illumina FASTQs usually carries far more depth than
+the alignment needs, and every extra read costs Step 1 time.
+
+- Only samples whose reads are **over** the size are trimmed; anything under it
+  is staged unchanged, under its own name.
+- A trimmed sample is staged as **`<sample>-trimN`** (e.g. `Sample1-trim200`),
+  so the sample name in the VCF, the SNP table and the tree label all record
+  that the alignment came from trimmed reads.
+- Trimming keeps the **first** reads of the file. For a pair, R1 and R2 keep the
+  same read count, so every header stays matched with its mate. For an ONT run,
+  whole reads are kept — a long read is never cut in half.
+- The originals in `download/` are never modified.
+- The resulting file size is approximate: `200` means roughly 200 MB per FASTQ.
 
 **Verification:**
 - Check **Step 1 Status** → **Samples** list

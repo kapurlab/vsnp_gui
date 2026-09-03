@@ -954,6 +954,14 @@ export default function App() {
     [step2SetSamples, step2ProjectSamples, step2PanelSampleSet]
   );
 
+  // Samples carried by more than one file in vcf_database. The backend flags
+  // these per row; a run cannot proceed while any exist, because choosing
+  // between two files would decide the science by directory order.
+  const step2AmbiguousSamples = useMemo(
+    () => [...new Set(vcfSourceSamples.filter((s) => s.ambiguous).map((s) => s.sample))],
+    [vcfSourceSamples]
+  );
+
   // Sample-name matching for the "compare a list" tab.
   //
   // ONE RULE: the part of a name that identifies the sample is everything LEFT
@@ -1102,6 +1110,16 @@ export default function App() {
         ? "None of the pasted sample names matched a sample in the comparison set."
         : "No source is ticked, so this run would compare nothing — tick this project's samples (box 1) and/or a reference database (box 2).";
     }
+    // Two files claiming one sample hold different calls, and nothing here can
+    // say which is meant — the classic case is an edited VCF landing beside the
+    // original it was meant to replace. Dispatch refuses; surface it here so
+    // the veto arrives before the click, naming the samples to fix.
+    if (step2AmbiguousSamples.length > 0) {
+      const shown = step2AmbiguousSamples.slice(0, 3).join(", ");
+      const more = step2AmbiguousSamples.length > 3 ? `, +${step2AmbiguousSamples.length - 3} more` : "";
+      return `${step2AmbiguousSamples.length} sample${step2AmbiguousSamples.length === 1 ? " has" : "s have"} two VCFs in `
+        + `${vcfsFolderName || "vcf_database"} (${shown}${more}) — they hold different calls, so remove the one you do not want.`;
+    }
     // Sources are ticked but every sample they name is excluded (Step 1 Results,
     // the build list, or the reference blocklist). vsnp3 would be handed an
     // empty -wd, so say which stack of ticks is cancelling the other.
@@ -1131,7 +1149,7 @@ export default function App() {
   }, [
     selectedProject, settingsReady, reference, projectReference, selected,
     step2VcfCount, step2RunSelection, step2ComparisonSamples, step2Mode,
-    step2RefAudit, step2RefAuditBusy,
+    step2RefAudit, step2RefAuditBusy, step2AmbiguousSamples, vcfsFolderName,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -2778,7 +2796,9 @@ export default function App() {
     if (res.ok) {
       const samples = await res.json();
       setVcfSourceSamples(samples);
-      setStep2VcfCount(samples.length);
+      // step2VcfCount has ONE writer (loadStep2Outputs, from step2/vcf_count).
+      // Setting it here as well made the headline flip between two populations
+      // depending on which request answered last.
     }
     loadStep2ReferenceAudit();
     loadStep2BuildExclusions();
@@ -3161,6 +3181,11 @@ export default function App() {
         return { ok: false };
       }
       setExclSaveState({ phase: "saved", detail: "" });
+      // Step 2 reads its own copy of the exclusions, loaded once when the pane
+      // loads. Without this refresh, un-excluding a sample in Step 1 Results
+      // left Step 2 counting it as excluded AND re-asserting it in the run
+      // payload — so the un-exclude was silently undone at dispatch.
+      loadStep2QcExclusions();
       exclSavedFadeRef.current = setTimeout(() => {
         exclSavedFadeRef.current = null;
         setExclSaveState((s) => (s.phase === "saved" ? { phase: "idle", detail: "" } : s));
@@ -4259,6 +4284,13 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           reference: effectiveRef,
+          // What this run compares, named POSITIVELY. Sending the complement
+          // (build_exclude) was the shape of the bug: a complement can only be
+          // computed over the files this pane can see, so a database entry it
+          // could not see was never excluded and joined every run. The tiers
+          // below still travel — they maintain their stores and still feed
+          // vsnp3's -remove_by_name — but they no longer define the run.
+          include: step2ComparisonSamples,
           step1_exclude: Object.keys(step2QcExcluded).filter((k) => step2QcExcluded[k]),
           build_exclude: Array.from(new Set([
             ...Object.keys(step2BuildExcluded).filter((k) => step2BuildExcluded[k]),
@@ -8198,11 +8230,18 @@ export default function App() {
                     <div className="step2-src-hint">Paste some sample names above to see what will be compared.</div>
                   ) : (
                     <>
+                      {/* step2ComparisonSamples, never keep.size: keep counts what
+                          the list matched, before the exclusion tiers have had their
+                          say, so this box and the note beside Run were two different
+                          numbers for the same run on the same screen. */}
                       <div className="note">
-                        <strong>{step2RunSelection.keep.size}</strong> sample
-                        {step2RunSelection.keep.size === 1 ? "" : "s"} will be compared
+                        <strong>{step2ComparisonSamples.length}</strong> sample
+                        {step2ComparisonSamples.length === 1 ? "" : "s"} will be compared
                         {" — "}{step2RunSelection.fromList} matched from your list
                         {step2ListIncludeDbs ? ` + ${step2RunSelection.fromDbs} added by the ticked databases` : ""}
+                        {step2RunSelection.keep.size - step2ComparisonSamples.length > 0
+                          ? ` · ${step2RunSelection.keep.size - step2ComparisonSamples.length} of them excluded`
+                          : ""}
                         {step2RunSelection.leaveOut.length
                           ? ` · ${step2RunSelection.leaveOut.length} other sample${step2RunSelection.leaveOut.length === 1 ? "" : "s"} in vcf_database left out of this run`
                           : ""}
@@ -8330,9 +8369,12 @@ export default function App() {
                       style={{fontSize:"0.85em"}}
                     >
                       {vcfSourceOpen ? "▲ Hide" : "▼ Browse"}{" "}
+                      {/* Samples, not files: step2LeftOutSet holds NAMES, so
+                          subtracting it from a file count mixed units the moment
+                          one sample had two files in the folder. */}
                       {vcfSourceShowLeftOut
-                        ? vcfSourceSamples.length
-                        : vcfSourceSamples.length - step2LeftOutSet.size}{" "}
+                        ? step2SetSamples.length
+                        : step2SetSamples.length - step2LeftOutSet.size}{" "}
                       {step2LeftOutSet.size > 0 && !vcfSourceShowLeftOut
                         ? "samples from this run's ticked sources"
                         : `samples in ${vcfsFolderName || "vcf_database"}`}
@@ -8439,11 +8481,17 @@ export default function App() {
                                       ) : effectiveQc ? (
                                         <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
                                       ) : null}
+                                      {s.ambiguous ? (
+                                        <span
+                                          title="Two files in vcf_database claim this sample. They hold different calls, so a run refuses rather than letting directory order choose. Delete or rename the one you do not want."
+                                          style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}
+                                        > — two files for this sample</span>
+                                      ) : null}
                                       {metaLabel && metaLabel !== s.sample && (
                                         <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
                                       )}
                                     </span>
-                                    {s.source_type && (() => {
+                                    {(() => {
                                       // The manifest only knows "step1" vs "imported", so the
                                       // badge used to read "ref db" for everything that was not
                                       // a Step 1 sample — including hand-copied VCFs and Step 1

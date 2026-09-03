@@ -41,8 +41,20 @@
  * @returns {{keep: Set<string>, leaveOut: string[], fromList: number,
  *            fromDbs: number, noSourceTicked: boolean}}
  */
+/** Distinct sample names, order preserved.
+ *
+ * `setSamples` is one entry per FILE, so a sample holding both `X_zc.vcf` and
+ * `X_zc.vcf.gz` arrives twice. Every count derived from it then double-counted
+ * that sample — "8,581 others stay out of this run" was a file tally being
+ * subtracted from a name tally. The run itself is keyed by sample name, so the
+ * names are what the arithmetic must use.
+ */
+function distinct(names) {
+  return [...new Set(names || [])]
+}
+
 export function selectStep2Run({
-  setSamples,
+  setSamples: setSamplesRaw,
   projectSamples,
   projectSamplesInSet,
   panels,
@@ -51,6 +63,7 @@ export function selectStep2Run({
   listKeep,
   listIncludeDbs,
 }) {
+  const setSamples = distinct(setSamplesRaw)
   const inSet = new Set(setSamples);
   // Panel membership, restricted to what is physically in the database: a
   // panel accession that was never collected cannot be compared.

@@ -53,6 +53,10 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app.step2_staging import stage_step2_vcfs
+from app.step2_inventory import (
+    Entry, db_entries, duplicate_samples, is_analyzable, is_db_vcf, import_tail, sample_of,
+)
+from app.step2_reconcile import reconcile as _reconcile_run
 from app.projects import (
     create_project,
     list_projects,
@@ -838,7 +842,10 @@ def _step2_run_dirs(step2_dir: Path) -> Dict[str, Path]:
 # resolver skip it, the dropdown label it, and the pane explain it.
 # ---------------------------------------------------------------------------
 
-_STEP2_STAGED_VCF_SUFFIXES = (".vcf", ".vcf.gz")
+# What vsnp3 will actually READ out of a run folder. It discovers inputs with
+# glob('*vcf'), so a .vcf.gz staged beside them is counted by nobody: staging
+# decompresses instead of copying, and this set says so.
+_STEP2_STAGED_VCF_SUFFIXES = (".vcf",)
 
 # vsnp3 drops this in its working directory while a comparison is in flight. It
 # is the only in-band progress signal a command-line run leaves behind, and
@@ -1478,6 +1485,14 @@ class Step2Request(BaseModel):
     # exclusions are explicit per-run choices and are never exempted).
     step1_exclude: Optional[List[str]] = None   # tier B
     build_exclude: Optional[List[str]] = None   # tier C
+    # The samples this run compares, named positively. THIS is what decides the
+    # run; the exclusion tiers above only maintain their stores and still feed
+    # vsnp3's -remove_by_name. Sending the complement instead was the shape of
+    # the bug: a complement can only be computed over the files the selection UI
+    # could see, so any database entry it could not see was, by construction,
+    # never excluded and always compared. When absent (an older frontend) the
+    # denylist path below is taken unchanged.
+    include: Optional[List[str]] = None
     # Deprecated merged field (older frontends). Treated as build-list (tier C)
     # so it is never panel-exempted — safe default.
     exclude: Optional[List[str]] = None
@@ -4417,8 +4432,9 @@ def step2_setup(project: str):
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
-        for vcf in sorted([*step2_dir.glob("*_zc.vcf"), *step2_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name):
-            stem = vcf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        for entry in db_entries(step2_dir):
+            vcf = step2_dir / entry.filename
+            stem = entry.sample
             try:
                 resolved = vcf.resolve()
             except OSError:
@@ -4436,7 +4452,7 @@ def step2_setup(project: str):
                     excluded_step1 += 1
             manifest.write(f"{vcf.name},{source_type},{resolved}\n")
     _write_step2_edit_summary(step2_dir.parent, edited_samples)
-    total = len(list(step2_dir.glob("*_zc.vcf"))) + len(list(step2_dir.glob("*_zc.vcf.gz")))
+    total = len(db_entries(step2_dir))
     # total = every VCF in the cumulative DB; comparison = what Step 2 actually
     # compares (total minus QC-excluded); excluded = QC-excluded but still in DB.
     return {
@@ -4633,7 +4649,16 @@ def step2_run(project: str, payload: Step2Request):
         return {str(s).strip() for s in (xs or []) if str(s).strip()}
     ref_block = set(_reference_blocklist_names(cfg, payload.reference))
     panel_accessions = _reference_panel_accessions(cfg, payload.reference)
-    step1_names = (set(_read_step1_exclusions(step2_dir)) | _clean(payload.step1_exclude)) - panel_accessions
+    # The payload REPLACES the store when it is present. Unioning them meant a
+    # name could never leave tier B: un-excluding a sample in Step 1 Results
+    # removed it from the UI and from the store, but a payload built from a
+    # stale copy put it straight back, and the sample stayed out of the run
+    # with nothing on screen to say so. An absent field (older client) still
+    # falls back to the store.
+    step1_payload = _clean(payload.step1_exclude) if payload.step1_exclude is not None else None
+    step1_names = (
+        step1_payload if step1_payload is not None else set(_read_step1_exclusions(step2_dir))
+    ) - panel_accessions
     build_names = (
         set(_read_step2_build_exclusions(step2_dir))
         | _clean(payload.build_exclude)
@@ -4688,6 +4713,55 @@ def step2_run(project: str, payload: Step2Request):
             ),
         )
 
+    def _abandon_new_run_dir() -> None:
+        """Take back the folder this request just made, when no run will use it.
+
+        os.rmdir, never a recursive delete: it succeeds only while the folder is
+        still empty, so it can never carry data off with it, and it declines by
+        design if staging had already copied something in. Left behind, every
+        refused run added an empty timestamped comparison to the project — and an
+        empty comparison folder is precisely what used to capture the results
+        pane by virtue of being the newest name in step2/.
+        """
+        if resume:
+            return  # not ours to remove; it predates this request
+        try:
+            os.rmdir(run_dir)
+        except OSError:
+            pass
+
+    # What this run compares, named positively. The frontend sends `include`;
+    # when it does not (an older client) fall back to "the whole database minus
+    # the removal tiers", which is what the code did before and is still correct
+    # for a client that cannot express an allow-list.
+    db_samples = [e.sample for e in db_entries(vcf_source_dir)]
+    if payload.include is None:
+        requested_samples = None
+        expected_samples = sorted({
+            s for s in db_samples
+            if not vsnp3_would_remove(f"{s}_zc.vcf", set(effective_removals))
+            and s not in set(effective_removals)
+        })
+    else:
+        asked = {str(x).strip() for x in payload.include if str(x).strip()}
+        known = set(db_samples)
+        unknown = sorted(asked - known)
+        if unknown:
+            shown = ", ".join(unknown[:10]) + (f", +{len(unknown) - 10} more" if len(unknown) > 10 else "")
+            _abandon_new_run_dir()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{len(unknown)} sample(s) in this run are not in the comparison set: {shown}. "
+                    "Rebuild the comparison set and try again."
+                ),
+            )
+        # The removal tiers still apply on top of the allow-list: a sample the
+        # reference blocklist forbids is not comparable just because it was
+        # named. Tier B's panel exemption has already been applied upstream.
+        requested_samples = sorted(asked - set(effective_removals))
+        expected_samples = list(requested_samples)
+
     # Copy the VCFs out of the persistent database into this dated run folder and
     # run vsnp3 against the COPIES, never the database itself. vsnp3_step2.py
     # deletes every VCF out of its -wd after ingesting them (they survive only
@@ -4722,8 +4796,15 @@ def step2_run(project: str, payload: Step2Request):
     else:
         try:
             copied_vcfs, skipped_excluded, staged_vcf_names = stage_step2_vcfs(
-                vcf_source_dir, run_dir, effective_removals,
+                vcf_source_dir, run_dir,
+                removal_names=effective_removals,
+                include_samples=requested_samples,
             )
+        except ValueError as exc:
+            # One sample, two VCFs in the database: they hold different calls
+            # and directory order must not choose between them.
+            _abandon_new_run_dir()
+            raise HTTPException(status_code=400, detail=str(exc))
         except OSError as exc:
             # Deliberately not cleaned up: staging may have copied part of the
             # set before failing, and a partial folder is evidence, not litter.
@@ -4731,23 +4812,6 @@ def step2_run(project: str, payload: Step2Request):
                 status_code=500,
                 detail=f"Failed to stage VCFs into the run folder: {exc}",
             )
-    def _abandon_new_run_dir() -> None:
-        """Take back the folder this request just made, when no run will use it.
-
-        os.rmdir, never a recursive delete: it succeeds only while the folder is
-        still empty, so it can never carry data off with it, and it declines by
-        design if staging had already copied something in. Left behind, every
-        refused run added an empty timestamped comparison to the project — and an
-        empty comparison folder is precisely what used to capture the results
-        pane by virtue of being the newest name in step2/.
-        """
-        if resume:
-            return  # not ours to remove; it predates this request
-        try:
-            os.rmdir(run_dir)
-        except OSError:
-            pass
-
     if not copied_vcfs:
         if skipped_excluded:
             _abandon_new_run_dir()
@@ -4817,6 +4881,37 @@ def step2_run(project: str, payload: Step2Request):
     # -t was the one value on this line that was neither validated nor quoted.
     # The guard above only compares against refs when exactly one is inferred,
     # so an import-only project (empty step1/) reached here unchecked.
+    # ---- Reconciliation: prove this is the run that was asked for -----------
+    #
+    # Every defect this gate exists for produced the same symptom — a run that
+    # started cleanly, finished cleanly, and analysed the wrong samples. The
+    # pane said 25, the folder held 26, vsnp3 reported 26, and nothing compared
+    # those three numbers to each other. A tree is not self-evidently wrong the
+    # way a crash is, so the disagreement was publishable.
+    #
+    # Done AFTER remove_by_name.xlsx is written, because what vsnp3 will read is
+    # the staged files minus what that workbook drops. A mismatch is a bug in
+    # this code, not a state a user can reach on purpose, so it refuses: the run
+    # folder stays as evidence and no job is started. On resume the request's
+    # own selection says nothing about a folder staged days ago, so the staged
+    # files themselves are the requested set.
+    recon_requested = (
+        {sample_of(n) for n in staged_vcf_names} if resume else set(expected_samples)
+    )
+    reconciliation = _reconcile_run(run_dir, recon_requested, effective_removals)
+    if not reconciliation["ok"]:
+        c = reconciliation["counts"]
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Refusing to start: the staged comparison does not match the samples this run "
+                f"asked for (requested {c['requested']}, staged {c['staged']}, "
+                f"readable by vsnp3 {c['analyzable']}). "
+                + " | ".join(reconciliation["problems"])
+                + f" The run folder {run_ts} has been left in place for inspection."
+            ),
+        )
+
     safe_reference = _require_ref_token(payload.reference, "reference")
     cmd = f"vsnp3_step2.py -wd {shlex.quote(str(run_dir))} {flags_str} -t {shlex.quote(safe_reference)}{remove_arg}"
     label_style = payload.label_style or "short"
@@ -4868,6 +4963,25 @@ def step2_run(project: str, payload: Step2Request):
         )
         logger.warning("Step 2 provenance dispatch failed; run proceeds without "
                        "run_metadata.json: %s", e)
+
+    # The reconciliation, on disk beside the run. A tree that gets published and
+    # questioned six months later needs a record of which samples went into it
+    # that does not depend on re-deriving anything.
+    try:
+        (run_dir / "comparison_manifest.json").write_text(
+            json.dumps({
+                "run_id": run_ts,
+                "reference": payload.reference,
+                "requested": reconciliation["requested"],
+                "staged": reconciliation["staged"],
+                "analyzed_by_vsnp3": reconciliation["analyzable"],
+                "counts": reconciliation["counts"],
+                "removed_by_name": sorted(effective_removals),
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning("could not write comparison_manifest.json for %s: %s", run_ts, e)
 
     pgid_path = step2_dir / ".step2_pgid"
 
@@ -4948,9 +5062,12 @@ def step2_run(project: str, payload: Step2Request):
         "blocklist_count": len(ref_block),
         "panel_exempt_count": panel_exempt_count,
         "vcf_total": vcf_total,
-        # Exactly what was staged for vsnp3 — not vcf_total minus removal
-        # NAMES, which overcounted when stale exclusion names matched nothing.
-        "comparison_count": copied_vcfs,
+        # Exactly what vsnp3 will analyse — reconciled against the staged
+        # folder and vsnp3's own discovery rule, not "how many files we copied"
+        # (which counted .vcf.gz entries vsnp3 never opens).
+        "comparison_count": reconciliation["counts"]["analyzable"],
+        "staged_count": copied_vcfs,
+        "comparison_samples": reconciliation["analyzable"],
         # Non-empty when the run started WITHOUT a provenance record (T-07
         # dispatch failed). The run itself is unaffected; the UI shows this
         # as a warning note, never as a blocking error.
@@ -5854,19 +5971,26 @@ def step2_vcf_database_samples(project: str):
                         "source_type": row.get("source_type", ""),
                         "source_path": row.get("source_path", ""),
                     }
+    # db_entries is the ONE membership rule (app/step2_inventory.py). This
+    # listing used to glob *_zc.vcf(.gz) while staging copied every *.vcf —
+    # so a database entry without the _zc marker was unlistable, unexcludable,
+    # and analysed by every run. Anything a run would read is listed here,
+    # therefore it can be excluded.
+    dupes = duplicate_samples(db_entries(vcf_source_dir))
     samples = []
-    seen: set = set()
-    for vcf in sorted(vcf_source_dir.glob("*_zc.vcf")) + sorted(vcf_source_dir.glob("*_zc.vcf.gz")):
-        fn = vcf.name
-        if fn in seen:
-            continue
-        seen.add(fn)
-        meta = meta_by_filename.get(fn, {})
+    for entry in db_entries(vcf_source_dir):
+        meta = meta_by_filename.get(entry.filename, {})
         samples.append({
-            "filename": fn,
-            "sample": fn.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""),
+            "filename": entry.filename,
+            "sample": entry.sample,
             "source_type": meta.get("source_type", ""),
-            "source_path": meta.get("source_path", str(vcf)),
+            "source_path": meta.get("source_path", str(vcf_source_dir / entry.filename)),
+            # vsnp3 reads only glob('*vcf'); a compressed entry is decompressed
+            # at staging so this stays informational, not a warning.
+            "compressed": entry.compressed,
+            # Two files claiming one sample hold different calls. The run
+            # refuses rather than letting directory order pick.
+            "ambiguous": entry.sample in dupes,
         })
     samples.sort(key=lambda x: x["sample"].lower())
     return samples
@@ -8932,33 +9056,8 @@ def _scan_vcf_db(vcf_source_dir: Path) -> tuple[List[str], set]:
     symlink into vcf_edits/ — is covered by resolving the directory once.
     The (names, edited) answer is identical to the old per-file walk.
     """
-    names: List[str] = []
-    edited: set = set()
-    try:
-        dir_is_edited = "vcf_edits" in vcf_source_dir.resolve().parts
-    except OSError:
-        dir_is_edited = False
-    try:
-        with os.scandir(vcf_source_dir) as it:
-            for entry in it:
-                # Case-sensitive suffix and an explicit dot-skip, matching
-                # exactly what glob("*.vcf") + glob("*.vcf.gz") returned.
-                if not entry.name.endswith((".vcf", ".vcf.gz")) or entry.name.startswith("."):
-                    continue
-                names.append(entry.name)
-                is_edited = dir_is_edited
-                if not is_edited:
-                    try:
-                        if entry.is_symlink():
-                            is_edited = "vcf_edits" in Path(entry.path).resolve().parts
-                    except OSError:
-                        is_edited = False
-                if is_edited:
-                    edited.add(_sample_from_vcf(Path(entry.name)))
-    except OSError:
-        return [], set()
-    names.sort()
-    return names, edited
+    entries = db_entries(vcf_source_dir)
+    return [e.filename for e in entries], {e.sample for e in entries if e.edited}
 
 
 def _edited_samples_in_dir(vcf_source_dir: Path) -> List[str]:
@@ -9372,11 +9471,13 @@ def _find_step1_vcf_for_sample(step1_dir: Path, sample: str) -> Optional[Path]:
 
 
 def _sample_from_vcf(vcf: Path) -> str:
-    name = vcf.name
-    for suffix in ("_zc.vcf.gz", "_zc.vcf"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return vcf.stem
+    """Sample name for a VCF path — one derivation, shared with the inventory.
+
+    The private version here knew only the _zc shapes and fell back to
+    Path.stem, so "A.vcf.gz" became "A.vcf": a sample name that matches no
+    file and no exclusion.
+    """
+    return sample_of(vcf.name)
 
 
 # ---------------------------------------------------------------------------
@@ -9635,9 +9736,11 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
 
     cache = _vcf_ref_cache_load(step2_dir)
     fresh: Dict[str, Any] = {}
-    entries = sorted(
-        [*step2_dir.glob("*_zc.vcf"), *step2_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name
-    )
+    # Over the canonical set: the veto used to scan only *_zc.vcf(.gz), i.e. it
+    # was blind to exactly the files staging copies regardless of selection —
+    # so a VCF called against another reference could join every run without
+    # ever being offered to the check that exists to catch it.
+    entries = [step2_dir / e.filename for e in db_entries(step2_dir)]
 
     by_ref_cache: Dict[str, Dict[str, List[Path]]] = {}
 

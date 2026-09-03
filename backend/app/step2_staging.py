@@ -1,32 +1,50 @@
 """Step 2 run-folder staging.
 
-Each Step 2 run works on COPIES of the cumulative step2/vcf_database in a
-dated run folder (vsnp3 deletes every VCF out of its -wd, so the database
-itself must never be handed to it). Staging used to copy the WHOLE database
-and rely on vsnp3's -remove_by_name to drop the excluded samples — but
-vsnp3_step2.py parses every VCF in its -wd into a dataframe BEFORE applying
-the removal list, so a 10-sample comparison against a 9,372-VCF database
-copied and parsed all 9,372 files. Staging now skips any file the removal
-list would drop anyway.
+Each Step 2 run works on COPIES of the cumulative step2/vcf_database in a dated
+run folder (vsnp3 deletes every VCF out of its -wd, so the database itself must
+never be handed to it). Staging copies only what the run will analyse: vsnp3
+parses every VCF in its -wd into a dataframe BEFORE applying -remove_by_name,
+so copying the whole database made a 25-sample comparison parse 8,600 files.
 
-vsnp3's matching rule (vsnp3_step2.py + Remove_From_Analysis, read from the
-deployed install): dataframes are keyed by VCF basename, and a listed name N
-removes the keys ``N``, ``N.vcf`` and ``N_zc.vcf`` — nothing else (a .vcf.gz
-key can never match). vsnp3_would_remove() mirrors that EXACTLY, and the run
-still passes -remove_by_name with the full list, so if the mirror ever
-disagreed with vsnp3 the stray file would still be removed by vsnp3 itself:
-a mismatch can only cost time, never correctness.
+Staging is an ALLOW-LIST. It used to be a denylist — copy every ``*.vcf`` /
+``*.vcf.gz`` in the folder, minus the names the removal list catches — and that
+is the shape of the bug it caused: the removal list can only ever contain names
+the SELECTION UI knew about, and the selection UI listed only ``*_zc.vcf``. A
+database entry with any other name was therefore unnameable, unexcludable, and
+copied into every single run. Naming what to include cannot fail that way: a
+file nobody asked for is simply not in the list.
+
+Compressed entries are DECOMPRESSED on the way in. vsnp3 discovers its inputs
+with ``glob.glob(f'{wd}/*vcf')``, which cannot match a name ending ``.gz``, and
+opens them with a plain ``open()`` — so a ``.vcf.gz`` copied verbatim sat in the
+run folder, was counted by the GUI as part of the comparison, and never reached
+the matrix. That hit edited VCFs hardest: the editor writes its patch bgzipped,
+so the correction a user made was the one file guaranteed to be ignored.
+
+``vsnp3_would_remove`` remains because ``-remove_by_name`` is still passed to
+vsnp3 (belt and braces on the legacy path, and the reconciler checks against
+it). Its docstring used to claim a mirror mismatch "can only cost time, never
+correctness" — untrue for ``.vcf.gz``, which neither the mirror nor vsnp3 can
+match. With an allow-list and decompression, no staged file is compressed and
+the claim holds again.
 """
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
-from typing import Iterable, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+from app.step2_inventory import Entry, db_entries, is_db_vcf, sample_of, stage_entry
 
 
 def vsnp3_would_remove(vcf_basename: str, removal_names: Set[str]) -> bool:
-    """True when vsnp3's -remove_by_name would drop this staged file."""
+    """True when vsnp3's -remove_by_name would drop this staged file.
+
+    vsnp3's Remove_From_Analysis builds, for each listed name N and
+    extension "vcf", the keys N, N.vcf and N_zc.vcf, and pops those basenames
+    out of the parsed dataframes. Nothing else matches — a ``.vcf.gz`` key
+    never can.
+    """
     if vcf_basename in removal_names:
         return True
     if vcf_basename.endswith(".vcf"):
@@ -41,33 +59,55 @@ def vsnp3_would_remove(vcf_basename: str, removal_names: Set[str]) -> bool:
 def stage_step2_vcfs(
     vcf_source_dir: Path,
     run_dir: Path,
-    removal_names: Iterable[str],
+    removal_names: Optional[Iterable[str]] = None,
+    include_samples: Optional[Iterable[str]] = None,
 ) -> Tuple[int, int, Set[str]]:
-    """Copy the VCFs this run will analyze from the database into run_dir.
+    """Copy the VCFs this run will analyse from the database into run_dir.
 
-    Returns (copied, skipped_excluded, staged_basenames). copy2 follows
-    symlinks, so the real VCF content (the DB entries are symlinks into
-    step1) lands in the run folder as regular files. Raises OSError with the
-    failing filename attached for the endpoint to surface.
+    ``include_samples`` is the allow-list, by SAMPLE name — exactly those are
+    staged and nothing else. ``removal_names`` is the legacy denylist, used
+    only when no allow-list is given (an older frontend, or a caller that has
+    not been migrated); it reproduces the previous behaviour so the migration
+    is not a flag day.
+
+    Returns (copied, skipped, staged_basenames) where staged_basenames are the
+    names as WRITTEN — a decompressed ``.gz`` is reported under its ``.vcf``
+    name, because that is what vsnp3 will see.
+
+    Raises OSError with the failing filename attached, and ValueError when a
+    sample carries more than one database file: the two hold different calls,
+    and choosing between them silently would decide the science by filesystem
+    order.
     """
-    removal_set = set(removal_names)
+    entries = db_entries(vcf_source_dir)
     copied = 0
     skipped = 0
     staged: Set[str] = set()
-    for src in sorted([*vcf_source_dir.glob("*.vcf"), *vcf_source_dir.glob("*.vcf.gz")]):
-        if vsnp3_would_remove(src.name, removal_set):
+
+    if include_samples is not None:
+        wanted = {s for s in include_samples if s}
+        chosen: List[Entry] = [e for e in entries if e.sample in wanted]
+        clashes: Dict[str, List[str]] = {}
+        for e in chosen:
+            clashes.setdefault(e.sample, []).append(e.filename)
+        ambiguous = {s: fns for s, fns in clashes.items() if len(fns) > 1}
+        if ambiguous:
+            detail = "; ".join(f"{s}: {', '.join(sorted(fns))}" for s, fns in sorted(ambiguous.items())[:5])
+            raise ValueError(
+                f"{len(ambiguous)} sample(s) have more than one VCF in the database, so this run "
+                f"cannot say which calls to compare — {detail}"
+            )
+        skipped = len(entries) - len(chosen)
+        for e in chosen:
+            staged.add(stage_entry(vcf_source_dir / e.filename, run_dir, e))
+            copied += 1
+        return copied, skipped, staged
+
+    removal_set = set(removal_names or ())
+    for e in entries:
+        if vsnp3_would_remove(e.filename, removal_set):
             skipped += 1
             continue
-        dest = run_dir / src.name
-        # Refuse to write THROUGH a symlink. The run folder is created with
-        # exist_ok=True inside a group-writable project, so another member could
-        # pre-plant <run>/<sample>_zc.vcf as a link to a file elsewhere and
-        # copy2 would follow it and overwrite the target as this user. Removing
-        # the link (never the thing it points at) keeps staging correct — the
-        # real VCF is written in its place — and cannot destroy data.
-        if dest.is_symlink():
-            dest.unlink()
-        shutil.copy2(src, dest)
+        staged.add(stage_entry(vcf_source_dir / e.filename, run_dir, e))
         copied += 1
-        staged.add(src.name)
     return copied, skipped, staged

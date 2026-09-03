@@ -2,22 +2,29 @@
 
 The predicate must mirror vsnp3's Remove_From_Analysis EXACTLY (a listed
 name N removes basenames N, N.vcf and N_zc.vcf; nothing else — notably a
-.vcf.gz basename can never match). If the mirror under-skips, vsnp3's own
--remove_by_name still drops the file, so only exactness is asserted here.
+.vcf.gz basename can never match).
+
+This file used to assert that an unremovable .vcf.gz "must not be skipped
+either (identical analysis set)". That premise was false and it is the bug
+this suite now guards: vsnp3 discovers its inputs with glob('*vcf'), so a
+staged .vcf.gz is not analysed at all. It was copied, counted as compared,
+and silently absent from the matrix. Staging now decompresses instead, and
+the assertions below say so.
 
 Run directly:  python test_step2_staging.py
 """
 
 from __future__ import annotations
 
+import gzip
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from step2_staging import stage_step2_vcfs, vsnp3_would_remove
+from app.step2_staging import stage_step2_vcfs, vsnp3_would_remove
 
 
 def assert_eq(actual, expected, label):
@@ -41,8 +48,9 @@ def main() -> int:
     assert_eq(vsnp3_would_remove("ERR036186_parsed_reads_zc.vcf", {"ERR036186"}),
               False, "leading ID alone does not (matches vsnp3)")
     assert_eq(vsnp3_would_remove("S10_zc.vcf", {"S1"}), False, "no prefix fuzz")
-    # vsnp3's candidates never end in .gz — a gzipped VCF is not removable by
-    # name, so it must not be skipped either (identical analysis set).
+    # vsnp3's candidates never end in .gz. That is why a gzipped entry must be
+    # decompressed on the way into the run folder rather than copied: no tier
+    # could ever remove it, and vsnp3 would never read it.
     assert_eq(vsnp3_would_remove("Y_zc.vcf.gz", {"Y"}), False, ".vcf.gz never matches")
 
     print("\n[stage_step2_vcfs]")
@@ -52,17 +60,34 @@ def main() -> int:
         run = tmp / "run"
         src.mkdir()
         run.mkdir()
-        for name in ("a_zc.vcf", "b_zc.vcf", "c.vcf", "d_zc.vcf.gz"):
+        for name in ("a_zc.vcf", "b_zc.vcf", "c.vcf"):
             (src / name).write_text(f"##{name}\n")
+        with gzip.open(src / "d_zc.vcf.gz", "wt") as fh:
+            fh.write("##d_zc.vcf.gz\n")
+        # Legacy denylist path (an older frontend that sends no allow-list).
         copied, skipped, staged = stage_step2_vcfs(src, run, ["b", "d", "not_in_db"])
         assert_eq(copied, 3, "copied everything the run keeps")
         assert_eq(skipped, 1, "skipped exactly the excluded .vcf")
-        assert_eq(staged, {"a_zc.vcf", "c.vcf", "d_zc.vcf.gz"}, "staged basenames")
+        assert_eq(staged, {"a_zc.vcf", "c.vcf", "d_zc.vcf"},
+                  "staged basenames — d arrives DECOMPRESSED, under the name vsnp3 globs")
         assert_eq(sorted(p.name for p in run.iterdir()), sorted(staged),
-                  "run dir holds exactly the staged files")
+                  "run dir holds exactly the staged files, none of them gzipped")
+        assert_eq((run / "d_zc.vcf").read_text(), "##d_zc.vcf.gz\n",
+                  "and holds the real decompressed content")
         assert_eq(sorted(p.name for p in src.iterdir()),
                   ["a_zc.vcf", "b_zc.vcf", "c.vcf", "d_zc.vcf.gz"],
                   "database untouched")
+
+        print("\n[stage_step2_vcfs — allow-list]")
+        run2 = tmp / "run2"
+        run2.mkdir()
+        # The reported bug: c.vcf carries no _zc marker, so the selection UI
+        # could not name it and the denylist above could never exclude it.
+        copied, skipped, staged = stage_step2_vcfs(src, run2, include_samples=["a"])
+        assert_eq(copied, 1, "only the named sample is staged")
+        assert_eq(staged, {"a_zc.vcf"}, "and it is the one that was named")
+        assert_eq(sorted(p.name for p in run2.iterdir()), ["a_zc.vcf"],
+                  "the unnameable c.vcf does not join the run")
         print("\nAll step2 staging tests passed.")
         return 0
     finally:

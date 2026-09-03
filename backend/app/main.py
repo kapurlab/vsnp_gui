@@ -5,7 +5,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from pathlib import Path
 from urllib.parse import quote
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Set, Tuple
 import zipfile
 import csv
 import io
@@ -52,7 +52,7 @@ from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
-from app.step2_staging import stage_step2_vcfs
+from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 from app.step2_inventory import (
     Entry, db_entries, duplicate_samples, is_analyzable, is_db_vcf, import_tail, sample_of,
 )
@@ -83,7 +83,13 @@ from app.refs import (
 from app.sra import (expand_accessions, expand_accessions_with_mapping, build_download_script,
                      SRAExpansionError, write_crosswalk_tsv,
                      is_valid_accession as sra_is_valid_accession)
-from app.posthoc import list_tools as posthoc_list_tools, get_tool as posthoc_get_tool, tool_status as posthoc_tool_status
+from app.posthoc import (
+    LEGACY_SUBDIR as POSTHOC_LEGACY_SUBDIR,
+    get_tool as posthoc_get_tool,
+    list_tools as posthoc_list_tools,
+    output_path as posthoc_output_path,
+    tool_status as posthoc_tool_status,
+)
 
 app = FastAPI(title="vSNP GUI API")
 logger = logging.getLogger("uvicorn.error")
@@ -1124,46 +1130,15 @@ def _step2_read_run_metadata(run_dir: Path) -> Dict[str, Any]:
     return out
 
 
-def _write_figtree_groups(step2_dir: Path, vcf_source_dir: Path, cfg: Dict[str, str], label_style: str) -> None:
-    if not vcf_source_dir.exists():
-        return
-    import re as _re
-    manifest_path = vcf_source_dir / ".vcf_source_manifest.csv"
-    source_map: Dict[str, str] = {}
-    if manifest_path.exists():
-        with manifest_path.open("r", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                name = (row.get("filename") or "").strip()
-                source_type = (row.get("source_type") or "").strip()
-                if name:
-                    source_map[name] = source_type
-    label_map = _load_vcf_label_map(cfg, label_style)
-    # Build group file(s)
-    rows = []
-    for vcf in sorted(vcf_source_dir.glob("*.vcf*")):
-        taxon = vcf.name
-        source_type = source_map.get(taxon, "reference")
-        group = "sample" if source_type == "step1" else "reference"
-        color = "#d1495b" if group == "sample" else "#2b6cb0"
-        rows.append((taxon, group, color))
-    if not rows:
-        return
-    group_path = step2_dir / "figtree_groups.tsv"
-    with group_path.open("w", encoding="utf-8") as handle:
-        handle.write("taxon\tgroup\tcolor\n")
-        for taxon, group, color in rows:
-            handle.write(f"{taxon}\t{group}\t{color}\n")
-    # Labeled version
-    if label_map:
-        labeled_path = step2_dir / "figtree_groups_labeled.tsv"
-        with labeled_path.open("w", encoding="utf-8") as handle:
-            handle.write("taxon\tgroup\tcolor\n")
-            for taxon, group, color in rows:
-                labeled = taxon
-                for ident, friendly in label_map.items():
-                    labeled = _re.sub(rf"\\b{_re.escape(ident)}\\b", friendly, labeled)
-                handle.write(f"{labeled}\t{group}\t{color}\n")
+# figtree_groups.tsv is gone, deliberately.
+#
+# It was written into every comparison folder from a scan of the WHOLE
+# vcf_database — one row per database entry, taxon name and all — so a run
+# comparing ten samples shipped a tab-separated list of every isolate in the
+# project. Nothing read it: no FigTree annotation step, nothing in vsnp3,
+# nothing in this GUI. A file that names every sample you have, sitting in a
+# folder you hand to someone who should see ten of them, has to justify its
+# existence, and this one could not.
 
 
 def _count_vcfs(folder: Path) -> int:
@@ -4735,6 +4710,10 @@ def step2_run(project: str, payload: Step2Request):
     # the removal tiers", which is what the code did before and is still correct
     # for a client that cannot express an allow-list.
     db_samples = [e.sample for e in db_entries(vcf_source_dir)]
+    # The names this request itself supplied, kept for the manifest below: it is
+    # the only sample list a comparison folder may write down, because it is the
+    # only one the person who started the run already had.
+    asked: Optional[Set[str]] = None
     if payload.include is None:
         requested_samples = None
         expected_samples = sorted({
@@ -4832,6 +4811,19 @@ def step2_run(project: str, payload: Step2Request):
             ),
         )
 
+    # -remove_by_name, scoped to the run folder it applies to.
+    #
+    # effective_removals is a DATABASE-wide set, and on an allow-list run it is
+    # dominated by "everything you did not tick" — so writing it out verbatim
+    # put a workbook naming every other isolate in the project inside a folder
+    # that compares ten. A removal name matching nothing that was staged is a
+    # no-op (vsnp3 pops keys out of dataframes built from its own -wd glob), so
+    # narrowing to the names that can actually bite changes what vsnp3 does not
+    # at all: on an allow-list run the set comes out empty, no workbook is
+    # written, and no -remove_by_name is passed. What survives is the case the
+    # flag is still here for — the legacy denylist path, where the file lists
+    # only names of VCFs sitting in this very folder.
+    staged_removals = removals_that_bite(staged_vcf_names, effective_removals)
     remove_arg = ""
     remove_file = run_dir / "remove_by_name.xlsx"
     if resume and remove_file.exists():
@@ -4839,15 +4831,24 @@ def step2_run(project: str, payload: Step2Request):
         # folder. Overwriting it with today's exclusions would hand vsnp3 a
         # removal set that disagrees with the copies it is about to read.
         remove_arg = f" -remove_by_name {shlex.quote(str(remove_file))}"
-    elif effective_removals:
+    elif staged_removals:
         try:
             import pandas as pd  # vsnp3 env
-            pd.DataFrame(effective_removals).to_excel(remove_file, header=False, index=False)
+            pd.DataFrame(staged_removals).to_excel(remove_file, header=False, index=False)
             remove_arg = f" -remove_by_name {shlex.quote(str(remove_file))}"
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Failed to build removal list: {exc}")
-    _write_step2_edit_summary(run_dir, _edited_samples_in_dir(vcf_source_dir))
-    _write_figtree_groups(run_dir, vcf_source_dir, cfg, payload.label_style or "short")
+    # This run's edited samples — not the project's. The scan is over the whole
+    # database, so a comparison folder used to carry the name of every sample
+    # anyone had ever hand-edited, most of them nothing to do with this run. It
+    # also made the pane's "edited samples included in this run" untrue for a
+    # subset run. The project-wide summary still lives at step2/, which is where
+    # the pane links; this copy answers for its own folder.
+    _run_samples = {sample_of(n) for n in staged_vcf_names}
+    _write_step2_edit_summary(
+        run_dir,
+        [s for s in _edited_samples_in_dir(vcf_source_dir) if s in _run_samples],
+    )
     # Build Step 2 command with options
     step2_flags = []
     if payload.all_vcf:
@@ -4898,7 +4899,7 @@ def step2_run(project: str, payload: Step2Request):
     recon_requested = (
         {sample_of(n) for n in staged_vcf_names} if resume else set(expected_samples)
     )
-    reconciliation = _reconcile_run(run_dir, recon_requested, effective_removals)
+    reconciliation = _reconcile_run(run_dir, recon_requested, staged_removals)
     if not reconciliation["ok"]:
         c = reconciliation["counts"]
         raise HTTPException(
@@ -4967,6 +4968,20 @@ def step2_run(project: str, payload: Step2Request):
     # The reconciliation, on disk beside the run. A tree that gets published and
     # questioned six months later needs a record of which samples went into it
     # that does not depend on re-deriving anything.
+    #
+    # It records THIS COMPARISON and nothing else. It used to carry
+    # removed_by_name — the whole database-wide removal set — which on a
+    # ten-sample run meant a file inside the comparison folder listing every
+    # other isolate in the project by name. Those samples are not part of this
+    # comparison; a folder that can be handed to a collaborator must not be the
+    # thing that tells them what else is in the database. The one exclusion
+    # worth keeping is the one the request itself named and a removal tier then
+    # dropped: it can only contain names the requester already had, and a
+    # sample that silently failed to make the run is exactly what a manifest is
+    # for.
+    excluded_from_request = (
+        sorted(asked & set(effective_removals)) if asked is not None else []
+    )
     try:
         (run_dir / "comparison_manifest.json").write_text(
             json.dumps({
@@ -4976,7 +4991,7 @@ def step2_run(project: str, payload: Step2Request):
                 "staged": reconciliation["staged"],
                 "analyzed_by_vsnp3": reconciliation["analyzable"],
                 "counts": reconciliation["counts"],
-                "removed_by_name": sorted(effective_removals),
+                "excluded_from_request": excluded_from_request,
             }, indent=2),
             encoding="utf-8",
         )
@@ -5716,19 +5731,20 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
     group_dir = output_dir / payload.group
     if not group_dir.exists():
         raise HTTPException(status_code=404, detail=f"Group not found: {payload.group}")
-    posthoc_dir = group_dir / "posthoc"
-    posthoc_dir.mkdir(parents=True, exist_ok=True)
     lock_path = _posthoc_lock_path(group_dir, tool.tool_id)
     _posthoc_clear_stale_lock(lock_path)
     if lock_path.exists():
         raise HTTPException(status_code=409, detail="Posthoc job already running for this group")
-    stats_path = posthoc_dir / "stats.json"
+    # Results land in the group folder itself, beside the alignment they were
+    # computed from. A run that predates this writes into posthoc/; a re-run of
+    # that same group writes up here, and the status lookups read both.
+    stats_path = group_dir / tool.stats_file
     scope = (payload.scope or "all").lower()
     if tool.tool_id == "snp_analysis":
         cmd = _posthoc_snp_analysis_command(
             group_dir,
             payload.group,
-            posthoc_dir,
+            group_dir,
             str(_tool_bin_dir(cfg) or ""),
             scope,
         )
@@ -5755,15 +5771,9 @@ def posthoc_status(project: str, group: str, tool: str = "snp_analysis", run_id:
     group_dir = output_dir / group
     if not group_dir.exists():
         raise HTTPException(status_code=404, detail=f"Group not found: {group}")
-    posthoc_dir = group_dir / "posthoc"
     lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
     _posthoc_clear_stale_lock(lock_path)
-    running = lock_path.exists()
-    outputs = []
-    for rel in tool_obj.outputs:
-        path = group_dir / rel
-        outputs.append({"path": str(path), "exists": path.exists()})
-    return {"running": running, "outputs": outputs}
+    return _posthoc_group_state(group_dir, tool_obj, lock_path)
 
 
 @app.get("/api/projects/{project}/posthoc/status_all")
@@ -5803,11 +5813,7 @@ def posthoc_status_all(project: str, tool: str = "snp_analysis", run_id: Optiona
                 group_dir = Path(entry.path)
                 lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
                 _posthoc_clear_stale_lock(lock_path)
-                outputs = []
-                for rel in tool_obj.outputs:
-                    path = group_dir / rel
-                    outputs.append({"path": str(path), "exists": path.exists()})
-                groups[name] = {"running": lock_path.exists(), "outputs": outputs}
+                groups[name] = _posthoc_group_state(group_dir, tool_obj, lock_path)
     except OSError:
         return {"groups": {}}
     return {"groups": groups}
@@ -9510,20 +9516,63 @@ if _frontend_dist.exists():
                 return _FileResponse(_frontend_dist / fname)
 
 
+def _posthoc_group_state(group_dir: Path, tool, lock_path: Path) -> Dict[str, Any]:
+    """One group's post-hoc state: is it running, what came out, and what broke.
+
+    The failure report is the point. A job that dies on its first step still
+    writes stats.json — with ``"status": "error"`` and the reason — and
+    stats.json used to be listed among the tool's outputs, so "did this produce
+    anything?" was answered yes by the very file that says no. The results pane
+    hides stats.json, so the group showed a ready chip above an empty file list
+    and the run looked like it had worked. Outputs now mean deliverables only,
+    and the error travels so the pane can say what happened instead of nothing.
+    """
+    outputs = []
+    for rel in tool.outputs:
+        path = posthoc_output_path(group_dir, rel)
+        outputs.append({"path": str(path), "exists": path.exists()})
+    state: Dict[str, Any] = {
+        "running": lock_path.exists(),
+        "outputs": outputs,
+        "status": "",
+        "message": "",
+    }
+    stats_path = posthoc_output_path(group_dir, tool.stats_file)
+    try:
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return state
+    if isinstance(stats, dict):
+        state["status"] = str(stats.get("status") or "")
+        state["message"] = str(stats.get("message") or "")
+    return state
+
+
 def _posthoc_lock_path(group_dir: Path, tool: str) -> Path:
-    return group_dir / "posthoc" / f".{tool}.lock"
+    """The run lock, in the group folder beside the results it guards."""
+    return group_dir / f".{tool}.lock"
 
 
 def _posthoc_clear_stale_lock(lock_path: Path) -> None:
-    if not lock_path.exists():
-        return
-    job_id = lock_path.read_text(encoding="utf-8").strip()
-    if not job_id:
-        lock_path.unlink()
-        return
-    job = job_manager.get_job(job_id)
-    if not job or job.get("status") in {"succeeded", "failed", "cancelled"}:
-        lock_path.unlink()
+    """Drop the lock when the job it names is over.
+
+    Also sweeps a lock left in the legacy posthoc/ subfolder by a run started
+    before the results moved up a level: nothing reads it any more, and left in
+    place it is a permanent "running" for anyone who looks at the folder.
+    """
+    for path in (lock_path, lock_path.parent / POSTHOC_LEGACY_SUBDIR / lock_path.name):
+        if not path.exists():
+            continue
+        try:
+            job_id = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not job_id:
+            path.unlink()
+            continue
+        job = job_manager.get_job(job_id)
+        if not job or job.get("status") in {"succeeded", "failed", "cancelled"}:
+            path.unlink()
 
 
 def _posthoc_stub_command(cfg: Dict, stats_path: Path, group: str, tool: str) -> str:

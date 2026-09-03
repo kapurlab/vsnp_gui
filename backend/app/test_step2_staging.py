@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.step2_staging import stage_step2_vcfs, vsnp3_would_remove
+from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 
 
 def assert_eq(actual, expected, label):
@@ -88,6 +88,25 @@ def main() -> int:
         assert_eq(staged, {"a_zc.vcf"}, "and it is the one that was named")
         assert_eq(sorted(p.name for p in run2.iterdir()), ["a_zc.vcf"],
                   "the unnameable c.vcf does not join the run")
+        print("\n[removals_that_bite — a run folder's removal list is its own]")
+        # The database-wide set an allow-list run computes: everything the user
+        # did not tick. Written out verbatim it named every other isolate in
+        # the project, inside a folder comparing one.
+        database_wide = ["b", "c", "d", "zz-not-in-this-project"]
+        assert_eq(removals_that_bite(["a_zc.vcf"], database_wide), [],
+                  "nothing in the database-wide list can touch this run — so nothing is kept")
+        assert_eq(removals_that_bite(["a_zc.vcf", "b_zc.vcf", "c.vcf"], database_wide),
+                  ["b", "c"],
+                  "only names that can drop a staged file survive")
+        assert_eq(removals_that_bite(["b_zc.vcf"], ["b_zc.vcf", "b_zc", "b"]),
+                  ["b", "b_zc", "b_zc.vcf"],
+                  "every spelling vsnp3 would match is kept, and no other")
+        # The narrowing must not change what vsnp3 does: a name that survives
+        # removes, a name that was dropped could not have removed anything.
+        for name in database_wide:
+            assert_eq(vsnp3_would_remove("a_zc.vcf", {name}), False,
+                      f"{name} was correctly discarded — it cannot drop a_zc.vcf")
+
         print("\nAll step2 staging tests passed.")
         return 0
     finally:

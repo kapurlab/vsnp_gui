@@ -1298,6 +1298,14 @@ button:hover:not(:disabled) {
   padding: 2px 8px;
 }
 
+/* A group whose last SNP-distance run produced nothing. It has to read as
+   different from the ready chip at a glance — the two sit in the same slot,
+   and the whole failure is that "it ran" and "it worked" looked alike. */
+.group-chip.warning {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
 .results-name {
   font-weight: 600;
   font-size: 12px;

@@ -9023,6 +9023,12 @@ export default function App() {
                 const path = item?.path || "";
                 const fileName = path.split("/").pop() || "";
                 if (fileName.startsWith("~$")) return true;
+                // SNP-distance results sit in the group folder now, so this
+                // list also sees that tool's working files. Anything it writes
+                // for itself is hidden by a leading dot (its filtered
+                // alignment, its run lock); the rest are named here, including
+                // the two spellings older runs left under posthoc/.
+                if (fileName.startsWith(".")) return true;
                 if (fileName.endsWith(".lock")) return true;
                 if (fileName === "filtered_step1.fasta") return true;
                 if (fileName === "snp_distances.txt") return true;
@@ -9152,8 +9158,21 @@ export default function App() {
                           <div className="group-actions">
                             {(() => {
                               const canRunPosthoc = snpToolAvailable && group.posthoc_possible;
-                              const hasPosthocOutputs = posthocStatus[group.name]?.outputs?.some((o) => o.exists);
-                              if (!canRunPosthoc && !hasPosthocOutputs) {
+                              const posthocState = posthocStatus[group.name];
+                              const hasPosthocOutputs = posthocState?.outputs?.some((o) => o.exists);
+                              // What the last SNP-distance run has to say for
+                              // itself. A failed run writes stats.json and
+                              // nothing else, and stats.json is hidden from the
+                              // file list — so without this the group showed a
+                              // ready chip over an empty list and the failure
+                              // was invisible. Twice, in the report that led
+                              // here.
+                              const posthocTrouble =
+                                !posthocState?.running &&
+                                (posthocState?.status === "error" || posthocState?.status === "insufficient_data")
+                                  ? posthocState
+                                  : null;
+                              if (!canRunPosthoc && !hasPosthocOutputs && !posthocTrouble) {
                                 return null;
                               }
                               const posthocHelp =
@@ -9167,6 +9186,21 @@ export default function App() {
                                 <>
                                   {hasPosthocOutputs ? (
                                     <span className="group-chip" title="SNP-distance results are available in this group's file list below.">distances ready</span>
+                                  ) : null}
+                                  {posthocTrouble ? (
+                                    <span
+                                      className="group-chip warning"
+                                      title={
+                                        posthocTrouble.message ||
+                                        (posthocTrouble.status === "error"
+                                          ? "The last SNP-distance run for this group failed."
+                                          : "The last SNP-distance run for this group had too little data to plot.")
+                                      }
+                                    >
+                                      {posthocTrouble.status === "error"
+                                        ? "distances failed"
+                                        : "too few distances"}
+                                    </span>
                                   ) : null}
                                   {canRunPosthoc ? (
                                     <>
@@ -9204,6 +9238,20 @@ export default function App() {
                           </div>
                         </div>
                       </summary>
+                      {(() => {
+                        // The reason, spelled out where the missing files
+                        // would have been. The chip in the header says a run
+                        // went wrong; opening the group is when you want to
+                        // know what.
+                        const st = posthocStatus[group.name];
+                        if (!st || st.running || !st.message) return null;
+                        if (st.status !== "error" && st.status !== "insufficient_data") return null;
+                        return (
+                          <div className={st.status === "error" ? "note error" : "note"}>
+                            <strong>SNP distances:</strong> {st.message}
+                          </div>
+                        );
+                      })()}
                       {group.files.map((item) => {
                         const isTre = (item.label || "").toLowerCase().endsWith(".tre");
                         const treeBase = window.location.pathname.replace(/[^/]*$/, "");

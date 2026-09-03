@@ -1,3 +1,3 @@
-from .registry import list_tools, get_tool, tool_status
+from .registry import LEGACY_SUBDIR, get_tool, list_tools, output_path, tool_status
 
-__all__ = ["list_tools", "get_tool", "tool_status"]
+__all__ = ["LEGACY_SUBDIR", "get_tool", "list_tools", "output_path", "tool_status"]

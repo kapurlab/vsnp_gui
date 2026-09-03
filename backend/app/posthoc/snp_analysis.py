@@ -84,10 +84,22 @@ def get_lineage_colors(lineage: str) -> Dict[str, str]:
     return {"fill": "#87CEFA", "iqr": "#1E90FF", "median": "black"}
 
 
+# The filtered alignment this tool writes for a "only samples" run. Results now
+# land in the group folder itself, so the working file sits in the same
+# directory find_group_fasta scans — and it picks the NEWEST match, which the
+# working file always is. Hidden by name, skipped by name, and deleted when the
+# run ends: any one of the three would do, and a group's alignment is not the
+# thing to be clever about.
+FILTERED_FASTA_NAME = ".snp_analysis_input.fasta"
+
+
 def find_group_fasta(group_dir: Path) -> Optional[Path]:
     candidates = []
     for ext in ("*.fasta", "*.fa", "*.fna"):
-        candidates.extend(group_dir.glob(ext))
+        candidates.extend(
+            p for p in group_dir.glob(ext)
+            if not p.name.startswith(".") and p.name != FILTERED_FASTA_NAME
+        )
     if not candidates:
         return None
     candidates.sort(key=lambda p: p.stat().st_mtime)
@@ -101,12 +113,30 @@ def normalize_header(header: str) -> str:
     return name
 
 
+def find_vcf_manifest(start: Path) -> Optional[Path]:
+    """Locate the VCF-source manifest by walking up from a group folder.
+
+    This is the "Include: only samples" bug. The caller used to hand over
+    ``group_dir.parent`` as the step2 directory, which was true back when
+    vsnp3 output sat directly in step2/<group>. Groups have lived under a dated
+    run folder for a long time now, so the parent is step2/<run_id>, the
+    manifest was looked for at step2/<run_id>/vcf_database/ where it has never
+    been, and the allow-list came back empty — every single "only samples" run
+    failed with "No step1 samples found in manifest", wrote that into stats.json
+    and stopped. Walking up finds step2/ from either layout, and from any
+    future one that keeps the database beside the runs.
+    """
+    for base in (start, *start.parents):
+        for name in ("vcf_database", "vcf_source"):
+            manifest = base / name / ".vcf_source_manifest.csv"
+            if manifest.exists():
+                return manifest
+    return None
+
+
 def load_step1_allowlist(step2_dir: Path) -> set:
-    db_dir = step2_dir / "vcf_database"
-    if not db_dir.exists():
-        db_dir = step2_dir / "vcf_source"
-    manifest = db_dir / ".vcf_source_manifest.csv"
-    if not manifest.exists():
+    manifest = find_vcf_manifest(step2_dir)
+    if manifest is None:
         return set()
     allowed = set()
     with manifest.open("r", encoding="utf-8") as handle:
@@ -287,6 +317,18 @@ def plot_closest_neighbor(values: pd.Series, lineage: str, output_prefix: Path) 
     return {"pdf": str(pdf_path), "png": str(png_path)}
 
 
+def _discard(path: Optional[Path]) -> None:
+    """Remove a working file, if it is there. Results share the group folder
+    with the tree and tables now, so anything this tool does not mean a user to
+    open has to clean up after itself."""
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def write_stats(path: Path, payload: Dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -299,14 +341,41 @@ def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, sc
         write_stats(stats_path, {"status": "error", "message": "No FASTA found", "group": group_name})
         return 1
     input_fasta = fasta_path
+    filtered_fasta = None
     filtered_count = None
     if scope == "step1_only":
-        allowlist = load_step1_allowlist(group_dir.parent)
+        allowlist = load_step1_allowlist(group_dir)
         if not allowlist:
-            write_stats(stats_path, {"status": "error", "message": "No step1 samples found in manifest", "group": group_name})
+            write_stats(stats_path, {
+                "status": "error",
+                "message": (
+                    "Could not find the VCF source manifest "
+                    "(step2/vcf_database/.vcf_source_manifest.csv), so there is no "
+                    "record of which of this group's sequences came from Step 1. "
+                    "Re-run with 'Include: samples + reference', or collect the "
+                    "VCFs into the project database and try again."
+                ),
+                "group": group_name,
+                "scope": scope,
+            })
             return 1
-        filtered_fasta = out_dir / "filtered_step1.fasta"
+        filtered_fasta = out_dir / FILTERED_FASTA_NAME
         filtered_count = filter_fasta_by_headers(fasta_path, filtered_fasta, allowlist)
+        if filtered_count < 2:
+            # snp-dists on one sequence produces a 1x1 matrix and no distances
+            # at all; say why rather than emitting an empty plot.
+            write_stats(stats_path, {
+                "status": "error",
+                "message": (
+                    f"Only {filtered_count} of this group's sequences are Step 1 samples, "
+                    "so there is no pair to measure. Re-run with "
+                    "'Include: samples + reference'."
+                ),
+                "group": group_name,
+                "scope": scope,
+            })
+            _discard(filtered_fasta)
+            return 1
         input_fasta = filtered_fasta
     tab_path = out_dir / "snp_matrix.tsv"
     run_snp_dists(input_fasta, tab_path, snp_dists_path)
@@ -315,21 +384,25 @@ def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, sc
     df, nan_count = sanitize_matrix(df)
     df, cluster_order = reorder_by_cluster(df)
     n_sequences = int(df.shape[0])
-    df.to_csv(tab_path, sep="\t")
     df.to_csv(out_dir / "snp_matrix.csv")
-    try:
-        tab_path.unlink()
-    except OSError:
-        pass
+    _discard(tab_path)
+    _discard(filtered_fasta)
     distances = lower_triangle_values(df)
-    dist_path = out_dir / "snp_distances.txt"
-    np.savetxt(dist_path, distances, fmt="%s")
     lineage = detect_lineage(group_name)
     if distances.size < 3:
         write_stats(
             stats_path,
             {
                 "status": "insufficient_data",
+                # snp_matrix.csv is written and real; the plots are not, because
+                # fewer than three pairwise distances is not a distribution. The
+                # pane needs to be told that, or the group looks like a failure.
+                "message": (
+                    f"{n_sequences} sequence{'' if n_sequences == 1 else 's'} give "
+                    f"{int(distances.size)} pairwise distance"
+                    f"{'' if distances.size == 1 else 's'} — too few to plot. "
+                    "snp_matrix.csv holds the distances."
+                ),
                 "group": group_name,
                 "n_sequences": n_sequences,
                 "lineage": lineage,
@@ -358,7 +431,7 @@ def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, sc
         "iqr": [float(np.quantile(distances, 0.25)), float(np.quantile(distances, 0.75))],
         "kdp": kdp_paths,
         "closest_neighbor": neighbor_paths,
-        "fasta": str(input_fasta),
+        "fasta": str(fasta_path),
     }
     write_stats(stats_path, stats)
     return 0

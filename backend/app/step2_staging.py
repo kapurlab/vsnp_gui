@@ -37,23 +37,44 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from app.step2_inventory import Entry, db_entries, is_db_vcf, sample_of, stage_entry
 
 
-def vsnp3_would_remove(vcf_basename: str, removal_names: Set[str]) -> bool:
-    """True when vsnp3's -remove_by_name would drop this staged file.
+def removal_keys(vcf_basename: str) -> Set[str]:
+    """Every -remove_by_name spelling that would drop this staged file.
 
-    vsnp3's Remove_From_Analysis builds, for each listed name N and
-    extension "vcf", the keys N, N.vcf and N_zc.vcf, and pops those basenames
-    out of the parsed dataframes. Nothing else matches — a ``.vcf.gz`` key
-    never can.
+    vsnp3's Remove_From_Analysis builds, for each listed name N and extension
+    "vcf", the keys N, N.vcf and N_zc.vcf, and pops those basenames out of the
+    parsed dataframes. Nothing else matches — a ``.vcf.gz`` key never can. Read
+    backwards, that makes this the set of removal names a given staged file can
+    answer to, which is what lets a caller narrow a database-wide removal list
+    to the handful of names that can actually do anything in one run folder.
     """
-    if vcf_basename in removal_names:
-        return True
+    keys = {vcf_basename}
     if vcf_basename.endswith(".vcf"):
         stem = vcf_basename[: -len(".vcf")]
-        if stem in removal_names:
-            return True
-        if stem.endswith("_zc") and stem[: -len("_zc")] in removal_names:
-            return True
-    return False
+        keys.add(stem)
+        if stem.endswith("_zc"):
+            keys.add(stem[: -len("_zc")])
+    return keys
+
+
+def removals_that_bite(staged_basenames: Iterable[str], removal_names: Iterable[str]) -> List[str]:
+    """The removal names that can drop one of these staged files, sorted.
+
+    A removal name matching nothing in the run folder is a no-op: vsnp3 pops
+    keys out of dataframes it built from its own ``-wd`` glob, so a name for a
+    file that was never staged changes neither what it reads nor what it
+    writes. Dropping those names is therefore behaviour-preserving — and it is
+    the difference between a comparison folder that names its own samples and
+    one that names every isolate in the database.
+    """
+    keys: Set[str] = set()
+    for name in staged_basenames:
+        keys |= removal_keys(name)
+    return sorted(keys & {str(n).strip() for n in removal_names if str(n).strip()})
+
+
+def vsnp3_would_remove(vcf_basename: str, removal_names: Set[str]) -> bool:
+    """True when vsnp3's -remove_by_name would drop this staged file."""
+    return any(key in removal_names for key in removal_keys(vcf_basename))
 
 
 def stage_step2_vcfs(

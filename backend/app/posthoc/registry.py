@@ -4,13 +4,47 @@ from typing import Dict, List, Optional
 import shutil
 
 
+# Post-hoc results live in the GROUP folder, beside the tree and the tables
+# they describe — not in a posthoc/ subfolder of it.
+#
+# The subfolder bought nothing. It held no inputs, it grouped no set of files a
+# user thinks about separately, and the results pane already flattened it back
+# out for display ("posthoc/kdp.png"), so its only lasting effect was one more
+# level to click through on disk for a matrix that belongs with the alignment it
+# was computed from. Runs made before this change keep theirs; every lookup
+# below checks the group folder first and falls back to the old location, so an
+# existing comparison still shows and still reports its results.
+LEGACY_SUBDIR = "posthoc"
+
+
+def output_path(group_dir: Path, rel: str) -> Path:
+    """Where one output lives: current layout first, then the legacy subfolder.
+
+    Returns the current-layout path when neither exists, so a caller reporting
+    "not there yet" names the place it is going to appear.
+    """
+    direct = group_dir / rel
+    if direct.exists():
+        return direct
+    legacy = group_dir / LEGACY_SUBDIR / rel
+    if legacy.exists():
+        return legacy
+    return direct
+
+
 @dataclass(frozen=True)
 class PosthocTool:
     tool_id: str
     label: str
     description: str
     requires: List[str]
+    # The files a finished run leaves behind — the ones a user opens, and the
+    # only ones "has results" may be decided from. stats_file is deliberately
+    # NOT among them: it is written on the failure path too, so counting it as
+    # an output made a job that died on its first step report itself finished
+    # with nothing to show.
     outputs: List[str]
+    stats_file: str = "stats.json"
 
 
 TOOLS: Dict[str, PosthocTool] = {
@@ -20,12 +54,11 @@ TOOLS: Dict[str, PosthocTool] = {
         description="SNP distance matrix, KDP, and closest-neighbor plots",
         requires=["snp-dists"],
         outputs=[
-            "posthoc/snp_matrix.csv",
-            "posthoc/kdp.pdf",
-            "posthoc/kdp.png",
-            "posthoc/closest_neighbor.pdf",
-            "posthoc/closest_neighbor.png",
-            "posthoc/stats.json",
+            "snp_matrix.csv",
+            "kdp.pdf",
+            "kdp.png",
+            "closest_neighbor.pdf",
+            "closest_neighbor.png",
         ],
     )
 }

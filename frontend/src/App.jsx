@@ -6,6 +6,7 @@ import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
+import { selectStep2Run, comparisonSamples, unclaimedSamples } from "./step2Selection.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -929,6 +930,30 @@ export default function App() {
     [step2SetSamples, step2ProjectSamples]
   );
 
+  // Every sample name a reference database configured for this project's
+  // reference holds — ticked or not, and whether or not it has been copied into
+  // vcf_database yet. Needed because the manifest cannot answer this: its
+  // source_type only distinguishes "step1" from "imported", so a curated panel
+  // VCF, a hand-copied one and a Step 1 sample whose folder was later removed
+  // all look identical there.
+  const step2PanelSampleSet = useMemo(() => {
+    const names = new Set();
+    step2AvailablePanels.forEach((p) => (p.samples || []).forEach((s) => names.add(s)));
+    return names;
+  }, [step2AvailablePanels]);
+
+  // VCFs sitting in vcf_database that no source can claim: not this project's
+  // Step 1 samples, and not held by any configured reference database. Old
+  // imports and hand-copied reference VCFs land here. The source tick boxes
+  // cannot drop them — attributing them would be guesswork — so on the Build
+  // tab they ride along in every run, which is what made a comparison of "185
+  // samples, none of them mine" look inexplicable. Counted so the pane can say
+  // so out loud instead of leaving it to be discovered in the results.
+  const step2UnclaimedSamples = useMemo(
+    () => unclaimedSamples(step2SetSamples, step2ProjectSamples, step2PanelSampleSet),
+    [step2SetSamples, step2ProjectSamples, step2PanelSampleSet]
+  );
+
   // Sample-name matching for the "compare a list" tab.
   //
   // ONE RULE: the part of a name that identifies the sample is everything LEFT
@@ -1012,62 +1037,50 @@ export default function App() {
     return { tokens, rows, keep, unmatched, ambiguous };
   }, [step2ListText, step2ProjectSamplesInSet]);
 
-  // What this run will actually compare, and what it leaves behind.
-  //
-  // vcf_database is cumulative and never pruned, so the tick boxes can't be
-  // enforced by adding files alone — an unticked source whose VCFs are already
-  // in the database has to be dropped at run time (vsnp3 -remove_by_name, the
-  // same mechanism as the exclusion tiers). Only samples we can positively
-  // attribute to an unticked source are dropped on the Build tab, so a VCF from
-  // a hand-added folder is never silently lost. The List tab is an explicit
-  // allow-list, so there everything unlisted is dropped.
-  const step2RunSelection = useMemo(() => {
-    const inSet = new Set(step2SetSamples);
-    // Panel membership, restricted to what is physically in the database.
-    const enabledPanelSamples = new Set();
-    const anyPanelSamples = new Set();
-    step2AvailablePanels.forEach((p) => {
-      p.samples.forEach((s) => {
-        if (!inSet.has(s)) return;
-        anyPanelSamples.add(s);
-        if (p.enabled) enabledPanelSamples.add(s);
-      });
-    });
-    if (step2Mode === "list") {
-      const keep = new Set(step2ListResolution.keep);
-      const fromList = keep.size;
-      if (step2ListIncludeDbs) enabledPanelSamples.forEach((s) => keep.add(s));
-      return {
-        keep,
-        leaveOut: step2SetSamples.filter((s) => !keep.has(s)),
-        fromList,
-        // What the databases ADD on top of the list, so fromList + fromDbs is
-        // exactly the total (a listed sample that is also a panel accession is
-        // counted once, under the list).
-        fromDbs: keep.size - fromList,
-      };
-    }
-    // Ticked sources decide what is kept; a sample belonging to no source we can
-    // name (a hand-copied VCF, an old import) is attributed to nothing and so is
-    // never dropped. A sample can belong to several sources — a project sample
-    // that is also a panel accession is kept if EITHER source is ticked.
-    const keep = new Set();
-    if (step2UseVcfDb) step2ProjectSamplesInSet.forEach((s) => keep.add(s));
-    enabledPanelSamples.forEach((s) => keep.add(s));
-    const leaveOut = step2SetSamples.filter(
-      (s) => !keep.has(s) && (step2ProjectSamples.has(s) || anyPanelSamples.has(s))
-    );
-    const leftOut = new Set(leaveOut);
-    return {
-      keep: new Set(step2SetSamples.filter((s) => !leftOut.has(s))),
-      leaveOut,
-      fromList: 0,
-      fromDbs: enabledPanelSamples.size,
-    };
-  }, [
-    step2Mode, step2SetSamples, step2AvailablePanels, step2UseVcfDb,
-    step2ProjectSamples, step2ProjectSamplesInSet, step2ListResolution, step2ListIncludeDbs,
-  ]);
+  // What this run will actually compare, and what it leaves behind. The
+  // arithmetic lives in step2Selection.js, where it can be tested against the
+  // set shapes that produced the wrong answer in the field; this memo only
+  // feeds it the current state.
+  const step2RunSelection = useMemo(
+    () => selectStep2Run({
+      setSamples: step2SetSamples,
+      projectSamples: step2ProjectSamples,
+      projectSamplesInSet: step2ProjectSamplesInSet,
+      panels: step2AvailablePanels,
+      useVcfDb: step2UseVcfDb,
+      mode: step2Mode,
+      listKeep: step2ListResolution.keep,
+      listIncludeDbs: step2ListIncludeDbs,
+    }),
+    [
+      step2Mode, step2SetSamples, step2AvailablePanels, step2UseVcfDb,
+      step2ProjectSamples, step2ProjectSamplesInSet, step2ListResolution, step2ListIncludeDbs,
+    ]
+  );
+
+  // What vsnp3 will actually read: the selection above minus the three
+  // exclusion tiers. Everything on screen counts THIS, never `keep` — `keep`
+  // knows only about the source ticks, which is how a comparison the user had
+  // narrowed to 25 samples still announced 8,607.
+  const step2ComparisonSamples = useMemo(
+    () => comparisonSamples(step2RunSelection.keep, {
+      blocklist: step2Blocklist,
+      step1Excluded: step2QcExcluded,
+      buildExcluded: step2BuildExcluded,
+      panelAccessions: step2PanelAccessions,
+    }),
+    [step2RunSelection, step2Blocklist, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
+  );
+
+  // Unclaimed VCFs that this run actually compares. The raw unclaimed set is
+  // not the right number to put on screen: once the user acts on the warning
+  // and unticks them in the sample list, an exclusion tier drops them, and a
+  // note still saying "compared regardless" would be telling them their fix
+  // did not work.
+  const step2UnclaimedInRun = useMemo(() => {
+    const unclaimed = new Set(step2UnclaimedSamples);
+    return step2ComparisonSamples.filter((s) => unclaimed.has(s));
+  }, [step2UnclaimedSamples, step2ComparisonSamples]);
 
   // Why Step 2 cannot run, as one string — so the button, its tooltip and the
   // note under it can never disagree, and a disabled Run always says what is
@@ -1087,7 +1100,13 @@ export default function App() {
     if (step2VcfCount > 0 && step2RunSelection.keep.size === 0) {
       return step2Mode === "list"
         ? "None of the pasted sample names matched a sample in the comparison set."
-        : "Every source above is unticked, so this run would compare nothing.";
+        : "No source is ticked, so this run would compare nothing — tick this project's samples (box 1) and/or a reference database (box 2).";
+    }
+    // Sources are ticked but every sample they name is excluded (Step 1 Results,
+    // the build list, or the reference blocklist). vsnp3 would be handed an
+    // empty -wd, so say which stack of ticks is cancelling the other.
+    if (step2VcfCount > 0 && step2ComparisonSamples.length === 0) {
+      return "Every sample this run would compare is excluded — clear some exclusions in Step 1 Results or in the sample list below.";
     }
     // A mixed set is not a warning, it is a wrong answer: VCFs called against
     // different references carry different coordinates, and a matrix built
@@ -1111,7 +1130,8 @@ export default function App() {
     return "";
   }, [
     selectedProject, settingsReady, reference, projectReference, selected,
-    step2VcfCount, step2RunSelection, step2Mode, step2RefAudit, step2RefAuditBusy,
+    step2VcfCount, step2RunSelection, step2ComparisonSamples, step2Mode,
+    step2RefAudit, step2RefAuditBusy,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -3905,26 +3925,45 @@ export default function App() {
       setStep2SetupMsg(`Trimming reads to ~${mb} MB before aligning — the batch starts when that finishes. Follow it in Live Logs below.`);
     }
     setStep1AutoRefreshPending(true);
-    // T-46: surface samples auto-skipped from the dispatch (single-end,
-    // junk-sized fastqs) so the user knows what didn't run and why. Without
-    // this banner the GUI just silently runs N-of-M samples.
-    // A provenance warning means the batch STARTED but no run record was
-    // written — worth a diagnostic lab's attention, never a blocker.
-    const step1ProvWarn = data.provenance_warning
-      ? `\n\n⚠ ${data.provenance_warning}\nThe analysis itself is unaffected.`
-      : "";
+    // T-46: samples auto-skipped from the dispatch are reported INLINE, never in
+    // a modal. On a project with hundreds of misfit folders the alert stood
+    // between the user and a run they had already committed to, on every single
+    // Run, and named nothing they could act on from there — the Samples panel
+    // below already lists every misfit and offers Remove. Skipping is the
+    // designed behaviour, not an event that needs acknowledging.
     if (Array.isArray(data.skipped_samples) && data.skipped_samples.length > 0) {
-      const lines = data.skipped_samples
-        .map((s) => `  • ${s.sample}: ${s.reason}`)
-        .join("\n");
-      window.alert(
-        `Step 1 dispatched — ${data.skipped_samples.length} sample(s) auto-skipped:\n\n` +
-        lines +
-        `\n\nThese sample directories remain on disk (under step1/) but are excluded from this run (junk/broken reads, or already complete — use Force re-run to redo completed ones).` +
-        step1ProvWarn
+      // The backend already drops "already completed" from this list (they are
+      // the point of skipping, not news), so what is left is misfit input and
+      // samples that failed a previous run — and only the second kind is worth
+      // pointing at Force re-run for.
+      const nSkipped = data.skipped_samples.length;
+      const nErrored = data.skipped_samples.filter(
+        (s) => /errored/i.test(String(s.reason || ""))
+      ).length;
+      const nInput = nSkipped - nErrored;
+      // One reason family reads better unqualified ("3 held out: no usable
+      // reads") than with its own count repeated back ("3 held out: 3 with…").
+      let why = "";
+      if (nInput && nErrored) {
+        why = `: ${nInput} with no usable reads, ${nErrored} that errored before `
+            + `— tick Force re-run to retry those`;
+      } else if (nErrored) {
+        why = ": errored in a previous run — tick Force re-run to retry";
+      } else if (nInput) {
+        why = ": no usable reads";
+      }
+      setStep1SetupMsg(
+        `Step 1 started — ${nSkipped} sample${nSkipped === 1 ? "" : "s"} held out${why}. `
+        + `Their folders stay under step1/.`
       );
-    } else if (step1ProvWarn) {
-      window.alert(`Step 1 dispatched.${step1ProvWarn}`);
+    }
+    // A provenance warning means the batch STARTED but no run record was
+    // written — worth a diagnostic lab's attention, never a blocker. This one
+    // stays a modal: it is an anomaly, not a routine outcome.
+    if (data.provenance_warning) {
+      window.alert(
+        `Step 1 dispatched.\n\n⚠ ${data.provenance_warning}\nThe analysis itself is unaffected.`
+      );
     }
     // Clear the re-entry guard now that the job is recorded; step1JobStatus is
     // about to read "running" (loadStep1Status), which keeps the button disabled.
@@ -4135,11 +4174,13 @@ export default function App() {
     // whole database (or nothing at all). A resume is exempt: its comparison set
     // was fixed when the VCFs were staged, and it is those copies vsnp3 reads —
     // today's ticks say nothing about it.
-    if (!resumeRunId && step2SetSamples.length && step2RunSelection.keep.size === 0) {
+    if (!resumeRunId && step2SetSamples.length && step2ComparisonSamples.length === 0) {
       window.alert(
         step2Mode === "list"
           ? "None of the pasted sample names matched a sample in this project. Nothing to compare."
-          : "No sources are ticked, so there is nothing to compare. Tick this project's samples and/or a reference database."
+          : step2RunSelection.keep.size === 0
+            ? "No sources are ticked, so there is nothing to compare. Tick this project's samples and/or a reference database."
+            : "Every sample the ticked sources name is excluded (Step 1 Results, the build list, or the reference blocklist), so there is nothing to compare."
       );
       return;
     }
@@ -8029,7 +8070,14 @@ export default function App() {
                       {step2BuiltAt ? ` • Built at: ${step2BuiltAt}` : ""}
                     </div>
                   )}
-                  {step2RunSelection.leaveOut.length > 0 ? (
+                  {step2RunSelection.noSourceTicked ? (
+                    <div className="note warning" style={{fontSize:"0.82em"}}>
+                      <strong>Nothing is ticked, so this run would compare nothing.</strong> Every one of the{" "}
+                      {step2SetSamples.length} VCFs in <strong>{vcfsFolderName || "vcf_database"}</strong> is left out.
+                      Tick this project's samples in box 1 and/or a reference database in box 2. The files are not
+                      deleted — an untick only decides what the next Run compares.
+                    </div>
+                  ) : step2RunSelection.leaveOut.length > 0 ? (
                     <div className="note warning" style={{fontSize:"0.82em"}}>
                       <strong>This run will skip {step2RunSelection.leaveOut.length} sample
                       {step2RunSelection.leaveOut.length === 1 ? "" : "s"}.</strong> {step2RunSelection.leaveOut.length === 1 ? "It is" : "They are"} in{" "}
@@ -8037,6 +8085,22 @@ export default function App() {
                       unticked above, so {step2RunSelection.leaveOut.length === 1 ? "it is" : "they are"} left out of the comparison and
                       {step2RunSelection.leaveOut.length === 1 ? " is" : " are"} hidden from the sample list below. The files are not deleted —
                       tick the source again to include {step2RunSelection.leaveOut.length === 1 ? "it" : "them"}.
+                    </div>
+                  ) : null}
+                  {/* VCFs no tick box can reach. They are compared whatever the
+                      ticks say, so the pane has to name them: they were the whole
+                      of a run that looked like it had picked 185 samples at random. */}
+                  {!step2RunSelection.noSourceTicked && step2UnclaimedInRun.length > 0 ? (
+                    <div className="note warning" style={{fontSize:"0.82em"}}>
+                      <strong>{step2UnclaimedInRun.length} VCF{step2UnclaimedInRun.length === 1 ? "" : "s"} in{" "}
+                      {vcfsFolderName || "vcf_database"} belong{step2UnclaimedInRun.length === 1 ? "s" : ""} to no source above.</strong>{" "}
+                      {step2UnclaimedInRun.length === 1 ? "It was" : "They were"} copied or imported in earlier and
+                      {step2UnclaimedInRun.length === 1 ? " is" : " are"} not one of this project's Step 1 samples, so no tick box
+                      above can drop {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
+                      {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} compared regardless. To leave{" "}
+                      {step2UnclaimedInRun.length === 1 ? "it" : "them"} out, untick{" "}
+                      {step2UnclaimedInRun.length === 1 ? "it" : "them"} in the sample list below (marked{" "}
+                      <em>imported</em>), or use <em>Compare a list of samples</em>, which compares only what you name.
                     </div>
                   ) : null}
                 </div>
@@ -8270,7 +8334,7 @@ export default function App() {
                         ? vcfSourceSamples.length
                         : vcfSourceSamples.length - step2LeftOutSet.size}{" "}
                       {step2LeftOutSet.size > 0 && !vcfSourceShowLeftOut
-                        ? "samples in this run"
+                        ? "samples from this run's ticked sources"
                         : `samples in ${vcfsFolderName || "vcf_database"}`}
                     </button>
                     {vcfSourceOpen && (
@@ -8314,6 +8378,9 @@ export default function App() {
                                     : `${filtered.length} of ${listedTotal} samples`}
                                   {excludedCount > 0 && (
                                     <span style={{color:"var(--danger, #a94442)"}}> · {excludedCount} excluded from Step 2</span>
+                                  )}
+                                  {!q && (
+                                    <span> · <strong>{step2ComparisonSamples.length}</strong> will be compared</span>
                                   )}
                                   {step2LeftOutSet.size > 0 && (
                                     <span style={{color:"var(--warning, #8a6d3b)"}}>
@@ -8376,18 +8443,42 @@ export default function App() {
                                         <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
                                       )}
                                     </span>
-                                    {s.source_type && (
-                                      <span style={{
-                                        flexShrink:0,
-                                        fontSize:"0.8em",
-                                        padding:"0 4px",
-                                        borderRadius:"3px",
-                                        background: s.source_type === "step1" ? "var(--accent-subtle, #dff0d8)" : "var(--info-subtle, #d9edf7)",
-                                        color: s.source_type === "step1" ? "var(--accent-dark, #3c763d)" : "var(--info-dark, #31708f)",
-                                      }}>
-                                        {s.source_type === "step1" ? "step1" : "ref db"}
-                                      </span>
-                                    )}
+                                    {s.source_type && (() => {
+                                      // The manifest only knows "step1" vs "imported", so the
+                                      // badge used to read "ref db" for everything that was not
+                                      // a Step 1 sample — including hand-copied VCFs and Step 1
+                                      // samples whose folder was later removed. On a project
+                                      // with no reference database configured at all, a list of
+                                      // 185 rows every one of which claimed "ref db" was simply
+                                      // false. Only a sample a configured database actually
+                                      // holds gets that badge; the rest are "imported".
+                                      const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
+                                      const origin = s.source_type === "step1" ? "step1" : (inRefDb ? "ref db" : "imported");
+                                      const palette = origin === "step1"
+                                        ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
+                                        : origin === "ref db"
+                                          ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
+                                          : {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"};
+                                      return (
+                                        <span
+                                          title={origin === "step1"
+                                            ? "Produced by this project's Step 1"
+                                            : origin === "ref db"
+                                              ? "Held by a reference database configured for this project's reference"
+                                              : "In vcf_database but claimed by no source — copied or imported in earlier, and not one of this project's Step 1 samples. No tick box above can drop it; untick it here to leave it out."}
+                                          style={{
+                                            flexShrink:0,
+                                            fontSize:"0.8em",
+                                            padding:"0 4px",
+                                            borderRadius:"3px",
+                                            background: palette.bg,
+                                            color: palette.fg,
+                                          }}
+                                        >
+                                          {origin}
+                                        </span>
+                                      );
+                                    })()}
                                   </div>
                                   );
                                 })}
@@ -8778,22 +8869,39 @@ export default function App() {
                   if (!inSet) return selected ? `VCFs in set: ${inSet}` : "";
                   const runN = step2RunSelection.keep.size;
                   const outN = step2RunSelection.leaveOut.length;
+                  // runN counts only what the source ticks / pasted list keep;
+                  // cmpN is what vsnp3 will actually read, once Step 1 Results,
+                  // the build list and the reference blocklist have had their
+                  // say. Reporting runN was how a comparison the user had
+                  // narrowed to 25 samples still announced 8,607 — and "ready
+                  // to Run" is only true when step2RunBlock has no objection.
+                  const cmpN = step2ComparisonSamples.length;
+                  const ready = step2RunBlock ? "" : " — ready to Run";
                   if (step2Mode === "list") {
                     if (runN === 0) {
                       return `VCFs in set: ${inSet} — paste sample names above to choose what this run compares`;
                     }
                     const dbs = step2RunSelection.fromDbs > 0
                       ? ` + ${step2RunSelection.fromDbs} from the ticked databases` : "";
+                    const dropped = runN - cmpN > 0
+                      ? ` · ${runN - cmpN} of them excluded` : "";
                     const others = outN > 0
                       ? ` · ${outN} other${outN === 1 ? "" : "s"} in vcf_database stay out of this run` : "";
-                    return `This run compares ${runN} sample${runN === 1 ? "" : "s"} `
-                      + `(${step2RunSelection.fromList} from your list${dbs})${others} — ready to Run`;
+                    return `This run compares ${cmpN} sample${cmpN === 1 ? "" : "s"} `
+                      + `(${step2RunSelection.fromList} from your list${dbs})${dropped}${others}${ready}`;
                   }
-                  if (outN > 0) {
-                    return `This run compares ${runN} of the ${inSet} VCFs in the set `
-                      + `(${outN} left out by unticked sources) — ready to Run`;
+                  if (step2RunSelection.noSourceTicked) {
+                    return `VCFs in set: ${inSet} — tick a source above to choose what this run compares`;
                   }
-                  return `VCFs in set: ${inSet} — ready to Run`;
+                  const excludedN = runN - cmpN;
+                  const unclaimedN = step2UnclaimedInRun.length;
+                  const why = [];
+                  if (outN > 0) why.push(`${outN} left out by unticked sources`);
+                  if (excludedN > 0) why.push(`${excludedN} excluded`);
+                  if (unclaimedN > 0) why.push(`includes ${unclaimedN} claimed by no source`);
+                  return `This run compares ${cmpN} of the ${inSet} VCFs in the set`
+                    + (why.length ? ` (${why.join(", ")})` : "")
+                    + ready;
                 })()}
               </div>
               {step2EditedCount > 0 ? (

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:tree": "node test/tree_layout.test.mjs && node test/tree_view.test.mjs",
     "test:igv": "node test/igv_locus.test.mjs",
-    "test": "npm run test:tree && npm run test:igv"
+    "test": "npm run test:tree && npm run test:igv && npm run test:step2",
+    "test:step2": "node test/step2_selection.test.mjs"
   },
   "dependencies": {
     "igv": "^3.8.0",

@@ -91,8 +91,43 @@ def _resolve_db_root() -> Path:
 DB_ROOT = _resolve_db_root()
 
 _SHARED_VSNP3 = TOOLS_ROOT / "vsnp3"
+# The bdtools launcher exports BDTOOLS_TOOLS_ROOT=<bdtools home>/checkouts so
+# sibling tool CHECKOUTS resolve (kraken_id_parse_gui, mlst_gui, ...). But the
+# vsnp3 ENV it builds is not a checkout: install-local.sh publishes it as
+# <site>/tools/vsnp3 and labels that symlink "GUI vsnp3_path". Keyed off
+# TOOLS_ROOT alone, _SHARED_VSNP3 became <checkouts>/vsnp3 -- which never
+# exists -- and the default fell through to the personal miniforge env. That
+# env need not hold vsnp3 at all: on a bdtools-local install it was a path
+# nothing had created, and this backend's own first-start registry write then
+# created a dependencies/ dir inside it. The GUI read and wrote reference
+# locations in that phantom install while every job ran the real vsnp3 off
+# PATH, so the dropdowns validated one set of references and Step 2 resolved
+# another -- a reference whose metadata the UI could see and vsnp3 could not
+# (mtbc0_v1.1, 2026-09-10).
+_SITE_TOOLS_VSNP3 = _SITE_ROOT / "tools" / "vsnp3"
 _PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
-_DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
+
+
+def _is_vsnp3_install(path: Path) -> bool:
+    """True only when the CLI a job actually executes lives there.
+
+    is_dir() was too weak a test -- it accepts any directory that happens to
+    carry the right name, and a vsnp3_path with no bin/vsnp3_step2.py can
+    never be the install a job runs. Requiring the entry point is what keeps
+    what the GUI displays and what Step 2 executes the same vsnp3."""
+    return (path / "bin" / "vsnp3_step2.py").is_file()
+
+
+def _resolve_default_vsnp3() -> Path:
+    for candidate in (_SHARED_VSNP3, _SITE_TOOLS_VSNP3, _PERSONAL_VSNP3):
+        if _is_vsnp3_install(candidate):
+            return candidate
+    # Nothing built yet (fresh machine, or an env mid-build). Keep the old
+    # answer so the "vsnp3 not found" the UI reports still names a useful path.
+    return _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
+
+
+_DEFAULT_VSNP3_PATH = _resolve_default_vsnp3()
 
 # Shared projects root (T-12a). Surfaces in /api/config; backend's project
 # listing scans both this and per-user projects_root. Multi-user server installs

@@ -98,6 +98,31 @@ if [ -f "${TREE_PY}" ]; then
   "${PYBIN}" "${SCRIPT_DIR}/bootstrapfix.py" "${TREE_PY}"
 fi
 
+# metadata_df unbound whenever a reference ships no *_metadata.xlsx.
+# vsnp3_group_on_defining_snps initializes metadata_test at the top of
+# __init__ but binds metadata_df ONLY inside the `if metadata:` branch, and
+# the later call
+#   self.resolve_sample_name_detail(base, metadata_df, metadata_test)
+# evaluates its arguments before the callee's own `if not metadata_test:
+# return` guard can fire -- so a reference with no metadata worksheet died
+# with UnboundLocalError at "Getting dataframe essential positions...",
+# after the run had already validated 81 VCFs and printed its config
+# (mtbc0_v1.1, 2026-09-10; 18 of the 22 USDA references ship no metadata).
+# Exactly the shape of the read_length guard in the v3.16 .patch set, and a
+# content fix for the same reason as the CPU cap: that set is skipped on
+# 3.35/3.36, where this bug is live. `&` re-emits the matched initializer so
+# the anchor is written once, and the kapurlab marker makes it idempotent.
+GROUP_PY="${PREFIX}/bin/vsnp3_group_on_defining_snps.py"
+if [ -f "${GROUP_PY}" ] && ! grep -qF "kapurlab: metadata_df" "${GROUP_PY}"; then
+  if grep -qE '^        metadata_test = False$' "${GROUP_PY}"; then
+    sed -i '0,/^        metadata_test = False$/s//&\n        metadata_df = None  # kapurlab: metadata_df is bound only inside the if-metadata branch below, but is passed as an argument to resolve_sample_name_detail -- Python evaluates arguments before that callee can return on its own not-metadata_test guard, so a reference with no *_metadata.xlsx raised UnboundLocalError/' "${GROUP_PY}"
+    echo "applied metadata_df guard to ${GROUP_PY}"
+  else
+    echo "warning: no 8-space 'metadata_test = False' initializer in ${GROUP_PY};" >&2
+    echo "         skipping the metadata_df guard (upstream may have fixed or moved it)." >&2
+  fi
+fi
+
 # The .patch set below is unified-diff against v3.16 and does not apply to any
 # other release — v3.35 restructured all four target files, so every hunk fails.
 # We deploy both (/srv carries v3.16, the bdtools checkout env carries v3.35),

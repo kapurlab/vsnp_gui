@@ -34,6 +34,17 @@ def _write_paths_file(deps_file: Path, paths: List[str]) -> None:
     `conda create ... vsnp3` on the machine is born pre-seeded with this
     install's paths. A rename breaks the link and edits only this install.
     """
+    # Create dependencies/ only INSIDE an install that exists. mkdir(parents=True)
+    # on a vsnp3_path pointing nowhere fabricates the whole tree
+    # (~/miniforge3/envs/vsnp3/dependencies and every parent), and that phantom
+    # then satisfies every "is it configured?" check here while having no bin/ to
+    # run — the Reference Editor lists references from it, the run executes some
+    # other vsnp3 on PATH, and the two registries disagree silently.
+    if not deps_file.parent.is_dir() and not deps_file.parent.parent.is_dir():
+        raise FileNotFoundError(
+            f"no vsnp3 install at {deps_file.parent.parent} — refusing to create "
+            f"one by writing {deps_file.name}"
+        )
     deps_file.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(deps_file.parent), prefix=".rop-")
     try:

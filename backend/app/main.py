@@ -328,6 +328,39 @@ def _script_bin_dir(cfg: Dict) -> Optional[Path]:
     return candidate if candidate.is_dir() else None
 
 
+def _require_vsnp3_script(cfg: Dict, script: str) -> Path:
+    """Absolute path to a vsnp3 script inside the CONFIGURED install.
+
+    Refuses rather than falling back to PATH. The fallback is what made a
+    half-present install dangerous instead of merely broken: references were read
+    from <vsnp3_path>/dependencies while the analysis ran from whatever other
+    vsnp3 happened to be first on PATH, so Step 2 completed against reference
+    data the user had never edited. Failing here costs a settings change; the
+    alternative costs a result nobody can tell is wrong.
+    """
+    configured = (cfg.get("vsnp3_path") or "").strip()
+    if configured:
+        candidate = Path(configured) / "bin" / script
+        if candidate.is_file():
+            return candidate
+    on_path = shutil.which(script)
+    detail = (
+        f"vsnp3 is not usable at the configured path: {configured or '(unset)'} "
+        f"has no bin/{script}."
+    )
+    if on_path:
+        detail += (
+            f" A different vsnp3 is on PATH ({on_path}); it is NOT being used, "
+            "because it has its own reference registry and would analyse against "
+            "references other than the ones this app reads and edits. "
+            f"Set vsnp3_path to {Path(on_path).resolve().parent.parent} in Settings "
+            "if that is the install you want."
+        )
+    else:
+        detail += " Set vsnp3_path in Settings to a vsnp3 install."
+    raise HTTPException(status_code=500, detail=detail)
+
+
 def _tool_bin_dir(cfg: Dict) -> Optional[Path]:
     bcftools_path = cfg.get("bcftools_path", "").strip()
     if bcftools_path:
@@ -4914,7 +4947,14 @@ def step2_run(project: str, payload: Step2Request):
         )
 
     safe_reference = _require_ref_token(payload.reference, "reference")
-    cmd = f"vsnp3_step2.py -wd {shlex.quote(str(run_dir))} {flags_str} -t {shlex.quote(safe_reference)}{remove_arg}"
+    # Run the vsnp3 we READ from, by absolute path. A bare "vsnp3_step2.py"
+    # resolves through PATH, which need not be the install whose
+    # reference_options_paths.txt the Reference Editor just edited — and when the
+    # two differ nothing says so: the run succeeds, against a same-named
+    # reference from another registry. (Step 1 has always used an absolute
+    # <vsnp3_path>/bin path; Step 2 had not.)
+    step2_exe = _require_vsnp3_script(cfg, "vsnp3_step2.py")
+    cmd = f"{shlex.quote(str(step2_exe))} -wd {shlex.quote(str(run_dir))} {flags_str} -t {shlex.quote(safe_reference)}{remove_arg}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:

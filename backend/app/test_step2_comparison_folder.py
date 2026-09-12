@@ -83,7 +83,15 @@ def dispatch(root: Path, project: Path, **overrides):
              ("load_config", "reference_lock", "_step2_reference_audit", "build_env")}
     saved_start = m.job_manager.start_job
     saved_dispatch = m.provenance_writer.dispatch_step2
-    m.load_config = lambda: {"projects_root": str(root)}
+    # Step 2 now runs <vsnp3_path>/bin/vsnp3_step2.py rather than trusting PATH,
+    # so the stub config has to name an install. Nothing is executed here — the
+    # job start is faked — but the path must resolve, which is the point: a cfg
+    # with no usable vsnp3 is refused instead of falling through to whatever the
+    # machine running the tests happens to have.
+    _vsnp3 = root / "vsnp3"
+    (_vsnp3 / "bin").mkdir(parents=True, exist_ok=True)
+    (_vsnp3 / "bin" / "vsnp3_step2.py").write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    m.load_config = lambda: {"projects_root": str(root), "vsnp3_path": str(_vsnp3)}
     m.reference_lock = lambda p: {"references": ["AF2122"]}
     m._step2_reference_audit = lambda cfg, pd_: {
         "project_reference": "", "recoverable": [], "removable": [], "orphans": [], "mixed": False}

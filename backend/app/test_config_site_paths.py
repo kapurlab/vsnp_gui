@@ -67,6 +67,13 @@ def main() -> int:
     try:
         site = tmp / "site"
         (site / "tools" / "vsnp3" / "bin").mkdir(parents=True)
+        # config now resolves vsnp3_path to an install it can RUN, so the fixture
+        # has to be one. An empty bin/ is the half-present shape that used to be
+        # accepted and then silently not executed (see
+        # test_vsnp3_install_consistency): references were read from it while the
+        # analysis ran some other vsnp3 from PATH.
+        (site / "tools" / "vsnp3" / "bin" / "vsnp3_step2.py").write_text(
+            "#!/usr/bin/env python\n", encoding="utf-8")
         (site / "projects").mkdir(parents=True)
         xdg = tmp / "xdg"
 

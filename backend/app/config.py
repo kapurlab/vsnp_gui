@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -92,7 +93,55 @@ DB_ROOT = _resolve_db_root()
 
 _SHARED_VSNP3 = TOOLS_ROOT / "vsnp3"
 _PERSONAL_VSNP3 = HOME_DIR / "miniforge3" / "envs" / "vsnp3"
-_DEFAULT_VSNP3_PATH = _SHARED_VSNP3 if _SHARED_VSNP3.is_dir() else _PERSONAL_VSNP3
+
+
+def _looks_like_vsnp3(prefix: Path) -> bool:
+    """A vsnp3 install is one we can actually RUN, not merely a directory.
+
+    Every consumer of vsnp3_path divides into two camps: those that read
+    ``<prefix>/dependencies/reference_options_paths.txt`` (the Reference Editor,
+    refs.list_references) and those that execute ``<prefix>/bin/vsnp3_*.py``.
+    A prefix that satisfies the first and not the second is the worst case: the
+    GUI lists and edits references from it while the run silently falls through
+    to some other vsnp3 on PATH, with its own registry — so an analysis succeeds
+    against reference data the user never edited. Requiring the executable keeps
+    both camps pointed at one install.
+    """
+    return (prefix / "bin" / "vsnp3_step2.py").is_file()
+
+
+def _resolve_vsnp3_path() -> Path:
+    """The vsnp3 install to read AND run, nearest-first.
+
+    The old rule was `TOOLS_ROOT/vsnp3 if it is a dir else ~/miniforge3/envs/vsnp3`
+    — and the fallback was taken without asking whether it existed. On a bdtools
+    sandbox install TOOLS_ROOT/vsnp3 is absent (vsnp3 ships INSIDE the vsnp_gui
+    env), so the default became a path with nothing at it; startup then wrote a
+    registry there, whose mkdir(parents=True) created the tree and made the
+    phantom look installed from then on. Ask each candidate whether it can run
+    vsnp3 instead, and prefer the env this backend is running in — that is where
+    a conda-installed suite puts vsnp3, and it cannot disagree with the code
+    asking the question.
+    """
+    for candidate in (_SHARED_VSNP3, Path(sys.prefix), _PERSONAL_VSNP3):
+        if _looks_like_vsnp3(candidate):
+            return candidate
+    found = shutil.which("vsnp3_step2.py")
+    if found:
+        # <prefix>/bin/vsnp3_step2.py -> <prefix>. resolve() first so a shim or a
+        # symlink on PATH lands on the env that owns the script rather than on
+        # ~/bin. Derived two levels up, so CHECK it before trusting it: anything
+        # not laid out as an env prefix would otherwise become vsnp3_path and
+        # reintroduce the read-here-run-there split this function exists to stop.
+        candidate = Path(found).resolve().parent.parent
+        if _looks_like_vsnp3(candidate):
+            return candidate
+    # Nothing runnable anywhere. Keep the historic default so the UI reports a
+    # missing install at a recognisable path rather than at "".
+    return _SHARED_VSNP3
+
+
+_DEFAULT_VSNP3_PATH = _resolve_vsnp3_path()
 
 # Shared projects root (T-12a). Surfaces in /api/config; backend's project
 # listing scans both this and per-user projects_root. Multi-user server installs

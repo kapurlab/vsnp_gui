@@ -66,6 +66,25 @@ for CPU_FILE in vsnp3_step2.py vsnp3_group_on_defining_snps.py vsnp3_fasta_to_sn
   fi
 done
 
+# Optional metadata that is not optional. vsnp3 gives metadata_test a default at
+# the top of Group.__init__ but assigns metadata_df ONLY inside `if metadata:`,
+# then passes it to resolve_sample_name_detail for every sample. So a Step 2 run
+# without a metadata worksheet -- the normal case -- dies with
+#   UnboundLocalError: cannot access local variable 'metadata_df'
+# after the VCFs have been validated, loaded and grouped, which reads as a
+# corrupt run rather than a missing optional input (Kapur Lab, 2026-09-11: three
+# projects, every attempt). resolve_sample_name_detail returns early on
+# `not metadata_test` and never dereferences the value, so None is safe -- the
+# variable only has to exist. The 8-space anchor is the method-level default;
+# the 16-space one in the else-branch is left alone.
+GROUP_PY="${PREFIX}/bin/vsnp3_group_on_defining_snps.py"
+if [ -f "${GROUP_PY}" ] \
+   && grep -q "^        metadata_test = False$" "${GROUP_PY}" \
+   && ! grep -qF "kapurlab: metadata is optional" "${GROUP_PY}"; then
+  sed -i "s|^        metadata_test = False$|        metadata_test = False\n        # kapurlab: metadata is optional; give metadata_df the same method-level\n        # default so a run without a worksheet cannot die on an unbound name.\n        metadata_df = None|" "${GROUP_PY}"
+  echo "applied optional-metadata fix to ${GROUP_PY}"
+fi
+
 # Minus-strand amino acid calls: vsnp3_annotation.py translates the plus-strand
 # codon as-is, so every minus-strand ref/alt AA is wrong and the silent vs
 # nonsynonymous call is close to a coin flip (~half of MTBC genes are minus

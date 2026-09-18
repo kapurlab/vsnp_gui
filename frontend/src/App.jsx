@@ -4,6 +4,7 @@ import { APP_VERSION } from "./version";
 import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
+import Elapsed from "./Elapsed.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
 import { selectStep2Run, comparisonSamples, unclaimedSamples } from "./step2Selection.js";
@@ -89,7 +90,7 @@ function BusyButton({ onClick, busyLabel, children, disabled, onError, ...rest }
         }
       }}
     >
-      {busy ? (busyLabel || "Working…") : children}
+      {busy ? (<>{busyLabel || "Working…"} <Elapsed /></>) : children}
     </button>
   );
 }
@@ -219,7 +220,7 @@ function Step2EmptyPane({ reason, runId, runTitle, jumpTitle, busy, onResume, on
               title={`Run vsnp3 over the ${n} VCFs already staged in this folder. Nothing is re-copied.`}
               onClick={() => onResume(runId)}
             >
-              {busy ? "Starting…" : "Run this comparison"}
+              {busy ? (<>Starting… <Elapsed /></>) : "Run this comparison"}
             </button>
           ) : null}
           {jumpButton}
@@ -360,6 +361,10 @@ export default function App() {
   // second concurrent batch. Empty string when no batch has ever been
   // run for this project.
   const [step1JobStatus, setStep1JobStatus] = useState("");
+  // ISO start time the server reports for that batch, so the Run button's
+  // elapsed counter reads the run's true age rather than the age of this page
+  // — a Step 1 batch outlives a browser reload by hours.
+  const [step1JobStartedAt, setStep1JobStartedAt] = useState("");
   const [step1StatusError, setStep1StatusError] = useState("");
   // True while a stop request is in flight, to disable the Stop button and
   // show feedback (the batch can take a few seconds to tear down).
@@ -600,6 +605,9 @@ export default function App() {
   // Live job status while active: "queued" (waiting for a global concurrency
   // slot) or "running". Drives the Queued…/Running… button label.
   const [step2JobStatus, setStep2JobStatus] = useState("");
+  // Same idea for Step 2: the job's own started_at (queued_at while it waits
+  // for a slot), so the counter survives a reload mid-build.
+  const [step2JobStartedAt, setStep2JobStartedAt] = useState("");
   // False only for a run orphaned by a backend restart (alive server-side but
   // not stoppable via the API) — hides the Stop button in that case.
   const [step2Controllable, setStep2Controllable] = useState(true);
@@ -1905,6 +1913,7 @@ export default function App() {
     setStep2Running(false);
     setStep2Stopping(false);
     setStep2JobStatus("");
+    setStep2JobStartedAt("");
     setStep2Controllable(true);
     setStep2JobId("");
     // No direct loadStep2Outputs() here: loadStep2Runs(true) settles the run
@@ -2009,6 +2018,7 @@ export default function App() {
         if (!res.ok) return;
         const job = await res.json();
         setStep2JobStatus(job.status || "");
+        setStep2JobStartedAt(job.started_at || job.queued_at || "");
         // "cancelled" is the terminal state a user Stop produces — the whole
         // process tree (vsnp3 workers, RAxML) has actually exited by the time
         // the job reports it, so that's when we announce "all shut down".
@@ -2018,6 +2028,7 @@ export default function App() {
           setStep2Running(false);
           setStep2Stopping(false);
           setStep2JobStatus("");
+          setStep2JobStartedAt("");
           // Always replace the "Step 2 running…" message on a terminal state —
           // otherwise a finished run keeps showing "running…" even though the
           // button has already reverted to Run.
@@ -4387,6 +4398,7 @@ export default function App() {
     // May come back "queued" if the global concurrency cap is full — it will
     // start automatically when a slot frees.
     setStep2JobStatus(data.status || "running");
+    setStep2JobStartedAt("");
     setStep2Controllable(true);
     const blk = data.blocklist_count > 0 ? `, ${data.blocklist_count} reference-blocked` : "";
     const kept = data.panel_exempt_count > 0 ? `, ${data.panel_exempt_count} kept via panel` : "";
@@ -4459,6 +4471,7 @@ export default function App() {
         setStep2JobId(data.job_id);
         setStep2Running(true);
         setStep2JobStatus(data.status || "running");
+        setStep2JobStartedAt(data.started_at || "");
         setStep2Controllable(data.controllable !== false);
         if (data.controllable === false) {
           // Orphaned by a backend restart — still running on the server, but
@@ -4484,6 +4497,7 @@ export default function App() {
       const data = await res.json();
       setStep1Status(data.samples || []);
       setStep1JobStatus(data.job_status || "");
+      setStep1JobStartedAt(data.job_started_at || "");
       // The trim finished and the batch it queued has claimed the run: point the
       // log pane and the Stop button at the batch instead of the spent trim job.
       if (step1TrimJobId && data.job_id && data.job_id !== step1TrimJobId) {
@@ -5159,7 +5173,7 @@ export default function App() {
         </datalist>
         {!configLoaded ? (
           <div className="panel alert-banner">
-            <strong>Starting up…</strong> Gathering saved settings and this session's resources.
+            <strong>Starting up…</strong> <Elapsed /> Gathering saved settings and this session's resources.
             The first load of a fresh session can take a few minutes on an HPC filesystem —
             nothing is wrong, and this message clears by itself.
           </div>
@@ -5448,7 +5462,7 @@ export default function App() {
               <div className="note scanning" style={{display:"flex", alignItems:"center", gap:"8px"}}>
                 <span className="pulse-dot" />
                 <span>
-                  <strong>Scanning projects…</strong>{" "}
+                  <strong>Scanning projects…</strong> <Elapsed />{" "}
                   {typeof projectsScanning === "string" && projectsScanning
                     ? <code>{projectsScanning}</code> : null}{" "}
                   Counting samples and VCFs. Large projects take a while the first
@@ -5566,7 +5580,7 @@ export default function App() {
                 {projExpanded[p.name] ? (
                   <div style={{ marginLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "4px" }}>
                     {projData[p.name]?.loading ? (
-                      <div className="muted" style={{ fontSize: "12px" }}>Loading samples…</div>
+                      <div className="muted" style={{ fontSize: "12px" }}>Loading samples… <Elapsed /></div>
                     ) : !projData[p.name] || projData[p.name].samples.length === 0 ? (
                       <div className="muted" style={{ fontSize: "12px" }}>
                         No samples yet. Add FASTQs in the Inputs panel, or run Step 1.
@@ -5604,7 +5618,7 @@ export default function App() {
                                   <span className="muted" style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>vSNP outputs</span>
                                   {(() => {
                                     const s1 = sampleStep1Files[key];
-                                    if (!s1 || s1.loading) return <span className="muted" style={{ fontSize: "11px" }}>Loading…</span>;
+                                    if (!s1 || s1.loading) return <span className="muted" style={{ fontSize: "11px" }}>Loading… <Elapsed /></span>;
                                     if (!(s1.files || []).length) return <span className="muted" style={{ fontSize: "11px" }}>No Step 1 outputs yet — run Step 1 for this sample.</span>;
                                     return s1.files.map((f) => sampleFileRow(p.name, f));
                                   })()}
@@ -5613,7 +5627,7 @@ export default function App() {
                                   <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
                                     <span className="muted" style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" }}>🧬 Kraken outputs</span>
                                     {kRes?.loading ? (
-                                      <span className="muted" style={{ fontSize: "11px" }}>Loading Kraken results…</span>
+                                      <span className="muted" style={{ fontSize: "11px" }}>Loading Kraken results… <Elapsed /></span>
                                     ) : !kRes || !(kRes.files || []).length ? (
                                       <span className="muted" style={{ fontSize: "11px" }}>No Kraken output files.</span>
                                     ) : (
@@ -5816,6 +5830,7 @@ export default function App() {
                       <span className="pulse-dot" />
                     ) : null}
                     {sraStatus}
+                    {sraStatus.includes("Downloading") ? <> <Elapsed /></> : null}
                   </div>
                 ) : null}
                 {/* Persistent outcome of the last download. The skipped bucket is
@@ -5899,7 +5914,7 @@ export default function App() {
                         title="Refresh the file list"
                         style={{fontSize:"11px", padding:"2px 8px"}}
                       >
-                        {inputsLoading ? "…" : "Refresh"}
+                        {inputsLoading ? <Elapsed /> : "Refresh"}
                       </button>
                     </h3>
                     {/* Why the list can be shorter than what just downloaded: a sample
@@ -6128,6 +6143,7 @@ export default function App() {
                       <div className="note" style={{marginTop:"0.3em"}}>
                         {genomeDownloadStatus.includes("Downloading") ? <span className="pulse-dot" /> : null}
                         {genomeDownloadStatus}
+                        {genomeDownloadStatus.includes("Downloading") ? <> <Elapsed /></> : null}
                       </div>
                     ) : null}
                   </div>
@@ -6233,7 +6249,7 @@ export default function App() {
                               >
                                 Add group
                               </button>
-                              {dfStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{dfStatus}</div>}
+                              {dfStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{dfStatus}{dfStatus.endsWith("…") ? <> <Elapsed /></> : null}</div>}
                             </div>
                           ) : null}
                         </div>
@@ -6284,7 +6300,7 @@ export default function App() {
                               >
                                 Add sample
                               </button>
-                              {rmStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{rmStatus}</div>}
+                              {rmStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{rmStatus}{rmStatus.endsWith("…") ? <> <Elapsed /></> : null}</div>}
                             </div>
                           ) : null}
                         </div>
@@ -6295,7 +6311,7 @@ export default function App() {
                             Maps VCF file-stem names to human-readable labels in vSNP3 trees and tables. Column 1 = original name (VCF stem, e.g. <code>99-0100</code>), Column 2 = display label.
                           </div>
                           {metaLoading ? (
-                            <div className="note"><span className="pulse-dot" /> Loading…</div>
+                            <div className="note"><span className="pulse-dot" /> Loading… <Elapsed /></div>
                           ) : metaExists && metaFilename ? (
                             <>
                               <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
@@ -6448,7 +6464,7 @@ export default function App() {
                           </div>
 
                           {metaStatus && (
-                            <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{metaStatus}</div>
+                            <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{metaStatus}{metaStatus.endsWith("…") ? <> <Elapsed /></> : null}</div>
                           )}
                         </div>
 
@@ -6625,7 +6641,7 @@ export default function App() {
                         : "Stage the ready-to-run FASTQs from download/ into Step 1 as samples (they appear below as Not Started, ready to Run)."
                   }
                 >
-                  {grabJobStatus === "running" ? "Grabbing…" : "Grab ready-to-run samples"}
+                  {grabJobStatus === "running" ? (<>Grabbing… <Elapsed /></>) : "Grab ready-to-run samples"}
                 </button>
                 <button
                   onClick={step1Run}
@@ -6638,7 +6654,7 @@ export default function App() {
                         : ""
                   }
                 >
-                  {step1JobStatus === "running" ? "Running…" : "Run"}
+                  {step1JobStatus === "running" ? (<>Running… <Elapsed since={step1JobStartedAt} /></>) : "Run"}
                 </button>
                 {step1JobStatus === "running" ? (
                   <button
@@ -6647,7 +6663,7 @@ export default function App() {
                     disabled={step1Stopping}
                     title="Terminate the running Step 1 batch. Finished samples keep their results."
                   >
-                    {step1Stopping ? "Stopping…" : "Stop"}
+                    {step1Stopping ? (<>Stopping… <Elapsed /></>) : "Stop"}
                   </button>
                 ) : null}
               </div>
@@ -6842,7 +6858,7 @@ export default function App() {
                 <div className="modal-backdrop" onClick={() => setStep1LogSample("")}>
                   <div className="modal modal-wide log-viewer" onClick={(e) => e.stopPropagation()}>
                     <div className="log-title" style={{ fontWeight: 700 }}>Log: {step1LogSample}</div>
-                    <pre>{step1LogLoading ? "Loading..." : (step1LogText || "No log content")}</pre>
+                    <pre>{step1LogLoading ? <>Loading… <Elapsed /></> : (step1LogText || "No log content")}</pre>
                     <div className="modal-actions">
                       <CopyLogButton text={() => step1LogText} />
                       <button onClick={() => setStep1LogSample("")}>Close</button>
@@ -6874,7 +6890,7 @@ export default function App() {
                 {step1ResultsTab === "results" ? (
                   <>
                     <button onClick={() => loadQC({ refresh: true })} disabled={!selectedProject || qcLoading}>
-                      {qcLoading ? "Loading..." : "Refresh"}
+                      {qcLoading ? (<>Loading… <Elapsed /></>) : "Refresh"}
                     </button>
                     <button onClick={downloadQC} disabled={!selectedProject}>Download CSV</button>
                     <button onClick={downloadQcXlsx} disabled={!selectedProject}>Download XLSX</button>
@@ -6888,7 +6904,7 @@ export default function App() {
                       </button>
                     ) : null}
                     {exclSaveState.phase === "saving" ? (
-                      <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Saving exclusions…</span>
+                      <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Saving exclusions… <Elapsed /></span>
                     ) : exclSaveState.phase === "saved" ? (
                       <span className="muted" style={{ fontSize: "0.85em", alignSelf: "center" }}>Exclusions saved ✓</span>
                     ) : exclSaveState.phase === "error" ? (
@@ -6913,7 +6929,7 @@ export default function App() {
                     </button>
                     <button onClick={addPosthocFolder}>Add Step 1 Folder</button>
                     <button onClick={loadPosthoc} disabled={!posthocFolders.length || posthocLoading}>
-                      {posthocLoading ? "Loading..." : "Load"}
+                      {posthocLoading ? (<>Loading… <Elapsed /></>) : "Load"}
                     </button>
                     {posthocColWidths.resized ? (
                       <button className="ghost rt-reset" onClick={posthocColWidths.reset}
@@ -6935,7 +6951,8 @@ export default function App() {
                       style={{ minWidth: "10rem" }}
                     />
                     <span>
-                      Reading sample stats… {qcScan.total ? `${qcScan.done} of ${qcScan.total}` : "starting"}
+                      Reading sample stats… <Elapsed />{" "}
+                      {qcScan.total ? `${qcScan.done} of ${qcScan.total}` : "starting"}
                       {" "}— the first load of a big project builds a cache; loading it again is fast.
                     </span>
                   </div>
@@ -6946,7 +6963,7 @@ export default function App() {
                           ? `Showing ${visibleQcRows.length} of ${qcRows.length} sample(s) for ${selectedProject}.`
                           : `Loaded ${qcRows.length} sample(s) for ${selectedProject}.`)
                       : qcLoading
-                        ? "Loading sample stats…"
+                        ? <>Loading sample stats… <Elapsed /></>
                         : "No stats loaded yet."}
                   </div>
                 )}
@@ -7428,7 +7445,7 @@ export default function App() {
                 {folderModal.sampleDir ? <div className="muted" style={{ wordBreak: "break-all" }}>{folderModal.sampleDir}</div> : null}
               </div>
               {folderModal.loading ? (
-                <div className="note">Loading…</div>
+                <div className="note">Loading… <Elapsed /></div>
               ) : folderModal.error ? (
                 <div className="error">{folderModal.error}</div>
               ) : folderModal.files.length === 0 ? (
@@ -7531,7 +7548,7 @@ export default function App() {
             title="A Kraken run is in progress — click to view its log"
             style={{ position: "fixed", right: 18, bottom: 18, zIndex: 50, boxShadow: "0 6px 20px rgba(0,0,0,0.25)" }}
           >
-            <span className="pulse-dot" /> 🧬 Kraken: {krakenModal.sample} — running… (view)
+            <span className="pulse-dot" /> 🧬 Kraken: {krakenModal.sample} — running… <Elapsed /> (view)
           </button>
         ) : null}
 
@@ -7654,7 +7671,7 @@ export default function App() {
                     <button type="button" className="ghost"
                             onClick={addKrakenTaxon}
                             disabled={krakenModal.running || krakenAddingTaxon || !krakenNewTaxon.trim()}>
-                      {krakenAddingTaxon ? "Adding…" : "+ Add"}
+                      {krakenAddingTaxon ? (<>Adding… <Elapsed /></>) : "+ Add"}
                     </button>
                   </div>
                   <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
@@ -7669,7 +7686,7 @@ export default function App() {
                 </div>
                 <div className="log" ref={krakenLogRef} style={{ maxHeight: "32vh", overflow: "auto", marginTop: 8 }}>
                   {krakenModal.log.length === 0 ? (
-                    <span className="log-placeholder">Starting…</span>
+                    <span className="log-placeholder">Starting… <Elapsed /></span>
                   ) : (
                     krakenModal.log.map((line, i) => (
                       <div key={i} className={line.startsWith("ERROR") ? "log-line error" : "log-line"}>{line}</div>
@@ -7701,7 +7718,7 @@ export default function App() {
                   onClick={runKrakenForSample}
                   disabled={krakenModal.running || ((krakenModal.mode === "full" || krakenModal.mode === "parse_only") && !krakenModal.taxon.trim())}
                 >
-                  {krakenModal.running ? "Running…" : krakenModal.status === "succeeded" || krakenModal.status === "failed" ? "Run again" : "▶ Run"}
+                  {krakenModal.running ? (<>Running… <Elapsed /></>) : krakenModal.status === "succeeded" || krakenModal.status === "failed" ? "Run again" : "▶ Run"}
                 </button>
                 <button className="ghost" onClick={closeKrakenModal}>
                   {krakenModal.running ? "Run in background" : "Close"}
@@ -8879,7 +8896,7 @@ export default function App() {
                   disabled={step2Running || Boolean(step2RunBlock)}
                 >
                 {step2Running
-                  ? (<><span className="pulse-dot" />{step2JobStatus === "queued" ? "Queued…" : "Running…"}</>)
+                  ? (<><span className="pulse-dot" />{step2JobStatus === "queued" ? "Queued…" : "Running…"} <Elapsed since={step2JobStartedAt} /></>)
                   : "Run"}
               </button>
               {!step2Running && step2RunBlock ? (
@@ -8898,7 +8915,7 @@ export default function App() {
                       : "Terminate the running Step 2 build and every background process it spawned (vsnp3 workers, RAxML)."
                   }
                 >
-                  {step2Stopping ? "Shutting down…" : (step2JobStatus === "queued" ? "Cancel" : "Stop")}
+                  {step2Stopping ? (<>Shutting down… <Elapsed /></>) : (step2JobStatus === "queued" ? "Cancel" : "Stop")}
                 </button>
               ) : null}
               {step2SetupMsg ? (
@@ -9337,7 +9354,7 @@ export default function App() {
                   if (l.includes("[MISSING]") || l.includes("[DEPENDENCY_ERROR]") || l.includes("[FAILED]")) cls = "log-error";
                   else if (l.includes("[OK]")) cls = "log-success";
                   return <div key={i} className={cls}>{l}</div>;
-                }) : <div>Waiting for output...</div>
+                }) : <div>Waiting for output… <Elapsed /></div>
               ) : (
                 <div>No job running</div>
               )}
@@ -9376,7 +9393,7 @@ export default function App() {
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "0 16px", minHeight: 160 }}>
               {folderBrowser.loading ? (
-                <div className="muted" style={{ padding: 12 }}>Loading…</div>
+                <div className="muted" style={{ padding: 12 }}>Loading… <Elapsed /></div>
               ) : folderBrowser.error ? (
                 <div className="muted" style={{ padding: 12, color: "var(--danger, #c00)" }}>{folderBrowser.error}</div>
               ) : folderBrowser.entries.length === 0 && !(folderBrowser.files || []).length ? (

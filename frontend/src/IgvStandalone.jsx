@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import igv from "igv";
 import { normalizeLocus, goToLocus, landingLocus } from "./igvLocus.js";
+import Elapsed from "./Elapsed.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -430,7 +431,12 @@ export default function IgvStandalone() {
           {meta.trackCount ? ` · ${meta.trackCount} track${meta.trackCount === 1 ? "" : "s"}` : ""}
           {distinctProjects.length ? ` · ${distinctProjects.join(", ")}` : ""}
         </span>
-        {status ? <span style={{ color: "#b34", fontSize: "0.9em" }}>{status}</span> : null}
+        {status ? (
+          <span style={{ color: "#b34", fontSize: "0.9em" }}>
+            {status}
+            {status.endsWith("…") ? <> <Elapsed /></> : null}
+          </span>
+        ) : null}
       </div>
       <div ref={containerRef} style={{ flex: 1, overflow: "auto" }} />
     </div>

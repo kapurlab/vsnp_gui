@@ -24,6 +24,7 @@ import re
 import hashlib
 import tempfile
 import threading
+from datetime import datetime as _dt, timezone as _timezone
 
 # Serializes Step 1 dispatch so a fast double-click can't start two batches
 # that race over the same per-sample dirs. The check ("is a job already
@@ -3811,6 +3812,10 @@ def step1_status(project: str):
     job_id = job_id_path.read_text(encoding="utf-8").strip() if job_id_path.exists() else ""
     job = job_manager.get_job(job_id) if job_id else None
     job_status = job["status"] if job else "unknown"
+    # When this run started, so the GUI's "Running…" button can count up from
+    # the real start instead of from whenever the page happened to load. Falls
+    # back to the queue time for a job still waiting on a concurrency slot.
+    job_started_at = (job.get("started_at") or job.get("queued_at") or "") if job else ""
     # Restart resilience: the batch is one bash job that keeps running (as an
     # orphan) across a backend restart, but the in-memory JobManager state is
     # lost, so `job` is None and job_status would read "unknown" — making live
@@ -3821,6 +3826,15 @@ def step1_status(project: str):
         script_path = step1_dir / "run_step1.sh"
         if script_path.exists() and _wrapper_process_alive(script_path):
             job_status = "running"
+            # The JobManager's start time died with the backend. run_step1.sh is
+            # written once, at launch, so its mtime is when this batch began.
+            if not job_started_at:
+                try:
+                    job_started_at = _dt.fromtimestamp(
+                        script_path.stat().st_mtime, _timezone.utc
+                    ).isoformat()
+                except OSError:
+                    job_started_at = ""
 
     vcfs_dir = vcf_db_dir(project_dir / "step2")
     in_vcfs_folder: set = set()
@@ -3951,7 +3965,12 @@ def step1_status(project: str):
         statuses.append(entry)
     # job_id so the GUI can follow the trim -> batch hand-off: the trim job
     # finishes, this starts reporting the batch's id, and the log pane re-points.
-    return {"job_status": job_status, "job_id": job_id, "samples": statuses}
+    return {
+        "job_status": job_status,
+        "job_id": job_id,
+        "job_started_at": job_started_at,
+        "samples": statuses,
+    }
 
 
 def _safe_child(parent: Path, name: str) -> Path:
@@ -4645,7 +4664,6 @@ def step2_run(project: str, payload: Step2Request):
                 ),
             )
     else:
-        from datetime import datetime as _dt
         run_ts = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_dir = step2_dir / run_ts
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -5188,7 +5206,14 @@ def step2_active(project: str):
             run_id = cur.read_text(encoding="utf-8").strip()
         except OSError:
             run_id = ""
-    return {"job_id": job_id, "run_id": run_id, "status": status, "controllable": controllable}
+    started_at = (job.get("started_at") or job.get("queued_at") or "") if job else ""
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "status": status,
+        "controllable": controllable,
+        "started_at": started_at,
+    }
 
 
 @app.post("/api/jobs/{job_id}/stop")

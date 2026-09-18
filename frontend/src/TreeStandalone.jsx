@@ -11,6 +11,7 @@ import {
   INTERNAL_LABEL_MIN_ROW_H,
 } from "./tree/draw.js";
 import { pickAt } from "./tree/hit.js";
+import Elapsed from "./Elapsed.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -771,7 +772,14 @@ export default function TreeStandalone() {
         <button onClick={midpointRoot}>Midpoint</button>
         <button onClick={resetRoot}>Reset</button>
         <button onClick={downloadTre}>Download .tre</button>
-        {status ? <span className="tree-status">{status}</span> : null}
+        {status ? (
+          <span className="tree-status">
+            {status}
+            {/* Only while it is still working — a finished/failed status is
+                not a wait, and a counter beside it would just be noise. */}
+            {status.endsWith("…") ? <> <Elapsed /></> : null}
+          </span>
+        ) : null}
       </div>
 
       {tables.length > 0 ? (

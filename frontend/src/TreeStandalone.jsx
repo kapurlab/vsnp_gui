@@ -803,7 +803,8 @@ export default function TreeStandalone() {
         </label>
         <label><input type="checkbox" checked={stripSuffix} onChange={(e) => setStripSuffix(e.target.checked)} /> Strip <code>_zc.vcf</code></label>
         <label title={"Stack sibling clades by how many tips they hold, the way FigTree's "
-                      + "Increasing / Decreasing Node Order does. The tree itself is unchanged "
+                      + "Increasing / Decreasing Node Order does \u2014 same words, same result, so a "
+                      + "tree ordered here matches the same setting in FigTree. The tree itself is unchanged "
                       + "— same topology, same branch lengths, same tips — only which "
                       + "clade is drawn above which, which is what makes a wide tree read as a "
                       + "ladder. Re-stacking clears the current selection, because a selection "
@@ -811,8 +812,8 @@ export default function TreeStandalone() {
           Node order
           <select value={ordering} onChange={(e) => setOrdering(e.target.value)}>
             <option value="file">as in file</option>
-            <option value="increasing">increasing (small clades first)</option>
-            <option value="decreasing">decreasing (large clades first)</option>
+            <option value="increasing">increasing — large clades at the top (FigTree)</option>
+            <option value="decreasing">decreasing — small clades at the top (FigTree)</option>
           </select>
         </label>
         <label title={bootstrapTitle}

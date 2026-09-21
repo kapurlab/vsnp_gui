@@ -217,15 +217,33 @@ test("file order is the default and is unchanged", () => {
                    tipOrder(lay));
 });
 
-test("increasing puts the smaller clade first", () => {
+// The words carry FigTree's meaning, verified against FigTree 1.5 on a real
+// 54-tip tree: its "increasing" draws the LARGER clade first at every node
+// (a lone reference tip lands at the very bottom), its "decreasing" the
+// smaller. The first version of this viewer had them the other way round —
+// "increasing" read as "small first" — and a tree ordered here disagreed
+// with the same setting in FigTree.
+
+test("increasing puts the larger clade first, as FigTree does", () => {
   const lay = buildLayout(parse(LADDER).nodes, { ordering: "increasing" });
-  // (d,e)=2 before (a,b,c)=3; f=1 before (g,h,i,j)=4.
+  // (a,b,c)=3 before (d,e)=2; (g,h,i,j)=4 before f=1.
+  assert.deepEqual(tipOrder(lay), ["a", "b", "c", "d", "e", "g", "h", "i", "j", "f"]);
+});
+
+test("decreasing puts the smaller clade first", () => {
+  const lay = buildLayout(parse(LADDER).nodes, { ordering: "decreasing" });
   assert.deepEqual(tipOrder(lay), ["d", "e", "a", "b", "c", "f", "g", "h", "i", "j"]);
 });
 
-test("decreasing puts the larger clade first", () => {
-  const lay = buildLayout(parse(LADDER).nodes, { ordering: "decreasing" });
-  assert.deepEqual(tipOrder(lay), ["a", "b", "c", "d", "e", "g", "h", "i", "j", "f"]);
+test("a lone reference tip goes to the bottom under 'increasing'", () => {
+  // The root of a vSNP3 tree has the reference as one child and everything
+  // else as the other; this is the picture that told the two settings apart.
+  const lay = buildLayout(parse("(root:0.0,((a:1,b:1):1,(c:1,(d:1,e:1):1):1):1);").nodes,
+                          { ordering: "increasing" });
+  assert.equal(tipOrder(lay).at(-1), "root");
+  const dec = buildLayout(parse("(root:0.0,((a:1,b:1):1,(c:1,(d:1,e:1):1):1):1);").nodes,
+                          { ordering: "decreasing" });
+  assert.equal(tipOrder(dec)[0], "root");
 });
 
 test("a tie keeps the file's order, so redraws are stable", () => {
@@ -272,10 +290,11 @@ test("a deep caterpillar does not blow the stack", () => {
   // the row walk too.
   let nwk = "t0:1";
   for (let i = 1; i < 4000; i++) nwk = `(${nwk},t${i}:1):1`;
-  const lay = buildLayout(parse(`${nwk};`).nodes, { ordering: "increasing" });
+  const lay = buildLayout(parse(`${nwk};`).nodes, { ordering: "decreasing" });
   assert.equal(lay.nLeaves, 4000);
-  // Every level is [3,999-tip subtree, one tip], so increasing peels the lone
-  // tips off first, outermost first, and the innermost pair ends up last.
+  // Every level is [3,999-tip subtree, one tip], so decreasing (small first)
+  // peels the lone tips off first, outermost first, and the innermost pair
+  // ends up last.
   const order = tipOrder(lay);
   assert.deepEqual(order.slice(0, 3), ["t3999", "t3998", "t3997"]);
   assert.deepEqual(order.slice(-2), ["t0", "t1"], "the tied innermost pair keeps file order");

@@ -24,13 +24,19 @@ export const ORDERINGS = ["file", "increasing", "decreasing"];
  * @param opts.ordering  how sibling clades are stacked down the canvas:
  *   "file"        the order the newick lists them — the default, and the only
  *                 order that matches what another viewer shows for this file;
- *   "increasing"  fewest tips first, so the small clades sit at the top;
- *   "decreasing"  most tips first.
- *   The last two are FigTree's Increasing/Decreasing Node Order. Sorting by
- *   subtree size is what turns a broad tree into a ladder, and on a few
- *   thousand closely related samples that is the difference between reading
- *   the branching order off the picture and not. Nothing about the tree
- *   changes — same topology, same branch lengths, same tips — only which
+ *   "increasing"  at every node the LARGER clade is drawn first (top), so
+ *                 the ladder runs down to the right;
+ *   "decreasing"  the smaller clade first.
+ *   These are FigTree's Increasing / Decreasing Node Order, with FigTree's
+ *   meaning — checked against FigTree 1.5 on the same tree, where "increasing"
+ *   puts a lone reference tip at the very bottom under everything else. The
+ *   words are the convention the field knows, so they are not reinterpreted
+ *   here even though "increasing" reads as if the small clades should come
+ *   first (the first version of this did exactly that, and was backwards).
+ *   Sorting by subtree size is what turns a broad tree into a ladder, and on
+ *   a few thousand closely related samples that is the difference between
+ *   reading the branching order off the picture and not. Nothing about the
+ *   tree changes — same topology, same branch lengths, same tips — only which
  *   child is drawn above which.
  * @returns the flat layout described field by field below
  */
@@ -105,7 +111,8 @@ export function buildLayout(root, opts) {
     tips[i] = t;
   }
   if (ordering === "increasing" || ordering === "decreasing") {
-    const sign = ordering === "increasing" ? 1 : -1;
+    // FigTree's sense: "increasing" = larger clade first, i.e. descending by tips.
+    const sign = ordering === "increasing" ? -1 : 1;
     for (let i = 0; i < n; i++) {
       const kids = childrenOf[i];
       // Array.prototype.sort is stable, so equal-sized clades keep the order

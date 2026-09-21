@@ -14,14 +14,29 @@
 // loop, and they give the subtree row spans (rowMin/rowMax) that make both
 // culling and clade-band drawing O(1) per node.
 
+/** Node orderings the viewer offers. See `ordering` in buildLayout. */
+export const ORDERINGS = ["file", "increasing", "decreasing"];
+
 /**
  * Build the layout for a parsed tree.
  *
  * @param root a phylotree/d3-hierarchy node: {data:{name,attribute}, children}
+ * @param opts.ordering  how sibling clades are stacked down the canvas:
+ *   "file"        the order the newick lists them — the default, and the only
+ *                 order that matches what another viewer shows for this file;
+ *   "increasing"  fewest tips first, so the small clades sit at the top;
+ *   "decreasing"  most tips first.
+ *   The last two are FigTree's Increasing/Decreasing Node Order. Sorting by
+ *   subtree size is what turns a broad tree into a ladder, and on a few
+ *   thousand closely related samples that is the difference between reading
+ *   the branching order off the picture and not. Nothing about the tree
+ *   changes — same topology, same branch lengths, same tips — only which
+ *   child is drawn above which.
  * @returns the flat layout described field by field below
  */
-export function buildLayout(root) {
+export function buildLayout(root, opts) {
   if (!root) return emptyLayout();
+  const ordering = (opts && opts.ordering) || "file";
 
   // Pass 1: pre-order walk, assigning each node an index. Iterative, not
   // recursive — a pathological newick (a caterpillar of 4,000 tips is a real
@@ -77,16 +92,51 @@ export function buildLayout(root) {
     isLeaf[i] = childrenOf[i].length === 0 ? 1 : 0;
   }
 
-  // Pass 2: rows. Tips take consecutive rows in pre-order, which is the order
-  // they are drawn down the canvas; an internal node sits at the midpoint of
-  // its first and last child, the standard rectangular layout.
+  // Tips under each node, and — when asked — sibling clades reordered by that
+  // count. Both are cheap: one backwards pass for the counts (a pre-order
+  // index is always greater than its parent's, so descending order is a
+  // post-order), and one sort per internal node.
+  const tips = new Int32Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    if (isLeaf[i]) { tips[i] = 1; continue; }
+    const kids = childrenOf[i];
+    let t = 0;
+    for (let c = 0; c < kids.length; c++) t += tips[kids[c]];
+    tips[i] = t;
+  }
+  if (ordering === "increasing" || ordering === "decreasing") {
+    const sign = ordering === "increasing" ? 1 : -1;
+    for (let i = 0; i < n; i++) {
+      const kids = childrenOf[i];
+      // Array.prototype.sort is stable, so equal-sized clades keep the order
+      // the file gave them rather than shuffling between redraws.
+      if (kids.length > 1) kids.sort((a, b) => sign * (tips[a] - tips[b]));
+    }
+  }
+
+  // Pass 2: rows. Tips take consecutive rows in the order a depth-first walk
+  // reaches them, which is the order they are drawn down the canvas; an
+  // internal node sits at the midpoint of its first and last child, the
+  // standard rectangular layout.
+  //
+  // Walked explicitly rather than by ascending index: those two are the same
+  // only while children are in file order, and reordering them is the whole
+  // point of `ordering`. Iterative for the same reason pass 1 is — a
+  // caterpillar of 4,000 tips is a real shape here.
   const leafRows = [];
-  for (let i = 0; i < n; i++) {
-    if (isLeaf[i]) {
-      row[i] = leafRows.length;
-      rowMin[i] = row[i];
-      rowMax[i] = row[i];
-      leafRows.push(i);
+  {
+    const stack = [0];
+    while (stack.length) {
+      const i = stack.pop();
+      if (isLeaf[i]) {
+        row[i] = leafRows.length;
+        rowMin[i] = row[i];
+        rowMax[i] = row[i];
+        leafRows.push(i);
+        continue;
+      }
+      const kids = childrenOf[i];
+      for (let c = kids.length - 1; c >= 0; c--) stack.push(kids[c]);
     }
   }
   const nLeaves = leafRows.length;
@@ -178,6 +228,8 @@ export function buildLayout(root) {
     rowMin,
     rowMax,
     leafRows: Int32Array.from(leafRows),
+    tips,
+    ordering,
     maxX: maxX > 0 ? maxX : 1,
     maxRank,
     // A newick with no `:length` anywhere is legal and RAxML bootstrap
@@ -198,7 +250,8 @@ function emptyLayout() {
     xLen: new Float64Array(0), xTopo: new Float64Array(0),
     rank: new Int32Array(0), row: new Float64Array(0),
     rowMin: new Float64Array(0), rowMax: new Float64Array(0),
-    leafRows: new Int32Array(0), maxX: 1, maxRank: 0, noBranchLengths: false,
+    leafRows: new Int32Array(0), tips: new Int32Array(0), ordering: "file",
+    maxX: 1, maxRank: 0, noBranchLengths: false,
     nInternalLabels: 0, nNumericInternalLabels: 0,
   };
 }
@@ -233,15 +286,25 @@ export function tipNamesUnder(layout, i) {
  * Returns rows rather than node indices because everything the search then does
  * — reveal it, mark it in the overview, step to the next one — is positional.
  */
-export function searchRows(layout, term, displayName) {
+export function searchRows(layout, term, displayName, alsoTry) {
   const out = [];
   const t = String(term || "").trim().toLowerCase();
   if (!t) return out;
+  // `alsoTry` are other spellings of the same sample, from the reference's
+  // metadata. A tree written through that metadata labels its tips
+  // `GISAID-19152935_…` for a sample the project ran as `EPI-ISL-19152935`,
+  // so searching the name you have found nothing on the tree you are looking
+  // at — the one place a name really has to be findable.
+  const terms = [t];
+  (alsoTry || []).forEach((x) => {
+    const v = String(x || "").trim().toLowerCase();
+    if (v && !terms.includes(v)) terms.push(v);
+  });
   for (let r = 0; r < layout.nLeaves; r++) {
     const i = layout.leafRows[r];
-    const raw = layout.names[i] || "";
-    const shown = displayName ? displayName(raw) : raw;
-    if (raw.toLowerCase().includes(t) || shown.toLowerCase().includes(t)) out.push(r);
+    const raw = (layout.names[i] || "").toLowerCase();
+    const shown = (displayName ? displayName(layout.names[i] || "") : "").toLowerCase();
+    if (terms.some((x) => raw.includes(x) || shown.includes(x))) out.push(r);
   }
   return out;
 }

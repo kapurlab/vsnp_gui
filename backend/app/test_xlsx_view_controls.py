@@ -114,8 +114,14 @@ def main() -> int:
         assert_eq(sorted(int(k) for k in loci), list(range(2, cols + 1)),
                   "every locus column is in LOCI")
         samples = json.loads(pagef.split("var SAMPLES = ", 1)[1].split(";", 1)[0])
-        assert_eq(samples, ["", "", "S1_meta", "S2_meta", "S3_meta", "S4_meta",
-                            "", ""],
+        # The ON-DISK stem (`S1`), not the label printed in column 1
+        # (`S1_meta`). SAMPLES is what the page's IGV launcher clicks with, and
+        # the per-cell code on this same path had always resolved the label
+        # before deciding whether to draw the cell as clickable — so shipping
+        # the label here meant a cell could look loadable and open nothing.
+        # The streaming renderer had always shipped the stem; these two paths
+        # now agree.
+        assert_eq(samples, ["", "", "S1", "S2", "S3", "S4", "", ""],
                   "one stem per row, structural rows blank")
         assert_true(pagef.count("xlsx-igv-cell") > 0,
                     "the per-cell anchors are still how this path launches IGV")

@@ -19,7 +19,8 @@
 //   node test/step2_selection.test.mjs
 
 import assert from "node:assert/strict";
-import { selectStep2Run, comparisonSamples, unclaimedSamples } from "../src/step2Selection.js";
+import { selectStep2Run, comparisonSamples, unclaimedSamples,
+         listTokens, matchTier, resolveList } from "../src/step2Selection.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -181,6 +182,63 @@ test("a panel accession that was never collected cannot be compared", () => {
   });
   assert.deepEqual(Array.from(sel.keep), ["S1"]);
   assert.equal(sel.fromDbs, 0, "a name with no file behind it adds nothing");
+});
+
+// --- Compare a list of samples: the metadata cross-reference --------------
+//
+// Reported: copy the first column of a Step 2 SNP table, paste it into
+// "Compare a list of samples", and nothing matches. That column is not the
+// sample names — vSNP3 rewrote it through the reference's *_metadata.xlsx, and
+// on an HPAI set the rewrite replaces the id outright
+// (`EPI-ISL-19152935` becomes `GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL`).
+// No rule over those two strings can connect them, so the fix is to read the
+// same workbook back: `counterparts` is what the backend's /resolve-names
+// returns for the pasted tokens.
+
+const GISAID = "GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL";
+const EPI = "EPI-ISL-19152935";
+
+test("the reported paste: metadata names find their samples", () => {
+  const r = resolveList(`${GISAID}\nSRR1723693`, [EPI, "SRR1723693"],
+                        { [GISAID]: [EPI] });
+  assert.deepEqual([...r.keep].sort(), [EPI, "SRR1723693"].sort());
+  assert.equal(r.unmatched.length, 0);
+  assert.equal(r.viaMetadata, 1, "and the pane can say so");
+});
+
+test("without the cross-reference the same paste matches nothing", () => {
+  const r = resolveList(GISAID, [EPI], {});
+  assert.deepEqual(r.unmatched, [GISAID]);
+  assert.equal(r.keep.size, 0);
+});
+
+test("a mixture of both spellings resolves to one sample, not two", () => {
+  const r = resolveList(`${GISAID}\n${EPI}`, [EPI], { [GISAID]: [EPI] });
+  assert.deepEqual([...r.keep], [EPI]);
+  assert.equal(r.rows.length, 2, "both tokens are reported");
+});
+
+test("the metadata can only add matches, never change an existing one", () => {
+  // `ERR036186_Malawi_human_L2` already matched by leading ID. A counterpart
+  // must not demote that to a metadata match or pull in another sample.
+  const before = resolveList("ERR036186_Malawi_human_L2", ["ERR036186"], {});
+  const after = resolveList("ERR036186_Malawi_human_L2", ["ERR036186"],
+                            { "ERR036186_Malawi_human_L2": ["ERR036186"] });
+  assert.deepEqual([...after.keep], [...before.keep]);
+  assert.equal(after.rows[0].tier, before.rows[0].tier);
+  assert.equal(after.viaMetadata, 0, "it matched on its own name");
+});
+
+test("tokenising: comments, tabs, quotes and vcf suffixes", () => {
+  assert.deepEqual(listTokens("# a comment\nERR1\tMalawi\nERR2, ERR3\n'ERR4_zc.vcf.gz'"),
+                   ["ERR1", "ERR2", "ERR3", "ERR4"]);
+});
+
+test("the tiers are unchanged", () => {
+  assert.equal(matchTier("ERR036186", "ERR036186"), 1);
+  assert.equal(matchTier("ERR036186", "ERR036186_Malawi"), 2);
+  assert.equal(matchTier("13-1941-6-S4-L001", "13-1941"), 3);
+  assert.equal(matchTier("ERR036186", "SRR999"), 0);
 });
 
 if (!process.exitCode) console.log(`step2 selection: ${passed} tests passed`);

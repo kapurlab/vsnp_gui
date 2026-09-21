@@ -51,30 +51,36 @@ def check(got, want, what):
         print(f"  FAIL {what}\n    got:  {got!r}\n    want: {want!r}")
 
 
+# Keyed by the SAMPLE name vsnp3 writes into the alignment. The manifest
+# records the FILE (`<sample>_zc.vcf`); vsnp3 strips `.vcf` and `_zc` when it
+# names a sequence, so the two never matched by string — every real
+# "Include: only samples" run kept 0 sequences. (The old fixture wrote
+# `_zc.vcf` into the headers too, which vsnp3 never does, so the test passed.)
 SEQS = {
-    "TX-17-0001_zc.vcf": "ACGTACGTAC",
-    "TX-17-0002_zc.vcf": "ACGTACGTAA",
-    "TX-17-0003_zc.vcf": "ACGTACGTTT",
-    "ERR2704709_zc.vcf": "TTTTACGTAC",  # a reference-panel genome, not Step 1
+    "TX-17-0001": "ACGTACGTAC",
+    "TX-17-0002": "ACGTACGTAA",
+    "TX-17-0003": "ACGTACGTTT",
+    "ERR2704709": "TTTTACGTAC",  # a reference-panel genome, not Step 1
 }
 
 
-def build_project(tmp: Path, group_name="Mbovis-11B"):
+def build_project(tmp: Path, group_name="Mbovis-11B", headers=None):
     """A project shaped the way one on disk actually is: the VCF database at
-    step2/, the comparison in a dated folder under it, groups under that."""
+    step2/, the comparison in a dated folder under it, groups under that.
+    `headers` renames alignment headers the way a metadata workbook would."""
     step2 = tmp / "project" / "step2"
     db = step2 / "vcf_database"
     db.mkdir(parents=True)
     with (db / ".vcf_source_manifest.csv").open("w", encoding="utf-8") as fh:
         fh.write("filename,source_type\n")
         for name in SEQS:
-            fh.write(f"{name},{'reference' if name.startswith('ERR') else 'step1'}\n")
+            fh.write(f"{name}_zc.vcf,{'reference' if name.startswith('ERR') else 'step1'}\n")
     group = step2 / "2026-09-03_12-19-58" / group_name
     group.mkdir(parents=True)
     with (group / f"{group_name}-2026-09-03.fasta").open("w", encoding="utf-8") as fh:
         fh.write(">root\nACGTACGTAC\n")
         for name, seq in SEQS.items():
-            fh.write(f">{name}\n{seq}\n")
+            fh.write(f">{(headers or {}).get(name, name)}\n{seq}\n")
     return step2, group
 
 
@@ -97,10 +103,11 @@ def test_manifest_is_found_from_a_dated_run_folder():
         check(find_vcf_manifest(group), step2 / "vcf_database" / ".vcf_source_manifest.csv",
               "walking up from the group reaches the database beside the runs")
         allowed = load_step1_allowlist(group)
-        check(sorted(allowed),
-              ["TX-17-0001_zc.vcf", "TX-17-0002_zc.vcf", "TX-17-0003_zc.vcf"],
-              "and only the Step 1 rows come back")
-        check("ERR2704709_zc.vcf" in allowed, False,
+        check({"TX-17-0001", "TX-17-0002", "TX-17-0003"} <= allowed, True,
+              "the Step 1 rows come back as the sample names vsnp3 writes")
+        check({"TX-17-0001_zc.vcf", "TX-17-0002_zc.vcf"} <= allowed, True,
+              "...and as the file names, for alignments written by hand")
+        check("ERR2704709" in allowed or "ERR2704709_zc.vcf" in allowed, False,
               "a reference-panel genome is not a Step 1 sample")
 
 
@@ -132,7 +139,7 @@ def test_a_second_run_still_reads_the_groups_own_alignment():
         run(group, "Mbovis-11B", group, snp_dists(), "step1_only")
         # Leave a filtered alignment behind by hand: even then it is not the
         # newest *.fasta the next run picks up.
-        (group / FILTERED_FASTA_NAME).write_text(">TX-17-0001_zc.vcf\nAAAA\n")
+        (group / FILTERED_FASTA_NAME).write_text(">TX-17-0001\nAAAA\n")
         check(find_group_fasta(group).name, "Mbovis-11B-2026-09-03.fasta",
               "the group's own alignment is chosen, not the working file")
         rc = run(group, "Mbovis-11B", group, snp_dists(), "all")
@@ -164,7 +171,7 @@ def test_a_group_with_no_step1_samples_is_told_so():
     with tempfile.TemporaryDirectory() as t:
         _step2, group = build_project(Path(t))
         aln = next(group.glob("*.fasta"))
-        aln.write_text(">root\nACGTACGTAC\n>ERR2704709_zc.vcf\nTTTTACGTAC\n")
+        aln.write_text(">root\nACGTACGTAC\n>ERR2704709\nTTTTACGTAC\n")
         rc = run(group, "Mbovis-11B", group, snp_dists(), "step1_only")
         check(rc, 1, "the run fails")
         stats = json.loads((group / "stats.json").read_text())
@@ -172,6 +179,33 @@ def test_a_group_with_no_step1_samples_is_told_so():
               f"and names the reason: {stats['message']}")
         check((group / FILTERED_FASTA_NAME).exists(), False,
               "the working alignment is cleaned up on the failure path too")
+
+
+def test_metadata_renamed_headers_are_still_step1_samples():
+    print("\n[headers written through the reference metadata still count]")
+    # vsnp3 names a sequence by the metadata's display name when the workbook
+    # has a row for it. `TX-17-0002` becomes a name with nothing of the stem
+    # left in it; only the workbook can connect the two.
+    import openpyxl
+    from app.posthoc.snp_analysis import header_stem
+    with tempfile.TemporaryDirectory() as t:
+        renamed = {"TX-17-0002": "GISAID-0002_Bovine_2024_TX", "TX-17-0003": "TX-17-0003_dairy"}
+        _step2, group = build_project(Path(t), headers=renamed)
+        meta = Path(t) / "Mbovis_metadata.xlsx"
+        wb = openpyxl.Workbook(); ws = wb.active
+        for i, (stem, shown) in enumerate(renamed.items(), start=1):
+            ws.cell(row=i, column=1, value=f"{stem}_zc.vcf"); ws.cell(row=i, column=2, value=shown)
+        wb.save(meta)
+        allowed = load_step1_allowlist(group)
+        check(header_stem("GISAID-0002_Bovine_2024_TX", allowed), "",
+              "without the workbook the renamed header is not a Step 1 sample")
+        rc = run(group, "Mbovis-11B", group, snp_dists(), "step1_only", metadata=meta)
+        check(rc, 0, "the run succeeds with the workbook")
+        stats = json.loads((group / "stats.json").read_text())
+        check(stats["n_sequences"], 3, "all three Step 1 samples were kept, renamed or not")
+        header = (group / "snp_matrix.csv").read_text().splitlines()[0]
+        check("GISAID-0002_Bovine_2024_TX" in header, True, "under the name the alignment uses")
+        check("ERR2704709" in header, False, "and the reference genome is still out")
 
 
 def test_a_comparison_made_before_the_move_still_reports():

@@ -7,7 +7,7 @@ import CopyLogButton from "./CopyLogButton";
 import Elapsed from "./Elapsed.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
-import { selectStep2Run, comparisonSamples, unclaimedSamples } from "./step2Selection.js";
+import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList } from "./step2Selection.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -441,6 +441,9 @@ export default function App() {
   const [editVcfNote, setEditVcfNote] = useState("");
   const [editVcfReason, setEditVcfReason] = useState("");
   const [editVcfCurrent, setEditVcfCurrent] = useState(null);
+  // Raise QUAL/MQ/AC to values Step 2 accepts, for a call confirmed in IGV.
+  // Default on: an edit Step 2 then filters out is exactly the complaint.
+  const [editVcfPassFilters, setEditVcfPassFilters] = useState(true);
   const [step2SetupMsg, setStep2SetupMsg] = useState("");
   const [refLock, setRefLock] = useState({ references: [] });
   const [projectReference, setProjectReference] = useState("");
@@ -558,6 +561,13 @@ export default function App() {
   // .xlsx). Always excluded, shown locked + distinctly — cannot be re-included
   // from Step 2 (edit the reference file to change it).
   const [step2Blocklist, setStep2Blocklist] = useState({});
+  // Remove-list entries written as metadata display names: vsnp3 matches
+  // file names, so these remove nothing. Shown as a warning, never as blocked.
+  const [step2BlocklistIneffective, setStep2BlocklistIneffective] = useState([]);
+  // {stored sample name: [every other name it goes by]}, for this project's
+  // samples. Lets every "Filter samples…" box match the spelling a SNP table
+  // or a tree uses.
+  const [projectNameAliases, setProjectNameAliases] = useState({});
   // Accessions available from an enabled reference panel — these override a
   // Step 1 exclusion (an external panel VCF isn't a Step 1 sample), so the build
   // list shows them kept rather than "excluded in Step 1".
@@ -622,6 +632,44 @@ export default function App() {
   // Item 6: Reference Editor
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
+  // "Find a sample": which of this reference's spreadsheets mention a name.
+  const [refEditorWritable, setRefEditorWritable] = useState(true);
+  // The remove list as written, with the entries vsnp3 cannot match.
+  const [rmEntries, setRmEntries] = useState(null);
+
+  async function loadRemoveEntries(refName) {
+    if (!refName) { setRmEntries(null); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/remove-from-analysis/entries`);
+      setRmEntries(res.ok ? await res.json() : null);
+    } catch { setRmEntries(null); }
+  }
+
+  async function normalizeRemoveNames() {
+    if (!refEditorRef || !rmEntries || !rmEntries.ineffective.length) return;
+    const rationale = window.prompt(
+      `Rewrite ${rmEntries.ineffective.length} remove_from_analysis entr${rmEntries.ineffective.length === 1 ? "y" : "ies"} from metadata names to the VCF file names vsnp3 matches? Rationale (required):`
+    );
+    if (!rationale || !rationale.trim()) return;
+    setRmStatus("Rewriting…");
+    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/normalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rationale: rationale.trim() }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setRmStatus(`Rewrote ${(data.changed || []).length}: ${(data.changed || []).map(([a, b]) => `${a} → ${b}`).join(", ")}`);
+      await loadRemoveEntries(refEditorRef);
+      await loadRefEditorFiles(refEditorRef);
+      await loadStep2Blocklist();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setRmStatus(`Error: ${err.detail || res.status}`);
+    }
+  }
+  const [refFindQuery, setRefFindQuery] = useState("");
+  const [refFindResult, setRefFindResult] = useState(null);
+  const [refFindBusy, setRefFindBusy] = useState(false);
   const [refEditorPath, setRefEditorPath] = useState("");
   const [metaRows, setMetaRows] = useState([]);
   const [metaFilename, setMetaFilename] = useState(null);
@@ -705,7 +753,7 @@ export default function App() {
     const de = qcDateEnd;
     return qcRows
       .filter((r) => !showFlaggedOnly || isFlagged(r))
-      .filter((r) => !q || String(r._sample || r.sample || "").toLowerCase().includes(q))
+      .filter((r) => !q || nameMatches(r._sample || r.sample || "", q))
       .filter((r) => {
         if (!ds && !de) return true;
         const rd = qcRunDate(r);
@@ -726,7 +774,8 @@ export default function App() {
   // them actually changes.
   const _visibleQcRows = useMemo(
     computeVisibleQcRows,
-    [qcRows, showFlaggedOnly, qcFilter, qcDateStart, qcDateEnd]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [qcRows, showFlaggedOnly, qcFilter, qcDateStart, qcDateEnd, projectNameAliases]
   );
 
   /* Step 1 Results column sorting. null key = the order the scanner returned,
@@ -894,8 +943,9 @@ export default function App() {
   const step1StatusFiltered = useMemo(() => {
     const q = step1SampleFilter.trim().toLowerCase();
     if (!q) return step1StatusSorted;
-    return step1StatusSorted.filter((s) => String(s.sample || "").toLowerCase().includes(q));
-  }, [step1StatusSorted, step1SampleFilter]);
+    return step1StatusSorted.filter((s) => nameMatches(s.sample || "", q));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step1StatusSorted, step1SampleFilter, projectNameAliases]);
 
   // --- Step 2 setup: sources, sample-name matching, run-time keep set --------
 
@@ -992,66 +1042,111 @@ export default function App() {
   //   3 prefix     — for IDs with no underscore at all (dashed lab IDs), one
   //                  name is the other's prefix at a `-` or `.` boundary:
   //                  `13-1941` finds `13-1941-6-S4-L001`.
-  function step2LeadingId(name) {
-    const head = String(name).split("_")[0].trim();
-    return head.length >= 4 ? head.toLowerCase() : "";
+  // The reference metadata's answer for the names currently in the box:
+  // {token: [other spellings]}. Fetched rather than computed, because the
+  // mapping lives in the reference's *_metadata.xlsx and only the backend
+  // reads it — see /api/projects/{p}/resolve-names for why the whole map is
+  // not shipped instead.
+  const [step2NameCounterparts, setStep2NameCounterparts] = useState({});
+  const [step2NameSource, setStep2NameSource] = useState(null);
+
+  useEffect(() => {
+    if (step2Mode !== "list" || !selectedProject) return undefined;
+    const tokens = listTokens(step2ListText);
+    if (!tokens.length) {
+      setStep2NameCounterparts({});
+      return undefined;
+    }
+    // Debounced: this fires on every keystroke in a textarea people paste
+    // hundreds of lines into.
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/resolve-names`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ names: tokens }),
+          }
+        );
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        setStep2NameCounterparts(data.counterparts || {});
+        setStep2NameSource({
+          file: data.metadata_file || "",
+          rows: data.metadata_rows || 0,
+          reference: data.reference || "",
+        });
+      } catch {
+        // A cross-reference that cannot be fetched must not break the box:
+        // matching falls back to the names as typed.
+        if (!cancelled) setStep2NameCounterparts({});
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [step2ListText, step2Mode, selectedProject]);
+
+  // What is actually behind a listed reference file. A reference tree that
+  // shares one curated master between references keeps these as symlinks, and
+  // when the master is not mounted the file is there by name and absent by
+  // content — which used to present as "View does nothing".
+  function refFileFlags(name) {
+    const f = refEditorFiles.find((x) => x.name === name);
+    if (!f) return null;
+    if (f.exists === false) {
+      return (
+        <span className="ref-editor-fileflag broken">
+          {f.symlink_to
+            ? <>broken link → {f.symlink_to}</>
+            : <>missing on disk</>}
+        </span>
+      );
+    }
+    if (f.readable === false) {
+      return <span className="ref-editor-fileflag broken">not readable by this account</span>;
+    }
+    if (f.symlink_to) {
+      return <span className="ref-editor-fileflag">link → {f.symlink_to}</span>;
+    }
+    return null;
   }
 
-  function step2MatchTier(sample, token) {
-    const s = sample.toLowerCase();
-    const t = token.toLowerCase();
-    if (s === t) return 1;
-    const ls = step2LeadingId(sample);
-    const lt = step2LeadingId(token);
-    if (ls && ls === lt) return 2;
-    const boundary = (long, short) =>
-      long.length > short.length && long.startsWith(short) && /[-.]/.test(long[short.length]);
-    if (boundary(s, t) || boundary(t, s)) return 3;
-    return 0;
-  }
+  // Find a sample across the selected reference's spreadsheets. Debounced:
+  // the box is typed into, and each query streams the define_filter (tens of
+  // thousands of cells) the first time it is read.
+  useEffect(() => {
+    const q = refFindQuery.trim();
+    if (!refEditorRef || q.length < 2) { setRefFindResult(null); return undefined; }
+    let cancelled = false;
+    setRefFindBusy(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}`
+          + `/find-sample?q=${encodeURIComponent(q)}`
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setRefFindResult({ error: err.detail || `HTTP ${res.status}` });
+          return;
+        }
+        setRefFindResult(await res.json());
+      } catch (e) {
+        if (!cancelled) setRefFindResult({ error: String(e) });
+      } finally {
+        if (!cancelled) setRefFindBusy(false);
+      }
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); setRefFindBusy(false); };
+  }, [refFindQuery, refEditorRef]);
 
-  const step2ListResolution = useMemo(() => {
-    // Line-by-line, because the two ways people paste a sample list need
-    // different splitting. A spreadsheet column arrives TAB-delimited with the
-    // label in later columns, so on a tabbed line only the first column is a
-    // name; otherwise every space/comma/semicolon-separated word on the line is
-    // one. A `#` line is a comment, and a pasted file name (…_zc.vcf.gz) is
-    // accepted as the name.
-    const tokens = [];
-    step2ListText.split(/\r?\n/).forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) return;
-      const head = trimmed.includes("\t") ? trimmed.split("\t")[0] : trimmed;
-      head.split(/[\s,;]+/).forEach((f) => {
-        const t = f.trim().replace(/^["']|["']$/g, "").replace(/(_zc)?\.vcf(\.gz)?$/i, "");
-        if (t && !t.startsWith("#")) tokens.push(t);
-      });
-    });
-    const candidates = step2ProjectSamplesInSet;
-    const keep = new Set();
-    const rows = [];
-    const unmatched = [];
-    const ambiguous = [];
-    const seenTokens = new Set();
-    tokens.forEach((token) => {
-      const key = token.toLowerCase();
-      if (seenTokens.has(key)) return;
-      seenTokens.add(key);
-      let bestTier = 0;
-      let matches = [];
-      candidates.forEach((sample) => {
-        const tier = step2MatchTier(sample, token);
-        if (!tier) return;
-        if (!bestTier || tier < bestTier) { bestTier = tier; matches = [sample]; }
-        else if (tier === bestTier) matches.push(sample);
-      });
-      if (!matches.length) { unmatched.push(token); return; }
-      if (matches.length > 1) ambiguous.push({ token, matches });
-      matches.forEach((m) => keep.add(m));
-      rows.push({ token, matches, tier: bestTier });
-    });
-    return { tokens, rows, keep, unmatched, ambiguous };
-  }, [step2ListText, step2ProjectSamplesInSet]);
+  const step2ListResolution = useMemo(
+    () => resolveList(step2ListText, step2ProjectSamplesInSet, step2NameCounterparts),
+    [step2ListText, step2ProjectSamplesInSet, step2NameCounterparts]
+  );
 
   // What this run will actually compare, and what it leaves behind. The
   // arithmetic lives in step2Selection.js, where it can be tested against the
@@ -1367,6 +1462,7 @@ export default function App() {
     if (!refName) {
       setRefEditorFiles([]);
       setRefEditorPath("");
+      setRefEditorWritable(true);
       return;
     }
     const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/files`);
@@ -1374,7 +1470,9 @@ export default function App() {
       const data = await res.json();
       setRefEditorFiles(data.files || []);
       setRefEditorPath(data.ref_path || "");
+      setRefEditorWritable(data.ref_dir_writable !== false);
     }
+    loadRemoveEntries(refName);
   }
 
   async function loadMetadata(refName) {
@@ -1468,7 +1566,11 @@ export default function App() {
       const data = await res.json();
       const addedTxt = (data.added || []).length ? `added ${(data.added || []).join(", ")}` : "nothing added";
       const skipTxt = (data.skipped || []).length ? `; skipped (already present): ${(data.skipped || []).join(", ")}` : "";
-      setRmStatus(`${addedTxt}${skipTxt}`);
+      const tr = Object.entries(data.translated || {});
+      const trTxt = tr.length
+        ? `; written as the VCF file name vsnp3 matches: ${tr.map(([a, b]) => `${a} → ${b}`).join(", ")}`
+        : "";
+      setRmStatus(`${addedTxt}${skipTxt}${trTxt}`);
       setRmSampleText("");
       await loadRefEditorFiles(refEditorRef);
     } else {
@@ -2816,6 +2918,7 @@ export default function App() {
     loadStep2QcExclusions();
     loadStep2Blocklist();
     loadStep2PanelAccessions();
+    loadProjectNameAliases();
     loadStep2Panels();
     loadStep2BuildMeta();
   }
@@ -2862,8 +2965,29 @@ export default function App() {
         const map = {};
         (data.samples || []).forEach((s) => { map[s] = true; });
         setStep2Blocklist(map);
+        setStep2BlocklistIneffective(data.ineffective || []);
       }
     } catch (e) { /* best-effort; the build still works without it */ }
+  }
+
+  async function loadProjectNameAliases() {
+    if (!selectedProject) { setProjectNameAliases({}); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/name-aliases`);
+      if (res.ok) {
+        const data = await res.json();
+        setProjectNameAliases(data.aliases || {});
+      }
+    } catch (e) { /* filters fall back to the names as stored */ }
+  }
+
+  // Does `name` — or the other name Step 2 shows for it — contain `q`?
+  // `q` is already lower-cased by every caller.
+  function nameMatches(name, q) {
+    const n = String(name || "");
+    if (n.toLowerCase().includes(q)) return true;
+    const others = projectNameAliases[n];
+    return Array.isArray(others) && others.some((o) => String(o).toLowerCase().includes(q));
   }
 
   // Accessions backed by an enabled reference panel — override Step 1 exclusions.
@@ -5027,7 +5151,8 @@ export default function App() {
         locus: editVcfLocus,
         new_alt: editVcfAlt,
         note: editVcfNote,
-        reason: editVcfReason
+        reason: editVcfReason,
+        pass_filters: editVcfPassFilters
       })
     });
     if (!res.ok) {
@@ -5036,7 +5161,13 @@ export default function App() {
       return;
     }
     const data = await res.json();
-    window.alert(`VCF patched:\\n${data.patched_vcf}`);
+    const setFields = Object.entries((data.entry && data.entry.set) || {});
+    const setNote = setFields.length
+      ? `\\nAlso set so Step 2 accepts the call: ${setFields.map(([k, v]) => `${k}=${v}`).join(", ")} (marked CURATED; measured values kept in the header and log).`
+      : editVcfPassFilters
+        ? "\\nQUAL, MQ and AC already pass Step 2's thresholds; only the ALT changed."
+        : "\\nOnly the ALT changed, as requested.";
+    window.alert(`VCF patched:\\n${data.patched_vcf}${setNote}`);
     setEditVcfOpen(false);
     if (project === selectedProject) {
       await loadQC();
@@ -6188,6 +6319,119 @@ export default function App() {
             </section>
             <section className="panel">
               <h2>Edit Filter / Exclusion Spreadsheets</h2>
+              {refEditorRef && !refEditorWritable ? (
+                <div className="note warning" style={{fontSize:"0.85em", marginBottom:"0.6em"}}>
+                  <strong>This reference is read-only to the account running the GUI.</strong>{" "}
+                  Viewing, downloading and searching work; <em>Replace</em>, <em>Add group</em> and
+                  <em> Add sample</em> will be refused. The directory is{" "}
+                  <code>{refEditorPath}</code>.
+                </div>
+              ) : null}
+              {refEditorRef ? (
+                <div className="ref-editor-card" style={{marginBottom:"0.8em"}}>
+                  <h3>Find a sample</h3>
+                  <div className="muted" style={{fontSize:"0.85em", marginBottom:"0.4em"}}>
+                    Search this reference’s spreadsheets for a sample name. Both spellings are
+                    tried: the name as stored, and whatever <code>*_metadata.xlsx</code> renames it
+                    to — so a sample listed under its metadata name is still found when you
+                    search the name you know it by, and the other way round.
+                  </div>
+                  <input
+                    value={refFindQuery}
+                    onChange={(e) => setRefFindQuery(e.target.value)}
+                    placeholder="Sample name or part of one (e.g. SRR1791698)"
+                    spellCheck={false}
+                    style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em"}}
+                  />
+                  {refFindQuery.trim().length === 1 ? (
+                    <div className="muted" style={{fontSize:"0.82em", marginTop:"0.3em"}}>
+                      Type at least two characters.
+                    </div>
+                  ) : null}
+                  {refFindBusy && refFindQuery.trim().length > 1 ? (
+                    <div className="note" style={{fontSize:"0.85em", marginTop:"0.4em"}}>
+                      Searching… <Elapsed />
+                    </div>
+                  ) : null}
+                  {refFindResult && refFindResult.error ? (
+                    <div className="note warning" style={{fontSize:"0.85em", marginTop:"0.4em"}}>
+                      {refFindResult.error}
+                    </div>
+                  ) : null}
+                  {refFindResult && !refFindResult.error ? (
+                    <div style={{marginTop:"0.4em"}}>
+                      {refFindResult.also_searched && refFindResult.also_searched.length ? (
+                        <div className="note" style={{fontSize:"0.82em"}}>
+                          Also searched as{" "}
+                          <span style={{fontFamily:"monospace"}}>
+                            {refFindResult.also_searched.join(", ")}
+                          </span>
+                          {" "}— the name <code>{refFindResult.metadata_file}</code> gives this sample.
+                        </div>
+                      ) : null}
+                      {refFindResult.unsearchable && refFindResult.unsearchable.length ? (
+                        <div className="note warning" style={{fontSize:"0.82em"}}>
+                          <strong>Not searched:</strong>{" "}
+                          {refFindResult.unsearchable.map((x) => `${x.file} (${x.error})`).join("; ")}.
+                          A name could be in there and not show up here.
+                        </div>
+                      ) : null}
+                      {refFindResult.hits.length === 0 ? (
+                        <div className="note" style={{fontSize:"0.85em"}}>
+                          <strong>Not found</strong> in{" "}
+                          {refFindResult.searched.filter((x) => !x.error).map((x) => x.file).join(", ")
+                            || "any readable spreadsheet"}.
+                          {!refFindResult.metadata_file ? (
+                            <> This reference has no <code>*_metadata.xlsx</code>, so only the name as
+                            typed could be looked for.</>
+                          ) : (!refFindResult.also_searched || !refFindResult.also_searched.length) ? (
+                            <> <code>{refFindResult.metadata_file}</code> has no row for this name
+                            ({refFindResult.metadata_rows} rows), so there was no second spelling to
+                            try.</>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="note" style={{fontSize:"0.85em"}}>
+                            <strong>{refFindResult.hits.length}</strong> match
+                            {refFindResult.hits.length === 1 ? "" : "es"}
+                            {refFindResult.truncated ? " (showing the first page)" : ""}
+                          </div>
+                          <div style={{maxHeight:"260px", overflowY:"auto", fontSize:"0.8em", marginTop:"4px"}}>
+                            <table className="ref-find-hits">
+                              <tbody>
+                                {refFindResult.hits.map((h, i) => (
+                                  <tr key={`${h.file}-${h.sheet}-${h.cell}-${i}`}>
+                                    <td style={{whiteSpace:"nowrap"}}>
+                                      <span className={h.type === "remove_from_analysis" ? "warning" : undefined}>
+                                        {h.file}
+                                      </span>
+                                    </td>
+                                    <td className="muted" style={{whiteSpace:"nowrap"}}>
+                                      {h.sheet}!{h.cell}
+                                    </td>
+                                    <td style={{fontFamily:"monospace", wordBreak:"break-all"}}>{h.text}</td>
+                                    <td className="muted" style={{whiteSpace:"nowrap", fontStyle:"italic"}}>
+                                      {h.exact ? "exact" : "contains"}
+                                      {h.via_metadata ? " · via metadata" : ""}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          {refFindResult.hits.some((h) => h.type === "remove_from_analysis") ? (
+                            <div className="note warning" style={{fontSize:"0.82em", marginTop:"0.4em"}}>
+                              This name appears in <strong>remove_from_analysis</strong>: samples listed
+                              there are excluded from every Step 2 run against this reference.
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {refEditorRef ? (
                 <div className="block">
                   {(() => {
@@ -6204,7 +6448,7 @@ export default function App() {
                           </div>
                           {hasDefine && defineFile ? (
                             <div className="ref-editor-file-row">
-                              <span className="ref-editor-filename">{defineFile.name}</span>
+                              <span className="ref-editor-filename">{defineFile.name}{refFileFlags(defineFile.name) ? " " : ""}{refFileFlags(defineFile.name)}</span>
                               <button onClick={() => viewRefFile(refEditorRef, defineFile.name)}>
                                 View
                               </button>
@@ -6261,7 +6505,7 @@ export default function App() {
                           </div>
                           {hasRemove && removeFile ? (
                             <div className="ref-editor-file-row">
-                              <span className="ref-editor-filename">{removeFile.name}</span>
+                              <span className="ref-editor-filename">{removeFile.name}{refFileFlags(removeFile.name) ? " " : ""}{refFileFlags(removeFile.name)}</span>
                               <button onClick={() => viewRefFile(refEditorRef, removeFile.name)}>
                                 View
                               </button>
@@ -6284,8 +6528,27 @@ export default function App() {
                             <div style={{marginTop:"0.5em"}}>
                               <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Add sample to remove</div>
                               <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.3em"}}>
-                                Sample name(s) to permanently exclude from analysis for this reference (matches the VCF stem, no extension). One per line or comma-separated. Adds to <code>{removeFile.name}</code>.
+                                Sample name(s) to permanently exclude from analysis for this reference. One per line or
+                                comma-separated. Adds to <code>{removeFile.name}</code>. vsnp3 matches the <em>VCF file
+                                name</em> (no extension), so a name pasted from a SNP table — the metadata spelling —
+                                is translated to the file name before it is written, and the status line says so.
                               </div>
+                              {rmEntries && rmEntries.ineffective && rmEntries.ineffective.length ? (
+                                <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                                  <strong>{rmEntries.ineffective.length} entr{rmEntries.ineffective.length === 1 ? "y" : "ies"} in this
+                                  file {rmEntries.ineffective.length === 1 ? "is" : "are"} written as a metadata name and remove
+                                  nothing:</strong>{" "}
+                                  <span style={{fontFamily:"monospace"}}>
+                                    {rmEntries.ineffective.slice(0, 5).map((e) => `${e.name} → ${e.stored}`).join(", ")}
+                                    {rmEntries.ineffective.length > 5 ? ` … (+${rmEntries.ineffective.length - 5})` : ""}
+                                  </span>
+                                  <div style={{marginTop:"0.3em"}}>
+                                    <button onClick={normalizeRemoveNames} disabled={!refEditorWritable}>
+                                      Rewrite as file names
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
                               <textarea
                                 rows={2}
                                 placeholder={"sample_name\nanother_sample"}
@@ -6315,7 +6578,7 @@ export default function App() {
                           ) : metaExists && metaFilename ? (
                             <>
                               <div className="ref-editor-file-row" style={{marginBottom:"0.4em"}}>
-                                <span className="ref-editor-filename">{metaFilename}</span>
+                                <span className="ref-editor-filename">{metaFilename}{refFileFlags(metaFilename) ? " " : ""}{refFileFlags(metaFilename)}</span>
                                 <button onClick={() => viewRefFile(refEditorRef, metaFilename)}>View</button>
                                 <button className="ghost" onClick={() => downloadRefFile(refEditorRef, metaFilename)}>Download</button>
                                 <button className="ghost" onClick={() => replaceRefFile(refEditorRef, metaFilename, () => loadMetadata(refEditorRef))}>Replace</button>
@@ -7773,6 +8036,50 @@ export default function App() {
                 value={editVcfNote}
                 onChange={(e) => setEditVcfNote(e.target.value)}
               />
+              <label style={{display:"flex", gap:"0.5em", alignItems:"flex-start", marginTop:"0.6em", fontSize:"0.9em"}}>
+                <input type="checkbox" checked={editVcfPassFilters}
+                       onChange={(e) => setEditVcfPassFilters(e.target.checked)}
+                       style={{marginTop:"0.2em"}} />
+                <span>
+                  <strong>Make Step 2 accept this call.</strong> Step 2 filters a SNP on
+                  <code> QUAL</code> (&gt;150), <code>MQ</code> (≥56) and <code>AC</code> (=2) and
+                  ignores everything else, so a heterozygous or low-quality record keeps coming out
+                  as N, an ambiguity code or the reference base whatever you set the ALT to. With
+                  this on, any of those three the record fails is set to a documented value
+                  (<code>QUAL=999</code> — the same number vsnp3 itself writes for an asserted
+                  quality — <code>MQ=60</code>, <code>AC=2</code> with <code>GT=1/1</code>), the
+                  record is flagged <code>CURATED</code>, and the measured numbers are kept in the
+                  file header and the log. Gates the record already passes are left as measured.
+                </span>
+              </label>
+              <details style={{marginTop:"0.6em", fontSize:"0.82em"}}>
+                <summary style={{cursor:"pointer"}}>What this changes, exactly</summary>
+                <div className="muted" style={{marginTop:"0.3em"}}>
+                  <p style={{marginTop:0}}>
+                    <strong>The ALT allele of this one record, a <code>CURATED</code> flag in its
+                    INFO column, and — with the box above ticked — whichever of QUAL, MQ, AC
+                    (plus AN and GT alongside AC) fail Step 2’s thresholds.</strong> FILTER,
+                    <code> DP</code>, <code>AD</code> and every other field are copied through
+                    unchanged: they are what the aligner and caller measured, and nothing here can
+                    measure them again.
+                  </p>
+                  <p>
+                    <code>AD</code> in particular still counts reads for the <em>original</em> allele.
+                    That is deliberate — it is the evidence you reviewed — and the header line
+                    written for this edit records the original QUAL, MQ, AC and GT beside the new
+                    ones, so nobody reading the file later can mistake a curated value for a
+                    measured one.
+                  </p>
+                  <p style={{marginBottom:0}}>
+                    Nothing is written over your original VCF. The edit goes to a separate
+                    <code> vcf_edits/</code> copy beside the sample, is appended to
+                    <code> &lt;sample&gt;_patchlog.jsonl</code>, and is stamped into the patched
+                    file’s own VCF header — so it stays visible after Build copies that file
+                    into <strong>{vcfsFolderName || "vcf_database"}</strong>. Build then prefers the
+                    edited copy for every later Step 2 run.
+                  </p>
+                </div>
+              </details>
               <div className="modal-actions">
                 <button className="ghost" onClick={() => setEditVcfOpen(false)}>Cancel</button>
                 <button onClick={submitEditVcf}>Apply</button>
@@ -8163,7 +8470,7 @@ export default function App() {
                     <span
                       className="help-icon"
                       style={{marginLeft:"6px"}}
-                      data-tooltip="One name per line; spaces and commas also separate names. A line starting with # is ignored, a tab-delimited spreadsheet paste uses the first column, and a pasted file name (…_zc.vcf.gz) is accepted. Only samples in this project that have been collected into vcf_database can match."
+                      data-tooltip="One name per line; spaces and commas also separate names. A line starting with # is ignored, a tab-delimited spreadsheet paste uses the first column, and a pasted file name (…_zc.vcf.gz) is accepted. Sample names and the reference-metadata names a SNP table shows both work — paste either. Only samples in this project that have been collected into vcf_database can match."
                     >
                       ?
                     </span>
@@ -8198,6 +8505,14 @@ export default function App() {
                       spelled correctly (at least 4 characters). The rest of the line does not matter. An ID with
                       no underscore at all (a dashed lab ID such as <code>13-1941-6-S4-L001</code>) has to be
                       given in full, or as a leading piece of it (<code>13-1941</code>).
+                    </p>
+                    <p>
+                      <strong>Names copied out of a SNP table work too.</strong> Step 2 writes that first column
+                      through the reference’s <code>*_metadata.xlsx</code>, so a sample this project ran as{" "}
+                      <code>EPI-ISL-19152935</code> appears there as{" "}
+                      <code>GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL</code> — two names with nothing in
+                      common to compare. The same metadata file is read back here, so you can paste either
+                      spelling, or a mixture, and box 3 says how many were matched that way.
                     </p>
                     <p>
                       <strong>Watch for this:</strong> if two samples share a leading ID — say the same accession
@@ -8263,6 +8578,14 @@ export default function App() {
                           ? ` · ${step2RunSelection.leaveOut.length} other sample${step2RunSelection.leaveOut.length === 1 ? "" : "s"} in vcf_database left out of this run`
                           : ""}
                       </div>
+                      {step2ListResolution.viaMetadata ? (
+                        <div className="note" style={{fontSize:"0.82em"}}>
+                          <strong>{step2ListResolution.viaMetadata} name
+                          {step2ListResolution.viaMetadata === 1 ? "" : "s"} matched through the reference
+                          metadata</strong> — they are written the way a SNP table writes them, and were
+                          cross-referenced back to the sample names in this project.
+                        </div>
+                      ) : null}
                       {step2ListResolution.unmatched.length ? (
                         <div className="note warning" style={{fontSize:"0.82em"}}>
                           <strong>{step2ListResolution.unmatched.length} name
@@ -8272,6 +8595,13 @@ export default function App() {
                             {step2ListResolution.unmatched.slice(0, 20).join(", ")}
                             {step2ListResolution.unmatched.length > 20 ? ` … (+${step2ListResolution.unmatched.length - 20})` : ""}
                           </span>
+                          {step2NameSource && !step2NameSource.file ? (
+                            <div style={{marginTop:"3px"}}>
+                              Reference <strong>{step2NameSource.reference || "?"}</strong> has no
+                              {" "}<code>*_metadata.xlsx</code>, so names written the way a SNP table writes
+                              them cannot be cross-referenced back to samples. Add one in the Reference Editor.
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                       {step2ListResolution.ambiguous.length ? (
@@ -8302,7 +8632,11 @@ export default function App() {
                                 {r.token}
                                 <span className="muted"> → </span>
                                 {r.matches.join(", ")}
-                                {r.tier > 1 ? (
+                                {r.via ? (
+                                  <span className="muted" style={{fontFamily:"sans-serif", fontStyle:"italic"}}>
+                                    {" (via reference metadata)"}
+                                  </span>
+                                ) : r.tier > 1 ? (
                                   <span className="muted" style={{fontFamily:"sans-serif", fontStyle:"italic"}}>
                                     {r.tier === 2 ? " (same leading ID)" : " (leading piece of the name)"}
                                   </span>
@@ -8408,11 +8742,23 @@ export default function App() {
                             autoFocus
                           />
                         </div>
+                        {step2BlocklistIneffective.length ? (
+                          <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                            <strong>{step2BlocklistIneffective.length} entr{step2BlocklistIneffective.length === 1 ? "y" : "ies"} in
+                            the reference’s remove_from_analysis list {step2BlocklistIneffective.length === 1 ? "is" : "are"} written
+                            as a metadata name and will remove nothing.</strong> vsnp3 matches VCF file names, so{" "}
+                            {step2BlocklistIneffective.slice(0, 3).map((e) => (
+                              <span key={e.name}><code>{e.name}</code> (file name <code>{e.stored}</code>) </span>
+                            ))}
+                            {step2BlocklistIneffective.length > 3 ? `and ${step2BlocklistIneffective.length - 3} more ` : ""}
+                            stay in every run. Fix them in the Reference Editor (“Rewrite as file names”).
+                          </div>
+                        ) : null}
                         <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
                           {(() => {
                             const q = vcfSourceFilter.trim().toLowerCase();
                             const matching = q
-                              ? vcfSourceSamples.filter(s => s.sample.toLowerCase().includes(q) || s.filename.toLowerCase().includes(q))
+                              ? vcfSourceSamples.filter(s => nameMatches(s.sample, q) || s.filename.toLowerCase().includes(q))
                               : vcfSourceSamples;
                             // Untick a source and its VCFs leave the run, so they leave this
                             // list too — showing them unmarked reads as "still included".

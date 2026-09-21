@@ -170,3 +170,129 @@ export function comparisonSamples(keep, { blocklist, step1Excluded, buildExclude
 export function unclaimedSamples(setSamples, projectSamples, panelSampleSet) {
   return setSamples.filter((s) => !projectSamples.has(s) && !panelSampleSet.has(s));
 }
+
+// --- A pasted list of names, resolved against the project -----------------
+//
+// Lifted out of App.jsx when the metadata cross-reference went in, because at
+// that point it stopped being "compare two strings" and became a rule with
+// enough cases to be worth testing on its own.
+//
+// The reason it needed one: the names people paste most often come from the
+// FIRST COLUMN OF A SNP TABLE, and vSNP3 wrote that column through the
+// reference's metadata file. So the list says
+// `GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL` while the sample in the
+// set is `EPI-ISL-19152935`, and no comparison of those two strings will ever
+// connect them — the metadata replaced the id, it did not decorate it. Pasting
+// a group straight out of its own SNP table matched nothing.
+//
+// `counterparts` closes that: {token: [other spellings of it]}, from the
+// backend's /resolve-names, which reads the same metadata workbook vSNP3
+// renamed from. A token is tried under its own spelling first and then under
+// each counterpart, so the metadata can only ADD matches — a list that worked
+// before works identically, at the same tier.
+
+/** Split pasted text into candidate names.
+ *
+ * Line by line, because the two ways people paste need different splitting. A
+ * spreadsheet column arrives TAB-delimited with the label in later columns, so
+ * on a tabbed line only the first column is a name; otherwise every
+ * space/comma/semicolon-separated word on the line is one. A `#` line is a
+ * comment, and a pasted file name (…_zc.vcf.gz) is accepted as the name.
+ */
+export function listTokens(text) {
+  const tokens = [];
+  String(text || "").split(/\r?\n/).forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+    const head = trimmed.includes("\t") ? trimmed.split("\t")[0] : trimmed;
+    head.split(/[\s,;]+/).forEach((f) => {
+      const t = f.trim().replace(/^["']|["']$/g, "").replace(/(_zc)?\.vcf(\.gz)?$/i, "");
+      if (t && !t.startsWith("#")) tokens.push(t);
+    });
+  });
+  return tokens;
+}
+
+/** The part of a name that identifies the sample: left of the first underscore. */
+export function leadingId(name) {
+  const head = String(name).split("_")[0].trim();
+  return head.length >= 4 ? head.toLowerCase() : "";
+}
+
+/** How well `token` names `sample`; 0 for not at all, lower is better.
+ *
+ *   1 exact      — the names are identical.
+ *   2 leading ID — same text left of the first underscore (4+ characters, so a
+ *                  stray fragment can't sweep up the project).
+ *   3 prefix     — for IDs with no underscore at all (dashed lab IDs), one
+ *                  name is the other's prefix at a `-` or `.` boundary:
+ *                  `13-1941` finds `13-1941-6-S4-L001`.
+ */
+export function matchTier(sample, token) {
+  const s = String(sample).toLowerCase();
+  const t = String(token).toLowerCase();
+  if (s === t) return 1;
+  const ls = leadingId(sample);
+  const lt = leadingId(token);
+  if (ls && ls === lt) return 2;
+  const boundary = (long, short) =>
+    long.length > short.length && long.startsWith(short) && /[-.]/.test(long[short.length]);
+  if (boundary(s, t) || boundary(t, s)) return 3;
+  return 0;
+}
+
+/**
+ * Resolve a pasted list against the samples available to the run.
+ *
+ * @param {string} text            what the user pasted
+ * @param {Iterable<string>} candidates  samples this run could compare
+ * @param {Record<string,string[]>} [counterparts]  token -> other spellings
+ * @returns {{tokens: string[], rows: object[], keep: Set<string>,
+ *            unmatched: string[], ambiguous: object[], viaMetadata: number}}
+ */
+export function resolveList(text, candidates, counterparts) {
+  const tokens = listTokens(text);
+  const alt = counterparts || {};
+  const keep = new Set();
+  const rows = [];
+  const unmatched = [];
+  const ambiguous = [];
+  const seen = new Set();
+  let viaMetadata = 0;
+  const all = [...(candidates || [])];
+  tokens.forEach((token) => {
+    const key = token.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    // The token's OWN spelling decides, whenever it decides anything. The
+    // metadata is consulted only for a token that matched nothing, which makes
+    // this change strictly additive: every list that worked before resolves to
+    // the same samples at the same tier, and "matched through the reference
+    // metadata" in the pane means it genuinely could not have matched
+    // otherwise.
+    let bestTier = 0;
+    let matches = [];
+    let matchedVia = "";
+    const against = (spelling, via) => {
+      all.forEach((sample) => {
+        const tier = matchTier(sample, spelling);
+        if (!tier) return;
+        if (!bestTier || tier < bestTier) {
+          bestTier = tier; matches = [sample]; matchedVia = via;
+        } else if (tier === bestTier && !matches.includes(sample)) {
+          matches.push(sample);
+        }
+      });
+    };
+    against(token, "");
+    if (!matches.length) {
+      (alt[token] || []).forEach((spelling) => against(spelling, spelling));
+    }
+    if (!matches.length) { unmatched.push(token); return; }
+    if (matchedVia) viaMetadata++;
+    if (matches.length > 1) ambiguous.push({ token, matches });
+    matches.forEach((m) => keep.add(m));
+    rows.push({ token, matches, tier: bestTier, via: matchedVia });
+  });
+  return { tokens, rows, keep, unmatched, ambiguous, viaMetadata };
+}

@@ -51,9 +51,17 @@ class RegistryNeverFabricatesAnInstall(unittest.TestCase):
         self.root = Path(self.tmp.name)
 
     def test_writing_into_a_real_install_still_works(self):
+        """The registry records the path it was given.
+
+        add_reference_path stores the RESOLVED path, so compare resolved forms
+        on both sides — otherwise this fails on macOS, where tempfile hands back
+        /var/... and /var is a symlink to /private/var.
+        """
         prefix = make_vsnp3(self.root / "env")
         refs.add_reference_path(prefix, str(self.root))
-        self.assertIn(str(self.root), refs.get_reference_paths(prefix))
+        self.assertIn(
+            str(self.root.resolve()),
+            [str(Path(p).resolve()) for p in refs.get_reference_paths(prefix)])
 
     def test_a_prefix_with_nothing_at_it_is_refused(self):
         """mkdir(parents=True) here invents ~/miniforge3/envs/vsnp3 out of nothing.

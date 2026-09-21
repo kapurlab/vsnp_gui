@@ -49,6 +49,7 @@ from app.config import (
     apply_site_paths, set_path_override, site_path_defaults,
 )
 from app.jobs import JobManager
+from app import name_aliases
 from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
@@ -193,6 +194,144 @@ def _project_reference(project_dir: Path) -> str:
     except (json.JSONDecodeError, OSError):
         return ""
     return (meta.get("reference") or "").strip()
+
+
+def _project_reference_dir(project_dir: Path, cfg: Dict) -> Optional[Path]:
+    """The reference directory this project is locked to, or None.
+
+    Resolved by NAME against the registered roots, first hit wins — vsnp3's own
+    `-t` rule, and the same walk _project_reference_fasta_and_gff makes. Not
+    via list_references: that lists every root's every child and opens each one
+    to decide whether it looks like a reference, and this is called on the SNP
+    table preview path where a locked reference name needs one is_dir() per
+    root, not a survey of the shared reference tree.
+    """
+    ref_name = _project_reference(project_dir)
+    if not ref_name:
+        return None
+    for root in reference_roots(Path(cfg.get("vsnp3_path", ""))):
+        ref_dir = root / ref_name
+        try:
+            if ref_dir.is_dir():
+                return ref_dir
+        except OSError:
+            continue
+    return None
+
+
+def _project_metadata_file(project_dir: Path, cfg: Dict) -> Optional[Path]:
+    """The metadata workbook behind this project's reference, if it has one."""
+    return name_aliases.metadata_file(_project_reference_dir(project_dir, cfg))
+
+
+def _file_fingerprint(tag: str, path: Optional[Path]) -> str:
+    """Cache-key material for one file: identity plus size and mtime."""
+    if not path:
+        return f"{tag}:none"
+    try:
+        st = path.stat()
+        return f"{tag}:{path}:{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return f"{tag}:none"
+
+
+# (vcf_refs.csv path, mtime, size) -> NameAliases of the GUI's own tree labels.
+_LABEL_ALIAS_CACHE: Dict[tuple, Any] = {}
+
+
+def _project_sample_names(project_dir: Path) -> List[str]:
+    """Every sample this project holds: Step 1 folders and vcf_database stems.
+    Used by the /name-aliases endpoint only — once per project selection."""
+    names: set = set()
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        try:
+            names.update(d.name for d in step1_dir.iterdir()
+                         if d.is_dir() and not d.name.startswith(("_", ".")))
+        except OSError:
+            pass
+    db = vcf_db_dir(project_dir / "step2")
+    if db.is_dir():
+        try:
+            for f in db.iterdir():
+                if f.is_file() and ".vcf" in f.name:
+                    names.add(name_aliases.vsnp3_file_keys(f.name)[-1])
+        except OSError:
+            pass
+    return sorted(names)
+
+
+# (vcf_refs.csv path, mtime, size) -> PrefixLabelAliases
+_LABEL_ALIAS_CACHE: Dict[tuple, Any] = {}
+
+
+def _label_aliases(cfg: Dict):
+    """The GUI's tree-tip relabelling as an alias index — see
+    name_aliases.PrefixLabelAliases for why it is undone per lookup instead of
+    expanded over the project's samples. Both label styles are indexed, because
+    a tree does not say which one its run used."""
+    csv_path = _find_vcf_refs_csv(cfg)
+    if not csv_path:
+        return None
+    try:
+        st = csv_path.stat()
+    except OSError:
+        return None
+    key = (str(csv_path), st.st_mtime_ns, st.st_size)
+    hit = _LABEL_ALIAS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    rows: List[tuple] = []
+    for style in ("short", "rich"):
+        try:
+            rows.extend((ident, friendly) for ident, friendly in _load_vcf_label_map(cfg, style).items())
+        except Exception as e:                       # a malformed csv
+            logger.warning("vcf_refs label map (%s) unreadable: %s", style, e)
+    idx = name_aliases.PrefixLabelAliases(rows, path=str(csv_path))
+    if len(_LABEL_ALIAS_CACHE) > 4:
+        _LABEL_ALIAS_CACHE.clear()
+    _LABEL_ALIAS_CACHE[key] = idx
+    return idx
+
+
+# (metadata fingerprint, label fingerprint) -> combined index, so the fold is
+# paid once per change of either file rather than once per request.
+_PROJECT_ALIAS_CACHE: Dict[tuple, Any] = {}
+
+
+def _aliases_fingerprint(project_dir: Path, cfg: Dict) -> str:
+    """Cache-key material for everything _project_aliases reads.
+
+    A rendered SNP table's IGV links depend on these two files, so a change to
+    either has to invalidate the preview cache exactly as an edit to the table
+    does. Nothing about the project's sample list is in the key: the relabel
+    index no longer depends on it.
+    """
+    return "|".join([
+        _file_fingerprint("meta", _project_metadata_file(project_dir, cfg)),
+        _file_fingerprint("labels", _find_vcf_refs_csv(cfg)),
+    ])
+
+
+def _project_aliases(project_dir: Path, cfg: Dict):
+    """Every other name this project's samples go by: the reference metadata's
+    display names AND the GUI's tree-tip labels, in one index.
+
+    The one place the rest of the backend asks "what else is this sample
+    called?". Empty (and harmless) for a project with neither source.
+    """
+    key = (_aliases_fingerprint(project_dir, cfg),)
+    hit = _PROJECT_ALIAS_CACHE.get(key)
+    if hit is not None:
+        return hit
+    idx = name_aliases.ChainedAliases(
+        name_aliases.load(_project_metadata_file(project_dir, cfg)),
+        _label_aliases(cfg),
+    )
+    if len(_PROJECT_ALIAS_CACHE) > 8:
+        _PROJECT_ALIAS_CACHE.clear()
+    _PROJECT_ALIAS_CACHE[key] = idx
+    return idx
 
 
 def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str, str]:
@@ -1250,7 +1389,44 @@ def _resolved_vcf_db_folders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return result
 
 
+# (config key) -> (csv path or None, time this answer expires)
+_VCF_REFS_CSV_CACHE: Dict[tuple, tuple] = {}
+_VCF_REFS_CSV_NEGATIVE_TTL = 60.0
+
+
 def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
+    """Where the tree-relabel csv is, remembered.
+
+    Discovery walks every panel folder under vcf_db_folders_root and COUNTS
+    the VCFs in each (_resolved_vcf_db_folders) — fine once per Step 2 run,
+    which is all it used to be asked for, and not fine on every SNP-table
+    preview, list-box keystroke and group search, which now consult the alias
+    index. A found path is re-validated with one stat; "no csv" — the case for
+    every reference without a panel — is believed for a minute.
+    """
+    key = (
+        str(cfg.get("vcf_db_folders_root", "") or ""),
+        json.dumps(cfg.get("vcf_db_folders", []) or [], sort_keys=True, default=str),
+        str(cfg.get("vsnp3_path", "") or ""),
+        str(cfg.get("projects_root", "") or ""),
+    )
+    now = time.monotonic()
+    hit = _VCF_REFS_CSV_CACHE.get(key)
+    if hit is not None:
+        found, expires = hit
+        if found is not None:
+            if found.exists():
+                return found
+        elif now < expires:
+            return None
+    found = _discover_vcf_refs_csv(cfg)
+    if len(_VCF_REFS_CSV_CACHE) > 16:
+        _VCF_REFS_CSV_CACHE.clear()
+    _VCF_REFS_CSV_CACHE[key] = (found, now + (0 if found else _VCF_REFS_CSV_NEGATIVE_TTL))
+    return found
+
+
+def _discover_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
     candidates: List[Path] = []
     for folder in _resolved_vcf_db_folders(cfg):
         path = Path(folder["path"])
@@ -1540,6 +1716,10 @@ class VcfEditRequest(BaseModel):
     note: Optional[str] = ""
     reason: Optional[str] = ""
     user: Optional[str] = ""
+    # Raise the quality gates Step 2 filters on (QUAL, MQ, AC) to values that
+    # pass, for a call the curator has confirmed in IGV. On by default: an edit
+    # that Step 2 then discards is the reported problem. See _curation_plan.
+    pass_filters: Optional[bool] = True
 
 
 class VcfLookupRequest(BaseModel):
@@ -1974,17 +2154,201 @@ def ref_files(ref_name: str):
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
     ref_dir = Path(ref["path"])
-    define_filter = list(ref_dir.glob("*define_filter*"))
-    remove_from = list(ref_dir.glob("*remove_from_analysis*"))
-    files = []
-    for f in define_filter:
-        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "define_filter"})
-    for f in remove_from:
-        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "remove_from_analysis"})
-    meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
-    for f in meta_files:
-        files.append({"name": f.name, "path": str(f), "exists": f.exists(), "type": "metadata"})
-    return {"ref_name": ref_name, "ref_path": str(ref_dir), "files": files}
+
+    def _entry(f: Path, kind: str) -> Dict[str, Any]:
+        """One listed file, plus enough to explain a file that will not open.
+
+        `exists` follows symlinks, so a reference tree that links its
+        spreadsheets to a master copy that is not mounted here lists a file
+        that is there by name and absent by content. Saying so in the listing
+        is the difference between "View does nothing" and "this link points
+        somewhere this machine cannot see".
+        """
+        entry: Dict[str, Any] = {
+            "name": f.name,
+            "path": str(f),
+            "exists": f.exists(),
+            "type": kind,
+        }
+        if f.is_symlink():
+            try:
+                entry["symlink_to"] = os.readlink(f)
+            except OSError:
+                entry["symlink_to"] = "?"
+        if entry["exists"]:
+            entry["readable"] = os.access(f, os.R_OK)
+        return entry
+
+    files = [_entry(f, "define_filter") for f in ref_dir.glob("*define_filter*")]
+    files += [_entry(f, "remove_from_analysis") for f in ref_dir.glob("*remove_from_analysis*")]
+    files += [_entry(f, "metadata") for f in ref_dir.glob("*meta*xlsx")
+              if not f.name.startswith("~$")]
+    return {
+        "ref_name": ref_name,
+        "ref_path": str(ref_dir),
+        "ref_dir_writable": os.access(ref_dir, os.W_OK | os.X_OK),
+        "files": files,
+    }
+
+
+# --- Find a sample in a reference's spreadsheets ---------------------------
+#
+# Asked for because the answer to "is this sample held back?" lived in files
+# nobody could search: the define_filter, the remove_from_analysis list and the
+# metadata are all spreadsheets, the editor could only download them, and the
+# name you have is often not the name they use. A sample stored as
+# `EPI-ISL-19152935` is written `GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL`
+# wherever the metadata has been applied, so looking for one spelling finds
+# nothing while the other sits in the file.
+#
+# So the search runs over BOTH spellings of whatever is typed, and says which
+# one each hit matched.
+
+# Cells scanned per workbook. A define_filter is a few hundred KB and tens of
+# thousands of cells; this stops a mis-shaped workbook from being walked to its
+# last cell on a request thread.
+_REF_SEARCH_MAX_CELLS = 400_000
+# (path, mtime_ns, size) -> [(sheet, coordinate, text)]. Searching is typed
+# into a box one character at a time, so the same workbook is re-read on every
+# keystroke without this.
+_REF_SEARCH_CACHE: Dict[tuple, tuple] = {}
+_REF_SEARCH_CACHE_MAX = 6
+
+
+def _ref_sheet_cells(path: Path) -> tuple:
+    """Every non-empty text cell of a workbook, as (cells, error).
+
+    `error` is "" on success and a one-line reason otherwise. A workbook that
+    could not be opened must not read as a workbook the name is not in: an
+    empty result and a failed read look identical to whoever searched.
+    """
+    try:
+        st = path.stat()
+    except OSError as e:
+        return [], f"cannot be read ({e.strerror or e})"
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    hit = _REF_SEARCH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    import openpyxl
+    cells: List[tuple] = []
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as e:
+        logger.warning("reference search: cannot open %s: %s", path, e)
+        out = ([], f"not readable as a spreadsheet ({type(e).__name__})")
+        _REF_SEARCH_CACHE[key] = out
+        return out
+    try:
+        seen = 0
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    seen += 1
+                    if seen > _REF_SEARCH_MAX_CELLS:
+                        raise StopIteration
+                    v = cell.value
+                    if v is None:
+                        continue
+                    text = str(v).strip()
+                    if text:
+                        cells.append((ws.title, cell.coordinate, text))
+    except StopIteration:
+        logger.warning("reference search: stopped at %d cells in %s",
+                       _REF_SEARCH_MAX_CELLS, path)
+    finally:
+        wb.close()
+    if len(_REF_SEARCH_CACHE) >= _REF_SEARCH_CACHE_MAX:
+        _REF_SEARCH_CACHE.clear()
+    out = (cells, "")
+    _REF_SEARCH_CACHE[key] = out
+    return out
+
+
+@app.get("/api/references/{ref_name}/find-sample")
+def ref_find_sample(ref_name: str, q: str = Query(..., min_length=1, max_length=200),
+                    limit: int = Query(200, ge=1, le=2000)):
+    """Where a sample name appears in this reference's spreadsheets.
+
+    Searches the define_filter, the remove_from_analysis list and the metadata
+    workbook for the name as typed AND for its other spelling, which the
+    metadata supplies. Each hit says which file, which sheet, which cell, and
+    which spelling found it — so "not held back" and "held back under a name
+    you did not search for" stop looking the same.
+
+    Substring matches are included and marked; an exact cell match is listed
+    first, because that is what an entry in a sample list actually looks like.
+    """
+    ref_dir = Path(_ref_entry(ref_name)["path"])
+    token = q.strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Nothing to search for")
+
+    aliases = name_aliases.for_reference_dir(ref_dir)
+    # What to look for: the name as typed, then whatever the metadata calls the
+    # same sample. Labelled, so a hit can say how it was found.
+    spellings: List[tuple] = [(token, "")]
+    for other in aliases.counterparts(token):
+        spellings.append((other, token))
+
+    def _kind(name: str) -> str:
+        low = name.lower()
+        if "define_filter" in low:
+            return "define_filter"
+        if "remove_from_analysis" in low:
+            return "remove_from_analysis"
+        if "meta" in low:
+            return "metadata"
+        return "other"
+
+    targets = [f for f in sorted(ref_dir.glob("*.xlsx"))
+               if not f.name.startswith("~$") and _kind(f.name) != "other"]
+
+    hits: List[Dict[str, Any]] = []
+    searched: List[Dict[str, Any]] = []
+    for f in targets:
+        cells, why = _ref_sheet_cells(f)
+        searched.append({"file": f.name, "type": _kind(f.name),
+                         "cells": len(cells), "error": why})
+        for sheet, coord, text in cells:
+            low = text.lower()
+            for spelling, via in spellings:
+                sl = spelling.lower()
+                if sl == low:
+                    exact = True
+                elif sl in low:
+                    exact = False
+                else:
+                    continue
+                hits.append({
+                    "file": f.name,
+                    "type": _kind(f.name),
+                    "sheet": sheet,
+                    "cell": coord,
+                    "text": text,
+                    "exact": exact,
+                    # "" when the name as typed found it; otherwise the
+                    # spelling the user gave, which the metadata translated.
+                    "matched_spelling": spelling,
+                    "via_metadata": bool(via),
+                })
+                break
+    hits.sort(key=lambda h: (not h["exact"], h["via_metadata"], h["file"], h["cell"]))
+
+    meta = name_aliases.metadata_file(ref_dir)
+    return {
+        "reference": ref_name,
+        "query": token,
+        "also_searched": [sp for sp, via in spellings if via],
+        "metadata_file": meta.name if meta else "",
+        "metadata_rows": len(aliases),
+        "searched": searched,
+        # Files the search could not actually look inside. "Not found" means
+        # nothing until this is empty.
+        "unsearchable": [x for x in searched if x["error"]],
+        "truncated": len(hits) > limit,
+        "hits": hits[:limit],
+    }
 
 
 def _read_metadata_xlsx(cfg: Dict, meta_path: Path) -> List[Dict[str, str]]:
@@ -2313,11 +2677,26 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
     """
     cfg = load_config()
     ref_dir = _ref_dir_or_404(ref_name)
-    samples = [str(s).strip() for s in (payload.samples or []) if str(s).strip()]
-    if not samples:
+    given = [str(s).strip() for s in (payload.samples or []) if str(s).strip()]
+    if not given:
         raise HTTPException(status_code=400, detail="At least one sample name is required")
     if not (payload.rationale or "").strip():
         raise HTTPException(status_code=400, detail="A rationale is required")
+    # vsnp3 applies this list to the VCF FILES, before any renaming: it looks
+    # for <name>, <name>.vcf and <name>_zc.vcf in the working directory. A
+    # metadata display name — the spelling every SNP table shows, and so the
+    # one most likely to be pasted here — matches no file and removes nothing,
+    # silently. Write the stored name instead, and say so.
+    aliases = name_aliases.for_reference_dir(ref_dir)
+    translated: Dict[str, str] = {}
+    samples: List[str] = []
+    for name in given:
+        stored = aliases.original_of(name) if aliases else None
+        if stored and stored != name_aliases.vsnp3_file_keys(name)[-1]:
+            translated[name] = stored
+            name = stored
+        if name not in samples:
+            samples.append(name)
 
     remove_files = [
         f for f in ref_dir.glob("*remove_from_analysis*.xlsx") if not f.name.startswith("~$")
@@ -2358,6 +2737,7 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "rationale": payload.rationale.strip(),
         "added": summary.get("added", samples),
         "skipped": summary.get("skipped", []),
+        "translated": translated,
         "old_sha256": old_sha,
         "new_sha256": new_sha,
         "archived_old": archived,
@@ -2369,9 +2749,132 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "filename": target.name,
         "added": summary.get("added", samples),
         "skipped": summary.get("skipped", []),
+        # {as given: as written} for every name that was a metadata display
+        # name; empty when everything was already a file name.
+        "translated": translated,
         "archived_old": archived,
         "audit_log": audit_path,
     }
+
+
+def _remove_list_entries(ref_dir: Path) -> Dict[str, Any]:
+    """Every entry of a reference's remove_from_analysis list, and whether vsnp3
+    can act on it.
+
+    An entry is effective when it names a VCF file stem. One that is instead
+    the metadata's display name for a sample is `ineffective`: vsnp3 will find
+    no such file and the sample stays in every run, while the GUI's build list
+    would show it as blocked. Both the Step 2 pane and the Reference Editor
+    read this so the two never disagree in silence.
+    """
+    files = [f for f in ref_dir.glob("*remove_from_analysis*.xlsx")
+             if not f.name.startswith("~$")]
+    if not files:
+        return {"file": "", "entries": [], "ineffective": []}
+    target = files[0]
+    aliases = name_aliases.for_reference_dir(ref_dir)
+    entries: List[Dict[str, Any]] = []
+    ineffective: List[Dict[str, str]] = []
+    for name in _read_remove_xlsx_names(target):
+        stored = aliases.original_of(name) if aliases else None
+        as_stem = name_aliases.vsnp3_file_keys(name)[-1]
+        bad = bool(stored) and stored != as_stem
+        entries.append({"name": name, "effective": not bad, "stored": stored or ""})
+        if bad:
+            ineffective.append({"name": name, "stored": stored})
+    return {"file": target.name, "entries": entries, "ineffective": ineffective}
+
+
+@app.get("/api/references/{ref_name}/remove-from-analysis/entries")
+def ref_remove_entries(ref_name: str):
+    """The remove list as written, with the entries vsnp3 cannot match."""
+    return _remove_list_entries(_ref_dir_or_404(ref_name))
+
+
+class RemoveNormalizeRequest(BaseModel):
+    rationale: str
+
+
+_REMOVE_NORMALIZE_CODE = r"""
+import openpyxl, json, sys
+target = sys.argv[1]
+mapping = json.load(open(sys.argv[2]))
+wb = openpyxl.load_workbook(target)
+ws = wb.worksheets[0]
+changed = []
+present = set()
+for r in range(1, ws.max_row + 1):
+    v = ws.cell(row=r, column=1).value
+    if v is not None and str(v).strip():
+        present.add(str(v).strip())
+for r in range(1, ws.max_row + 1):
+    cell = ws.cell(row=r, column=1)
+    v = cell.value
+    if v is None:
+        continue
+    name = str(v).strip()
+    new = mapping.get(name)
+    if new is None or new == name:
+        continue
+    if new in present:
+        cell.value = None          # the file name is already listed, before or after
+    else:
+        cell.value = new
+        present.add(new)
+    changed.append([name, new])
+wb.save(target)
+print(json.dumps({'changed': changed}))
+"""
+
+
+@app.post("/api/references/{ref_name}/remove-from-analysis/normalize")
+def ref_remove_normalize(ref_name: str, payload: RemoveNormalizeRequest):
+    """Rewrite the remove list's metadata-name entries as the file names vsnp3
+    matches. Archived and audited like every other edit to a reference file."""
+    cfg = load_config()
+    ref_dir = _ref_dir_or_404(ref_name)
+    if not (payload.rationale or "").strip():
+        raise HTTPException(status_code=400, detail="A rationale is required")
+    state = _remove_list_entries(ref_dir)
+    if not state["file"]:
+        raise HTTPException(status_code=404, detail="No remove_from_analysis file found for this reference")
+    if not state["ineffective"]:
+        return {"ok": True, "filename": state["file"], "changed": []}
+    target = ref_dir / state["file"]
+    mapping = {e["name"]: e["stored"] for e in state["ineffective"]}
+    old_sha, archived = _backup_ref_file(ref_dir, target)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
+        json.dump(mapping, tf)
+        tmp_json = tf.name
+    try:
+        result = subprocess.run(
+            conda_python_cmd(cfg, _REMOVE_NORMALIZE_CODE, [str(target), tmp_json]),
+            text=True, capture_output=True,
+        )
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"Failed to rewrite: {(result.stderr or '').strip()}")
+    try:
+        summary = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        summary = {"changed": [[k, v] for k, v in mapping.items()]}
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "remove_from_analysis_normalize_names",
+        "reference": ref_name,
+        "filename": target.name,
+        "user": _current_os_user(),
+        "rationale": payload.rationale.strip(),
+        "changed": summary.get("changed", []),
+        "old_sha256": old_sha,
+        "new_sha256": _sha256_of_path(target),
+        "archived_old": archived,
+        "target": str(target),
+    }
+    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    return {"ok": True, "filename": target.name, "changed": summary.get("changed", []),
+            "archived_old": archived, "audit_log": audit_path}
 
 
 class RefCreateFileRequest(BaseModel):
@@ -2415,23 +2918,76 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
     return {"created": str(dest), "name": dest_name}
 
 
-def _resolve_ref_file(ref_name: str, filename: str) -> Path:
-    """Resolve a reference-dir-relative filename to an absolute path with
-    a directory traversal guard. Raises HTTPException on validation
-    failures. Used by the reference preview / download endpoints."""
+def _ref_entry(ref_name: str) -> Dict:
+    """The list_references entry for `ref_name`, or 404."""
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
-    ref = next((r for r in refs if r["name"] == ref_name), None)
+    ref = next((r for r in list_references(vsnp3_path) if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
-    ref_dir = Path(ref["path"]).resolve()
-    if "/" in filename or filename.startswith("."):
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    target = (ref_dir / filename).resolve()
-    if not str(target).startswith(str(ref_dir) + "/") and target != ref_dir:
-        raise HTTPException(status_code=400, detail="Path not allowed")
-    if not target.exists() or not target.is_file():
+    return ref
+
+
+def _ref_dir_entry(ref_dir: Path, filename: str) -> Path:
+    """The path of `filename` inside `ref_dir`, confined to a direct child.
+
+    Confinement is LEXICAL, and that is the whole point of this function.
+    `filename` must be one path component — no separator, no `.`/`..`, no
+    leading dot — so `ref_dir / filename` cannot name anything but an entry of
+    that directory, whatever the file it names turns out to be.
+
+    What this deliberately does NOT do is re-resolve the joined path and demand
+    that the RESULT still sit under the reference directory. That check was
+    here, and on a reference tree whose spreadsheets are SYMLINKS to a curated
+    master copy it refused every one of them: on the USDA Ames HPC the whole
+    Reference Editor went read-only — View, Download and Replace all came back
+    `400 Path not allowed` — while the same build worked everywhere the files
+    happened to be real files. It never protected anything, either. Following
+    that link is a choice made by whoever curates the reference tree, not a
+    traversal the requester can steer: the request supplies a bare name, and
+    anyone able to plant a symlink in a reference directory could equally plant
+    the file itself.
+
+    This is the same widening `_serve_path_allowed` already makes for igv.js,
+    for the same reason and with the same reasoning — see its docstring.
+    """
+    name = (filename or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    if name != Path(name).name or name in (".", "..") or name.startswith("."):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid filename: {filename!r} must be a plain file name "
+                   f"inside the reference directory, with no path separators",
+        )
+    return ref_dir / name
+
+
+def _resolve_ref_file(ref_name: str, filename: str) -> Path:
+    """Resolve a reference-dir-relative filename to an existing file.
+
+    Raises HTTPException on validation failures. Used by the reference
+    preview / download endpoints. See _ref_dir_entry for the confinement rule.
+    """
+    ref_dir = Path(_ref_entry(ref_name)["path"])
+    target = _ref_dir_entry(ref_dir, filename)
+    if not target.exists():
+        # A dangling symlink is the one "missing" file worth naming precisely:
+        # it is listed by /files, looks present in the editor, and reads as a
+        # bug in the GUI rather than as a reference tree pointing at something
+        # that is not mounted on this machine.
+        if target.is_symlink():
+            try:
+                dest = os.readlink(target)
+            except OSError:
+                dest = "?"
+            raise HTTPException(
+                status_code=404,
+                detail=f"{target.name} is a symlink to {dest} — which does "
+                       f"not exist on this machine",
+            )
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return target
 
@@ -2532,13 +3088,7 @@ async def ref_upload_file(
     file: UploadFile = File(...),
     rationale: str = Query(..., min_length=1, max_length=4000),
 ):
-    cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
-    ref = next((r for r in refs if r["name"] == ref_name), None)
-    if not ref:
-        raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
-    ref_dir = Path(ref["path"]).resolve()
+    ref_dir = Path(_ref_entry(ref_name)["path"])
 
     # Filename validation: client-provided name only; we ignore any path
     # components and enforce the strict whitelist.
@@ -2549,15 +3099,34 @@ async def ref_upload_file(
             detail="Only *_define_filter.xlsx, *_remove_from_analysis.xlsx, or *_metadata.xlsx may be replaced via this endpoint",
         )
 
-    target = (ref_dir / upload_name).resolve()
-    if not str(target).startswith(str(ref_dir) + "/"):
-        raise HTTPException(status_code=400, detail="Path not allowed")
+    target = _ref_dir_entry(ref_dir, upload_name)
+
+    # Is this reference tree writable AT ALL? Worth answering before 10 MB is
+    # read off the wire, and worth answering in words: a shared reference set
+    # mounted read-only for the web user (the common HPC arrangement) otherwise
+    # failed deep inside the install with an OSError traceback, which reads as a
+    # broken upload rather than as a deliberate permission boundary.
+    if not os.access(ref_dir, os.W_OK | os.X_OK):
+        raise HTTPException(
+            status_code=403,
+            detail=f"This reference directory is not writable by the account "
+                   f"running the GUI, so {upload_name} cannot be replaced here: "
+                   f"{ref_dir}",
+        )
 
     # Spool to a temp file in the same dir (so the os.replace is atomic on
     # the same filesystem) while enforcing the size cap. Read in chunks so
     # we don't load 10 MB into memory.
     history_dir = ref_dir / ".history"
-    history_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        history_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot create the .history/ archive beside {upload_name} "
+                   f"({e}); refusing to replace a reference file that could not "
+                   f"then be rolled back",
+        )
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     tmp_path = ref_dir / f".{upload_name}.{ts}.tmp"
     bytes_written = 0
@@ -2592,12 +3161,24 @@ async def ref_upload_file(
     new_sha = _sha256_of_path(tmp_path)
     old_sha = ""
     archived_old_path = ""
+    replaced_symlink = ""
     if target.exists():
         old_sha = _sha256_of_path(target)
         # Move existing file aside under .history/ before replacing.
         archived = history_dir / f"{ts}_{old_sha[:8]}_{upload_name}"
         try:
-            target.replace(archived)  # atomic rename
+            if target.is_symlink():
+                # A reference tree that shares one curated master across several
+                # references keeps this entry as a link. Renaming the LINK into
+                # .history/ would archive a pointer — still aimed at the
+                # unchanged master, so the "previous version" would silently
+                # become the new one the moment anybody edited that master.
+                # Copy the bytes instead, and leave the link in place for the
+                # rename below to replace: the master is never written through.
+                replaced_symlink = os.readlink(target)
+                shutil.copy2(target, archived)
+            else:
+                target.replace(archived)  # atomic rename
             archived_old_path = str(archived)
         except OSError as e:
             try: tmp_path.unlink()
@@ -2629,6 +3210,10 @@ async def ref_upload_file(
         "size_bytes": bytes_written,
         "archived_old": archived_old_path,
         "target": str(target),
+        # Present only when this upload turned a shared link into a private
+        # copy. Silence here would make the reference tree's sharing structure
+        # change without a record of when or by whom.
+        **({"replaced_symlink_to": replaced_symlink} if replaced_symlink else {}),
     }
     audit_path = _t39_audit_append(record, history_dir)
 
@@ -2640,6 +3225,7 @@ async def ref_upload_file(
         "archived_old": archived_old_path,
         "audit_log": audit_path,
         "size_bytes": bytes_written,
+        "replaced_symlink_to": replaced_symlink,
     }
 
 
@@ -5554,12 +6140,24 @@ def _qc_apply_filters(
     start: Optional[str],
     end: Optional[str],
     q: Optional[str],
+    aliases=None,
 ) -> List[Dict[str, Any]]:
     """Date-range / name filter for the download endpoints — the same rule the
-    old embedded scan applied via the QC_START / QC_END / QC_Q env vars."""
+    old embedded scan applied via the QC_START / QC_END / QC_Q env vars.
+
+    The name test also accepts the other name a sample goes by (``aliases``,
+    a name_aliases index): the Step 1 Results table in the browser matches a
+    typed metadata name, and an export of "what I am looking at" has to keep
+    the same rows.
+    """
     start = (start or "").strip()
     end = (end or "").strip()
     q = (q or "").strip().lower()
+
+    def _name_hit(sample: str) -> bool:
+        if q in sample.lower():
+            return True
+        return bool(aliases) and any(q in other.lower() for other in aliases.counterparts(sample))
 
     def _keep(row: Dict[str, Any]) -> bool:
         rd = str(row.get("_run_date") or "")[:10]
@@ -5567,7 +6165,7 @@ def _qc_apply_filters(
             return False
         if end and (not rd or rd > end):
             return False
-        if q and q not in str(row.get("_sample", "")).lower():
+        if q and not _name_hit(str(row.get("_sample", ""))):
             return False
         return True
 
@@ -5638,7 +6236,8 @@ def qc_summary_csv(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q)
+    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+                             aliases=_project_aliases(project_dir, cfg))
     if not rows:
         return Response(content="", media_type="text/csv")
     header, data = _qc_table(rows)
@@ -5662,7 +6261,8 @@ def qc_summary_xlsx(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q)
+    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+                             aliases=_project_aliases(project_dir, cfg))
     header, data = _qc_table(rows)
     from openpyxl import Workbook  # ships with the env's pandas
 
@@ -5825,6 +6425,7 @@ def posthoc_run(project: str, payload: PosthocRunRequest):
             group_dir,
             str(_tool_bin_dir(cfg) or ""),
             scope,
+            metadata_file=_project_metadata_file(project_dir, cfg),
         )
     else:
         cmd = _posthoc_stub_command(cfg, stats_path, payload.group, tool.tool_id)
@@ -6190,7 +6791,39 @@ def step2_blocklist_get(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     ref = _project_reference(project_dir) or ""
-    return {"reference": ref, "samples": _reference_blocklist_names(cfg, ref)}
+    ref_dir = _project_reference_dir(project_dir, cfg)
+    ineffective = _remove_list_entries(ref_dir)["ineffective"] if ref_dir else []
+    return {
+        "reference": ref,
+        # As written — which is exactly what vsnp3 will act on.
+        "samples": _reference_blocklist_names(cfg, ref),
+        # Entries written as metadata display names: vsnp3 matches file names,
+        # so these remove nothing, and the pane must not show them as blocked.
+        "ineffective": ineffective,
+    }
+
+
+@app.get("/api/projects/{project}/name-aliases")
+def project_name_aliases(project: str):
+    """{stored sample name: [every other name it goes by]} for this project.
+
+    For the panes that filter lists already in the browser (Step 1 Results,
+    Step 1 status, the Step 2 build list), so typing the name a SNP table shows
+    finds the sample. Restricted to samples this project actually has, so the
+    payload is bounded by the project, not by the reference's whole metadata
+    workbook; and only samples that HAVE another name are listed.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    aliases = _project_aliases(project_dir, cfg)
+    out: Dict[str, List[str]] = {}
+    if aliases:
+        for n in _project_sample_names(project_dir):
+            others = [c for c in aliases.counterparts(n) if c != n]
+            if others:
+                out[n] = others
+    return {"aliases": out, "count": len(out),
+            "metadata_file": str(_project_metadata_file(project_dir, cfg) or "")}
 
 
 @app.get("/api/projects/{project}/step2/panel-accessions")
@@ -6571,6 +7204,20 @@ def step2_groupings(project: str, run_id: Optional[str] = Query(None)):
             for t in tokens:
                 if t not in members:
                     members.append(t)
+    # Same idea, the other rename: the reference's *_metadata.xlsx is what
+    # vSNP3 wrote this summary's names through, so a group can list
+    # `GISAID-19152935_…` for a sample the project knows as `EPI-ISL-19152935`.
+    # Searching the name you actually have found nothing. Add the other
+    # spelling of each member as a search token too.
+    aliases = _project_aliases(project_dir, cfg)
+    if aliases:
+        for members in groups.values():
+            extra = []
+            for m in members:
+                for other in aliases.counterparts(m):
+                    if other not in members:
+                        extra.append(other)
+            members.extend(dict.fromkeys(extra))
     return {"groups": groups, "summary_html": summary.name, "sample_count": sample_count}
 
 
@@ -6596,14 +7243,36 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
     whose name starts with ``sample_`` (e.g. sample ``13-1941-6``
     matches directory ``13-1941-6_S4_L001``).
     """
+    def _direct(name: str) -> Optional[Path]:
+        exact = step1_dir / name
+        if exact.is_dir():
+            return exact
+        candidates = sorted(
+            d for d in step1_dir.iterdir()
+            if d.is_dir() and d.name.startswith(f"{name}_")
+        )
+        return candidates[0] if candidates else None
+
     exact = step1_dir / sample
     if exact.is_dir():
         return exact
-    candidates = sorted(
-        d for d in step1_dir.iterdir()
-        if d.is_dir() and d.name.startswith(f"{sample}_")
-    )
-    return candidates[0] if candidates else None
+    # A name that is not a Step 1 folder may be what the reference metadata or
+    # the tree relabelling CALLS one — the spelling every Step 2 output uses.
+    # Everything behind this resolver (Step 1 file lists, the IGV launcher, the
+    # VCF editor) failed with "Sample not found" for those. Asked BEFORE the
+    # prefix scan below: that scan lists every sample folder (40,000 on the
+    # largest project), and the alias answers with two stats. Never allowed to
+    # turn a miss into an error.
+    try:
+        aliases = _project_aliases(step1_dir.parent, load_config())
+        stored = aliases.original_of(sample) if aliases else None
+    except Exception:
+        stored = None
+    if stored and stored != sample:
+        found = _direct(stored)
+        if found is not None:
+            return found
+    return _direct(sample)
 
 
 def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
@@ -7859,7 +8528,8 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "14"  # 14: escape cell text in <script>, sanitize font names
+_XLSX_RENDER_VERSION = "15"  # 15: reference metadata resolves row labels to samples
+#                              14: escape cell text in <script>, sanitize font names
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
 # home directory on an HPC is usually quota'd — so it is capped, not left to
@@ -8180,6 +8850,53 @@ def _too_large_response(project: str, target: Path, path: str,
     )
 
 
+class NameResolveRequest(BaseModel):
+    names: List[str]
+
+
+# A pasted list is a human action, so it is short by nature; the cap is only
+# there so a scripted caller cannot make one request walk a whole database.
+_RESOLVE_NAMES_MAX = 50_000
+
+
+@app.post("/api/projects/{project}/resolve-names")
+def resolve_names(project: str, payload: NameResolveRequest):
+    """Every other spelling of each name, from the reference's metadata.
+
+    The client matches a pasted list against the project's samples itself, and
+    must keep doing so — it is the side that knows which samples are in the
+    set, which are ticked, and which panel supplies them. What it cannot know
+    is that `GISAID-19152935_FAV-0863-5_Razorbill_2022_CAN-NL` in a SNP table's
+    first column IS `EPI-ISL-19152935` on disk. This answers exactly that, for
+    the names it is given.
+
+    Deliberately not "here is the whole map": a 40,000-sample reference set
+    would be several megabytes of JSON shipped to fill in a paste box. Sending
+    the tokens and getting back only their counterparts is a few hundred bytes
+    either way, whatever the size of the database.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    meta = _project_metadata_file(project_dir, cfg)
+    aliases = _project_aliases(project_dir, cfg)
+    counterparts: Dict[str, List[str]] = {}
+    for raw in (payload.names or [])[:_RESOLVE_NAMES_MAX]:
+        token = str(raw or "").strip()
+        if not token or token in counterparts:
+            continue
+        alts = aliases.counterparts(token)
+        if alts:
+            counterparts[token] = alts
+    return {
+        "counterparts": counterparts,
+        # So the pane can say WHY nothing cross-referenced, which is otherwise
+        # indistinguishable from the names simply not being there.
+        "metadata_file": str(meta) if meta else "",
+        "metadata_rows": len(aliases),
+        "reference": _project_reference(project_dir),
+    }
+
+
 @app.get("/api/projects/{project}/tree-tables")
 def tree_tables(project: str, path: str = Query(...)):
     """SNP tables that belong to a tree file — the xlsx siblings in its
@@ -8468,9 +9185,18 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
     # read every cell of the sheet XML even to render the leading columns), so
     # without this every revisit pays the full cost again. Keyed on the file's
     # identity AND the renderer version, so a code change invalidates the lot.
+    # The reference's metadata workbook: the authority on which SNP-table row
+    # label is which Step 1 sample, for the tables vSNP3 relabelled. Located
+    # once (one is_dir per reference root), read once per preview (cached
+    # across previews by file identity), and folded into the cache key because
+    # it decides which cells become IGV links.
+    aliases = _project_aliases(project_dir, cfg)
     cached = _xlsx_cache_path(
         target, project, samples_with_bams, samples_with_vcfs,
-        extra=f"sel:{selection}" if selection_samples is not None else "",
+        extra=("|".join(filter(None, [
+            f"sel:{selection}" if selection_samples is not None else "",
+            _aliases_fingerprint(project_dir, cfg),
+        ]))),
     )
     # The cache file's hash NAME already encodes every input that can change
     # the rendered output (file identity, renderer version, project, bam/vcf
@@ -8539,6 +9265,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                     target, rows, cols, None, project,
                     samples_with_bams, samples_with_vcfs, selection_samples,
                     xlsx_html.DEFAULT_MAX_CELLS, xlsx_html.DEFAULT_MAX_ROWS,
+                    aliases=aliases,
                 )
             elif rows * cols <= xlsx_html.STREAM_ABOVE_CELLS:
                 # Small sheet: the original full-fidelity renderer, unchanged,
@@ -8548,6 +9275,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                     samples_with_bams=samples_with_bams,
                     samples_with_vcfs=samples_with_vcfs,
                     download_href=download_href,
+                    aliases=aliases,
                 ))
             else:
                 # It fits, so render ALL of it — every row and every column.
@@ -8559,6 +9287,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                     target, rows, cols, None, project,
                     samples_with_bams, samples_with_vcfs,
                     xlsx_html.FULL_VIEW_MAX_CELLS, rows,
+                    aliases=aliases,
                 )
         except xlsx_html.FilterMatchError as e:
             # Also a page: this is the one a real name mismatch between the tree
@@ -8967,29 +9696,68 @@ def vcf_edit(project: str, payload: VcfEditRequest):
             base_vcf = source_vcf
 
     tbi_path = patched_vcf.with_suffix(patched_vcf.suffix + ".tbi")
-    if tbi_path.exists():
-        tbi_path.unlink()
-    tmp_vcf = edits_dir / f".{payload.sample}_edit_{int(time.time())}.vcf"
+    stamp = int(time.time())
+    tmp_vcf = edits_dir / f".{payload.sample}_edit_{stamp}.vcf"
+    # Compressed and indexed under staging names, then moved into place as a
+    # pair. Written straight to patched_vcf, a failed `bcftools index` left the
+    # NEW file in place with no .tbi and no log line: Step 2 would pick it up
+    # (it prefers a patched VCF), IGV could not open it, and nothing recorded
+    # that an edit had happened. Now a failure leaves the previous patched
+    # file, its index and the log exactly as they were.
+    stage_gz = edits_dir / f".{payload.sample}_edit_{stamp}.vcf.gz"
+    stage_tbi = stage_gz.with_suffix(stage_gz.suffix + ".tbi")
+    log_path = _edit_log_path(sample_dir, payload.sample)
+    # Read the record before touching it, so the provenance line written into
+    # the file can name what the call WAS and which quality fields are being
+    # left alone. Advisory only — the rewrite below does its own validation and
+    # its result is what the log records.
+    before = _scan_vcf_for_locus(base_vcf, contig, pos)
+    # Which of Step 2's gates this record fails, and what each is set to so the
+    # curated call is accepted — empty when the record already passes, or when
+    # the curator asked for the ALT alone.
+    plan = _curation_plan(before) if (payload.pass_filters is not False) else {}
     try:
-        edit_meta = _rewrite_vcf_with_alt(base_vcf, tmp_vcf, contig, pos, new_alt)
+        edit_meta = _rewrite_vcf_with_alt(
+            base_vcf, tmp_vcf, contig, pos, new_alt,
+            header_lines=[_vcf_edit_header_line(
+                contig=contig, pos=pos, new_alt=new_alt, before=before,
+                user=payload.user or _current_user(), reason=reason,
+                log_name=log_path.name, plan=plan)],
+            header_once=[(f"##INFO=<ID={CURATED_INFO_FLAG},", CURATED_INFO_HEADER)],
+            plan=plan,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    compress = subprocess.run([bcftools, "view", "-Oz", "-o", str(patched_vcf), str(tmp_vcf)], text=True, capture_output=True)
+    def _discard_staging():
+        for f in (tmp_vcf, stage_gz, stage_tbi):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    compress = subprocess.run([bcftools, "view", "-Oz", "-o", str(stage_gz), str(tmp_vcf)], text=True, capture_output=True)
+    if compress.returncode != 0:
+        _discard_staging()
+        raise HTTPException(status_code=500,
+                            detail=f"VCF compression failed; the edit was not applied: {compress.stderr.strip()}")
+    idx = subprocess.run([bcftools, "index", "-t", str(stage_gz)], text=True, capture_output=True)
+    if idx.returncode != 0:
+        _discard_staging()
+        raise HTTPException(status_code=500,
+                            detail=f"Index failed; the edit was not applied: {idx.stderr.strip()}")
+    try:
+        os.replace(stage_gz, patched_vcf)
+        os.replace(stage_tbi, tbi_path)
+    except OSError as e:
+        _discard_staging()
+        raise HTTPException(status_code=500, detail=f"Could not install the patched VCF: {e}")
     try:
         tmp_vcf.unlink()
     except OSError:
         pass
-    if compress.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"VCF compression failed: {compress.stderr.strip()}")
-
-    # Index patched VCF
-    idx = subprocess.run([bcftools, "index", "-t", str(patched_vcf)], text=True, capture_output=True)
-    if idx.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"Index failed: {idx.stderr.strip()}")
 
     edit_meta = edit_meta or {}
 
-    log_path = _edit_log_path(sample_dir, payload.sample)
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "user": payload.user or "",
@@ -9009,6 +9777,26 @@ def vcf_edit(project: str, payload: VcfEditRequest):
             "note": payload.note or "",
             "reason": reason
         },
+        # The call-quality fields as the caller wrote them — the fields Step 2
+        # filters on. Recorded verbatim, because the record itself may now
+        # carry curated values in their place (see "set"), and this log is
+        # where the measured numbers live on.
+        "measured": {
+            "qual": (before or {}).get("qual", ""),
+            "filter": (before or {}).get("filter", ""),
+            "mq": (before or {}).get("mq", None),
+            "ac": (before or {}).get("ac", None),
+            "an": (before or {}).get("an", None),
+            "gt": (before or {}).get("gt", None),
+            "dp": (before or {}).get("dp", None),
+            "ad": (before or {}).get("ad", None),
+        },
+        # What this edit set beyond ALT so Step 2 accepts the call: {} when the
+        # record already passed every gate, or when pass_filters was off.
+        "set": edit_meta.get("set", {}),
+        "pass_filters": payload.pass_filters is not False,
+        "scope": ("ALT, the CURATED INFO flag, and the fields in \"set\"; DP, AD, "
+                  "FILTER and every other field are unchanged"),
         "source_vcf": str(source_vcf),
         "base_vcf": str(base_vcf),
         "patched_vcf": str(patched_vcf)
@@ -9184,13 +9972,36 @@ def _scan_vcf_for_locus(path: Path, contig: str, pos: int) -> Optional[Dict[str,
                 alt = parts[4].split(",")[0] if parts[4] else ""
                 dp = None
                 ad = None
+                # The call-quality fields. An edit changes the ALLELE and
+                # nothing else, so these are exactly the numbers that carry on
+                # describing the ORIGINAL call — and they are the numbers
+                # vsnp3 filters on (QUAL, MQ, AC). Reported so both the patch
+                # log and the patched file's own header can say what evidence
+                # the edited call still rests on.
+                qual = parts[5] if len(parts) > 5 else ""
+                filt = parts[6] if len(parts) > 6 else ""
+                mq = None
+                ac = None
+                an = None
+                gt = None
                 for field in parts[7].split(";"):
                     if field.startswith("DP="):
                         try:
                             dp = int(field.split("=", 1)[1])
                         except ValueError:
                             dp = None
-                        break
+                    elif field.startswith("MQ="):
+                        mq = field.split("=", 1)[1]
+                    elif field.startswith("AC="):
+                        ac = field.split("=", 1)[1]
+                    elif field.startswith("AN="):
+                        an = field.split("=", 1)[1]
+                if len(parts) >= 10:
+                    fmt0 = parts[8].split(":")
+                    smp0 = parts[9].split(":")
+                    if "GT" in fmt0:
+                        gi = fmt0.index("GT")
+                        gt = smp0[gi] if gi < len(smp0) else None
                 if len(parts) >= 10:
                     fmt = parts[8].split(":")
                     sample = parts[9].split(":")
@@ -9206,6 +10017,12 @@ def _scan_vcf_for_locus(path: Path, contig: str, pos: int) -> Optional[Dict[str,
                     "alt": alt,
                     "dp": dp,
                     "ad": ad,
+                    "qual": qual,
+                    "filter": filt,
+                    "mq": mq,
+                    "ac": ac,
+                    "an": an,
+                    "gt": gt,
                     "path": str(path)
                 }
     except OSError:
@@ -9213,18 +10030,224 @@ def _scan_vcf_for_locus(path: Path, contig: str, pos: int) -> Optional[Dict[str,
     return None
 
 
-def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int, new_alt: str) -> Dict[str, object]:
+def _vcf_header_escape(value: str) -> str:
+    """Make a string safe inside a ``##key=<a="...">`` header value."""
+    return (str(value).replace("\\", "/").replace('"', "'")
+            .replace("\n", " ").replace("\r", " ").replace("<", "(")
+            .replace(">", ")").strip())
+
+
+# What vsnp3 Step 2 gates a SNP call on, mirrored from the install's
+# vsnp3_version.py (test_vcf_edit_provenance reads that file and fails if these
+# drift). Nothing else on the record is consulted: FILTER is dropped unread,
+# FORMAT/GT/AD are never looked at, DP feeds only the optional depth table.
+#   QUAL  > 150  -> called as ALT   (50..150 -> N, < 50 -> reference base)
+#   AC   == 2    -> homozygous ALT  (1 -> IUPAC ambiguity code)
+#   MQ   >= 56
+VSNP3_QUAL_THRESHOLD = 150
+VSNP3_MQ_THRESHOLD = 56
+VSNP3_AC_HOMOZYGOUS = 2
+# The QUAL vsnp3 itself writes for a record that has no measured quality
+# (--assume_gt_only_quality), chosen there to be recognisable as asserted rather
+# than called. A curated call gets the same number for the same reason.
+VSNP3_SYNTHESIZED_QUAL = 999
+# BWA's mapping-quality ceiling. Clears >= 56 and > 56 alike.
+CURATED_MQ = 60
+CURATED_INFO_FLAG = "CURATED"
+CURATED_INFO_HEADER = (
+    f'##INFO=<ID={CURATED_INFO_FLAG},Number=0,Type=Flag,Description="Record was '
+    'hand-edited in the vSNP GUI after review of the alignment; the '
+    '##vsnp3_gui_edit header lines record what changed and the original values">'
+)
+
+
+def _curation_plan(before: Optional[Dict[str, object]],
+                   qual_threshold: int = VSNP3_QUAL_THRESHOLD,
+                   mq_threshold: int = VSNP3_MQ_THRESHOLD) -> Dict[str, str]:
+    """The fields a curated call must carry for Step 2 to accept it, and the
+    value each gets — only for the gates the record currently FAILS.
+
+    A curator who has looked at the reads in IGV and confirmed the allele is
+    overriding the caller's verdict, and the caller's verdict is written into
+    QUAL/AC/MQ, not just into ALT. Leaving those as they were means Step 2
+    re-applies the verdict: a heterozygous call (AC=1) still comes out as an
+    ambiguity code, a QUAL of 46 still comes out as the reference base, and
+    the edit silently has no effect. So the gates are raised — to values that
+    are documented constants, marked in the record by the CURATED flag and in
+    the header by the original numbers, never to invented "plausible" ones.
+
+    A gate the record already passes is left as measured; a record that passes
+    all three gets an empty plan and only its ALT changes. AN and GT are set
+    along with AC so the record stays self-consistent (IGV's popup shows GT).
+    """
+    b = before or {}
+    plan: Dict[str, str] = {}
+
+    def _num(v):
+        try:
+            return float(str(v))
+        except (TypeError, ValueError):
+            return None
+
+    q = _num(b.get("qual"))
+    if q is None or q <= qual_threshold:
+        plan["QUAL"] = str(VSNP3_SYNTHESIZED_QUAL)
+    mq = _num(b.get("mq"))
+    if mq is None or mq < mq_threshold:
+        plan["MQ"] = str(CURATED_MQ)
+    ac = _num(b.get("ac"))
+    if ac is None or int(ac) != VSNP3_AC_HOMOZYGOUS:
+        plan["AC"] = str(VSNP3_AC_HOMOZYGOUS)
+        if b.get("an") is not None and str(b.get("an")) != str(VSNP3_AC_HOMOZYGOUS):
+            plan["AN"] = str(VSNP3_AC_HOMOZYGOUS)
+        if b.get("gt") and str(b.get("gt")) not in ("1/1", "1|1"):
+            plan["GT"] = "1/1"
+    return plan
+
+
+def _vcf_edit_header_line(*, contig: str, pos: int, new_alt: str,
+                          before: Optional[Dict[str, object]],
+                          user: str, reason: str, log_name: str,
+                          plan: Optional[Dict[str, str]] = None) -> str:
+    """One ``##vsnp3_gui_edit=<...>`` line describing this edit.
+
+    Written INTO the patched VCF, because the patch log lives beside the Step 1
+    sample and the VCF does not stay there: Build copies it into
+    `vcf_database/` under the source file's own name, where nothing in the
+    bytes or the filename distinguishes an edited call from an original one.
+    Anyone who later opens that file — here, in IGV, or in whatever a
+    collaborator has — can now see that a call was changed, to what, from
+    what, by whom, and that the quality fields beside it still describe the
+    ORIGINAL call. Header lines are carried through by bcftools and ignored by
+    every VCF reader, and re-editing a sample re-reads the patched file, so the
+    lines accumulate in order.
+    """
+    b = before or {}
+    plan = plan or {}
+
+    def _v(key):
+        v = b.get(key)
+        return _vcf_header_escape("" if v is None else v)
+
+    # The ORIGINAL numbers, whatever happens to them below: this line is the
+    # only place they survive once the record itself carries curated values.
+    fields = [
+        f'Date="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}"',
+        f'Locus="{_vcf_header_escape(contig)}:{pos}"',
+        f'REF="{_v("ref")}"',
+        f'oldALT="{_v("alt")}"',
+        f'newALT="{_vcf_header_escape(new_alt)}"',
+        f'origQUAL="{_v("qual")}"',
+        f'origMQ="{_v("mq")}"',
+        f'origAC="{_v("ac")}"',
+        f'origGT="{_v("gt")}"',
+        f'origDP="{_v("dp")}"',
+        f'origAD="{_vcf_header_escape(",".join(str(x) for x in (b.get("ad") or [])))}"',
+        # What this edit SET, field=value, or "none" when only ALT changed.
+        'Set="' + (_vcf_header_escape(";".join(f"{k}={v}" for k, v in plan.items()))
+                   if plan else "none") + '"',
+        f'By="{_vcf_header_escape(user)}"',
+        f'Reason="{_vcf_header_escape(reason)[:200]}"',
+        f'Log="{_vcf_header_escape(log_name)}"',
+        'Scope="ALT, the CURATED flag, and the fields listed in Set; DP, AD, FILTER '
+        'and every other field are unchanged"',
+    ]
+    return "##vsnp3_gui_edit=<" + ",".join(fields) + ">\n"
+
+
+def _apply_curation(parts: List[str], plan: Dict[str, str]) -> Dict[str, str]:
+    """Apply a _curation_plan to one split VCF record, in place.
+
+    Returns {field: old_value} for what actually changed. The CURATED flag is
+    added to INFO whether or not the plan is empty: the record was hand-edited
+    either way, and a reader of the file (not the log) has to be able to see it.
+    INFO keys keep their order; a key the plan names but the record lacks is
+    appended.
+    """
+    changed: Dict[str, str] = {}
+    if "QUAL" in plan and len(parts) > 5:
+        changed["QUAL"] = parts[5]
+        parts[5] = plan["QUAL"]
+    if len(parts) > 7:
+        items = parts[7].split(";") if parts[7] and parts[7] != "." else []
+        keys = [it.split("=", 1)[0] for it in items]
+        for key in ("AC", "AN", "MQ"):
+            if key not in plan:
+                continue
+            if key in keys:
+                i = keys.index(key)
+                changed[key] = items[i].split("=", 1)[1] if "=" in items[i] else ""
+                items[i] = f"{key}={plan[key]}"
+            else:
+                changed[key] = ""
+                items.append(f"{key}={plan[key]}")
+                keys.append(key)
+        if CURATED_INFO_FLAG not in keys:
+            items.append(CURATED_INFO_FLAG)
+        parts[7] = ";".join(items)
+    if "GT" in plan and len(parts) > 9:
+        fmt = parts[8].split(":")
+        smp = parts[9].split(":")
+        if "GT" in fmt:
+            gi = fmt.index("GT")
+            if gi < len(smp):
+                changed["GT"] = smp[gi]
+                smp[gi] = plan["GT"]
+                parts[9] = ":".join(smp)
+    return changed
+
+
+def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int,
+                          new_alt: str, header_lines=(), header_once=(),
+                          plan: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+    """Replace one record's ALT (and, per ``plan``, its quality gates), copying
+    every other byte through.
+
+    Without a plan only column 5 and the CURATED flag change: QUAL, FILTER,
+    INFO and the FORMAT/sample columns are written out exactly as they came
+    in. With a plan (see _curation_plan) the named fields are set as well; the
+    header line and the patch log both record what those were.
+
+    ``header_lines`` are emitted immediately before ``#CHROM`` (a VCF's header
+    must be contiguous and precede the data), or before the first data line if
+    the file has no ``#CHROM``. ``header_once`` is a list of (prefix, line):
+    each is emitted the same way, but only if no existing header line starts
+    with that prefix — so a re-edited file gets one ##INFO definition, not one
+    per edit.
+    """
     opener = gzip.open if str(base_vcf).endswith(".gz") else open
     found = False
     old_ref = ""
     old_alt = ""
     old_dp = None
     old_ad = None
+    applied: Dict[str, str] = {}
+    pending_header = list(header_lines)
+    once = list(header_once)
+    # The meta-information lines seen so far, verbatim. A VCF header is a few
+    # hundred short lines at most, so keeping them is cheaper than being clever
+    # about which part of each one to remember.
+    seen_meta: List[str] = []
+
+    def _flush_header(dst):
+        for prefix, line in once:
+            if not any(m.startswith(prefix) for m in seen_meta):
+                pending_header.insert(0, line)
+        once.clear()
+        for h in pending_header:
+            dst.write(h if h.endswith("\n") else h + "\n")
+        pending_header.clear()
+
     with opener(base_vcf, "rt", encoding="utf-8", errors="ignore") as src, out_vcf.open("w", encoding="utf-8") as dst:
         for line in src:
             if not line or line[0] == "#":
+                if line.startswith("##"):
+                    seen_meta.append(line)
+                if line.startswith("#CHROM"):
+                    _flush_header(dst)
                 dst.write(line)
                 continue
+            _flush_header(dst)
             parts = line.rstrip("\n").split("\t")
             if len(parts) < 5:
                 dst.write(line)
@@ -9263,6 +10286,7 @@ def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int, 
                             old_ad = [int(x) for x in ad_val.split(",") if x != ""] if ad_val else None
                         except Exception:
                             old_ad = None
+                applied = _apply_curation(parts, plan or {})
                 found = True
                 line = "\t".join(parts) + "\n"
             dst.write(line)
@@ -9271,7 +10295,8 @@ def _rewrite_vcf_with_alt(base_vcf: Path, out_vcf: Path, contig: str, pos: int, 
             f"No variant at {contig}:{pos} to edit — the sample matches the reference here. "
             f"Only positions where the sample differs from the reference can be edited."
         )
-    return {"old_ref": old_ref, "old_alt": old_alt, "old_dp": old_dp, "old_ad": old_ad}
+    return {"old_ref": old_ref, "old_alt": old_alt, "old_dp": old_dp, "old_ad": old_ad,
+            "set": dict(plan or {}), "previous": applied}
 
 
 def _scan_vcf_first_record(path: Optional[Path]) -> Optional[Dict[str, object]]:
@@ -9670,7 +10695,8 @@ def _posthoc_stub_command(cfg: Dict, stats_path: Path, group: str, tool: str) ->
     return " ".join(shlex.quote(part) for part in cmd_list)
 
 
-def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Path, tool_bin: str, scope: str) -> str:
+def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Path, tool_bin: str, scope: str,
+                                  metadata_file: Optional[Path] = None) -> str:
     snp_dists_path = "snp-dists"
     if tool_bin:
         candidate = Path(tool_bin) / "snp-dists"
@@ -9691,6 +10717,11 @@ def _posthoc_snp_analysis_command(group_dir: Path, group_name: str, out_dir: Pat
         "--scope",
         scope,
     ]
+    if metadata_file:
+        # The alignment's headers are vsnp3's SAMPLE names — renamed through
+        # this workbook when it has a row for them — while the manifest holds
+        # file names. The script needs the same index to connect the two.
+        cmd_parts += ["--metadata", str(metadata_file)]
     return " ".join(shlex.quote(part) for part in cmd_parts)
 
 

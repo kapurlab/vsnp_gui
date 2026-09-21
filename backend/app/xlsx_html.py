@@ -170,7 +170,30 @@ def _strip_vcf_suffix(s: str) -> str:
     return out
 
 
-def _canonical_stem(label: str, *stem_sets) -> str:
+def _union_stems(*stem_sets) -> "set[str]":
+    """The known on-disk stems, unioned ONCE per render rather than per row.
+
+    `_canonical_stem` accepts several sets and unions them itself, which is a
+    full copy of every known sample name for every label it is asked about. On
+    a 40,000-sample database that is 40,000 set inserts per table row —
+    measured at ~0.5 ms a row, so a 2,000-row table spent a second building
+    the same set two thousand times before comparing anything. The renderers
+    now build it once and pass the result.
+
+    The single-set case is returned as-is, not copied: callers only read it.
+    """
+    non_empty = [s for s in stem_sets if s]
+    if not non_empty:
+        return set()
+    if len(non_empty) == 1:
+        return non_empty[0]
+    out: set = set()
+    for s in non_empty:
+        out |= s
+    return out
+
+
+def _canonical_stem(label: str, *stem_sets, aliases=None) -> str:
     """Map a variant-table label back to the bare sample stem used on disk.
 
     vSNP3 step2 relabels samples with descriptive metadata
@@ -204,13 +227,41 @@ def _canonical_stem(label: str, *stem_sets) -> str:
     have both failed, so it can never change an answer that was already
     right. It also cannot alias two genuinely distinct samples: a pair
     differing only in `_` versus `-` cannot both exist as Step 1 samples,
-    because staging would have collapsed them to the same folder."""
-    known: set[str] = set()
-    for s in stem_sets:
-        if s:
-            known |= s
+    because staging would have collapsed them to the same folder.
+
+    ``aliases`` (a name_aliases.NameAliases) short-circuits all of it. Every
+    rule below works on the two strings alone, so all of them fail the moment
+    the reference's metadata REPLACES a sample's id rather than decorating it
+    — `EPI-ISL-19152935` reported as `GISAID-19152935_FAV-0863-5_…`. No
+    inspection of those two names can connect them; the metadata workbook
+    vSNP3 renamed from can, and does, in one dict lookup. Consulted first
+    because it is the authority and the heuristics are approximations of it,
+    and because a hit here skips the scans below — on a table whose samples
+    are all in the metadata this is the difference between a lookup per row
+    and a pass over every known sample per row."""
+    known = _union_stems(*stem_sets)
     if not known or label in known:
         return label
+    if aliases:
+        original = aliases.original_of(label)
+        if original:
+            if original in known:
+                return original
+            # The stored name may itself be spelled differently on disk —
+            # Step 1 stages with a dashed prefix and adds lane suffixes — so
+            # resolve the metadata's answer the ordinary way rather than
+            # discarding it. No aliases on the way in: one hop, cannot loop.
+            via = _canonical_stem(original, known)
+            if via in known:
+                return via
+            # ...including the case the rules above skip: the metadata names
+            # the bare id (`24-029315-007`) and the folder extends it
+            # (`24-029315-007-original`). Safe to try here where it is not in
+            # general, because the metadata has already told us WHICH sample
+            # this row is; all that is left is how Step 1 spelled it.
+            extended = _unique_extension(original, known)
+            if extended:
+                return extended
     best: str | None = None
     for s in known:
         if label.startswith(s + "_") and (best is None or len(s) > len(best)):
@@ -243,11 +294,22 @@ def _canonical_stem(label: str, *stem_sets) -> str:
     # identify a sample, and no link is better than the wrong one.
     head = label.split("_", 1)[0]
     if head and head != label:
-        cands = [s for s in known
-                 if s == head or s.startswith(head + "-") or s.startswith(head + "_")]
-        if len(cands) == 1:
-            return cands[0]
+        extended = _unique_extension(head, known)
+        if extended:
+            return extended
     return label
+
+
+def _unique_extension(head: str, known) -> str | None:
+    """The one known stem that `head` names, when the stem EXTENDS it.
+
+    A separator after the id is required, so `24-029315-007` cannot claim
+    `24-029315-0071-original`. More than one candidate means the id does not
+    identify a sample, and no link is better than the wrong one.
+    """
+    cands = [s for s in known
+             if s == head or s.startswith(head + "-") or s.startswith(head + "_")]
+    return cands[0] if len(cands) == 1 else None
 
 
 def _flatten_sep(s: str) -> str:
@@ -255,7 +317,7 @@ def _flatten_sep(s: str) -> str:
     return s.replace("_", "-")
 
 
-def _selection_key(label: str, *stem_sets) -> str:
+def _selection_key(label: str, *stem_sets, aliases=None) -> str:
     """Normalise a tree tip / table row label for clade-selection matching.
 
     Tree tips and table rows both come out of the same vSNP3 step 2 run, but
@@ -268,7 +330,7 @@ def _selection_key(label: str, *stem_sets) -> str:
     same sample compare equal; unknown stems fall back to the suffix-stripped
     label itself."""
     stem = _strip_vcf_suffix(str(label).strip())
-    return _canonical_stem(stem, *stem_sets)
+    return _canonical_stem(stem, *stem_sets, aliases=aliases)
 
 
 def fits_full_view(total_rows: int, total_cols: int,
@@ -1163,6 +1225,7 @@ def render_window(
     max_cells: int,
     max_rows: int,
     max_table_bytes: int = None,
+    aliases=None,
 ) -> str:
     """Render a bounded window of a very large sheet in one streaming pass.
 
@@ -1178,6 +1241,7 @@ def render_window(
     """
     if max_table_bytes is None:
         max_table_bytes = DEFAULT_MAX_TABLE_BYTES
+    known_stems = _union_stems(samples_with_bams, samples_with_vcfs)
     render_rows = min(total_rows, max_rows)
     render_cols = max(1, min(total_cols, max_cells // max(1, render_rows)))
 
@@ -1257,7 +1321,7 @@ def render_window(
                     stem = _strip_vcf_suffix(raw)
                     if stem:
                         row_stem = _canonical_stem(
-                            stem, samples_with_bams, samples_with_vcfs)
+                            stem, known_stems, aliases=aliases)
 
             row_labels.append((row_label, row_stem))
             row_samples.append(row_stem)
@@ -1403,6 +1467,7 @@ def render_filtered_window(
     max_cells: int,
     max_rows: int,
     max_table_bytes: int = None,
+    aliases=None,
 ) -> dict:
     """Render a SNP table subset to a tree clade, in one streaming pass.
 
@@ -1427,11 +1492,12 @@ def render_filtered_window(
     """
     if max_table_bytes is None:
         max_table_bytes = DEFAULT_MAX_TABLE_BYTES
+    known_stems = _union_stems(samples_with_bams, samples_with_vcfs)
 
     raw_sel = {_strip_vcf_suffix(str(s).strip()) for s in selection
                if str(s).strip()}
     raw_sel = {s for s in raw_sel if s and s.lower() not in _NON_SAMPLE_LABELS}
-    sel_keys = {_selection_key(s, samples_with_bams, samples_with_vcfs)
+    sel_keys = {_selection_key(s, known_stems, aliases=aliases)
                 for s in raw_sel}
     if not sel_keys:
         raise FilterMatchError("The clade selection contains no sample names.")
@@ -1551,7 +1617,7 @@ def render_filtered_window(
                     total_sample_rows += 1
                     stem = _strip_vcf_suffix(raw)
                     key = _canonical_stem(
-                        stem, samples_with_bams, samples_with_vcfs)
+                        stem, known_stems, aliases=aliases)
                     key_stems.setdefault(key, set()).add(stem)
                     # EXACT beats canonical. Canonicalisation exists so a tree
                     # tip and a table row that decorate the same sample
@@ -1664,7 +1730,7 @@ def render_filtered_window(
         win = render_window(
             xlsx_path, total_rows, total_cols, title, project,
             samples_with_bams, samples_with_vcfs, max_cells, max_rows,
-            max_table_bytes)
+            max_table_bytes, aliases=aliases)
         win["filter"] = {
             "ignored": ("this sheet has no locus columns, so it is not a "
                         "SNP table and the clade filter does not apply"),
@@ -2180,6 +2246,7 @@ def xlsx_to_html(
     max_cells: int = DEFAULT_MAX_CELLS,
     max_rows: int = DEFAULT_MAX_ROWS,
     download_href: str | None = None,
+    aliases=None,
 ) -> str:
     """Render the first (active) sheet of an xlsx file as a self-contained HTML page.
 
@@ -2213,8 +2280,10 @@ def xlsx_to_html(
         return compose_page(render_window(
             xlsx_path, total_rows, total_cols, title, project,
             samples_with_bams, samples_with_vcfs, max_cells, max_rows,
+            aliases=aliases,
         ))
 
+    known_stems = _union_stems(samples_with_bams, samples_with_vcfs)
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=False)
     ws = wb.active
     dxfs = list(wb._differential_styles.styles) if hasattr(wb, "_differential_styles") else []
@@ -2279,8 +2348,18 @@ def xlsx_to_html(
             continue
         # Per-row height. Excel stores row height in points (1pt ≈ 1.333px).
         row_idx = row[0].row
-        row_samples_full.append(
-            vtable["samples"].get(row_idx, "") if vtable else "")
+        # The on-disk stem, not the label printed in column 1. These two are
+        # the same only while the reference's metadata leaves the sample's id
+        # alone; when it rewrites it (`EPI-ISL-19152935` reported as
+        # `GISAID-19152935_…`) the label names no sample, and this array is
+        # what the page's IGV launcher clicks with. The cell-level decision a
+        # few lines down had always resolved the label — so on this path a cell
+        # could be drawn as clickable and then open nothing. Resolved once per
+        # row and shared with that decision.
+        row_label = vtable["samples"].get(row_idx, "") if vtable else ""
+        row_stem_here = (_canonical_stem(row_label, known_stems, aliases=aliases)
+                         if row_label else "")
+        row_samples_full.append(row_stem_here)
         row_dim = ws.row_dimensions.get(row_idx)
         row_style = ""
         if row_dim and row_dim.height:
@@ -2330,12 +2409,9 @@ def xlsx_to_html(
                 and cell.column in vtable["positions"]
                 and any("background-color" in p for p in inline_parts)
             ):
-                # Resolve the (possibly metadata-decorated) cascade label back
-                # to the bare on-disk stem so loadability + the IGV track id
-                # match the BAM/VCF filenames (imported step2-renamed samples).
-                row_stem = _canonical_stem(
-                    vtable["samples"][cell.row], samples_with_bams, samples_with_vcfs
-                )
+                # Resolved once for the row above; the same stem decides
+                # loadability, the IGV track id and the row's entry in SAMPLES.
+                row_stem = row_stem_here
                 has_bam = samples_with_bams is None or row_stem in samples_with_bams
                 has_vcf = samples_with_vcfs is not None and row_stem in samples_with_vcfs
                 # Loadable if either source is present (default-loadable when

@@ -186,4 +186,114 @@ test("an empty tree lays out without throwing", () => {
   assert.equal(lay.nInternalLabels, 0);
 });
 
+// --- Node ordering (FigTree's Increasing / Decreasing Node Order) ---------
+//
+// Asked for on a big tree, where the newick's own order scatters related
+// samples down the canvas and the branching pattern cannot be read off the
+// picture at all. Sorting siblings by subtree size is what turns it into a
+// ladder.
+//
+// The property that matters is that ONLY the stacking changes: same tips, same
+// topology, same branch lengths, same x. A reordering that quietly dropped or
+// duplicated a tip would look plausible on screen and be wrong in every clade
+// selection made from it, so the tests below check the tip SET as well as its
+// order.
+
+// Sibling clades of 3, 2 and then 1, 4 tips — deliberately unsorted in file
+// order, and with a 5-vs-5 tie at the root.
+const LADDER = "(((a:1,b:1,c:1):1,(d:1,e:1):1):1,(f:1,(g:1,h:1,i:1,j:1):1):1);";
+
+const tipOrder = (lay) => {
+  const out = [];
+  for (let r = 0; r < lay.nLeaves; r++) out.push(lay.names[lay.leafRows[r]]);
+  return out;
+};
+
+test("file order is the default and is unchanged", () => {
+  const lay = buildLayout(parse(LADDER).nodes);
+  assert.deepEqual(tipOrder(lay), ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+  assert.equal(lay.ordering, "file");
+  assert.deepEqual(tipOrder(buildLayout(parse(LADDER).nodes, { ordering: "file" })),
+                   tipOrder(lay));
+});
+
+test("increasing puts the smaller clade first", () => {
+  const lay = buildLayout(parse(LADDER).nodes, { ordering: "increasing" });
+  // (d,e)=2 before (a,b,c)=3; f=1 before (g,h,i,j)=4.
+  assert.deepEqual(tipOrder(lay), ["d", "e", "a", "b", "c", "f", "g", "h", "i", "j"]);
+});
+
+test("decreasing puts the larger clade first", () => {
+  const lay = buildLayout(parse(LADDER).nodes, { ordering: "decreasing" });
+  assert.deepEqual(tipOrder(lay), ["a", "b", "c", "d", "e", "g", "h", "i", "j", "f"]);
+});
+
+test("a tie keeps the file's order, so redraws are stable", () => {
+  // Both halves of the root hold 5 tips; neither ordering may swap them.
+  const inc = buildLayout(parse(LADDER).nodes, { ordering: "increasing" });
+  const dec = buildLayout(parse(LADDER).nodes, { ordering: "decreasing" });
+  assert.ok(tipOrder(inc).indexOf("a") < tipOrder(inc).indexOf("f"));
+  assert.ok(tipOrder(dec).indexOf("a") < tipOrder(dec).indexOf("f"));
+});
+
+test("re-stacking moves tips and changes nothing else", () => {
+  const file = buildLayout(parse(LADDER).nodes);
+  const dec = buildLayout(parse(LADDER).nodes, { ordering: "decreasing" });
+  assert.equal(dec.n, file.n);
+  assert.equal(dec.nLeaves, file.nLeaves);
+  assert.deepEqual(tipOrder(dec).slice().sort(), tipOrder(file).slice().sort(),
+                   "the same tips, once each");
+  assert.equal(dec.maxX, file.maxX);
+  assert.equal(dec.maxRank, file.maxRank);
+  // Every tip keeps its distance from the root; only its row moved.
+  const xOf = (lay) => Object.fromEntries(
+    Array.from(lay.leafRows).map((i) => [lay.names[i], lay.xLen[i]]));
+  assert.deepEqual(xOf(dec), xOf(file));
+});
+
+test("rows stay consecutive and clade spans stay contiguous", () => {
+  const lay = buildLayout(parse(LADDER).nodes, { ordering: "increasing" });
+  const rows = Array.from(lay.leafRows).map((i) => lay.row[i]);
+  assert.deepEqual(rows, rows.map((_, k) => k), "0..n-1, in order");
+  for (let i = 0; i < lay.n; i++) {
+    if (lay.isLeaf[i]) continue;
+    // A clade's rows must be exactly its tips' rows — this is what makes a
+    // band, a selection and the hit test O(1) per node.
+    const tipRows = tipIndicesUnder(lay, i).map((t) => lay.row[t]).sort((a, b) => a - b);
+    assert.equal(lay.rowMin[i], tipRows[0]);
+    assert.equal(lay.rowMax[i], tipRows[tipRows.length - 1]);
+    assert.equal(tipRows.length, lay.rowMax[i] - lay.rowMin[i] + 1);
+    assert.equal(lay.tips[i], tipRows.length, "tip counts agree with the spans");
+  }
+});
+
+test("a deep caterpillar does not blow the stack", () => {
+  // 4,000 nested clades: the shape that forced pass 1 to be iterative, and now
+  // the row walk too.
+  let nwk = "t0:1";
+  for (let i = 1; i < 4000; i++) nwk = `(${nwk},t${i}:1):1`;
+  const lay = buildLayout(parse(`${nwk};`).nodes, { ordering: "increasing" });
+  assert.equal(lay.nLeaves, 4000);
+  // Every level is [3,999-tip subtree, one tip], so increasing peels the lone
+  // tips off first, outermost first, and the innermost pair ends up last.
+  const order = tipOrder(lay);
+  assert.deepEqual(order.slice(0, 3), ["t3999", "t3998", "t3997"]);
+  assert.deepEqual(order.slice(-2), ["t0", "t1"], "the tied innermost pair keeps file order");
+});
+
+test("the tip search can be given the metadata's other spelling", () => {
+  // A tree written through the reference's metadata: the tip is the display
+  // name, and the name the user has is the one Step 1 ran.
+  const lay = buildLayout(parse(
+    "((GISAID-19152935_FAV-0863-5_Razorbill:1,other:1):1,third:1);").nodes);
+  assert.deepEqual(searchRows(lay, "EPI-ISL-19152935", null), [],
+                   "as typed, it is not on this tree");
+  assert.deepEqual(searchRows(lay, "EPI-ISL-19152935", null,
+                              ["GISAID-19152935_FAV-0863-5_Razorbill"]), [0]);
+  // The term as typed still wins on its own, and an empty list changes nothing.
+  assert.deepEqual(searchRows(lay, "other", null, []), [1]);
+  assert.deepEqual(searchRows(lay, "", null, ["other"]), [],
+                   "an empty box matches nothing, whatever is passed");
+});
+
 if (!process.exitCode) console.log(`ok — ${passed} tree layout assertions`);

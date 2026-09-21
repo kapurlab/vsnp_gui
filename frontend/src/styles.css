@@ -1509,6 +1509,25 @@ button .elapsed,
   flex: 1;
   min-width: 0;
 }
+/* "Find a sample" hit list. Dense on purpose: the answer is usually one or
+   two rows, and the point is to read file + cell + text at a glance. */
+.ref-find-hits { border-collapse: collapse; width: 100%; }
+.ref-find-hits td {
+  padding: 2px 8px 2px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border, #e5e0d8);
+}
+.ref-find-hits td:last-child { padding-right: 0; }
+/* A file whose bytes are somewhere else, or nowhere. Said quietly next to the
+   name rather than only when a button fails. */
+.ref-editor-fileflag {
+  font-size: 0.78em;
+  font-style: italic;
+  color: var(--muted, #777);
+  word-break: break-all;
+}
+.ref-editor-fileflag.broken { color: #b3261e; font-style: normal; }
+html[data-theme="dark"] .ref-editor-fileflag.broken { color: #f2b8b5; }
 
 /* Step 2 options panel */
 .step2-options-panel {

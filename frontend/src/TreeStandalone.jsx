@@ -49,6 +49,12 @@ export default function TreeStandalone() {
   const [snpScaleWhy, setSnpScaleWhy] = useState("");
   const [snpScale, setSnpScale] = useState(false);
   const [stripSuffix, setStripSuffix] = useState(true);
+  // How sibling clades are stacked: the newick's own order, or ladderized by
+  // subtree size (FigTree's Increasing / Decreasing Node Order). "file" is the
+  // default because it is the only order that matches what any other viewer
+  // shows for this file; the others are a reading aid for a wide tree.
+  const [ordering, setOrdering] = useState("file");
+  const orderingRef = useRef("file");
   const [rerootMode, setRerootMode] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [hits, setHits] = useState([]);
@@ -248,11 +254,22 @@ export default function TreeStandalone() {
 
   useEffect(() => { resize(false); }, [stripSuffix, resize]);
 
+  // Re-stack on an ordering change. A rebuild, not a redraw: the rows every
+  // tip sits on are decided during layout, and the selection, the search hits
+  // and the clade bands are all row ranges — keeping any of them across a
+  // re-stack would highlight whatever happened to land on those rows. The
+  // scroll position is kept (refit: false), so the tree does not jump.
+  useEffect(() => {
+    orderingRef.current = ordering;
+    if (treeRef.current) installTree(treeRef.current, { refit: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordering]);
+
   // ---- loading ----------------------------------------------------------
 
   const installTree = useCallback((tree, { refit = true } = {}) => {
     treeRef.current = tree;
-    const lay = buildLayout(tree.nodes);
+    const lay = buildLayout(tree.nodes, { ordering: orderingRef.current });
     layoutRef.current = lay;
     if (lay.noBranchLengths) setCladogram(true);
     selMaskRef.current = null;
@@ -543,16 +560,42 @@ export default function TreeStandalone() {
     setView(revealRows(view, lay, geomRef.current, [row], { rowH: REVEAL_ROW_H, context: 8 }));
   }, [setView]);
 
+  // The other spelling of whatever is in the search box, from the reference's
+  // metadata. Fetched only when the term as typed matches no tip: the common
+  // case costs nothing, and a term that already found something does not need
+  // a second opinion.
+  const [searchAlso, setSearchAlso] = useState([]);
+  useEffect(() => {
+    const lay = layoutRef.current;
+    const term = searchTerm.trim();
+    if (!lay || !project || term.length < 3) { setSearchAlso([]); return undefined; }
+    if (searchRows(lay, term, displayName).length) { setSearchAlso([]); return undefined; }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/projects/${encodeURIComponent(project)}/resolve-names`,
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ names: [term] }) });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled) setSearchAlso((data.counterparts || {})[term] || []);
+      } catch { if (!cancelled) setSearchAlso([]); }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm, layout, displayName, project]);
+
   useEffect(() => {
     const lay = layoutRef.current;
     if (!lay) return;
-    const rows = searchRows(lay, searchTerm, displayName);
+    const rows = searchRows(lay, searchTerm, displayName, searchAlso);
     setHits(rows);
     setHitAt(0);
     if (rows.length) goToHit(rows, 0);
     else scheduleDraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchTerm, layout, displayName]);
+  }, [searchTerm, layout, displayName, searchAlso]);
 
   const stepHit = (delta) => {
     if (!hits.length) return;
@@ -759,6 +802,19 @@ export default function TreeStandalone() {
           </select>
         </label>
         <label><input type="checkbox" checked={stripSuffix} onChange={(e) => setStripSuffix(e.target.checked)} /> Strip <code>_zc.vcf</code></label>
+        <label title={"Stack sibling clades by how many tips they hold, the way FigTree's "
+                      + "Increasing / Decreasing Node Order does. The tree itself is unchanged "
+                      + "— same topology, same branch lengths, same tips — only which "
+                      + "clade is drawn above which, which is what makes a wide tree read as a "
+                      + "ladder. Re-stacking clears the current selection, because a selection "
+                      + "is a range of rows and the rows have moved."}>
+          Node order
+          <select value={ordering} onChange={(e) => setOrdering(e.target.value)}>
+            <option value="file">as in file</option>
+            <option value="increasing">increasing (small clades first)</option>
+            <option value="decreasing">decreasing (large clades first)</option>
+          </select>
+        </label>
         <label title={bootstrapTitle}
                className={bootstrapAvailable ? undefined : "tree-opt-off"}>
           <input type="checkbox" checked={showBootstrap && bootstrapAvailable}

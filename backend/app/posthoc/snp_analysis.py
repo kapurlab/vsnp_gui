@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -134,7 +135,35 @@ def find_vcf_manifest(start: Path) -> Optional[Path]:
     return None
 
 
+def _vsnp3_stem(name: str) -> str:
+    """A VCF file name reduced the way vsnp3 reduces it for a sample name:
+    `.vcf`, then `_zc`, then `_zc_*` stripped, cumulatively. Mirrors
+    vsnp3_group_on_defining_snps.resolve_sample_name_detail; the `.vcf`
+    pattern keeps `.` as any character, as vsnp3 has it."""
+    cur = name.strip()
+    if cur.endswith(".gz"):
+        cur = cur[:-3]
+    for strip in (".vcf$", "_zc$", "_zc_.*$"):
+        cur = re.sub(strip, "", cur)
+    return cur
+
+
 def load_step1_allowlist(step2_dir: Path) -> set:
+    """The Step 1 samples, under every spelling an alignment header can use.
+
+    The manifest records FILE names (`ERR015582-trim200_zc.vcf`); an alignment
+    header is vsnp3's SAMPLE name for that file, which is the file name with
+    `.vcf`/`_zc` stripped (`ERR015582-trim200`) — so the stem is what is
+    matched against, and the raw file name is kept only for alignments written
+    by hand or by older tools. The header may instead be the reference
+    metadata's display name; filter_fasta_by_headers resolves that through
+    `aliases` before looking here.
+
+    Before this, the allow-list held file names only and the comparison was
+    exact, so on a real vsnp3 alignment nothing ever matched: every
+    "Include: only samples" run ended with "Only 0 of this group's sequences
+    are Step 1 samples".
+    """
     manifest = find_vcf_manifest(step2_dir)
     if manifest is None:
         return set()
@@ -147,18 +176,36 @@ def load_step1_allowlist(step2_dir: Path) -> set:
             filename = (row.get("filename") or "").strip()
             if not filename:
                 continue
+            forms = {filename}
             if filename.endswith(".gz"):
-                allowed.add(filename[:-3])
-            allowed.add(filename)
+                forms.add(filename[:-3])
             if "__" in filename:
                 tail = filename.split("__", 1)[1]
-                allowed.add(tail)
+                forms.add(tail)
                 if tail.endswith(".gz"):
-                    allowed.add(tail[:-3])
+                    forms.add(tail[:-3])
+            for f in list(forms):
+                forms.add(_vsnp3_stem(f))
+            allowed.update(forms)
     return allowed
 
 
-def filter_fasta_by_headers(input_fasta: Path, output_fasta: Path, allowlist: set) -> int:
+def header_stem(header: str, allowlist: set, aliases=None) -> str:
+    """The Step 1 sample a header names, as the allow-list spells it, or ""."""
+    if header in allowlist:
+        return header
+    if aliases is not None:
+        stored = aliases.original_of(header)
+        if stored:
+            for cand in (stored, _vsnp3_stem(stored)):
+                if cand in allowlist:
+                    return cand
+    stem = _vsnp3_stem(header)
+    return stem if stem in allowlist else ""
+
+
+def filter_fasta_by_headers(input_fasta: Path, output_fasta: Path, allowlist: set,
+                            aliases=None) -> int:
     kept = 0
     include = False
     with input_fasta.open("r", encoding="utf-8") as src, output_fasta.open(
@@ -167,7 +214,7 @@ def filter_fasta_by_headers(input_fasta: Path, output_fasta: Path, allowlist: se
         for line in src:
             if line.startswith(">"):
                 header = normalize_header(line)
-                include = header in allowlist
+                include = bool(header_stem(header, allowlist, aliases))
                 if include:
                     kept += 1
                     out.write(line)
@@ -333,7 +380,20 @@ def write_stats(path: Path, payload: Dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, scope: str) -> int:
+def _load_aliases(metadata: Optional[Path]):
+    """The reference metadata as a name index, or None when there is none."""
+    if not metadata:
+        return None
+    try:
+        from app import name_aliases
+    except ImportError:                                  # run outside the package
+        return None
+    idx = name_aliases.load(Path(metadata))
+    return idx if idx else None
+
+
+def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, scope: str,
+        metadata: Optional[Path] = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stats_path = out_dir / "stats.json"
     fasta_path = find_group_fasta(group_dir)
@@ -360,7 +420,8 @@ def run(group_dir: Path, group_name: str, out_dir: Path, snp_dists_path: str, sc
             })
             return 1
         filtered_fasta = out_dir / FILTERED_FASTA_NAME
-        filtered_count = filter_fasta_by_headers(fasta_path, filtered_fasta, allowlist)
+        filtered_count = filter_fasta_by_headers(fasta_path, filtered_fasta, allowlist,
+                                                 aliases=_load_aliases(metadata))
         if filtered_count < 2:
             # snp-dists on one sequence produces a 1x1 matrix and no distances
             # at all; say why rather than emitting an empty plot.
@@ -452,10 +513,14 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--snp-dists", dest="snp_dists", default=None)
     parser.add_argument("--scope", default="all", choices=["all", "step1_only"])
+    parser.add_argument("--metadata", default=None,
+                        help="the reference's *_metadata.xlsx, so alignment headers written "
+                             "as metadata display names resolve to Step 1 samples")
     args = parser.parse_args()
     try:
         snp_dists_path = resolve_snp_dists_path(args.snp_dists)
-        return run(Path(args.group_dir), args.group_name, Path(args.out_dir), snp_dists_path, args.scope)
+        return run(Path(args.group_dir), args.group_name, Path(args.out_dir), snp_dists_path, args.scope,
+                   metadata=Path(args.metadata) if args.metadata else None)
     except Exception as exc:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)

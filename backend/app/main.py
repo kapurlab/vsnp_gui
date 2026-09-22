@@ -2177,6 +2177,9 @@ def ref_files(ref_name: str):
                 entry["symlink_to"] = "?"
         if entry["exists"]:
             entry["readable"] = os.access(f, os.R_OK)
+        lock = _excel_lock_info(f)
+        if lock:
+            entry["excel_lock"] = lock
         return entry
 
     files = [_entry(f, "define_filter") for f in ref_dir.glob("*define_filter*")]
@@ -2466,6 +2469,9 @@ print(json.dumps({'added': added, 'updated': updated,
 class MetadataAddRequest(BaseModel):
     rows: List[Dict[str, str]]
     rationale: str = ""
+    # Set by the browser after the "open in Excel" warning was shown and
+    # accepted. Never defaulted on: the warning must be seen once.
+    ignore_lock: bool = False
 
 
 @app.post("/api/references/{ref_name}/metadata/add-rows")
@@ -2495,6 +2501,7 @@ def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
     # sheet in place instead, and archive + audit it like every other edit to
     # a shared reference file.
     master = _edit_target_or_403(ref_dir, meta_path)
+    excel_lock = _warn_if_open_in_excel(meta_path, payload.ignore_lock)
     _refuse_if_fragile(meta_path)
     old_sha, archived = _backup_ref_file(ref_dir, meta_path, _archive_dir_for(ref_dir, master))
     wanted = [{"original": str(r["original"]).strip(),
@@ -2541,6 +2548,9 @@ def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
         "archived_old": archived,
         "target": str(meta_path),
         **_shared_master_fields(ref_dir, master),
+        # The workbook looked open in Excel and the warning was overridden.
+        # If the row later turns out not to be in the file, this is why.
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
     }
     audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {
@@ -2553,6 +2563,101 @@ def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
         "audit_log": audit_path,
         **_shared_master_fields(ref_dir, master),
     }
+
+
+# Excel writes a "~$<name>" owner file beside a workbook it has open, and the
+# GUI has always skipped those so one is never mistaken for a real workbook.
+# What it never did was READ one. An edit made while someone has the workbook
+# open in Excel lands on the last SAVED copy; Excel neither notices nor
+# re-reads, and the moment that person saves, their in-memory copy goes over
+# the top and the GUI's row is gone. Nothing errors, and the audit log is left
+# asserting a change the file no longer contains.
+#
+# This is a warning and not a refusal, because the signal is unreliable in the
+# one direction that matters: Excel leaves the owner file behind on a crash or
+# a dropped share, and those orphans last for years. On the Ames HPC the
+# define_filter for Mycobacterium_AF2122 has carried one since December 2022,
+# and a reference metadata workbook carried one dated eight months BEFORE its
+# own last save. Refusing on presence would have made both permanently
+# uneditable. So: say who, say when, say whether it looks stale, and let the
+# person decide.
+# Past this, an owner file is read as a leftover rather than a live session.
+_EXCEL_LOCK_STALE_DAYS = 7
+
+
+def _excel_lock_owner(lock: Path) -> str:
+    """The user name Excel recorded in a "~$" owner file, or "".
+
+    The name is stored as a length byte followed by UTF-16LE text. Anything
+    unexpected falls back to the lock file's own owner, and then to "" —
+    a warning that cannot name anybody is still worth showing.
+    """
+    try:
+        data = lock.read_bytes()
+        if data:
+            n = data[0]
+            name = data[2:2 + n * 2].decode("utf-16-le", errors="ignore").strip("\x00").strip()
+            if name.isprintable() and name:
+                return name
+    except OSError:
+        pass
+    try:
+        import pwd
+        return pwd.getpwuid(lock.stat().st_uid).pw_name
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _excel_lock_info(target: Path) -> Optional[Dict[str, Any]]:
+    """The Excel owner file beside `target`, described — or None."""
+    lock = target.parent / f"~${target.name}"
+    try:
+        st = lock.stat()
+    except OSError:
+        return None
+    when = _dt.fromtimestamp(st.st_mtime, _timezone.utc)
+    age_days = max(0, int((time.time() - st.st_mtime) // 86400))
+    # AGE is the only sound signal. "Older than the workbook's own last save"
+    # looks like a stale lock and is not one: Excel stamps the owner file when
+    # the workbook is OPENED and the workbook itself on every save, so a live
+    # session that has saved once always has the older lock. Judging by that
+    # would have called a real session a leftover. Seven days is well past any
+    # plausible sitting-open session and well short of the orphans in the
+    # field, which run to months and years.
+    return {
+        "lock_file": lock.name,
+        "owner": _excel_lock_owner(lock),
+        "modified": when.strftime("%Y-%m-%d %H:%M UTC"),
+        "age_days": age_days,
+        "looks_stale": age_days >= _EXCEL_LOCK_STALE_DAYS,
+    }
+
+
+def _warn_if_open_in_excel(target: Path, proceed: bool) -> Optional[Dict[str, Any]]:
+    """409 once when a workbook looks open in Excel; proceed when told to.
+
+    Returns the lock description so the caller can put it in the audit record:
+    an edit made over a live Excel session may be about to be discarded, and
+    the log should say the warning was shown and overridden.
+    """
+    info = _excel_lock_info(target)
+    if info is None or proceed:
+        return info
+    who = f" by {info['owner']}" if info["owner"] else ""
+    if info["looks_stale"]:
+        reading = (f"That lock is {info['age_days']} days old and looks like a "
+                   f"leftover — Excel abandons these on a crash or a dropped "
+                   f"share — so it is probably safe.")
+    else:
+        reading = ("If somebody is really in that file, your change will be "
+                   "discarded the moment they save, and nothing will say so. "
+                   "Excel also leaves these behind when it crashes, so it may "
+                   "be nobody at all.")
+    raise HTTPException(
+        status_code=409,
+        detail=(f"{target.name} may be open in Excel{who}: {info['lock_file']} "
+                f"was last touched {info['modified']}. {reading}"),
+    )
 
 
 # A curated reference tree keeps ONE spreadsheet and links it into every
@@ -2772,6 +2877,7 @@ class DefineFilterAddGroupRequest(BaseModel):
     group: str
     positions: List[str]
     rationale: str
+    ignore_lock: bool = False
 
 
 # openpyxl mutator for the defining-SNP filter: appends one column per
@@ -2857,6 +2963,7 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
     target = define_files[0]
 
     master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, payload.ignore_lock)
     _refuse_if_fragile(target)
     old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
@@ -2903,6 +3010,9 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
         "archived_old": archived,
         "target": str(target),
         **_shared_master_fields(ref_dir, master),
+        # The workbook looked open in Excel and the warning was overridden.
+        # If the row later turns out not to be in the file, this is why.
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
     }
     audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {
@@ -2920,6 +3030,7 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
 class RemoveSampleAddRequest(BaseModel):
     samples: List[str]
     rationale: str
+    ignore_lock: bool = False
 
 
 # openpyxl mutator for remove_from_analysis: appends sample names to the
@@ -3006,6 +3117,7 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
     target = remove_files[0]
 
     master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, payload.ignore_lock)
     _refuse_if_fragile(target)
     old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
@@ -3042,6 +3154,9 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "archived_old": archived,
         "target": str(target),
         **_shared_master_fields(ref_dir, master),
+        # The workbook looked open in Excel and the warning was overridden.
+        # If the row later turns out not to be in the file, this is why.
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
     }
     audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {
@@ -3094,6 +3209,7 @@ def ref_remove_entries(ref_name: str):
 
 class RemoveNormalizeRequest(BaseModel):
     rationale: str
+    ignore_lock: bool = False
 
 
 _REMOVE_NORMALIZE_CODE = _XLSX_GUARDED_SAVE + r"""
@@ -3147,6 +3263,7 @@ def ref_remove_normalize(ref_name: str, payload: RemoveNormalizeRequest):
     target = ref_dir / state["file"]
     mapping = {e["name"]: e["stored"] for e in state["ineffective"]}
     master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, payload.ignore_lock)
     _refuse_if_fragile(target)
     old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
@@ -3178,6 +3295,9 @@ def ref_remove_normalize(ref_name: str, payload: RemoveNormalizeRequest):
         "archived_old": archived,
         "target": str(target),
         **_shared_master_fields(ref_dir, master),
+        # The workbook looked open in Excel and the warning was overridden.
+        # If the row later turns out not to be in the file, this is why.
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
     }
     audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {"ok": True, "filename": target.name, "changed": summary.get("changed", []),
@@ -3395,6 +3515,7 @@ async def ref_upload_file(
     ref_name: str,
     file: UploadFile = File(...),
     rationale: str = Query(..., min_length=1, max_length=4000),
+    ignore_lock: int = Query(0),
 ):
     ref_dir = Path(_ref_entry(ref_name)["path"])
 
@@ -3417,6 +3538,7 @@ async def ref_upload_file(
     # permission boundary. When the entry is a link, the file to check — and
     # later to write — is the master it points at, not this directory.
     master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, bool(ignore_lock))
     dest = master or target
 
     history_dir = _archive_dir_for(ref_dir, master)
@@ -3522,6 +3644,9 @@ async def ref_upload_file(
         # into, and every other reference that reads it. An edit that reaches
         # a dozen references should say so in the record.
         **_shared_master_fields(ref_dir, master),
+        # The workbook looked open in Excel and the warning was overridden.
+        # If the row later turns out not to be in the file, this is why.
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
     }
     audit_path = _t39_audit_append(record, history_dir)
 

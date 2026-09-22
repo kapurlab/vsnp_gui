@@ -652,10 +652,11 @@ export default function App() {
     );
     if (!rationale || !rationale.trim()) return;
     setRmStatus("Rewriting…");
-    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/normalize`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rationale: rationale.trim() }),
-    });
+    const res = await postRefEdit(
+      `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/normalize`,
+      { rationale: rationale.trim() }
+    );
+    if (!res) { setRmStatus(`Cancelled — ${CANCEL_NOTE}`); return; }
     if (res.ok) {
       const data = await res.json();
       setRmStatus(`Rewrote ${(data.changed || []).length}: ${(data.changed || []).map(([a, b]) => `${a} → ${b}`).join(", ")}`);
@@ -1494,11 +1495,11 @@ export default function App() {
   async function addMetadataRows(rows) {
     if (!refEditorRef || !rows.length) return;
     setMetaStatus("Saving…");
-    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/metadata/add-rows`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows })
-    });
+    const res = await postRefEdit(
+      `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/metadata/add-rows`,
+      { rows }
+    );
+    if (!res) { setMetaStatus(`Cancelled — ${CANCEL_NOTE}`); return; }
     if (res.ok) {
       const data = await res.json();
       // Say that the rest of the sheet was left alone, and where the previous
@@ -1537,11 +1538,11 @@ export default function App() {
     );
     if (!rationale || !rationale.trim()) { setDfStatus("Cancelled — rationale is required."); return; }
     setDfStatus("Saving…");
-    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-group`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ group, positions, rationale: rationale.trim() }),
-    });
+    const res = await postRefEdit(
+      `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-group`,
+      { group, positions, rationale: rationale.trim() }
+    );
+    if (!res) { setDfStatus(`Cancelled — ${CANCEL_NOTE}`); return; }
     if (res.ok) {
       const data = await res.json();
       setDfStatus(`Added group "${data.group}" with ${data.added} position(s): ${(data.positions || []).join(", ")}`);
@@ -1568,11 +1569,11 @@ export default function App() {
     );
     if (!rationale || !rationale.trim()) { setRmStatus("Cancelled — rationale is required."); return; }
     setRmStatus("Saving…");
-    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/add-sample`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ samples, rationale: rationale.trim() }),
-    });
+    const res = await postRefEdit(
+      `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/add-sample`,
+      { samples, rationale: rationale.trim() }
+    );
+    if (!res) { setRmStatus(`Cancelled — ${CANCEL_NOTE}`); return; }
     if (res.ok) {
       const data = await res.json();
       const addedTxt = (data.added || []).length ? `added ${(data.added || []).join(", ")}` : "nothing added";
@@ -1620,6 +1621,32 @@ export default function App() {
     return (f && f.symlink_to) || "";
   }
 
+  // Post a Reference Editor edit, surfacing the "may be open in Excel" warning
+  // the backend raises as a 409. Accepting it retries the same edit with
+  // ignore_lock. The warning is shown once and never becomes a refusal —
+  // Excel's owner files outlive their sessions by years, and one of these
+  // trees has carried a leftover since 2022. Returns null if the person
+  // backed out.
+  const CANCEL_NOTE = "the file may be open in Excel and you chose not to write over it.";
+
+  async function postRefEdit(url, body) {
+    const send = (payload) => fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let res = await send(body);
+    if (res.status === 409) {
+      const err = await res.json().catch(() => ({}));
+      const ok = window.confirm(
+        `${err.detail || "That file may be open in Excel."}\n\nEdit it anyway?`
+      );
+      if (!ok) return null;
+      res = await send({ ...body, ignore_lock: true });
+    }
+    return res;
+  }
+
   function replaceRefFile(refName, expectedFilename, onReplaced) {
     if (!refName || !expectedFilename) return;
     const input = document.createElement("input");
@@ -1659,7 +1686,18 @@ export default function App() {
         const fd = new FormData();
         fd.append("file", picked, picked.name);
         const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/upload-file?rationale=${encodeURIComponent(rationale.trim())}`;
-        const res = await fetch(url, { method: "POST", body: fd });
+        let res = await fetch(url, { method: "POST", body: fd });
+        if (res.status === 409) {
+          const lock = await res.json().catch(() => ({}));
+          const go = window.confirm(
+            `${lock.detail || "That file may be open in Excel."}\n\nReplace it anyway?`
+          );
+          if (!go) return;
+          // FormData is consumed by the first send; rebuild it for the retry.
+          const again = new FormData();
+          again.append("file", picked, picked.name);
+          res = await fetch(`${url}&ignore_lock=1`, { method: "POST", body: again });
+        }
         if (!res.ok) {
           const detail = await res.json().catch(() => ({}));
           window.alert(`Replace failed: ${detail.detail || res.status}`);

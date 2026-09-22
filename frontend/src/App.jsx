@@ -1501,7 +1501,18 @@ export default function App() {
     });
     if (res.ok) {
       const data = await res.json();
-      setMetaStatus(`Saved — ${data.added} added, ${data.updated} updated (${data.rows_total} total)`);
+      // Say that the rest of the sheet was left alone, and where the previous
+      // copy went: this file is shared, and a lab's own note columns sit to
+      // the right of the two the editor writes.
+      const kept = data.archived_old
+        ? ` — other columns untouched; previous copy archived in .history/`
+        : "";
+      const shared = data.master
+        ? ` — written to the shared file ${data.master}` +
+          ((data.also_used_by || []).length
+            ? `, also used by ${data.also_used_by.join(", ")}` : "")
+        : "";
+      setMetaStatus(`Saved — ${data.added} added, ${data.updated} updated (${data.rows_total} total)${kept}${shared}`);
       await loadMetadata(refEditorRef);
     } else {
       const err = await res.json().catch(() => ({}));
@@ -1601,6 +1612,14 @@ export default function App() {
   // hidden file picker, prompts for a rationale, posts multipart to the
   // upload endpoint. The backend enforces filename whitelist, size cap,
   // atomic write, and archives the old file under <ref>/.history/.
+  // The link target for a reference file, when the entry is a symlink into a
+  // curated master shared by several references. Replace and the in-place
+  // editors write THROUGH it, so the person doing it should be told first.
+  function refFileLink(name) {
+    const f = refEditorFiles.find((x) => x.name === name);
+    return (f && f.symlink_to) || "";
+  }
+
   function replaceRefFile(refName, expectedFilename, onReplaced) {
     if (!refName || !expectedFilename) return;
     const input = document.createElement("input");
@@ -1627,6 +1646,16 @@ export default function App() {
           window.alert("Replace cancelled — rationale is required.");
           return;
         }
+        // A shared master is not this reference's file to change quietly.
+        const linkedTo = refFileLink(expectedFilename);
+        if (linkedTo) {
+          const ok = window.confirm(
+            `${expectedFilename} is a link to a shared file:\n${linkedTo}\n\n` +
+            `Replacing it writes that file, so every reference linked to it changes too. ` +
+            `The link is kept and the file's permissions are preserved.\n\nContinue?`
+          );
+          if (!ok) return;
+        }
         const fd = new FormData();
         fd.append("file", picked, picked.name);
         const url = `${API_BASE}/api/references/${encodeURIComponent(refName)}/upload-file?rationale=${encodeURIComponent(rationale.trim())}`;
@@ -1637,8 +1666,11 @@ export default function App() {
           return;
         }
         const data = await res.json();
+        const alsoUsedBy = (data.also_used_by || []).length
+          ? `also used by: ${data.also_used_by.join(", ")}\n` : "";
         window.alert(
           `Replaced ${data.filename}.\n` +
+          (data.master ? `written to shared file: ${data.master}\n${alsoUsedBy}` : "") +
           `new sha256: ${data.new_sha256.slice(0, 12)}…\n` +
           `old archived: ${data.archived_old || "(no previous file)"}\n` +
           `audit log: ${data.audit_log}`

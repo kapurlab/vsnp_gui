@@ -2357,7 +2357,7 @@ def _read_metadata_xlsx(cfg: Dict, meta_path: Path) -> List[Dict[str, str]]:
         "df = pd.read_excel(sys.argv[1], header=None, usecols=[0,1], names=['original','display_name']); "
         "df = df.dropna(subset=['original']); "
         "df['original'] = df['original'].astype(str); "
-        "df['display_name'] = df['display_name'].astype(str); "
+        "df['display_name'] = df['display_name'].fillna('').astype(str); "
         "print(json.dumps(df.to_dict(orient='records')))"
     )
     result = subprocess.run(conda_python_cmd(cfg, code, [str(meta_path)]), text=True, capture_output=True)
@@ -2386,8 +2386,86 @@ def ref_get_metadata(ref_name: str):
     return {"rows": rows, "filename": meta_path.name, "exists": True}
 
 
+# Every mutator below saves through `guarded_save`: it reopens the workbook it
+# just wrote and refuses to leave behind one with fewer sheets, rows or columns
+# than the one it opened. These are SHARED files — a lab keeps its own notes in
+# the columns past the ones vSNP3 reads — and an edit that rebuilt a metadata
+# sheet from the two columns the GUI understands once erased every one of them.
+# "The file did not shrink" is now checked on disk rather than assumed.
+_XLSX_GUARDED_SAVE = r"""
+def shape_of(wb):
+    return (len(wb.sheetnames),
+            max(ws.max_row for ws in wb.worksheets),
+            max(ws.max_column for ws in wb.worksheets))
+
+def guarded_save(wb, target, before, rows_too=True):
+    import openpyxl, sys
+    wb.save(target)
+    chk = openpyxl.load_workbook(target)
+    after = shape_of(chk)
+    chk.close()
+    shrank = after[0] < before[0] or after[2] < before[2]
+    if rows_too and after[1] < before[1]:
+        shrank = True
+    if shrank:
+        sys.stderr.write('ERR:shrank:{}:{}'.format(before, after))
+        sys.exit(9)
+"""
+
+
+# openpyxl mutator for a reference's *_metadata.xlsx: column A is the stored
+# name, column B the display name vSNP3 relabels to. Rows are edited IN PLACE
+# and appended below the last occupied row — anything in column C onward, on
+# any sheet, is untouched. Emits a JSON summary on stdout.
+_METADATA_ADD_CODE = _XLSX_GUARDED_SAVE + r"""
+import openpyxl, json, os, sys
+target = sys.argv[1]
+rows = json.load(open(sys.argv[2]))
+if os.path.exists(target):
+    wb = openpyxl.load_workbook(target)
+    ws = wb.worksheets[0]
+else:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+before = shape_of(wb)
+at_row = {}
+last = 0
+for r in range(1, ws.max_row + 1):
+    a = ws.cell(row=r, column=1).value
+    if a is not None and str(a).strip():
+        at_row.setdefault(str(a).strip(), r)
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=r, column=c).value
+        if v is not None and str(v).strip():
+            last = r        # a row is occupied by ANY cell, a note column included
+            break
+added, updated, unchanged = [], [], []
+row = last
+for item in rows:
+    orig = str(item['original']).strip()
+    disp = str(item['display_name']).strip()
+    r = at_row.get(orig)
+    if r:
+        if str(ws.cell(row=r, column=2).value or '').strip() == disp:
+            unchanged.append(orig)
+        else:
+            ws.cell(row=r, column=2, value=disp)
+            updated.append(orig)
+    else:
+        row += 1
+        ws.cell(row=row, column=1, value=orig)
+        ws.cell(row=row, column=2, value=disp)
+        at_row[orig] = row
+        added.append(orig)
+guarded_save(wb, target, before)
+print(json.dumps({'added': added, 'updated': updated,
+                  'unchanged': unchanged, 'rows_total': len(at_row)}))
+"""
+
+
 class MetadataAddRequest(BaseModel):
     rows: List[Dict[str, str]]
+    rationale: str = ""
 
 
 @app.post("/api/references/{ref_name}/metadata/add-rows")
@@ -2410,56 +2488,262 @@ def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
     meta_files = [f for f in ref_dir.glob("*meta*xlsx") if not f.name.startswith("~$")]
     meta_path = meta_files[0] if meta_files else ref_dir / f"{ref_name}_metadata.xlsx"
 
-    existing_rows: List[Dict[str, str]] = []
-    if meta_path.exists():
-        existing_rows = _read_metadata_xlsx(cfg, meta_path)
-
-    orig_to_idx = {r["original"]: i for i, r in enumerate(existing_rows)}
-    added, updated = 0, 0
-    for row in payload.rows:
-        orig = str(row["original"]).strip()
-        disp = str(row["display_name"]).strip()
-        if orig in orig_to_idx:
-            existing_rows[orig_to_idx[orig]]["display_name"] = disp
-            updated += 1
-        else:
-            existing_rows.append({"original": orig, "display_name": disp})
-            orig_to_idx[orig] = len(existing_rows) - 1
-            added += 1
-
+    # This used to read columns A and B and write the workbook back out of
+    # them, which is not an edit but a replacement: a reference whose metadata
+    # carried a lab's own note columns came back two columns wide, and the
+    # notes were gone with no archived copy to recover them from. Mutate the
+    # sheet in place instead, and archive + audit it like every other edit to
+    # a shared reference file.
+    master = _edit_target_or_403(ref_dir, meta_path)
+    _refuse_if_fragile(meta_path)
+    old_sha, archived = _backup_ref_file(ref_dir, meta_path, _archive_dir_for(ref_dir, master))
+    wanted = [{"original": str(r["original"]).strip(),
+               "display_name": str(r["display_name"]).strip()} for r in payload.rows]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
-        json.dump(existing_rows, tf)
+        json.dump(wanted, tf)
         tmp_json = tf.name
     try:
-        code = (
-            "import pandas as pd, json, sys; "
-            "rows = json.load(open(sys.argv[2])); "
-            "df = pd.DataFrame([[r['original'], r['display_name']] for r in rows]); "
-            "df.to_excel(sys.argv[1], index=False, header=False)"
-        )
         result = subprocess.run(
-            conda_python_cmd(cfg, code, [str(meta_path), tmp_json]),
+            conda_python_cmd(cfg, _METADATA_ADD_CODE, [str(meta_path), tmp_json]),
             text=True, capture_output=True
         )
-        if result.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Failed to write metadata: {result.stderr.strip()}")
     finally:
         Path(tmp_json).unlink(missing_ok=True)
 
-    return {"filename": meta_path.name, "rows_total": len(existing_rows), "added": added, "updated": updated}
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        if archived and err.startswith("ERR:shrank"):
+            # The written file lost something. Put the original back rather
+            # than leaving the user to find it in .history/.
+            shutil.copy2(archived, meta_path)
+            raise HTTPException(
+                status_code=500,
+                detail=("Refused the edit: writing it would have shrunk "
+                        f"{meta_path.name}. The file is unchanged."),
+            )
+        raise HTTPException(status_code=500, detail=f"Failed to write metadata: {err}")
+    try:
+        summary = json.loads(result.stdout.strip())
+    except json.JSONDecodeError:
+        summary = {}
+
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "metadata_add_rows",
+        "reference": ref_name,
+        "filename": meta_path.name,
+        "user": _current_os_user(),
+        "rationale": (payload.rationale or "").strip(),
+        "added": summary.get("added", []),
+        "updated": summary.get("updated", []),
+        "old_sha256": old_sha,
+        "new_sha256": _sha256_of_path(meta_path),
+        "archived_old": archived,
+        "target": str(meta_path),
+        **_shared_master_fields(ref_dir, master),
+    }
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
+    return {
+        "filename": meta_path.name,
+        "rows_total": summary.get("rows_total", 0),
+        "added": len(summary.get("added", [])),
+        "updated": len(summary.get("updated", [])),
+        "unchanged": len(summary.get("unchanged", [])),
+        "archived_old": archived,
+        "audit_log": audit_path,
+        **_shared_master_fields(ref_dir, master),
+    }
 
 
-def _backup_ref_file(ref_dir: Path, target: Path) -> tuple[str, str]:
+# A curated reference tree keeps ONE spreadsheet and links it into every
+# reference that uses it — on the USDA Ames HPC a single FileMakerTB_metadata.xlsx
+# under vsnp_dependencies/ is the metadata for a dozen references. An edit made
+# here has to reach THAT file and leave the link alone.
+#
+# Replacing the link with a private copy is not a smaller change, it is a
+# different one, and it went wrong in two ways at once. The reference quietly
+# stopped sharing: the curated master kept the old content and the other
+# references never saw the edit. And because installing a file by RENAME puts a
+# new inode at the path, the replacement arrived owned by whoever ran the GUI,
+# mode 600, with the tree's ACL gone — a workbook the whole group could read
+# became one only the uploader could. Both are avoided the same way: write
+# through the existing file instead of over it.
+def _link_master(target: Path) -> Optional[Path]:
+    """The real file behind a reference entry, when that entry is a symlink."""
+    try:
+        if not target.is_symlink():
+            return None
+        return Path(os.path.realpath(target))
+    except OSError:
+        return None
+
+
+def _can_write_file(p: Path) -> bool:
+    """Whether this account can really write `p` — ACLs included.
+
+    os.access() answers from the mode bits, and on the filesystems these trees
+    live on an ACL is what actually grants or denies access. Ask the kernel the
+    question that cannot be wrong: open it. "r+b" neither creates nor truncates.
+    """
+    try:
+        with p.open("r+b"):
+            return True
+    except OSError:
+        return False
+
+
+def _edit_target_or_403(ref_dir: Path, target: Path) -> Optional[Path]:
+    """Confirm we can edit `target` where it actually lives; return its master.
+
+    None means an ordinary file in the reference directory. A Path means the
+    entry is a link and that is the file the bytes must land in. Refusing here
+    costs nothing; the same refusal after an upload, or half way through
+    archiving, costs the file.
+    """
+    master = _link_master(target)
+    if master is None:
+        if not os.access(ref_dir, os.W_OK | os.X_OK):
+            raise HTTPException(
+                status_code=403,
+                detail=f"This reference directory is not writable by the account "
+                       f"running the GUI: {ref_dir}",
+            )
+        if target.exists() and not _can_write_file(target):
+            raise HTTPException(
+                status_code=403,
+                detail=f"{target.name} is not writable by the account running the GUI.",
+            )
+        return None
+    if not master.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"{target.name} is a link to {master}, which this machine cannot "
+                   f"see — there is nothing to edit.",
+        )
+    if not _can_write_file(master):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{target.name} is a link to the shared master {master}, which "
+                   f"the account running the GUI cannot write. Ask whoever curates "
+                   f"that file for write access, or edit it there. The GUI will not "
+                   f"replace the link with a private copy — that would un-share this "
+                   f"reference silently.",
+        )
+    return master
+
+
+def _references_sharing(master: Path, exclude_dir: Path) -> List[str]:
+    """Other references whose entry links to the same master file.
+
+    An edit through one of them changes the file all of them read, so the
+    answer belongs in the audit record and on the screen.
+    """
+    names: List[str] = []
+    try:
+        refs = list_references(Path(load_config()["vsnp3_path"]))
+    except Exception:  # noqa: BLE001 — a sharing list is never worth a 500
+        return names
+    for r in refs:
+        d = Path(r["path"])
+        try:
+            if d.samefile(exclude_dir):
+                continue
+            entries = list(d.glob("*.xlsx"))
+        except OSError:
+            continue
+        for f in entries:
+            if f.is_symlink() and _link_master(f) == master:
+                names.append(r["name"])
+                break
+    return sorted(names)
+
+
+def _archive_dir_for(ref_dir: Path, master: Optional[Path]) -> Path:
+    """Where the previous version goes.
+
+    Beside the MASTER when the entry is a link: that is where the file lives,
+    several references read it, and a history filed under whichever reference
+    happened to be open would be invisible from the others. Falls back to the
+    reference's own .history/ when the master's directory will not take one.
+    """
+    if master is not None:
+        d = master.parent / ".history"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+        except OSError:
+            pass
+    return ref_dir / ".history"
+
+
+def _shared_master_fields(ref_dir: Path, master: Optional[Path]) -> Dict[str, Any]:
+    """Audit and response fields naming the shared file an edit actually reached."""
+    if master is None:
+        return {}
+    return {"master": str(master), "also_used_by": _references_sharing(master, ref_dir)}
+
+
+# Parts of an .xlsx that openpyxl does not read, and therefore cannot write
+# back: a load/save round trip drops them without a word. Every editor below
+# edits through openpyxl, so a workbook carrying one is refused rather than
+# quietly flattened. Replace still works on such a file — it swaps the bytes
+# whole — and so does editing it in Excel. None of the 41 reference workbooks
+# in the shipped set carry any of these, so this refuses nothing that works
+# today; it closes the one way an in-place edit could still lose something.
+_XLSX_FRAGILE_PARTS = (
+    ("xl/charts/", "charts"),
+    ("xl/drawings/", "drawings or images"),
+    ("xl/pivotCache/", "pivot tables"),
+    ("xl/pivotTables/", "pivot tables"),
+    ("xl/vbaProject.bin", "macros"),
+)
+
+
+def _xlsx_round_trip_risk(target: Path) -> List[str]:
+    """What editing `target` through openpyxl would silently delete."""
+    if not target.exists():
+        return []
+    try:
+        with zipfile.ZipFile(target) as z:
+            names = z.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return []
+    found: List[str] = []
+    for prefix, label in _XLSX_FRAGILE_PARTS:
+        if label not in found and any(n.startswith(prefix) for n in names):
+            found.append(label)
+    return found
+
+
+def _refuse_if_fragile(target: Path) -> None:
+    """400 rather than edit a workbook openpyxl would strip something out of."""
+    risk = _xlsx_round_trip_risk(target)
+    if risk:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{target.name} contains {', '.join(risk)}, which this editor "
+                "cannot preserve. Edit the file directly, or use Replace to "
+                "upload an edited copy — both keep it intact."
+            ),
+        )
+
+
+def _backup_ref_file(ref_dir: Path, target: Path,
+                     history_dir: Optional[Path] = None) -> tuple[str, str]:
     """Copy an existing reference file aside under .history/ before mutating it.
 
     Returns (old_sha256, archived_path) — both empty strings if the target
     doesn't exist yet. Mirrors the archiving the Replace (upload-file) flow
-    does, so add-group / add-sample edits are equally recoverable.
+    does, so add-group / add-sample edits are equally recoverable. `copy2`
+    follows a symlink, so the archive holds the master's BYTES and not a
+    pointer that would track the master's next edit. Pass `history_dir` to
+    file it beside a shared master instead of under this one reference.
     """
     if not target.exists():
         return "", ""
     old_sha = _sha256_of_path(target)
-    history_dir = ref_dir / ".history"
+    history_dir = history_dir or (ref_dir / ".history")
     history_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     archived = history_dir / f"{ts}_{old_sha[:8]}_{target.name}"
@@ -2495,7 +2779,7 @@ class DefineFilterAddGroupRequest(BaseModel):
 # the sheet's formatting. Detects the contig prefix from existing column
 # headers so the user may type a bare position. Rejects malformed or
 # duplicate positions. Emits a JSON summary on stdout, "ERR:<code>" on stderr.
-_DEFINE_FILTER_ADD_CODE = r"""
+_DEFINE_FILTER_ADD_CODE = _XLSX_GUARDED_SAVE + r"""
 import openpyxl, json, sys, re
 target = sys.argv[1]
 payload = json.load(open(sys.argv[2]))
@@ -2503,6 +2787,7 @@ group = str(payload['group']).strip()
 positions = payload['positions']
 wb = openpyxl.load_workbook(target)
 ws = wb.worksheets[0]
+before = shape_of(wb)
 chrom = None
 for c in range(2, ws.max_column + 1):
     v = ws.cell(row=1, column=c).value
@@ -2535,7 +2820,7 @@ for p in norm:
     col += 1
     ws.cell(row=1, column=col, value=p)
     ws.cell(row=2, column=col, value=group)
-wb.save(target)
+guarded_save(wb, target, before)
 print(json.dumps({'chrom': chrom, 'positions': norm, 'group': group}))
 """
 
@@ -2571,7 +2856,9 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
         )
     target = define_files[0]
 
-    old_sha, archived = _backup_ref_file(ref_dir, target)
+    master = _edit_target_or_403(ref_dir, target)
+    _refuse_if_fragile(target)
+    old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
         json.dump({"group": group, "positions": positions}, tf)
         tmp_json = tf.name
@@ -2615,8 +2902,9 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
         "new_sha256": new_sha,
         "archived_old": archived,
         "target": str(target),
+        **_shared_master_fields(ref_dir, master),
     }
-    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {
         "ok": True,
         "filename": target.name,
@@ -2625,6 +2913,7 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
         "added": len(summary.get("positions", positions)),
         "archived_old": archived,
         "audit_log": audit_path,
+        **_shared_master_fields(ref_dir, master),
     }
 
 
@@ -2636,20 +2925,28 @@ class RemoveSampleAddRequest(BaseModel):
 # openpyxl mutator for remove_from_analysis: appends sample names to the
 # single (header-less) column A, skipping any already present. Emits a JSON
 # summary {"added": [...], "skipped": [...]} on stdout.
-_REMOVE_SAMPLE_ADD_CODE = r"""
+_REMOVE_SAMPLE_ADD_CODE = _XLSX_GUARDED_SAVE + r"""
 import openpyxl, json, sys
 target = sys.argv[1]
 payload = json.load(open(sys.argv[2]))
 samples = payload['samples']
 wb = openpyxl.load_workbook(target)
 ws = wb.worksheets[0]
+before = shape_of(wb)
 existing = set()
 last = 0
 for r in range(1, ws.max_row + 1):
     v = ws.cell(row=r, column=1).value
     if v is not None and str(v).strip():
         existing.add(str(v).strip())
-        last = r
+    # vsnp3 reads column 1, but a reviewer's notes may sit to the right of it
+    # or below the last name. Append past the last row holding ANYTHING, so a
+    # new name never lands on a row someone else has already written on.
+    for c in range(1, ws.max_column + 1):
+        cv = ws.cell(row=r, column=c).value
+        if cv is not None and str(cv).strip():
+            last = r
+            break
 added, skipped = [], []
 row = last
 for s in samples:
@@ -2663,7 +2960,7 @@ for s in samples:
     ws.cell(row=row, column=1, value=s)
     existing.add(s)
     added.append(s)
-wb.save(target)
+guarded_save(wb, target, before)
 print(json.dumps({'added': added, 'skipped': skipped}))
 """
 
@@ -2708,7 +3005,9 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         )
     target = remove_files[0]
 
-    old_sha, archived = _backup_ref_file(ref_dir, target)
+    master = _edit_target_or_403(ref_dir, target)
+    _refuse_if_fragile(target)
+    old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
         json.dump({"samples": samples}, tf)
         tmp_json = tf.name
@@ -2742,8 +3041,9 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "new_sha256": new_sha,
         "archived_old": archived,
         "target": str(target),
+        **_shared_master_fields(ref_dir, master),
     }
-    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {
         "ok": True,
         "filename": target.name,
@@ -2754,6 +3054,7 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "translated": translated,
         "archived_old": archived,
         "audit_log": audit_path,
+        **_shared_master_fields(ref_dir, master),
     }
 
 
@@ -2795,12 +3096,13 @@ class RemoveNormalizeRequest(BaseModel):
     rationale: str
 
 
-_REMOVE_NORMALIZE_CODE = r"""
+_REMOVE_NORMALIZE_CODE = _XLSX_GUARDED_SAVE + r"""
 import openpyxl, json, sys
 target = sys.argv[1]
 mapping = json.load(open(sys.argv[2]))
 wb = openpyxl.load_workbook(target)
 ws = wb.worksheets[0]
+before = shape_of(wb)
 changed = []
 present = set()
 for r in range(1, ws.max_row + 1):
@@ -2822,7 +3124,9 @@ for r in range(1, ws.max_row + 1):
         cell.value = new
         present.add(new)
     changed.append([name, new])
-wb.save(target)
+# rows_too=False: clearing a duplicate that sat on the last row legitimately
+# shortens the sheet. Columns and sheets must still all be there.
+guarded_save(wb, target, before, rows_too=False)
 print(json.dumps({'changed': changed}))
 """
 
@@ -2842,7 +3146,9 @@ def ref_remove_normalize(ref_name: str, payload: RemoveNormalizeRequest):
         return {"ok": True, "filename": state["file"], "changed": []}
     target = ref_dir / state["file"]
     mapping = {e["name"]: e["stored"] for e in state["ineffective"]}
-    old_sha, archived = _backup_ref_file(ref_dir, target)
+    master = _edit_target_or_403(ref_dir, target)
+    _refuse_if_fragile(target)
+    old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
         json.dump(mapping, tf)
         tmp_json = tf.name
@@ -2871,10 +3177,12 @@ def ref_remove_normalize(ref_name: str, payload: RemoveNormalizeRequest):
         "new_sha256": _sha256_of_path(target),
         "archived_old": archived,
         "target": str(target),
+        **_shared_master_fields(ref_dir, master),
     }
-    audit_path = _t39_audit_append(record, ref_dir / ".history")
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
     return {"ok": True, "filename": target.name, "changed": summary.get("changed", []),
-            "archived_old": archived, "audit_log": audit_path}
+            "archived_old": archived, "audit_log": audit_path,
+            **_shared_master_fields(ref_dir, master)}
 
 
 class RefCreateFileRequest(BaseModel):
@@ -3101,34 +3409,31 @@ async def ref_upload_file(
 
     target = _ref_dir_entry(ref_dir, upload_name)
 
-    # Is this reference tree writable AT ALL? Worth answering before 10 MB is
-    # read off the wire, and worth answering in words: a shared reference set
-    # mounted read-only for the web user (the common HPC arrangement) otherwise
-    # failed deep inside the install with an OSError traceback, which reads as a
-    # broken upload rather than as a deliberate permission boundary.
-    if not os.access(ref_dir, os.W_OK | os.X_OK):
-        raise HTTPException(
-            status_code=403,
-            detail=f"This reference directory is not writable by the account "
-                   f"running the GUI, so {upload_name} cannot be replaced here: "
-                   f"{ref_dir}",
-        )
+    # Can we edit this file where it actually lives? Worth answering before
+    # 10 MB is read off the wire, and worth answering in words: a shared
+    # reference set mounted read-only for the web user (the common HPC
+    # arrangement) otherwise failed deep inside the install with an OSError
+    # traceback, which reads as a broken upload rather than as a deliberate
+    # permission boundary. When the entry is a link, the file to check — and
+    # later to write — is the master it points at, not this directory.
+    master = _edit_target_or_403(ref_dir, target)
+    dest = master or target
 
-    # Spool to a temp file in the same dir (so the os.replace is atomic on
-    # the same filesystem) while enforcing the size cap. Read in chunks so
-    # we don't load 10 MB into memory.
-    history_dir = ref_dir / ".history"
+    history_dir = _archive_dir_for(ref_dir, master)
     try:
         history_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise HTTPException(
             status_code=403,
-            detail=f"Cannot create the .history/ archive beside {upload_name} "
+            detail=f"Cannot create the .history/ archive for {upload_name} "
                    f"({e}); refusing to replace a reference file that could not "
                    f"then be rolled back",
         )
+    # Spool into the archive directory — already proven writable, and the
+    # install below copies bytes rather than renaming, so the spool does not
+    # need to share a filesystem with the destination.
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    tmp_path = ref_dir / f".{upload_name}.{ts}.tmp"
+    tmp_path = history_dir / f".{upload_name}.{ts}.tmp"
     bytes_written = 0
     try:
         with tmp_path.open("wb") as out:
@@ -3161,33 +3466,36 @@ async def ref_upload_file(
     new_sha = _sha256_of_path(tmp_path)
     old_sha = ""
     archived_old_path = ""
-    replaced_symlink = ""
     if target.exists():
         old_sha = _sha256_of_path(target)
-        # Move existing file aside under .history/ before replacing.
+        # COPY the previous version aside, never move it. copy2 follows a
+        # symlink, so the archive holds the master's bytes rather than a
+        # pointer that would track the master's next edit — and the original
+        # stays where it is, which is what lets the install below write
+        # through it.
         archived = history_dir / f"{ts}_{old_sha[:8]}_{upload_name}"
         try:
-            if target.is_symlink():
-                # A reference tree that shares one curated master across several
-                # references keeps this entry as a link. Renaming the LINK into
-                # .history/ would archive a pointer — still aimed at the
-                # unchanged master, so the "previous version" would silently
-                # become the new one the moment anybody edited that master.
-                # Copy the bytes instead, and leave the link in place for the
-                # rename below to replace: the master is never written through.
-                replaced_symlink = os.readlink(target)
-                shutil.copy2(target, archived)
-            else:
-                target.replace(archived)  # atomic rename
+            shutil.copy2(target, archived)
             archived_old_path = str(archived)
         except OSError as e:
             try: tmp_path.unlink()
             except OSError: pass
             raise HTTPException(status_code=500, detail=f"Failed to archive previous file: {e}")
 
-    # Atomic install of the new file.
+    # Install the new bytes THROUGH the existing file rather than renaming over
+    # it. A rename puts a new inode at the path, and everything about the old
+    # file that was not its content goes with the old inode: its owner, its
+    # mode, its ACL, and — when the entry was a link — the link itself, leaving
+    # this one reference holding a private copy while its siblings still read
+    # the master. Writing in place keeps all of it. The trade is atomicity: a
+    # reader during the copy sees a short file, which every xlsx reader rejects
+    # loudly, and the archive above is one copy command away.
     try:
-        tmp_path.replace(target)
+        if dest.exists():
+            shutil.copyfile(tmp_path, dest)
+            tmp_path.unlink()
+        else:
+            tmp_path.replace(dest)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Failed to install new file: {e}")
 
@@ -3210,10 +3518,10 @@ async def ref_upload_file(
         "size_bytes": bytes_written,
         "archived_old": archived_old_path,
         "target": str(target),
-        # Present only when this upload turned a shared link into a private
-        # copy. Silence here would make the reference tree's sharing structure
-        # change without a record of when or by whom.
-        **({"replaced_symlink_to": replaced_symlink} if replaced_symlink else {}),
+        # Present when this entry is a link: the file the bytes actually went
+        # into, and every other reference that reads it. An edit that reaches
+        # a dozen references should say so in the record.
+        **_shared_master_fields(ref_dir, master),
     }
     audit_path = _t39_audit_append(record, history_dir)
 
@@ -3225,7 +3533,7 @@ async def ref_upload_file(
         "archived_old": archived_old_path,
         "audit_log": audit_path,
         "size_bytes": bytes_written,
-        "replaced_symlink_to": replaced_symlink,
+        **_shared_master_fields(ref_dir, master),
     }
 
 
@@ -7673,20 +7981,34 @@ def _read_kraken_taxa() -> List[str]:
     return taxa
 
 
-def _write_kraken_taxa(taxa: List[str]) -> None:
-    """Rewrite the shared taxa.yaml as a flat YAML sequence, preserving header."""
+def _kraken_taxa_yaml_line(name: str) -> str:
+    """One taxon as a YAML sequence entry, quoted when the name needs it."""
+    name = name.strip()
+    if not name:
+        return ""
+    if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        return f'- "{esc}"'
+    return f"- {name}"
+
+
+def _append_kraken_taxon(name: str) -> None:
+    """Add one taxon to the shared taxa.yaml, leaving the rest of the file alone.
+
+    This used to rewrite the file from the names the parser understood, which
+    deleted every comment in it — and the header above says entries may be
+    added "by hand", so the notes people keep beside one are real, and both
+    GUIs write this same file. An append keeps them: the existing bytes are
+    untouched and one line goes on the end.
+    """
     _KRAKEN_TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
-    lines = [_KRAKEN_TAXA_HEADER]
-    for name in taxa:
-        name = name.strip()
-        if not name:
-            continue
-        if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
-            esc = name.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'- "{esc}"')
-        else:
-            lines.append(f"- {name}")
-    _KRAKEN_TAXA_YAML.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        text = _KRAKEN_TAXA_YAML.read_text(encoding="utf-8")
+    except OSError:
+        text = _KRAKEN_TAXA_HEADER
+    if text and not text.endswith("\n"):
+        text += "\n"
+    _KRAKEN_TAXA_YAML.write_text(text + _kraken_taxa_yaml_line(name) + "\n", encoding="utf-8")
 
 def _kraken_gui_config() -> Dict[str, Any]:
     """Read the Kraken ID Parse GUI's own user config so the vSNP GUI inherits
@@ -7871,7 +8193,7 @@ def kraken_taxa_add(payload: KrakenTaxonPayload):
         return {"taxa": taxa, "added": False}
     taxa.append(name)
     try:
-        _write_kraken_taxa(taxa)
+        _append_kraken_taxon(name)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not save taxon list: {exc}")
     return {"taxa": taxa, "added": True}

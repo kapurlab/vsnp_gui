@@ -17,6 +17,13 @@ is why this file tests both.
 `_serve_path_allowed` had already been widened for exactly this reason (igv.js
 fetching a GFF through a directory of symlinks); the Reference Editor never was.
 
+Replace then had a second bug on the same layout, which this file also pins.
+It installed the upload by RENAME, which put a new file at the LINK's path: the
+reference silently stopped sharing (the master kept the old content, and every
+sibling reference kept reading it), and because a rename means a new inode, the
+file arrived owned by the uploader with the tree's mode and ACL gone. An edit
+now goes THROUGH the link into the master, and the master is written in place.
+
 Run directly:  <conda>/bin/python backend/app/test_ref_file_access.py
 """
 from __future__ import annotations
@@ -139,23 +146,29 @@ def main() -> int:
     check("the listing says whether the tree is writable",
           listed.get("ref_dir_writable") is True)
 
-    print("[Replace, through a symlink, must not write to the shared master]")
+    print("[Replace, through a symlink, writes the shared master and keeps the link]")
+    master_file = master / "Mbovis_define_filter.xlsx"
+    master_ino = master_file.stat().st_ino
     res, err = upload("Mbovis_define_filter.xlsx")
-    check("upload accepted (was 400 Path not allowed)", err is None, )
+    check("upload accepted (was 400 Path not allowed)", err is None)
     if res:
-        check("the master copy is untouched",
-              (master / "Mbovis_define_filter.xlsx").read_bytes() == b"PK\x03\x04master")
-        check("the reference now holds a real file, not a link",
-              not (linked / "Mbovis_define_filter.xlsx").is_symlink())
-        check("...with the uploaded bytes",
-              (linked / "Mbovis_define_filter.xlsx").read_bytes() == XLSX)
+        check("the master holds the uploaded bytes",
+              master_file.read_bytes() == XLSX)
+        check("...written THROUGH the existing file, so its inode (and any ACL "
+              "or ownership on it) survived", master_file.stat().st_ino == master_ino)
+        check("the reference entry is still a link",
+              (linked / "Mbovis_define_filter.xlsx").is_symlink())
+        check("...still pointing at the master",
+              os.path.realpath(linked / "Mbovis_define_filter.xlsx")
+              == os.path.realpath(master_file))
         archived = Path(res["archived_old"])
         check("the previous version was archived by CONTENT",
               archived.is_file() and not archived.is_symlink()
               and archived.read_bytes() == b"PK\x03\x04master")
-        check("the audit record says the link was broken",
-              res.get("replaced_symlink_to", "").endswith(
-                  "curated/Mbovis_define_filter.xlsx"))
+        check("...beside the master, where every reference sharing it can find it",
+              archived.parent == Path(os.path.realpath(master)) / ".history")
+        check("the record names the shared file the bytes went into",
+              os.path.realpath(res.get("master", "")) == os.path.realpath(master_file))
 
     print("[Replace on a read-only reference tree refuses in words]")
     ro = tmp / "readonly/Mycobacterium_AF2122"

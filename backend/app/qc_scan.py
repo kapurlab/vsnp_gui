@@ -29,6 +29,7 @@ NaN, which json-encoded as the invalid token NaN).
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import gzip
 import json
@@ -38,6 +39,11 @@ import sys
 import tempfile
 import warnings
 from concurrent.futures import ProcessPoolExecutor
+
+try:  # run as a script from app/ (the backend's subprocess), or imported as app.qc_scan
+    from fanout import fan_out
+except ImportError:
+    from app.fanout import fan_out
 
 # openpyxl warns about vsnp3's workbooks ("no default style", …) — once per
 # file, thousands of times per project. Silence them in this process and in
@@ -222,15 +228,61 @@ def _save_cache(path: str, files: dict) -> None:
                 pass
 
 
+def _stats_files(step1_dir: str, include_direct: bool) -> dict:
+    """{path: [mtime_ns, size]} for every workbook the scan reads.
+
+    What ``glob.glob("<step1>/*/*_stats.xlsx")`` finds — glob's own rules: no
+    dotfiles at either level, case-sensitive, a sample entry that is not a
+    directory contributes nothing — together with the stat the cache check
+    needs. glob listed the sample dirs one after another and the cache check
+    then stat()ed every hit one after another: two round trips per sample on
+    shared storage, in series. Here each sample's listing and stats are one
+    task, and the tasks run at once.
+    """
+    try:
+        with os.scandir(step1_dir) as it:
+            top = [(e.name, e.path) for e in it if not e.name.startswith(".")]
+    except OSError:
+        return {}
+
+    def _stat(path: str):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return [st.st_mtime_ns, st.st_size]
+
+    def in_sample(item) -> list:
+        _name, path = item
+        out = []
+        try:
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.name.startswith(".") or not fnmatch.fnmatchcase(e.name, "*_stats.xlsx"):
+                        continue
+                    sig = _stat(e.path)
+                    if sig is not None:
+                        out.append((e.path, sig))
+        except OSError:
+            pass
+        return out
+
+    found = {}
+    if include_direct:
+        for name, path in top:
+            if fnmatch.fnmatchcase(name, "*_stats.xlsx"):
+                sig = _stat(path)
+                if sig is not None:
+                    found[path] = sig
+    for part in fan_out(in_sample, top):
+        found.update(part)
+    return found
+
+
 def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = False):
     """Yields ('progress', done, total) tuples, then ('rows', rows, stats)."""
-    patterns = [os.path.join(step1_dir, "*", "*_stats.xlsx")]
-    if include_direct:
-        patterns.insert(0, os.path.join(step1_dir, "*_stats.xlsx"))
-    files = []
-    for pat in patterns:
-        files.extend(glob.glob(pat))
-    files = sorted(set(files))
+    sigs = _stats_files(step1_dir, include_direct)
+    files = sorted(sigs)
     total = len(files)
 
     cached = _load_cache(cache_path) if cache_path else {}
@@ -240,11 +292,7 @@ def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = F
     done = 0
     for f in files:
         rel = os.path.relpath(f, step1_dir)
-        try:
-            st = os.stat(f)
-            sig = [st.st_mtime_ns, st.st_size]
-        except OSError:
-            continue
+        sig = sigs[f]
         hit = cached.get(rel)
         if hit and hit.get("sig") == sig and isinstance(hit.get("row"), dict):
             row = dict(hit["row"])
@@ -271,7 +319,9 @@ def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = F
                 if done % 20 == 0 or done == total:
                     yield ("progress", done, total)
 
-    if cache_path:
+    # Rewritten only when something changed. For the biggest projects it is
+    # tens of MB, and a revisit that parsed nothing used to write it all back.
+    if cache_path and (to_parse or fresh.keys() != cached.keys()):
         _save_cache(cache_path, fresh)
 
     # Newest run per sample, same rule as always: highest _run_date wins.

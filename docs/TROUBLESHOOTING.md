@@ -370,6 +370,17 @@ conda install pandas -c conda-forge
 # Select all samples to use same reference
 ```
 
+**Not a mismatch: the same FASTA under another file name.** A VCF records its
+reference by file name (`##reference=`, and the `alignment_<name>/` folder),
+but what decides whether positions can be compared is the coordinate system:
+the `##contig=<ID=…,length=…>` lines. When a VCF names another FASTA but its
+contigs are exactly the project reference's — every sequence name and length —
+the GUI counts it as the project's reference and says so under Reference check
+("*N* VCFs name *X* as their reference, but their contigs … are exactly *Y*'s").
+Nothing needs renaming or editing. A VCF whose lengths differ, that lacks a
+segment, or that records no contig lines is still treated as a different
+reference.
+
 ### Issue: No VCF files found for Step 2
 
 **Symptoms:** Step 2 Setup shows `VCFs ready: 0`
@@ -605,6 +616,21 @@ top  # or Activity Monitor on Mac
 
 # Close other applications
 # Allocate more RAM if running in VM
+```
+
+### Issue: switching to a large project is slow on shared storage
+
+On a network filesystem (NFS, GPFS, Lustre) every file check is a round trip
+to the server, and a project switch makes several per sample — a
+9,000-sample project is tens of thousands. The backend makes those checks
+concurrently, sixteen at a time by default, so they overlap instead of
+queueing. The width is one environment variable, set wherever the app is
+launched (the OOD `script.sh.erb`, or `sites/site.conf`):
+
+```bash
+# More in flight helps a fast parallel filesystem; fewer is gentler on a
+# busy NFS server. 1 makes every check one at a time, as before v0.4.105.
+export VSNP_GUI_FS_WORKERS=16
 ```
 
 ### Issue: Step 1 taking very long (>1 hour per sample)

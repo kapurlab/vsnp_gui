@@ -37,9 +37,13 @@ import os
 import re
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+try:  # imported as app.ref_contigs by the backend, as a top-level module by scripts
+    from app.fanout import fan_out
+except ImportError:
+    from fanout import fan_out
 
 # Sorted (sequence name, length) pairs: a reference's coordinate system.
 Contigs = Tuple[Tuple[str, int], ...]
@@ -48,11 +52,6 @@ Sig = Tuple[int, int]
 
 CACHE_BASENAME = ".vcf_contig_cache.json"
 _CACHE_VERSION = 1
-
-# Concurrent header reads for a cold cache. Each read is a few NFS round trips
-# and almost no bytes, so throughput scales with requests in flight; 16 keeps a
-# login node's filesystem client busy without looking like a storm.
-_READ_WORKERS = 16
 
 _ID_RE = re.compile(r"(?:^|,)ID=([^,>]+)")
 _LEN_RE = re.compile(r"(?:^|,)length=(\d+)")
@@ -201,6 +200,10 @@ class ContigMatcher:
         self._root = str(root) if root else None
         self._files: Dict[str, list] = {}
         self._new: Dict[str, list] = {}
+        # Files whose (size, mtime) this matcher has itself checked: a matcher
+        # lives for one request, so a verdict it settled a moment ago needs no
+        # second stat to be trusted (see prefetch).
+        self._checked: set = set()
         self._lock = threading.Lock()
         if self.digest and cache_path:
             self._files = self._read_cache()
@@ -246,6 +249,8 @@ class ContigMatcher:
         """
         if not self.enabled:
             return False
+        if sig is None and self._key(path) in self._checked:
+            return bool(self._files[self._key(path)][2])
         sig = sig or _stat_sig(path)
         if sig is None:
             return False
@@ -275,18 +280,23 @@ class ContigMatcher:
         def work(pair):
             path, sig = pair
             sig = sig or _stat_sig(path)
-            if sig is None or self.cached(path, sig) is not None:
+            if sig is None:
                 return None
+            if self.cached(path, sig) is not None:
+                return path, sig, None
             return path, sig, vcf_contigs(path) == self.contigs
 
-        if len(todo) == 1:
-            results = [work(todo[0])]
-        else:
-            with ThreadPoolExecutor(max_workers=min(_READ_WORKERS, len(todo))) as ex:
-                results = list(ex.map(work, todo))
-        for res in results:
+        # Concurrently, on the app's shared pool (see fanout): each header read
+        # is a few round trips on shared storage and almost no bytes. Every
+        # file checked here is remembered as checked, so the matches() calls
+        # that follow cost nothing — without that, each one re-stat()ed its
+        # file, one after another, undoing most of the point.
+        for res in fan_out(work, todo):
             if res:
-                self._record(*res)
+                path, sig, verdict = res
+                if verdict is not None:
+                    self._record(path, sig, verdict)
+                self._checked.add(self._key(path))
 
     def save(self) -> None:
         """Persist what this matcher learned. Atomic and best-effort.

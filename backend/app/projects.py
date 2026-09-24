@@ -7,6 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
+try:  # imported as app.projects by the backend, as a top-level module by its tests
+    from app.fanout import fan_out
+except ImportError:
+    from fanout import fan_out
+
 logger = logging.getLogger(__name__)
 
 
@@ -434,7 +439,7 @@ def _scan_step1(step1_dir: Path, seen: set) -> int:
     """
     if not step1_dir.is_dir():
         return 0
-    sample_dirs = []
+    sample_dirs: List[Tuple[str, bool]] = []
     try:
         with os.scandir(step1_dir) as it:
             for entry in it:
@@ -443,20 +448,34 @@ def _scan_step1(step1_dir: Path, seen: set) -> int:
                 if entry.name.startswith(("_", ".")):
                     continue
                 if entry.is_dir():
-                    sample_dirs.append(entry.path)
+                    sample_dirs.append((entry.path, entry.is_symlink()))
     except OSError:
         return 0
 
-    for sample_path in sample_dirs:
-        dev = _dir_device(Path(sample_path))
+    # A real sample directory is on step1's device — it is not a mount point —
+    # so only a symlinked one needs a stat of its own to learn where its files
+    # live. That was one stat per sample on every listing, for a number the
+    # directory entry already implies.
+    step1_dev = _dir_device(step1_dir)
+
+    def _reads_in(item: Tuple[str, bool]) -> set:
+        sample_path, is_link = item
+        dev = _dir_device(Path(sample_path)) if is_link else step1_dev
+        found: set = set()
         try:
             with os.scandir(sample_path) as it:
                 for entry in it:
                     # Reads live directly under the sample dir.
                     if _is_read_file(entry.name):
-                        _add_read_identity(entry, dev, seen)
+                        _add_read_identity(entry, dev, found)
         except OSError:
-            continue
+            pass
+        return found
+
+    # Every sample's listing at once: each is a round trip on shared storage,
+    # and made one after another they were most of a project card's cost.
+    for found in fan_out(_reads_in, sample_dirs):
+        seen.update(found)
     return len(sample_dirs)
 
 

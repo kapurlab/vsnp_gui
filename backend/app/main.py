@@ -8,6 +8,7 @@ from urllib.parse import quote
 from typing import List, Optional, Dict, Any, Set, Tuple
 import zipfile
 import csv
+import fnmatch
 import io
 import socket
 import json
@@ -55,6 +56,7 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app import ref_contigs
+from app.fanout import fan_out
 from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 from app.step2_inventory import (
     Entry, db_entries, duplicate_samples, is_analyzable, is_db_vcf, import_tail, sample_of,
@@ -670,21 +672,21 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
     """
     if len(_STEP1_NAMES_CACHE) > _STEP1_NAMES_CACHE_MAX:
         _STEP1_NAMES_CACHE.clear()
-    samples = []
     try:
         with os.scandir(step1_dir) as it:
             entries = sorted(it, key=lambda e: e.name)
     except OSError:
         return []
-    for entry in entries:
+
+    def _sample_if_reads(entry) -> Optional[str]:
         if entry.name.startswith(("_", ".")):
-            continue
+            return None
         try:
             if not entry.is_dir():
-                continue
+                return None
             mtime_ns = entry.stat().st_mtime_ns
         except OSError:
-            continue
+            return None
         hit = _STEP1_NAMES_CACHE.get(entry.path)
         if hit is not None and hit[0] == mtime_ns:
             has_fastq = hit[1]
@@ -707,9 +709,11 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
             # re-listed next call — the pre-memo cost, only while it is hot.
             if time.time_ns() - mtime_ns > 2_000_000_000:
                 _STEP1_NAMES_CACHE[entry.path] = (mtime_ns, has_fastq)
-        if has_fastq:
-            samples.append(entry.name)
-    return samples
+        return entry.name if has_fastq else None
+
+    # Every sample's stat (and, on a memo miss, its listing) at once: each is
+    # a round trip on shared storage (see fanout).
+    return [n for n in fan_out(_sample_if_reads, entries) if n]
 
 
 def _step1_browser_samples(step1_dir: Path) -> List[Dict]:
@@ -723,15 +727,38 @@ def _step1_browser_samples(step1_dir: Path) -> List[Dict]:
     way the sample dir (with its vSNP outputs) is a real sample and should
     list. `is_pair` is best-effort from whatever reads remain on disk, mirroring
     the R1/R2 detection used elsewhere; it only drives the "R1+R2" badge."""
-    out: List[Dict] = []
-    if not step1_dir.is_dir():
-        return out
-    for p in sorted(step1_dir.iterdir()):
-        if not p.is_dir() or p.name.startswith(("_", ".")):
-            continue
-        has_r2 = any(p.glob("*_R2*.fastq.gz")) or any(p.glob("*_2*.fastq.gz"))
-        out.append({"sample": p.name, "is_pair": bool(has_r2)})
-    return out
+    try:
+        with os.scandir(step1_dir) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        return []
+
+    def _is_sample_dir(e) -> bool:
+        if e.name.startswith(("_", ".")):
+            return False
+        try:
+            return e.is_dir()
+        except OSError:
+            return False
+
+    def _describe(e) -> Dict:
+        # One directory read per sample, not two globs: the R2 test listed the
+        # dir once for *_R2*.fastq.gz and — on the common `_2` naming, which
+        # misses the first pattern — again for *_2*.fastq.gz. Same patterns,
+        # same rule as pathlib's glob (case-sensitive, dotfiles included).
+        try:
+            with os.scandir(e.path) as files:
+                has_r2 = any(
+                    fnmatch.fnmatchcase(f.name, "*_R2*.fastq.gz")
+                    or fnmatch.fnmatchcase(f.name, "*_2*.fastq.gz")
+                    for f in files
+                )
+        except OSError:
+            has_r2 = False
+        return {"sample": e.name, "is_pair": has_r2}
+
+    # All samples at once: each read is a round trip on shared storage.
+    return fan_out(_describe, [e for e in entries if _is_sample_dir(e)])
 
 
 # T-46 Phase 1: filter at dispatch time so Step 1 doesn't abort on samples
@@ -769,6 +796,58 @@ def _align_glob(sample_dir: Path, pattern: str) -> List[Path]:
     return sorted(sample_dir.glob(f"alignment_*/{pattern}")) or sorted(
         sample_dir.glob(f"alignment/{pattern}")
     )
+
+
+class _AlignListing:
+    """_align_glob for one sample, answered from one listing per directory.
+
+    _align_glob lists the sample dir and every alignment_*/ in it afresh for
+    each pattern, and the status endpoint asks four patterns of every sample:
+    four listings of each directory where one answers all of them. Same rules
+    as the pathlib glob it replaces — case-sensitive, dotfiles included, an
+    alignment_* that is not a directory contributes nothing — and the same
+    fallback to the suffix-less alignment/ when no alignment_*/ matches.
+    """
+
+    def __init__(self, sample_dir: Path):
+        self._dir = sample_dir
+        self._entries: Dict[str, bool] = {}   # name -> is_symlink
+        try:
+            with os.scandir(sample_dir) as it:
+                for e in it:
+                    try:
+                        self._entries[e.name] = e.is_symlink()
+                    except OSError:
+                        self._entries[e.name] = False
+        except OSError:
+            pass
+        self._named: List[Tuple[str, List[str]]] = []
+        for name in sorted(n for n in self._entries if fnmatch.fnmatchcase(n, "alignment_*")):
+            try:
+                self._named.append((name, os.listdir(sample_dir / name)))
+            except OSError:
+                continue
+        self._legacy: Optional[List[str]] = None
+
+    def glob(self, pattern: str) -> List[Path]:
+        hits = sorted(
+            self._dir / d / f for d, files in self._named for f in files
+            if fnmatch.fnmatchcase(f, pattern)
+        )
+        if hits:
+            return hits
+        if self._legacy is None:
+            try:
+                self._legacy = os.listdir(self._dir / "alignment") if "alignment" in self._entries else []
+            except OSError:
+                self._legacy = []
+        return sorted(self._dir / "alignment" / f for f in self._legacy if fnmatch.fnmatchcase(f, pattern))
+
+    def exists(self, name: str) -> bool:
+        """Path.exists() for a direct child: present, and not a dangling link."""
+        if name not in self._entries:
+            return False
+        return not self._entries[name] or os.path.exists(self._dir / name)
 
 
 def _legacy_step1_complete(sample_dir: Path) -> bool:
@@ -4939,14 +5018,23 @@ def step1_status(project: str):
             stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
             in_vcfs_folder.add(stem)
 
-    statuses = []
-    for sample_dir in sorted(step1_dir.glob("*")):
-        if not sample_dir.is_dir():
-            continue
+    try:
+        with os.scandir(step1_dir) as it:
+            sample_entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        sample_entries = []
+
+    def _sample_status(dir_entry) -> Optional[Dict[str, Any]]:
         # Skip writer/janitor scaffolding (e.g. _provenance/) so they don't
         # surface as "Unknown" samples in the GUI.
-        if sample_dir.name.startswith(("_", ".")):
-            continue
+        if dir_entry.name.startswith(("_", ".")):
+            return None
+        try:
+            if not dir_entry.is_dir():
+                return None
+        except OSError:
+            return None
+        sample_dir = Path(dir_entry.path)
         sample = sample_dir.name
         log_path = sample_dir / "run_step1.log"
         exit_code_path = sample_dir / ".provenance" / "exit_code"
@@ -4966,19 +5054,22 @@ def step1_status(project: str):
                 entry = dict(cached[1])
                 entry["in_vcfs_folder"] = sample in in_vcfs_folder
                 entry["reason"] = _step1_status_reason(entry.get("status", ""), sample_dir, min_bytes)
-                statuses.append(entry)
-                continue
+                return entry
 
-        vcf = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
-        nodup = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
+        # One listing of the sample dir and of each alignment dir answers all
+        # four patterns below; _align_glob re-listed them for every pattern.
+        listing = _AlignListing(sample_dir)
+        vcf = next(iter(listing.glob("*_filtered_hapall_annotated.vcf")), None)
+        nodup = next(iter(listing.glob("*_nodup.bam")), None)
         # Non-recursive: the per-sample zc VCF is always written under
         # alignment_*/ (or the legacy plain alignment/). A recursive **/*_zc.vcf
         # glob walked each sample's entire output subtree (unmapped_reads/,
         # sourmash/, spoligo/, …) on every poll — the dominant cost that made
         # the endpoint time out at ~1000 samples.
-        zc_vcf = next(iter(_align_glob(sample_dir, "*_zc.vcf")), None) or next(
-            iter(_align_glob(sample_dir, "*_zc.vcf.gz")), None
+        zc_vcf = next(iter(listing.glob("*_zc.vcf")), None) or next(
+            iter(listing.glob("*_zc.vcf.gz")), None
         )
+        has_log = listing.exists("run_step1.log")
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
@@ -4998,7 +5089,7 @@ def step1_status(project: str):
         status = "not_started"
         legacy_complete = False
         exit_code_str = ""
-        if exit_code_path.exists():
+        if ec_mtime is not None:  # the stat above: it exists
             try:
                 exit_code_str = exit_code_path.read_text(encoding="utf-8").strip()
             except OSError:
@@ -5013,7 +5104,7 @@ def step1_status(project: str):
             # the sample is Complete, not 'Not Started' with a fastq complaint.
             status = "complete"
             legacy_complete = True
-        elif log_path.exists():
+        elif has_log:
             status = "running" if job_status == "running" else "unknown"
 
         # A never-run sample whose INPUT can't be dispatched is not "Not
@@ -5044,7 +5135,7 @@ def step1_status(project: str):
             "sample": sample,
             "status": status,
             "log_path": str(log_path),
-            "has_log": log_path.exists(),
+            "has_log": has_log,
             "has_outputs": bool(vcf and nodup) or legacy_complete,
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
@@ -5058,7 +5149,11 @@ def step1_status(project: str):
             _STEP1_STATUS_CACHE[cache_key] = (
                 ec_mtime, {k: v for k, v in entry.items() if k not in ("in_vcfs_folder", "reason")}
             )
-        statuses.append(entry)
+        return entry
+
+    # Every sample at once: on shared storage each check is a round trip, and
+    # one after another they were minutes on a 9,000-sample project.
+    statuses = [e for e in fan_out(_sample_status, sample_entries) if e is not None]
     # job_id so the GUI can follow the trim -> batch hand-off: the trim job
     # finishes, this starts reporting the batch's id, and the log pane re-points.
     return {
@@ -5469,18 +5564,38 @@ def step2_setup(project: str):
             same_memo[dir_name] = _same_reference(dir_name, project_reference, ref_aliases)
         return same_memo[dir_name]
 
-    plans: List[Tuple[str, List[Path]]] = []
-    for sample_dir in sorted(step1_dir.glob("*")):
-        if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
-            continue
-        sample = sample_dir.name
-        step1_samples.add(sample)
+    try:
+        with os.scandir(step1_dir) as it:
+            step1_entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        step1_entries = []
+
+    def _plan(e) -> Optional[Tuple[str, List[Path], bool]]:
+        if e.name.startswith(("_", ".")):
+            return None
+        try:
+            if not e.is_dir():
+                return None
+        except OSError:
+            return None
+        sample_dir = Path(e.path)
         # Every step1 sample goes into the cumulative DB, including QC-excluded
         # ones — they're filtered out at run time, not deleted here. Legacy
         # plain-alignment/ samples (pre-GUI runs) contribute their VCFs too.
         vcf_candidates = sorted(_align_glob(sample_dir, "*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
-        if vcf_candidates:
-            plans.append((sample, vcf_candidates))
+        # _find_patched_vcf answers None without a vcf_edits/, and nearly every
+        # sample has none; asked here, it is asked for all samples at once.
+        has_edits = bool(vcf_candidates) and (sample_dir / "vcf_edits").exists()
+        return e.name, vcf_candidates, has_edits
+
+    # The read-only half of Build — every sample's runs, newest last — for all
+    # samples at once: several round trips each on shared storage. Copying
+    # stays below, one sample at a time and in order, so which copy lands
+    # first when two samples share a target name is decided as it always was.
+    planned = [x for x in fan_out(_plan, step1_entries) if x is not None]
+    step1_samples.update(sample for sample, _c, _e in planned)
+    plans: List[Tuple[str, List[Path]]] = [(s, c) for s, c, _e in planned if c]
+    has_edits = {s for s, c, e in planned if e}
 
     # A run whose directory names another FASTA can still be against this
     # reference: a renamed copy leaves the name wrong and the contigs right (see
@@ -5496,6 +5611,19 @@ def step2_setup(project: str):
             )
             for p in cands if p.parent.name.startswith("alignment_")
         ])
+
+    # What is already in the set, from ONE listing: whether a target exists,
+    # and whether it is a legacy symlink, used to cost two stats per sample.
+    try:
+        with os.scandir(step2_dir) as it:
+            in_db = {}
+            for e in it:
+                try:
+                    in_db[e.name] = e.is_symlink()
+                except OSError:
+                    in_db[e.name] = False
+    except OSError:
+        in_db = {}
 
     for sample, vcf_candidates in plans:
         sample_dir = step1_dir / sample
@@ -5537,22 +5665,26 @@ def step2_setup(project: str):
                 ref_skipped_samples.append(sample)
                 continue
         source_vcf = vcf_candidates[-1]
-        patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
+        patched_vcf = (
+            _find_patched_vcf(sample_dir, sample, source_vcf) if sample in has_edits else None
+        )
         chosen_vcf = patched_vcf or source_vcf
         target_name = _target_name_for_vcf(source_vcf, chosen_vcf)
         target = step2_dir / target_name
         if patched_vcf:
             edited_samples.append(sample)
-        if target.exists() or target.is_symlink():
+        if target_name in in_db:
             # Upgrade a legacy (or broken) symlink entry to a durable real copy;
             # leave an existing real file in place (accumulate, never clobber).
-            if target.is_symlink():
+            if in_db[target_name]:
                 target.unlink()
                 shutil.copy2(chosen_vcf, target)
+                in_db[target_name] = False
                 count += 1
             continue
         # Copy (don't symlink) so vcf_database is a standalone, permanent store.
         shutil.copy2(chosen_vcf, target)
+        in_db[target_name] = False
         count += 1
 
     # Record which samples this project's reference makes unusable. Build is
@@ -5600,15 +5732,37 @@ def step2_setup(project: str):
     excluded_blocklist = 0
     excluded_step1 = 0
     manifest_path = step2_dir / ".vcf_source_manifest.csv"
+    # resolve() walks every component of the path with its own lstat — eight
+    # or so round trips per VCF, for 9,000 VCFs. A real file inside the set
+    # resolves to wherever the set's directory resolves, plus its name, so
+    # only the symlinked entries need a walk of their own.
+    try:
+        real_db = step2_dir.resolve()
+    except OSError:
+        real_db = step2_dir
+    try:
+        with os.scandir(step2_dir) as it:
+            db_links = set()
+            for e in it:
+                try:
+                    if e.is_symlink():
+                        db_links.add(e.name)
+                except OSError:
+                    db_links.add(e.name)
+    except OSError:
+        db_links = set()
     with manifest_path.open("w", encoding="utf-8") as manifest:
         manifest.write("filename,source_type,source_path\n")
         for entry in db_entries(step2_dir):
             vcf = step2_dir / entry.filename
             stem = entry.sample
-            try:
-                resolved = vcf.resolve()
-            except OSError:
-                resolved = vcf
+            if entry.filename in db_links:
+                try:
+                    resolved = vcf.resolve()
+                except OSError:
+                    resolved = vcf
+            else:
+                resolved = real_db / entry.filename
             if stem in step1_samples:
                 source_type = "step1"
             else:
@@ -7133,7 +7287,12 @@ def step2_vcf_count(project: str):
     # them into one "duplicates across DBs" figure reported the second number
     # under the first one's name.
     step1_dir = project_dir / "step1"
-    step1_set = set(_step1_sample_names(step1_dir)) if step1_dir.is_dir() else set()
+    # Only the panel-overlap figures below read this, and both need a panel
+    # hit, so with no panel for this reference it cannot change a number —
+    # and costs a listing of every sample dir. An influenza project has none.
+    step1_set = (
+        set(_step1_sample_names(step1_dir)) if panels and step1_dir.is_dir() else set()
+    )
     duplicates_across_dbs = 0
     duplicates_with_project = 0
     duplicates = 0
@@ -8781,11 +8940,26 @@ def step1_edits(project: str):
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    edits = {}
-    for sample_dir in sorted(step1_dir.glob("*")):
-        if not sample_dir.is_dir():
-            continue
+    try:
+        with os.scandir(step1_dir) as it:
+            sample_entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        sample_entries = []
+
+    def _sample_edits(dir_entry) -> Optional[Tuple[str, Dict[str, Any]]]:
+        try:
+            if not dir_entry.is_dir():
+                return None
+        except OSError:
+            return None
+        sample_dir = Path(dir_entry.path)
         sample = sample_dir.name
+        # Both artifacts of an edit — the patched VCF and its log — live under
+        # vcf_edits/, so a sample without one has nothing to report. Asking
+        # that first is one stat; the glob-and-sort below is several listings
+        # and a stat per VCF, and it used to run for every sample.
+        if not (sample_dir / "vcf_edits").exists():
+            return None
         # Non-recursive on purpose: a **/ glob here walked every sample's whole
         # output subtree per request — the same class of cost that made the
         # status endpoint time out at ~1000 samples. The zc VCF only ever
@@ -8797,12 +8971,15 @@ def step1_edits(project: str):
         patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
         edit_log = _edit_log_path(sample_dir, sample)
         if patched_vcf or edit_log.exists():
-            edits[sample] = {
+            return sample, {
                 "patched_vcf": str(patched_vcf) if patched_vcf else "",
                 "edit_log": str(edit_log) if edit_log.exists() else "",
                 "edited": bool(patched_vcf) and edit_log.exists()
             }
-    return edits
+        return None
+
+    # Every sample at once: each check is a round trip on shared storage.
+    return dict(e for e in fan_out(_sample_edits, sample_entries) if e is not None)
 
 
 
@@ -10939,7 +11116,62 @@ def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
     return candidate.replace("_", " ").strip().replace(" ", "_")
 
 
+# vsnp3_path -> (built at, roots signature, alias map). See _reference_alias_map.
+_ALIAS_MAP_MEMO: Dict[str, Tuple[float, tuple, Dict[str, str]]] = {}
+_ALIAS_MAP_TTL_S = 300.0
+_ALIAS_EXTS = (".fa", ".fasta", ".fna", ".fas")
+
+
+def _reference_roots_signature(vsnp3_path: Path) -> tuple:
+    """The registered roots and their mtimes: a reference added, removed or
+    renamed changes its root's mtime, and a root added or dropped changes the
+    list itself."""
+    out = []
+    for r in reference_roots(vsnp3_path):
+        try:
+            out.append((str(r), r.stat().st_mtime_ns))
+        except OSError:
+            out.append((str(r), None))
+    return tuple(out)
+
+
 def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
+    """_build_reference_alias_map, reused while the reference roots are unchanged.
+
+    Building it walks every reference directory recursively, and a project
+    switch asks for it from several endpoints at once (reference_lock, the
+    audit, Build). It is rebuilt whenever a root's contents change — a new
+    reference, a removed one — and at most five minutes after it was built,
+    which bounds how long a FASTA renamed deep inside an existing reference
+    directory can go unnoticed.
+    """
+    key = str(vsnp3_path)
+    sig = _reference_roots_signature(vsnp3_path)
+    now = time.monotonic()
+    hit = _ALIAS_MAP_MEMO.get(key)
+    if hit is not None and hit[1] == sig and now - hit[0] < _ALIAS_MAP_TTL_S:
+        return dict(hit[2])
+    aliases = _build_reference_alias_map(vsnp3_path)
+    _ALIAS_MAP_MEMO[key] = (now, sig, aliases)
+    return dict(aliases)
+
+
+def _fasta_like_by_ext(base: Path) -> Dict[str, List[Path]]:
+    """What ``base.rglob(f"*{ext}")`` yields for each alias extension, from ONE
+    walk of the tree instead of one per extension. Same rules as rglob: names
+    matched case-sensitively at every depth, dotfiles included, directory
+    symlinks not descended into, and a directory whose name matches counts
+    like a file."""
+    found: Dict[str, List[Path]] = {ext: [] for ext in _ALIAS_EXTS}
+    for dirpath, dirnames, filenames in os.walk(base):
+        for name in (*filenames, *dirnames):
+            for ext in _ALIAS_EXTS:
+                if name.endswith(ext):
+                    found[ext].append(Path(dirpath) / name)
+    return found
+
+
+def _build_reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
     """Map every plausible FASTA stem -> reference directory name.
 
     vsnp3_step1.py copies the reference FASTA into each sample's alignment
@@ -10965,14 +11197,20 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
         if key_lc in name.lower() and key_lc not in existing.lower():
             aliases[key] = name
 
-    refs = list_references(vsnp3_path)
-    for ref in refs:
-        name = ref.get("name")
-        base = Path(ref.get("path", ""))
-        if not name or not base.exists():
+    refs = [
+        (ref.get("name"), Path(ref.get("path", "")))
+        for ref in list_references(vsnp3_path)
+        if ref.get("name")
+    ]
+    # The walks are independent, so they run at once; the rules below depend
+    # on order (which reference claims a stem, when to stop looking) and are
+    # applied afterwards, one reference at a time, exactly as before.
+    walks = fan_out(lambda r: _fasta_like_by_ext(r[1]) if r[1].exists() else None, refs)
+    for (name, base), by_ext in zip(refs, walks):
+        if by_ext is None:
             continue
-        for ext in (".fa", ".fasta", ".fna", ".fas"):
-            for fasta in base.rglob(f"*{ext}"):
+        for ext in _ALIAS_EXTS:
+            for fasta in by_ext[ext]:
                 stem = fasta.stem
                 _add(stem, name)
                 # NCBI version-suffix variant: `NZ_LS483305.1` -> `NZ_LS483305`.
@@ -11458,7 +11696,6 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         return _project_run_key(by_ref, project_reference, alias_map, matcher, same=_same)
 
     cache = _vcf_ref_cache_load(step2_dir)
-    fresh: Dict[str, Any] = {}
     # Over the canonical set: the veto used to scan only *_zc.vcf(.gz), i.e. it
     # was blind to exactly the files staging copies regardless of selection —
     # so a VCF called against another reference could join every run without
@@ -11492,22 +11729,30 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
 
     unknown = 0
     wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
-    named: List[Tuple[str, Path, List[int], str]] = []
-    for entry in entries:
+
+    def _resolve(entry: Path) -> Optional[Tuple[str, Path, List[int], str]]:
         sample = entry.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
         try:
             st = entry.stat()
         except OSError:
-            continue
+            return None
         sig = [st.st_size, st.st_mtime_ns]
         hit = cache.get(entry.name)
         if hit and hit.get("sig") == sig and isinstance(hit.get("ref"), str):
             ref = hit["ref"]
         else:
             ref = _db_copy_reference(entry, alignment_refs(sample), alias_map)
-        fresh[entry.name] = {"sig": sig, "ref": ref}
-        named.append((sample, entry, sig, ref))
-    _vcf_ref_cache_save(step2_dir, fresh)
+        return sample, entry, sig, ref
+
+    # Every VCF's stat (and, on a cache miss, its Step 1 lookup) at once: a
+    # warm audit is one stat per VCF, and 9,000 of them one after another was
+    # most of the Step 2 pane's wait on shared storage.
+    named = [r for r in fan_out(_resolve, entries) if r is not None]
+    fresh = {e.name: {"sig": sig, "ref": ref} for _s, e, sig, ref in named}
+    # Rewritten only when something changed: it is the size of the set, and a
+    # warm audit changes nothing.
+    if fresh != cache:
+        _vcf_ref_cache_save(step2_dir, fresh)
 
     # The name is not the last word. A VCF named for another FASTA whose contigs
     # are exactly the project reference's was called against the same
@@ -11536,6 +11781,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     recoverable: List[Dict[str, Any]] = []
     removable: List[Dict[str, Any]] = []
     orphans: List[Dict[str, Any]] = []
+    fan_out(alignment_refs, sorted({sample for sample, _e, _r in wrong}))
     for sample, entry, ref in wrong:
         by_ref = alignment_refs(sample)
         if not by_ref:
@@ -11581,6 +11827,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # name. Read those candidates' contigs together first, so a worklist of
     # thousands (all 3,204 owl samples, before they were recognised) is one
     # parallel pass rather than a serial read per sample.
+    fan_out(alignment_refs, [n for n in recorded if n not in unusable])
     pending: List[Path] = []
     for name in recorded:
         by_ref = alignment_refs(name) if name not in unusable else {}

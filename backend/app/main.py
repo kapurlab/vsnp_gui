@@ -54,6 +54,7 @@ from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
+from app import ref_contigs
 from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 from app.step2_inventory import (
     Entry, db_entries, duplicate_samples, is_analyzable, is_db_vcf, import_tail, sample_of,
@@ -216,6 +217,76 @@ def _project_reference_dir(project_dir: Path, cfg: Dict) -> Optional[Path]:
                 return ref_dir
         except OSError:
             continue
+    return None
+
+
+def _reference_dir_named(cfg: Dict, ref_name: str) -> Optional[Path]:
+    """The reference directory vsnp3 would resolve `ref_name` to, or None.
+
+    The same first-hit-wins walk as _project_reference_dir, for a reference that
+    is named by a request rather than recorded in project.json.
+    """
+    if not ref_name:
+        return None
+    for root in reference_roots(Path(cfg.get("vsnp3_path", ""))):
+        ref_dir = root / ref_name
+        try:
+            if ref_dir.is_dir():
+                return ref_dir
+        except OSError:
+            continue
+    return None
+
+
+def _contig_matcher(cfg: Dict, project_dir: Path,
+                    reference: Optional[str] = None) -> ref_contigs.ContigMatcher:
+    """A check of VCFs against the coordinate system of the project's reference.
+
+    For the VCFs whose file name says they were called against something else:
+    a renamed copy of the same FASTA leaves the name wrong and the contigs
+    right, and only the contigs decide whether positions can be compared (see
+    ref_contigs). `reference` overrides the project's own, for an import that
+    names one. Disabled — every answer False, the name-only behaviour — when
+    there is no reference or its FASTA cannot be read from here.
+    """
+    name = reference if reference is not None else _project_reference(project_dir)
+    contigs = ref_contigs.reference_contigs(_reference_dir_named(cfg, name)) if name else None
+    step2 = project_dir / "step2"
+    cache = step2 / ref_contigs.CACHE_BASENAME if contigs and step2.is_dir() else None
+    return ref_contigs.ContigMatcher(contigs, cache, root=project_dir)
+
+
+def _newest_vcf(vcfs: List[Path]) -> Path:
+    """The VCF Build and Re-collect would take from a run directory: newest on disk."""
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+    return max(vcfs, key=_mtime)
+
+
+def _project_run_key(by_ref: Dict[str, List[Path]], reference: str,
+                     alias_map: Dict[str, str],
+                     matcher: Optional[ref_contigs.ContigMatcher] = None,
+                     same=None) -> Optional[str]:
+    """Which of a sample's alignment_<ref>/ runs is against `reference`, or None.
+
+    By directory name first — exact, alias-resolved, spelling variant — which
+    costs nothing. Only when no name matches is a run's VCF read for its
+    contigs, and then it is the one Re-collect would copy (the newest in that
+    directory), because those are the positions that would join the set. The
+    suffix-less legacy alignment/ is never chosen: Build does not collect from
+    it while a named run exists, and this has to agree with Build. `same` is the
+    caller's memoised _same_reference(a, b, alias_map), when it has one.
+    """
+    same = same or (lambda a, b: _same_reference(a, b, alias_map))
+    key = next((k for k in by_ref if same(k, reference)), None)
+    if key is not None or matcher is None or not matcher.enabled:
+        return key
+    for k, vcfs in by_ref.items():
+        if k and vcfs and matcher.matches(_newest_vcf(vcfs)):
+            return k
     return None
 
 
@@ -3913,8 +3984,14 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     with manifest_path.open("a", encoding="utf-8") as manifest_handle:
         if not manifest_exists:
             manifest_handle.write("filename,source_type,source_path\n")
+        import_matcher = _contig_matcher(cfg, project_dir, reference=detected_ref)
         for vcf in vcfs:
             vcf_ref = _detect_vcf_reference(vcf, alias_map)
+            if (vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match)
+                    and import_matcher.matches(vcf)):
+                # Named for another FASTA, called against this one's contigs: a
+                # renamed copy of the same reference (see ref_contigs).
+                vcf_ref = detected_ref
             if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
                 mismatched.append({"path": str(vcf), "reference": vcf_ref})
                 if not payload.allow_mismatch:
@@ -5384,6 +5461,15 @@ def step2_setup(project: str):
     ref_skipped_samples: List[str] = []
     edited_samples = []
     step1_samples: set[str] = set()
+    # Memoised: thousands of samples, a handful of distinct directory names.
+    same_memo: Dict[str, bool] = {}
+
+    def _is_project_ref(dir_name: str) -> bool:
+        if dir_name not in same_memo:
+            same_memo[dir_name] = _same_reference(dir_name, project_reference, ref_aliases)
+        return same_memo[dir_name]
+
+    plans: List[Tuple[str, List[Path]]] = []
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
             continue
@@ -5393,8 +5479,26 @@ def step2_setup(project: str):
         # ones — they're filtered out at run time, not deleted here. Legacy
         # plain-alignment/ samples (pre-GUI runs) contribute their VCFs too.
         vcf_candidates = sorted(_align_glob(sample_dir, "*_zc.vcf*"), key=lambda p: p.stat().st_mtime)
-        if not vcf_candidates:
-            continue
+        if vcf_candidates:
+            plans.append((sample, vcf_candidates))
+
+    # A run whose directory names another FASTA can still be against this
+    # reference: a renamed copy leaves the name wrong and the contigs right (see
+    # ref_contigs). Those runs are read for their contigs — only those, all at
+    # once, and each file's verdict is cached — before anything is decided.
+    matcher = _contig_matcher(cfg, project_dir) if project_reference else None
+    if matcher is not None and matcher.enabled:
+        matcher.prefetch([
+            p for _sample, cands in plans
+            if not any(
+                q.parent.name.startswith("alignment_")
+                and _is_project_ref(q.parent.name[len("alignment_"):]) for q in cands
+            )
+            for p in cands if p.parent.name.startswith("alignment_")
+        ])
+
+    for sample, vcf_candidates in plans:
+        sample_dir = step1_dir / sample
         # A sample re-run against a new reference KEEPS its old
         # alignment_<ref>/ dir, and "newest on disk" is not the same question as
         # "called against this project's reference" — the stale reference wins
@@ -5412,10 +5516,11 @@ def step2_setup(project: str):
             # alignment_MTBC0_v1 while the project reference is mtbc0_v1.1. A
             # string comparison here would read every one of those runs as a
             # foreign reference and skip the entire project.
-            preferred = [
-                p for p in named
-                if _same_reference(p.parent.name[len("alignment_"):], project_reference, ref_aliases)
-            ]
+            preferred = [p for p in named if _is_project_ref(p.parent.name[len("alignment_"):])]
+            if not preferred and matcher is not None and matcher.enabled:
+                # No run is named for this reference; one may still BE it,
+                # under another file name, and then it collects like any other.
+                preferred = [p for p in named if matcher.matches(p)]
             if preferred:
                 vcf_candidates = preferred
             elif len(named) == len(vcf_candidates):
@@ -5473,13 +5578,19 @@ def step2_setup(project: str):
                 # this, Build rewrote the record from scratch and every dismissal
                 # was undone by the next press.
                 "samples": sorted(set(ref_skipped_samples) - prior_ignored),
-                "ignored": sorted(prior_ignored),
+                # Only what Build still skips stays dismissed. A dismissed
+                # sample that now collects — recognised under a renamed FASTA,
+                # or re-run — is in the comparison set, not outstanding work,
+                # and listing it as dismissed would say otherwise.
+                "ignored": sorted(prior_ignored & set(ref_skipped_samples)),
                 "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }),
             encoding="utf-8",
         )
     except OSError:
         pass
+    if matcher is not None:
+        matcher.save()
 
     # Rebuild the manifest from the FINAL database contents so preserved /
     # imported VCFs (those with no step1 source) are recorded too, not just
@@ -11322,22 +11433,29 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
             "project_reference": project_reference,
             "db_references": [], "mixed": False, "total": 0,
             "recoverable": [], "removable": [], "orphans": [],
-            "unusable": [], "ignored": [], "unknown": 0,
+            "unusable": [], "ignored": [], "unknown": 0, "renamed": [],
         }
 
     alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    # For VCFs whose name says another reference: same contigs, same reference.
+    matcher = _contig_matcher(cfg, project_dir)
+    same_memo: Dict[Tuple[str, str], bool] = {}
 
     def _same(a: str, b: str) -> bool:
         """Same reference under a different spelling of its name.
 
         Covers both a case variant (MTBC0_v1.1 vs mtbc0_v1.1) and the version
         truncation vsnp3 leaves in the alignment dir name (MTBC0_v1) — see
-        _resolve_reference_name.
+        _resolve_reference_name. Memoised: a 9,000-VCF set holds a handful of
+        distinct names, and this is asked once or twice per VCF.
         """
-        return _same_reference(a, b, alias_map)
+        k = (a, b)
+        if k not in same_memo:
+            same_memo[k] = _same_reference(a, b, alias_map)
+        return same_memo[k]
 
-    def _key_for(by_ref: Dict[str, List[Path]], ref: str) -> Optional[str]:
-        return next((k for k in by_ref if _same(k, ref)), None)
+    def _project_key(by_ref: Dict[str, List[Path]]) -> Optional[str]:
+        return _project_run_key(by_ref, project_reference, alias_map, matcher, same=_same)
 
     cache = _vcf_ref_cache_load(step2_dir)
     fresh: Dict[str, Any] = {}
@@ -11374,6 +11492,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
 
     unknown = 0
     wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
+    named: List[Tuple[str, Path, List[int], str]] = []
     for entry in entries:
         sample = entry.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
         try:
@@ -11387,13 +11506,32 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         else:
             ref = _db_copy_reference(entry, alignment_refs(sample), alias_map)
         fresh[entry.name] = {"sig": sig, "ref": ref}
+        named.append((sample, entry, sig, ref))
+    _vcf_ref_cache_save(step2_dir, fresh)
+
+    # The name is not the last word. A VCF named for another FASTA whose contigs
+    # are exactly the project reference's was called against the same
+    # coordinate system under another file name — the owl project's 3,204
+    # samples called against 25-003495-001.fasta, a renamed copy of
+    # owl_25-003495-001.fasta — so it is the project's reference, not a foreign
+    # one. Only name mismatches are read, all at once, and each file's verdict
+    # is cached, so a warm audit reads nothing it did not read before.
+    def _misnamed(ref: str) -> bool:
+        return bool(project_reference and ref and not _same(ref, project_reference))
+
+    matcher.prefetch([(e, (sig[0], sig[1])) for _s, e, sig, ref in named if _misnamed(ref)])
+    renamed: Dict[str, int] = {}
+    for sample, entry, sig, ref in named:
+        if _misnamed(ref) and matcher.matches(entry, (sig[0], sig[1])):
+            shown = _resolve_reference_name(ref, alias_map)
+            renamed[shown] = renamed.get(shown, 0) + 1
+            ref = project_reference
         if ref:
             _note_ref(ref)
         else:
             unknown += 1
-        if project_reference and ref and not _same(ref, project_reference):
+        if _misnamed(ref):
             wrong.append((sample, entry, ref))
-    _vcf_ref_cache_save(step2_dir, fresh)
 
     recoverable: List[Dict[str, Any]] = []
     removable: List[Dict[str, Any]] = []
@@ -11405,7 +11543,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
             # no correct-reference run to swap in, and no sample directory to
             # re-run — the only lever is dropping it from the set.
             orphans.append({"sample": sample, "filename": entry.name, "reference": ref})
-        elif _key_for(by_ref, project_reference):
+        elif _project_key(by_ref) is not None:
             recoverable.append({
                 "sample": sample, "filename": entry.name, "reference": ref,
                 "correct_reference": project_reference,
@@ -11438,15 +11576,27 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # Only Build rewrote this file before, so a user who acted on the list then
     # pressed Re-check was shown the same stale names and had no way to clear
     # them.
+    #
+    # A run can also turn out to be against this reference under another file
+    # name. Read those candidates' contigs together first, so a worklist of
+    # thousands (all 3,204 owl samples, before they were recognised) is one
+    # parallel pass rather than a serial read per sample.
+    pending: List[Path] = []
+    for name in recorded:
+        by_ref = alignment_refs(name) if name not in unusable else {}
+        if by_ref and not any(_same(k, project_reference) for k in by_ref):
+            pending.extend(v for k, vcfs in by_ref.items() if k for v in vcfs)
+    matcher.prefetch(pending)
     for name in recorded:
         if name in unusable:
             continue
         by_ref = alignment_refs(name)
         if not (step1_dir / name).is_dir() or not by_ref:
             continue
-        if _key_for(by_ref, project_reference):
+        if _project_key(by_ref) is not None:
             continue
         unusable.add(name)
+    matcher.save()
     # A sample the user has dismissed stays dismissed, across Builds. Build
     # still refuses to put its VCF in the comparison set — that is a
     # correctness rule, not a preference — but it stops being reported as
@@ -11485,6 +11635,11 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         "unusable": sorted(unusable),
         "ignored": sorted(ignored),
         "orphans": sorted(orphans, key=key),
+        # VCFs whose header or run directory names another FASTA but whose
+        # contigs are exactly the project reference's — counted as the project
+        # reference, and listed so the page can say so instead of doing it
+        # silently.
+        "renamed": [{"reference": r, "count": n} for r, n in sorted(renamed.items())],
     }
 
 
@@ -11584,6 +11739,7 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
     step1_dir = project_dir / "step1"
     step2_dir = vcf_db_dir(project_dir / "step2")
     fix_aliases = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    fix_matcher = _contig_matcher(cfg, project_dir)
 
     recollected, dropped, skipped = [], [], []
     for sample in sorted(wanted):
@@ -11601,8 +11757,10 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
             continue
         by_ref = _sample_alignment_vcfs(step1_dir / sample)
         want = audit["project_reference"]
-        key = next((k for k in by_ref if _same_reference(k, want, fix_aliases)), None)
-        candidates = by_ref.get(key) or [] if key else []
+        # The same choice the audit made when it listed this sample as
+        # recoverable, renamed-FASTA runs included.
+        key = _project_run_key(by_ref, want, fix_aliases, fix_matcher)
+        candidates = (by_ref.get(key) or []) if key is not None else []
         if not candidates:
             skipped.append(sample)
             continue

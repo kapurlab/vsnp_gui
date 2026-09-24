@@ -9282,6 +9282,21 @@ export default function App() {
               </div>
             ) : null}
 
+            {step2RefAudit && !step2RefAudit.error && (step2RefAudit.renamed || []).length ? (
+              <div className="note" style={{ marginBottom: "0.6rem", fontSize: "0.9em" }}>
+                {step2RefAudit.renamed.map((r) => (
+                  <div key={r.reference}>
+                    <strong>{r.count} VCF{r.count === 1 ? "" : "s"}</strong> name{r.count === 1 ? "s" : ""}{" "}
+                    <strong>{r.reference}</strong> as {r.count === 1 ? "its" : "their"} reference, but{" "}
+                    {r.count === 1 ? "its" : "their"} contigs — every sequence name and length — are
+                    exactly <strong>{step2RefAudit.project_reference}</strong>'s. That is the same
+                    reference saved under another file name, so {r.count === 1 ? "it is" : "they are"}{" "}
+                    compared with the rest.
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             <div className="block">
                 {(reference || projectReference) ? (
                   <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginBottom: "0.4rem" }}>

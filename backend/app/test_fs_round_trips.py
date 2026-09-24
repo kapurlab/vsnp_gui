@@ -306,6 +306,134 @@ def test_budgets(root: Path):
     check(browser.n <= 1 * n + 20, True, "sample browser: 1 call a sample")
 
 
+class Opens:
+    """Counts files opened under a directory, in every thread."""
+
+    def __init__(self, under: Path):
+        import builtins
+        self._b = builtins
+        self.under = str(under)
+        self.n = 0
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        real = self._real = self._b.open
+
+        def counted(file, *a, **k):
+            if isinstance(file, (str, Path)) and str(file).startswith(self.under):
+                with self._lock:
+                    self.n += 1
+            return real(file, *a, **k)
+        self._b.open = counted
+        return self
+
+    def __exit__(self, *exc):
+        self._b.open = self._real
+
+
+def test_fanout_errors():
+    print("fan_out error handling")
+    ran = []
+
+    def work(x):
+        if x == 3:
+            raise ValueError("three")
+        time.sleep(0.002)
+        ran.append(x)
+        return x
+    try:
+        fanout.fan_out(work, range(200))
+        check("no error", "ValueError", "the first error reaches the caller")
+    except ValueError:
+        check(True, True, "the first error reaches the caller")
+        settled = len(ran)
+        time.sleep(0.05)
+        check(len(ran), settled, "and nothing is still running once it does")
+
+
+def test_status_survives_restart(root: Path):
+    """A fresh backend (every OOD launch) reads what the last one learned."""
+    print("Step 1 status across a backend restart")
+    proj = root / "restart"
+    s1 = proj / "step1"
+    n = 40
+    for i in range(n):
+        d = s1 / f"S{i:03d}"
+        touch(d / f"S{i:03d}_1.fastq.gz"); touch(d / f"S{i:03d}_2.fastq.gz")
+        for f in ("_zc.vcf", "_filtered_hapall_annotated.vcf", "_nodup.bam"):
+            touch(d / "alignment_REF" / f"S{i:03d}{f}")
+        touch(d / ".provenance" / "exit_code", b"0\n")
+    old = time.time() - 60   # past the racy-timestamp guard
+    for p in sorted(s1.rglob("*"), key=lambda p: -len(p.parts)):
+        os.utime(p, (old, old), follow_symlinks=False)
+    (proj / "step2" / "vcf_database").mkdir(parents=True)
+    (proj / "project.json").write_text(json.dumps({"name": "restart", "reference": "REF"}))
+    m._project_dir_for = lambda c, p: proj
+    first = m.step1_status("restart")["samples"]
+    check((s1 / m._STEP1_STATUS_DISK_BASENAME).exists(), True, "the answers are written beside the samples")
+
+    def restart():
+        m._STEP1_STATUS_CACHE.clear()
+        m._STEP1_STATUS_DISK_MEMO.clear()
+
+    restart()
+    with Calls() as calls, Opens(s1) as opens:
+        again = m.step1_status("restart")["samples"]
+    check(again, first, "a fresh backend reports exactly what the last one did")
+    check(opens.n <= 2, True, f"without opening the samples' files ({opens.n} opens)")
+    # Counted here: the exit_code stat. Not visible to this counter: the stat
+    # of each sample dir's own entry, which is the second key.
+    check(calls.n <= 2 * n + 10, True, "at most two stats a sample")
+
+    # A change made while no backend was watching must not be answered from disk.
+    shutil.rmtree(s1 / "S005" / "alignment_REF")
+    touch(s1 / "S007" / ".provenance" / "exit_code", b"1\n")
+    restart()
+    by = {e["sample"]: e for e in m.step1_status("restart")["samples"]}
+    check(by["S005"]["has_outputs"], False, "deleted outputs are noticed (the dir's mtime moved)")
+    check(by["S007"]["status"], "error", "a rewritten exit_code is noticed")
+
+    # A damaged file is ignored, not trusted.
+    (s1 / m._STEP1_STATUS_DISK_BASENAME).write_text(json.dumps(
+        {"version": m._STEP1_STATUS_DISK_VERSION, "samples": {"S001": [1, 2, {"status": 5}]}}))
+    restart()
+    by = {e["sample"]: e for e in m.step1_status("restart")["samples"]}
+    check(by["S001"]["status"], "complete", "a damaged entry is recomputed")
+
+
+def test_staging(root: Path):
+    print("Step 2 staging")
+    from app.step2_staging import stage_step2_vcfs
+    db = root / "stage_db"
+    for i in range(50):
+        touch(db / f"V{i:02d}_zc.vcf", f"v{i}".encode())
+    run = root / "stage_run"
+    run.mkdir()
+    copied, skipped, staged = stage_step2_vcfs(db, run, include_samples=[f"V{i:02d}" for i in range(50)])
+    check((copied, skipped, len(staged)), (50, 0, 50), "every chosen VCF is staged")
+    check(sorted(p.read_bytes() for p in run.iterdir()), sorted(f"v{i}".encode() for i in range(50)),
+          "with its own content")
+
+
+def test_import_reads(root: Path):
+    """Each incoming VCF is read once for its header, once to be copied."""
+    print("import-vcfs reads")
+    proj = root / "imp"
+    (proj / "step2" / "vcf_database").mkdir(parents=True)
+    (proj / "project.json").write_text(json.dumps({"name": "imp", "reference": "REF"}))
+    src = root / "imp_src"
+    n = 30
+    for i in range(n):
+        touch(src / f"X{i:02d}_zc.vcf", b"##fileformat=VCFv4.2\n##reference=/r/REF.fasta\n#CHROM\n")
+    cfg = {"vsnp3_path": str(root / "vsnp3"), "projects_root": str(root)}
+    m.load_config = lambda: cfg
+    m._project_dir_for = lambda c, p: proj
+    with Opens(src) as opens:
+        r = m.project_import_vcfs("imp", m.ImportVcfRequest(source_paths=[str(src)], reference="REF"))
+    check(r["imported"], n, "all of them import")
+    check(opens.n, 2 * n, "two opens a VCF: the header and the copy (was three)")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="fs_round_trips_"))
     try:
@@ -316,6 +444,10 @@ def main():
         test_alias_map(tmp)
         test_endpoints(tmp, s1)
         test_budgets(tmp)
+        test_fanout_errors()
+        test_status_survives_restart(tmp)
+        test_staging(tmp)
+        test_import_reads(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

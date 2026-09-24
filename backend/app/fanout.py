@@ -19,9 +19,10 @@ exactly as before.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Callable, Iterable, List, Optional, TypeVar
 
 T = TypeVar("T")
@@ -61,16 +62,24 @@ def fan_out(fn: Callable[[T], R], items: Iterable[T]) -> List[R]:
     """``[fn(x) for x in items]``, with the calls made concurrently.
 
     Results keep the order of `items`. `fn` should handle its own OSError the
-    way the serial loop it replaces did; anything it raises is re-raised here.
-    Items are handed out in chunks, so thousands of tiny calls cost dozens of
-    pool tasks rather than thousands.
+    way the serial loop it replaces did; anything it raises is re-raised here,
+    the first in item order, once the rest of the batch has stopped — so
+    nothing this started is still writing when the caller sees the error. Items are
+    handed out in chunks, so thousands of tiny calls cost dozens of pool tasks
+    rather than thousands. Each chunk runs in a copy of the caller's context,
+    so request-scoped context variables reach the calls made on its behalf.
     """
     items = list(items)
     if len(items) < 2 or WIDTH == 1 or getattr(_local, "inside", False):
         return [fn(x) for x in items]
     size = max(1, -(-len(items) // (WIDTH * 4)))
     parts = [items[i:i + size] for i in range(0, len(items), size)]
+    pool = _get_pool()
+    futures = [
+        pool.submit(contextvars.copy_context().run, _run_part, fn, part) for part in parts
+    ]
+    wait(futures)
     out: List[R] = []
-    for res in _get_pool().map(lambda part: _run_part(fn, part), parts):
-        out.extend(res)
+    for f in futures:
+        out.extend(f.result())
     return out

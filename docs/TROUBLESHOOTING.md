@@ -633,6 +633,12 @@ launched (the OOD `script.sh.erb`, or `sites/site.conf`):
 export VSNP_GUI_FS_WORKERS=16
 ```
 
+The same width applies to Step 2 staging (copying the chosen VCFs into the run
+folder) and to VCF import. A newly started backend — every Open OnDemand launch
+— reads the Step 1 status it last worked out from
+`step1/.step1_status_cache.json` instead of opening every sample's files again;
+it is only a cache, and deleting it costs one slower first visit.
+
 ### Issue: Step 1 taking very long (>1 hour per sample)
 
 **Expected times:**

@@ -45,6 +45,83 @@ _STEP1_DISPATCH_LOCK = threading.Lock()
 # dict get/set are atomic enough that no extra lock is warranted.
 _STEP1_STATUS_CACHE: Dict[str, tuple] = {}
 
+# The same answers on disk, in <project>/step1/, so a backend that has just
+# started — every Open OnDemand launch — does not open every sample's
+# exit_code and list every sample dir to rebuild them. Keyed per sample on the
+# exit_code mtime AND the sample dir's mtime: the dir's mtime is what notices a
+# change made while no backend was watching (outputs deleted, a re-run's
+# cleanup), which the in-memory key never had to.
+_STEP1_STATUS_DISK_BASENAME = ".step1_status_cache.json"
+_STEP1_STATUS_DISK_VERSION = 1
+# step1 dir -> ((size, mtime_ns) of the file, its samples), so a poll only
+# re-reads the file when it changed.
+_STEP1_STATUS_DISK_MEMO: Dict[str, Tuple[tuple, Dict[str, list]]] = {}
+_STEP1_STATUS_FIELDS = ("status", "has_log", "has_outputs", "has_zc_vcf")
+
+
+def _step1_status_disk_load(step1_dir: Path) -> Dict[str, list]:
+    path = step1_dir / _STEP1_STATUS_DISK_BASENAME
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    sig = (st.st_size, st.st_mtime_ns)
+    hit = _STEP1_STATUS_DISK_MEMO.get(str(step1_dir))
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    samples: Dict[str, list] = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") == _STEP1_STATUS_DISK_VERSION and isinstance(data.get("samples"), dict):
+            samples = data["samples"]
+    except Exception:
+        samples = {}
+    _STEP1_STATUS_DISK_MEMO[str(step1_dir)] = (sig, samples)
+    return samples
+
+
+def _step1_status_disk_save(step1_dir: Path, updates: Dict[str, list], present: set) -> None:
+    """Merge `updates` into the file, atomically, dropping samples no longer in
+    `present`. Best-effort: a project this user cannot write simply stays
+    uncached, and nothing depends on the file."""
+    if not updates:
+        return
+    path = step1_dir / _STEP1_STATUS_DISK_BASENAME
+    tmp = None
+    try:
+        merged = {k: v for k, v in _step1_status_disk_load(step1_dir).items() if k in present}
+        merged.update(updates)
+        fd, tmp = tempfile.mkstemp(prefix=_STEP1_STATUS_DISK_BASENAME + ".", dir=str(step1_dir))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"version": _STEP1_STATUS_DISK_VERSION, "samples": merged}, fh)
+        os.replace(tmp, path)
+        tmp = None
+        try:
+            os.chmod(path, 0o664)  # share the cache with the project's group
+        except OSError:
+            pass
+    except Exception:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+    _STEP1_STATUS_DISK_MEMO.pop(str(step1_dir), None)
+
+
+def _step1_status_from_disk(stored: Any, ec_mtime: int, dir_mtime: Optional[int]) -> Optional[Dict[str, Any]]:
+    """The cached fields of one stored sample, when its two keys still match."""
+    if not (isinstance(stored, list) and len(stored) == 3 and dir_mtime is not None):
+        return None
+    if stored[0] != ec_mtime or stored[1] != dir_mtime or not isinstance(stored[2], dict):
+        return None
+    fields = stored[2]
+    if fields.get("status") not in ("complete", "error"):
+        return None
+    if not all(isinstance(fields.get(k), bool) for k in _STEP1_STATUS_FIELDS[1:]):
+        return None
+    return {k: fields[k] for k in _STEP1_STATUS_FIELDS}
+
 from app.config import (
     load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT,
     apply_site_paths, set_path_override, site_path_defaults,
@@ -3952,6 +4029,25 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         raise HTTPException(status_code=404, detail="Project not found")
     ensure_project_dirs(project_dir)
 
+    # An import of a big database is thousands of VCFs, and every one of them
+    # used to cost, one after another: two tree walks to be found, four path
+    # resolutions (each a walk of the whole path, a stat per directory), a
+    # header read in a pass whose answer is discarded whenever a reference is
+    # given — the page always gives one — a second header read, a stat to see
+    # whether its target exists, and a copy. On shared storage each of those is
+    # round trips, so an 8,000-VCF source took minutes. Now: one walk per
+    # source, each path resolved once, each header read once, all of them at
+    # once, and the copies made concurrently after every decision has been
+    # taken in the same order, by the same rules, as before.
+
+    def _zc_vcfs(root: Path) -> List[Path]:
+        # One walk for both suffixes. The same order as the two rglobs it
+        # replaces: every *_zc.vcf in traversal order, then every *_zc.vcf.gz —
+        # order decides which of two same-named files lands first.
+        found = list(root.rglob("*_zc.vcf*"))
+        return ([p for p in found if fnmatch.fnmatchcase(p.name, "*_zc.vcf")]
+                + [p for p in found if fnmatch.fnmatchcase(p.name, "*_zc.vcf.gz")])
+
     vcfs = []
     source_roots = []
     missing_sources: List[str] = []
@@ -3964,25 +4060,68 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
             missing_sources.append(str(src))
             continue
         source_roots.append(src)
-        vcfs.extend(list(src.rglob("*_zc.vcf")))
-        vcfs.extend(list(src.rglob("*_zc.vcf.gz")))
+        vcfs.extend(_zc_vcfs(src))
 
     if payload.include_step1:
         step1_dir = project_dir / "step1"
         if step1_dir.exists():
             source_roots.append(step1_dir)
-            vcfs.extend(list(step1_dir.rglob("*_zc.vcf")))
-            vcfs.extend(list(step1_dir.rglob("*_zc.vcf.gz")))
+            vcfs.extend(_zc_vcfs(step1_dir))
 
     step1_dir = project_dir / "step1"
+    # Asked once; every VCF used to ask both again.
+    step1_exists = step1_dir.exists()
+    step1_real = str(step1_dir.resolve()) if step1_exists else ""
+
+    # Path.resolve(), once per path, prefetched concurrently. A failure is
+    # remembered and re-raised where the resolve used to happen, so each call
+    # site keeps its own handling of it.
+    real_paths: Dict[Path, Any] = {}
+
+    def _prefetch_resolve(paths: List[Path]) -> None:
+        def one(p: Path):
+            try:
+                return p.resolve()
+            except OSError as exc:
+                return exc
+        todo = [p for p in dict.fromkeys(paths) if p not in real_paths]
+        for p, r in zip(todo, fan_out(one, todo)):
+            real_paths[p] = r
+
+    def _resolve(p: Path) -> Path:
+        if p not in real_paths:
+            _prefetch_resolve([p])
+        hit = real_paths[p]
+        if isinstance(hit, OSError):
+            raise hit
+        return hit
+
+    def _under_step1(p: Path) -> bool:
+        return step1_exists and str(_resolve(p)).startswith(step1_real)
+
+    _prefetch_resolve(vcfs)
+    # _find_patched_vcf answers None without a vcf_edits/, which nearly every
+    # sample lacks: learn which do, for all of them at once.
+    step1_hits = []
+    for vcf in vcfs:
+        try:
+            if _under_step1(vcf):
+                step1_hits.append(vcf)
+        except FileNotFoundError:
+            pass
+    edit_dirs = list(dict.fromkeys(step1_dir / _sample_from_vcf(v) for v in step1_hits))
+    has_edits = dict(zip(edit_dirs, fan_out(lambda d: (d / "vcf_edits").exists(), edit_dirs)))
+
     resolved_vcfs = []
     vcf_sample_override = {}
     for vcf in vcfs:
         try:
-            if step1_dir.exists() and str(vcf.resolve()).startswith(str(step1_dir.resolve())):
+            if _under_step1(vcf):
                 sample = _sample_from_vcf(vcf)
                 sample_dir = step1_dir / sample
-                patched = _find_patched_vcf(sample_dir, sample, vcf)
+                patched = (
+                    _find_patched_vcf(sample_dir, sample, vcf) if has_edits.get(sample_dir, True) else None
+                )
                 if patched:
                     resolved_vcfs.append(patched)
                     vcf_sample_override[patched] = sample
@@ -3999,11 +4138,12 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     # "Large import (1981)" surprise. Two *different* files that merely share a
     # sample ID resolve to different paths and are both kept here; collapsing
     # those is what the dedupe / prefix-duplicates options handle downstream.
+    _prefetch_resolve(vcfs)
     _seen_targets: set = set()
     _deduped = []
     for v in vcfs:
         try:
-            key = v.resolve()
+            key = _resolve(v)
         except OSError:
             key = v
         if key in _seen_targets:
@@ -4018,8 +4158,11 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
         raise HTTPException(status_code=400, detail=f"Large import ({len(vcfs)} VCFs). Confirm to continue.")
 
     alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
-    detected_refs = _detect_vcf_references(vcfs, alias_map)
+    # Every header, read once and all at once. The detection pass that used to
+    # read them all a first time only matters when no reference was given.
+    vcf_refs = dict(zip(vcfs, fan_out(lambda v: _detect_vcf_reference(v, alias_map), vcfs)))
     if not payload.reference:
+        detected_refs = {r for r in vcf_refs.values() if r}
         if len(detected_refs) > 1:
             raise HTTPException(status_code=400, detail=f"Mixed references detected: {', '.join(sorted(detected_refs))}")
         detected_ref = next(iter(detected_refs), "")
@@ -4060,117 +4203,241 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     # the sample, not about how many folders offered it. The rejected paths are
     # collected per sample so the report can still name every one of them.
     collisions: Dict[str, Dict[str, Any]] = {}
+
+    # What is in the set, from one listing, kept current as the loop decides:
+    # name -> the VCF this import will put there (None for what was already
+    # there), and whether the entry on disk is a symlink.
+    db_entries_now: Dict[str, bool] = {}
+    try:
+        with os.scandir(vcf_source_dir) as it:
+            for e in it:
+                try:
+                    db_entries_now[e.name] = e.is_symlink()
+                except OSError:
+                    db_entries_now[e.name] = False
+    except OSError:
+        pass
+    planned_from: Dict[str, Path] = {}
+
+    def _in_db(name: str) -> bool:
+        """target.exists() — as the set will be once earlier decisions are carried out."""
+        if name in planned_from:
+            return True
+        if name not in db_entries_now:
+            return False
+        return not db_entries_now[name] or os.path.exists(vcf_source_dir / name)
+
+    def _unique(filename: str) -> Path:
+        """_unique_target, against the set as it will be."""
+        stem = Path(filename).stem
+        suffix = "".join(Path(filename).suffixes)
+        idx = 1
+        while True:
+            candidate = vcf_source_dir / f"{stem}_import{idx}{suffix}"
+            if not _in_db(candidate.name):
+                return candidate
+            idx += 1
+
+    digests: Dict[Path, Optional[str]] = {}
+
+    def _digest(p: Path) -> Optional[str]:
+        if p not in digests:
+            digests[p] = _vcf_variant_digest(p)
+        return digests[p]
+
+    same_on_disk: Dict[Tuple[Path, Path], bool] = {}
+
+    def _same_file(target: Path, vcf: Path) -> bool:
+        """target.samefile(vcf), False when it cannot be answered."""
+        src = planned_from.get(target.name)
+        if src is not None:
+            # Not on disk yet. A copy is a new file, never the incoming one; a
+            # link is its source.
+            if action != "link":
+                return False
+            try:
+                return src.samefile(vcf)
+            except OSError:
+                return False
+        key = (target, vcf)
+        if key not in same_on_disk:
+            try:
+                same_on_disk[key] = target.samefile(vcf)
+            except OSError:
+                same_on_disk[key] = False
+        return same_on_disk[key]
+
+    def _content_of(target: Path) -> Path:
+        """What a digest of `target` reads: its planned source until it lands."""
+        return planned_from.get(target.name, target)
+
+    import_matcher = _contig_matcher(cfg, project_dir, reference=detected_ref)
+    import_matcher.prefetch([
+        v for v in vcfs
+        if vcf_refs[v] and not _refs_match(vcf_refs[v], detected_ref, payload.allow_fuzzy_match)
+    ])
+
+    def _passes_reference(vcf: Path) -> bool:
+        ref = vcf_refs[vcf]
+        return bool(ref) and (
+            _refs_match(ref, detected_ref, payload.allow_fuzzy_match) or import_matcher.matches(vcf)
+        )
+
+    if on_conflict == "skip":
+        # Name clashes with what is already in the set are known up front, and
+        # their digests are whole-file reads: take them all at once.
+        clashing = [
+            v for v in vcfs
+            if v.name in db_entries_now and (payload.allow_mismatch or _passes_reference(v))
+        ]
+        pairs = [(vcf_source_dir / v.name, v) for v in clashing]
+        differing = [
+            (t, v) for (t, v), same in zip(pairs, fan_out(lambda tv: _same_file(*tv), pairs)) if not same
+        ]
+        todo = list(dict.fromkeys(p for tv in differing for p in tv))
+        for p, d in zip(todo, fan_out(_vcf_variant_digest, todo)):
+            digests[p] = d
+
+    # (unlink first?, incoming VCF, target, manifest line) in decision order.
+    jobs: List[Tuple[bool, Path, Path, str]] = []
+    for vcf in vcfs:
+        vcf_ref = vcf_refs[vcf]
+        if (vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match)
+                and import_matcher.matches(vcf)):
+            # Named for another FASTA, called against this one's contigs: a
+            # renamed copy of the same reference (see ref_contigs).
+            vcf_ref = detected_ref
+        if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
+            mismatched.append({"path": str(vcf), "reference": vcf_ref})
+            if not payload.allow_mismatch:
+                ref_skipped += 1
+                continue
+        if not vcf_ref:
+            mismatched.append({"path": str(vcf), "reference": "unknown"})
+            if not payload.allow_mismatch:
+                ref_skipped += 1
+                continue
+        if payload.dedupe:
+            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
+            if sample in seen_samples:
+                prev = seen_samples[sample]
+                if vcf.stat().st_mtime <= prev.stat().st_mtime:
+                    dedup_skipped += 1
+                    continue
+            seen_samples[sample] = vcf
+        target = vcf_source_dir / vcf.name
+        unlink_first = False
+        if _in_db(target.name):
+            if on_conflict == "skip":
+                already_present += 1
+                # Build never overwrites, so for a name that is already in
+                # the set the copy that landed FIRST is the one this project
+                # compares. When both copies call the same variants that is
+                # invisible and harmless — the usual case, since a panel and
+                # a local Step 1 run of the same accession differ only in
+                # their headers. When the calls differ it is a silent
+                # substitution of somebody else's genotype for this
+                # project's own, so record it instead of counting it as one
+                # more "already present".
+                same_file = _same_file(target, vcf)
+                if not same_file:
+                    in_place_digest = _digest(_content_of(target))
+                    incoming_digest = _digest(vcf)
+                    if in_place_digest and incoming_digest and in_place_digest != incoming_digest:
+                        sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
+                        # WHOSE calls are being compared is the question the
+                        # user actually has, and the manifest cannot answer
+                        # it: once Collect rebuilds the manifest at the
+                        # destination, every source_path reads
+                        # ".../vcf_database/<sample>_zc.vcf" — the file's own
+                        # address, not where it came from. So identify the
+                        # in-place file by its records instead: if they are
+                        # this project's Step 1 output, say so; if the
+                        # rejected file IS the Step 1 output, then whatever
+                        # is in place came from somewhere else.
+                        origin = "unknown"
+                        try:
+                            incoming_path = str(_resolve(vcf))
+                        except OSError:
+                            incoming_path = str(vcf)
+                        incoming_is_step1 = step1_exists and incoming_path.startswith(step1_real)
+                        if incoming_is_step1:
+                            origin = "reference database"
+                        else:
+                            own = _find_step1_vcf_for_sample(step1_dir, sample)
+                            if own is not None:
+                                origin = (
+                                    "this project's Step 1"
+                                    if _digest(own) == in_place_digest
+                                    else "unknown"
+                                )
+                        row = collisions.setdefault(vcf.name, {
+                            "sample": sample,
+                            "in_place": str(target),
+                            "in_place_origin": origin,
+                            "skipped": [],
+                        })
+                        if row["in_place_origin"] == "unknown" and origin != "unknown":
+                            row["in_place_origin"] = origin
+                        row["skipped"].append(str(vcf))
+                continue
+            if on_conflict == "rename":
+                if payload.prefix_duplicates:
+                    prefix = _source_prefix(vcf, source_roots)
+                    target = _unique(f"{prefix}__{vcf.name}")
+                else:
+                    target = _unique(vcf.name)
+                renamed += 1
+            else:
+                unlink_first = True
+        planned_from[target.name] = vcf
+        imported += 1
+        try:
+            vcf_path = _resolve(vcf)
+        except FileNotFoundError:
+            vcf_path = vcf
+        source_type = "step1" if step1_exists and str(vcf_path).startswith(step1_real) else "reference"
+        jobs.append((unlink_first, vcf, target, f"{target.name},{source_type},{vcf_path}\n"))
+
+    # Carry the decisions out concurrently. Jobs for the same target name —
+    # an overwrite following an earlier copy — stay together, in order.
+    by_target: Dict[str, List[int]] = {}
+    for i, (_u, _v, t, _l) in enumerate(jobs):
+        by_target.setdefault(t.name, []).append(i)
+
+    def _carry_out(indices: List[int]) -> List[Tuple[int, Optional[BaseException]]]:
+        out = []
+        for i in indices:
+            unlink_first, vcf, target, _line = jobs[i]
+            try:
+                if unlink_first:
+                    target.unlink()
+                if action == "link":
+                    target.symlink_to(vcf)
+                else:
+                    shutil.copy2(vcf, target)
+                out.append((i, None))
+            except Exception as exc:
+                out.append((i, exc))
+        return out
+
+    outcome: Dict[int, Optional[BaseException]] = {}
+    if on_conflict == "overwrite":
+        # An overwrite deletes before it copies, and a source can sit inside
+        # the set itself (vcf_database is a common source): kept in order.
+        outcome.update(_carry_out(list(range(len(jobs)))))
+    else:
+        for results in fan_out(_carry_out, list(by_target.values())):
+            outcome.update(results)
     with manifest_path.open("a", encoding="utf-8") as manifest_handle:
         if not manifest_exists:
             manifest_handle.write("filename,source_type,source_path\n")
-        import_matcher = _contig_matcher(cfg, project_dir, reference=detected_ref)
-        for vcf in vcfs:
-            vcf_ref = _detect_vcf_reference(vcf, alias_map)
-            if (vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match)
-                    and import_matcher.matches(vcf)):
-                # Named for another FASTA, called against this one's contigs: a
-                # renamed copy of the same reference (see ref_contigs).
-                vcf_ref = detected_ref
-            if vcf_ref and not _refs_match(vcf_ref, detected_ref, payload.allow_fuzzy_match):
-                mismatched.append({"path": str(vcf), "reference": vcf_ref})
-                if not payload.allow_mismatch:
-                    ref_skipped += 1
-                    continue
-            if not vcf_ref:
-                mismatched.append({"path": str(vcf), "reference": "unknown"})
-                if not payload.allow_mismatch:
-                    ref_skipped += 1
-                    continue
-            if payload.dedupe:
-                sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
-                if sample in seen_samples:
-                    prev = seen_samples[sample]
-                    if vcf.stat().st_mtime <= prev.stat().st_mtime:
-                        dedup_skipped += 1
-                        continue
-                seen_samples[sample] = vcf
-            target = vcf_source_dir / vcf.name
-            if target.exists():
-                if on_conflict == "skip":
-                    already_present += 1
-                    # Build never overwrites, so for a name that is already in
-                    # the set the copy that landed FIRST is the one this project
-                    # compares. When both copies call the same variants that is
-                    # invisible and harmless — the usual case, since a panel and
-                    # a local Step 1 run of the same accession differ only in
-                    # their headers. When the calls differ it is a silent
-                    # substitution of somebody else's genotype for this
-                    # project's own, so record it instead of counting it as one
-                    # more "already present".
-                    same_file = False
-                    try:
-                        same_file = target.samefile(vcf)
-                    except OSError:
-                        same_file = False
-                    if not same_file:
-                        in_place_digest = _vcf_variant_digest(target)
-                        incoming_digest = _vcf_variant_digest(vcf)
-                        if in_place_digest and incoming_digest and in_place_digest != incoming_digest:
-                            sample = vcf_sample_override.get(vcf, _sample_from_vcf(vcf))
-                            # WHOSE calls are being compared is the question the
-                            # user actually has, and the manifest cannot answer
-                            # it: once Collect rebuilds the manifest at the
-                            # destination, every source_path reads
-                            # ".../vcf_database/<sample>_zc.vcf" — the file's own
-                            # address, not where it came from. So identify the
-                            # in-place file by its records instead: if they are
-                            # this project's Step 1 output, say so; if the
-                            # rejected file IS the Step 1 output, then whatever
-                            # is in place came from somewhere else.
-                            origin = "unknown"
-                            try:
-                                incoming_path = str(vcf.resolve())
-                            except OSError:
-                                incoming_path = str(vcf)
-                            incoming_is_step1 = (
-                                step1_dir.exists()
-                                and incoming_path.startswith(str(step1_dir.resolve()))
-                            )
-                            if incoming_is_step1:
-                                origin = "reference database"
-                            else:
-                                own = _find_step1_vcf_for_sample(step1_dir, sample)
-                                if own is not None:
-                                    origin = (
-                                        "this project's Step 1"
-                                        if _vcf_variant_digest(own) == in_place_digest
-                                        else "unknown"
-                                    )
-                            row = collisions.setdefault(vcf.name, {
-                                "sample": sample,
-                                "in_place": str(target),
-                                "in_place_origin": origin,
-                                "skipped": [],
-                            })
-                            if row["in_place_origin"] == "unknown" and origin != "unknown":
-                                row["in_place_origin"] = origin
-                            row["skipped"].append(str(vcf))
-                    continue
-                if on_conflict == "rename":
-                    if payload.prefix_duplicates:
-                        prefix = _source_prefix(vcf, source_roots)
-                        target = _unique_target(vcf_source_dir, f"{prefix}__{vcf.name}")
-                    else:
-                        target = _unique_target(vcf_source_dir, vcf.name)
-                    renamed += 1
-                else:
-                    target.unlink()
-            if action == "link":
-                target.symlink_to(vcf)
-            else:
-                shutil.copy2(vcf, target)
-            imported += 1
-            try:
-                vcf_path = vcf.resolve()
-            except FileNotFoundError:
-                vcf_path = vcf
-            source_type = "step1" if step1_dir.exists() and str(vcf_path).startswith(str(step1_dir.resolve())) else "reference"
-            manifest_handle.write(f"{target.name},{source_type},{vcf_path}\n")
+        for i, (_u, _v, _t, line) in enumerate(jobs):
+            if outcome.get(i) is None:
+                manifest_handle.write(line)
+    failed = [outcome[i] for i in range(len(jobs)) if outcome.get(i) is not None]
+    if failed:
+        raise failed[0]
 
     collision_rows = sorted(collisions.values(), key=lambda r: r["sample"])
     collision_report = ""
@@ -5024,6 +5291,15 @@ def step1_status(project: str):
     except OSError:
         sample_entries = []
 
+    disk_cache = _step1_status_disk_load(step1_dir)
+    disk_updates: Dict[str, list] = {}
+
+    def _dir_mtime(dir_entry) -> Optional[int]:
+        try:
+            return dir_entry.stat().st_mtime_ns
+        except OSError:
+            return None
+
     def _sample_status(dir_entry) -> Optional[Dict[str, Any]]:
         # Skip writer/janitor scaffolding (e.g. _provenance/) so they don't
         # surface as "Unknown" samples in the GUI.
@@ -5054,6 +5330,22 @@ def step1_status(project: str):
                 entry = dict(cached[1])
                 entry["in_vcfs_folder"] = sample in in_vcfs_folder
                 entry["reason"] = _step1_status_reason(entry.get("status", ""), sample_dir, min_bytes)
+                return entry
+            # Not seen by this process yet: the answer a previous backend
+            # left on disk, if neither key has moved since.
+            stored = disk_cache.get(sample)
+            fields = (
+                _step1_status_from_disk(stored, ec_mtime, _dir_mtime(dir_entry))
+                if stored is not None else None
+            )
+            if fields is not None:
+                kept = {"sample": sample, "status": fields["status"], "log_path": str(log_path),
+                        "has_log": fields["has_log"], "has_outputs": fields["has_outputs"],
+                        "has_zc_vcf": fields["has_zc_vcf"]}
+                _STEP1_STATUS_CACHE[cache_key] = (ec_mtime, kept)
+                entry = dict(kept)
+                entry["in_vcfs_folder"] = sample in in_vcfs_folder
+                entry["reason"] = _step1_status_reason(entry["status"], sample_dir, min_bytes)
                 return entry
 
         # One listing of the sample dir and of each alignment dir answers all
@@ -5149,11 +5441,19 @@ def step1_status(project: str):
             _STEP1_STATUS_CACHE[cache_key] = (
                 ec_mtime, {k: v for k, v in entry.items() if k not in ("in_vcfs_folder", "reason")}
             )
+            # Persisted only once both timestamps are comfortably in the past,
+            # the same racy-timestamp guard as _STEP1_NAMES_CACHE: on a coarse
+            # (1 s) filesystem a change landing in the same tick would
+            # otherwise leave both keys looking unchanged.
+            dir_mtime = _dir_mtime(dir_entry)
+            if dir_mtime is not None and time.time_ns() - max(ec_mtime, dir_mtime) > 2_000_000_000:
+                disk_updates[sample] = [ec_mtime, dir_mtime, {k: entry[k] for k in _STEP1_STATUS_FIELDS}]
         return entry
 
     # Every sample at once: on shared storage each check is a round trip, and
     # one after another they were minutes on a 9,000-sample project.
     statuses = [e for e in fan_out(_sample_status, sample_entries) if e is not None]
+    _step1_status_disk_save(step1_dir, disk_updates, {e.name for e in sample_entries})
     # job_id so the GUI can follow the trim -> batch hand-off: the trim job
     # finishes, this starts reporting the batch's id, and the log pane re-points.
     return {

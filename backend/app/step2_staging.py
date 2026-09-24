@@ -34,6 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from app.fanout import fan_out
 from app.step2_inventory import Entry, db_entries, is_db_vcf, sample_of, stage_entry
 
 
@@ -105,6 +106,17 @@ def stage_step2_vcfs(
     skipped = 0
     staged: Set[str] = set()
 
+    def _stage_all(chosen: List[Entry]) -> List[str]:
+        # All at once: every copy is several round trips on shared storage, and
+        # a 7,500-VCF comparison waited on them one by one before vsnp3 could
+        # even start. Only when two entries would land on the same file name
+        # (A_zc.vcf beside an edited A_zc.vcf.gz, on the legacy denylist path)
+        # does order decide which survives, and then they stay in order.
+        names = [e.analyzable_name for e in chosen]
+        if len(set(names)) != len(names):
+            return [stage_entry(vcf_source_dir / e.filename, run_dir, e) for e in chosen]
+        return fan_out(lambda e: stage_entry(vcf_source_dir / e.filename, run_dir, e), chosen)
+
     if include_samples is not None:
         wanted = {s for s in include_samples if s}
         chosen: List[Entry] = [e for e in entries if e.sample in wanted]
@@ -119,16 +131,17 @@ def stage_step2_vcfs(
                 f"cannot say which calls to compare — {detail}"
             )
         skipped = len(entries) - len(chosen)
-        for e in chosen:
-            staged.add(stage_entry(vcf_source_dir / e.filename, run_dir, e))
-            copied += 1
+        staged.update(_stage_all(chosen))
+        copied = len(chosen)
         return copied, skipped, staged
 
     removal_set = set(removal_names or ())
+    chosen = []
     for e in entries:
         if vsnp3_would_remove(e.filename, removal_set):
             skipped += 1
             continue
-        staged.add(stage_entry(vcf_source_dir / e.filename, run_dir, e))
-        copied += 1
+        chosen.append(e)
+    staged.update(_stage_all(chosen))
+    copied = len(chosen)
     return copied, skipped, staged

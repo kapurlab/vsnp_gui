@@ -877,31 +877,57 @@ class _AlignListing:
         return not self._entries[name] or os.path.exists(self._dir / name)
 
 
-def _legacy_step1_complete(sample_dir: Path) -> bool:
-    """vSNP2-era completion: no exit_code sentinel and different inner file
-    names, but a zero-coverage VCF under plain alignment/ is the completion
-    artifact everything downstream (VCF collection, step2) actually consumes."""
-    return bool(
-        next(sample_dir.glob("alignment/*_zc.vcf"), None)
-        or next(sample_dir.glob("alignment/*_zc.vcf.gz"), None)
+def _step1_output_files(
+    listing: "_AlignListing",
+) -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
+    """(annotated VCF, de-duplicated BAM, zero-coverage VCF) under the sample's
+    alignment_*/ — or the plain alignment/ of a vSNP2-era run — each None when
+    absent. The zero-coverage VCF is *_zc.vcf (which also matches vsnp3's
+    *_nanopore_zc.vcf) or its .gz."""
+    vcf = next(iter(listing.glob("*_filtered_hapall_annotated.vcf")), None)
+    nodup = next(iter(listing.glob("*_nodup.bam")), None)
+    zc_vcf = next(iter(listing.glob("*_zc.vcf")), None) or next(
+        iter(listing.glob("*_zc.vcf.gz")), None
     )
+    return vcf, nodup, zc_vcf
+
+
+def _step1_outputs_complete(
+    vcf: Optional[Path], nodup: Optional[Path], zc_vcf: Optional[Path]
+) -> bool:
+    """Whether the outputs on disk are those of a finished Step 1 — the rule
+    for a sample with no .provenance/exit_code sentinel: run from the command
+    line, or a GUI run whose sentinel write raced. One rule, shared by the
+    status list, the dispatch plan and VCF collection, so they cannot disagree
+    about which samples are done.
+
+    The zero-coverage VCF is the completion artifact. vsnp3 writes it last of
+    the alignment outputs, after variant calling, and it is the file VCF
+    collection and Step 2 consume. The annotated VCF is not: vsnp3 writes
+    *_filtered_hapall_annotated.vcf only when a GenBank annotation was
+    supplied, so a run against an unannotated reference leaves *_zc.vcf and
+    *_nodup.bam and nothing else. Requiring the annotated VCF read every such
+    command-line run as Not Started — listed as pending, dispatched (and
+    re-aligned) by a plain Run, never collected — on a project with thousands
+    of them. The annotated VCF + BAM pair still counts, as before, for a run
+    that got that far; a BAM alone is a run that stopped before its VCF.
+    """
+    return zc_vcf is not None or bool(vcf and nodup)
 
 
 def _step1_is_complete(sample_dir: Path) -> bool:
-    """True if a sample already finished Step 1 successfully — same signal the
-    status endpoint uses: a `.provenance/exit_code` of 0, or (legacy) the
-    annotated VCF + de-duplicated BAM both present. Used to skip re-aligning
-    samples that are already Complete when a batch is re-run after adding new
-    samples (re-running would delete alignment_* and redo the slow alignment)."""
+    """True if a sample already finished Step 1 successfully — the same signal
+    the status endpoint uses: a `.provenance/exit_code` of 0, or the finished
+    outputs of _step1_outputs_complete. Used to skip re-aligning samples that
+    are already Complete when a batch is re-run after adding new samples
+    (re-running would delete alignment_* and redo the slow alignment)."""
     ec = sample_dir / ".provenance" / "exit_code"
     if ec.exists():
         try:
             return ec.read_text(encoding="utf-8").strip() == "0"
         except OSError:
             return False
-    vcf = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
-    nodup = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
-    return bool(vcf and nodup) or _legacy_step1_complete(sample_dir)
+    return _step1_outputs_complete(*_step1_output_files(_AlignListing(sample_dir)))
 
 
 def _step1_errored(sample_dir: Path) -> bool:
@@ -972,8 +998,9 @@ def _step1_dispatch_plan(
     strings — they end up in an alert in the GUI.
 
     Skip rules (in order):
-      0. Already completed (exit_code 0, or VCF+BAM present) → skip so a
-         re-run after adding new samples doesn't re-align finished ones.
+      0. Already completed (exit_code 0, or finished outputs on disk — see
+         _step1_outputs_complete) → skip so a re-run after adding new samples
+         doesn't re-align finished ones.
          Overridden by `force_rerun` (the GUI's "Force re-run" option).
       1. No fastq files at all in the sample dir → skip.
       2. R1 (or the lone single-end read) is a broken symlink / missing —
@@ -5287,25 +5314,23 @@ def step1_status(project: str):
 
         # One listing of the sample dir and of each alignment dir answers all
         # four patterns below; _align_glob re-listed them for every pattern.
-        listing = _AlignListing(sample_dir)
-        vcf = next(iter(listing.glob("*_filtered_hapall_annotated.vcf")), None)
-        nodup = next(iter(listing.glob("*_nodup.bam")), None)
         # Non-recursive: the per-sample zc VCF is always written under
         # alignment_*/ (or the legacy plain alignment/). A recursive **/*_zc.vcf
         # glob walked each sample's entire output subtree (unmapped_reads/,
         # sourmash/, spoligo/, …) on every poll — the dominant cost that made
         # the endpoint time out at ~1000 samples.
-        zc_vcf = next(iter(listing.glob("*_zc.vcf")), None) or next(
-            iter(listing.glob("*_zc.vcf.gz")), None
-        )
+        listing = _AlignListing(sample_dir)
+        vcf, nodup, zc_vcf = _step1_output_files(listing)
         has_log = listing.exists("run_step1.log")
 
         # Status logic (in priority order):
         #   1. .provenance/exit_code present  → authoritative per-sample terminal
         #      state (T-07 sentinel written by the bash batch after vsnp3_step1.py
         #      exits). 0 = success, non-zero = real failure.
-        #   2. Outputs (VCF + BAM) present     → complete (legacy projects pre-T-07
-        #      sentinels, or sentinel write raced).
+        #   2. Finished outputs present        → complete (a command-line run, a
+        #      project from before the sentinels, or a sentinel write that
+        #      raced): the zero-coverage VCF, or the annotated VCF + BAM pair
+        #      (_step1_outputs_complete).
         #   3. log_path exists + job running   → still running.
         #   4. log_path exists + job not running → unknown (sample's bash leg died
         #      before writing the sentinel — kill / OOM / batch interrupted).
@@ -5323,14 +5348,12 @@ def step1_status(project: str):
             exit_code_str = ""
         if exit_code_str:
             status = "complete" if exit_code_str == "0" else "error"
-        elif vcf and nodup:
+        elif _step1_outputs_complete(vcf, nodup, zc_vcf):
             status = "complete"
-        elif zc_vcf is not None and zc_vcf.parent.name == "alignment":
             # vSNP2-era run (plain alignment/, no sentinel, different inner file
-            # names): the zero-coverage VCF is the artifact step2 consumes, so
-            # the sample is Complete, not 'Not Started' with a fastq complaint.
-            status = "complete"
-            legacy_complete = True
+            # names): the note under the name says so, since nothing about the
+            # folder looks like this GUI's vsnp3 wrote it.
+            legacy_complete = zc_vcf is not None and zc_vcf.parent.name == "alignment"
         elif has_log:
             status = "running" if job_status == "running" else "unknown"
 
@@ -5363,7 +5386,7 @@ def step1_status(project: str):
             "status": status,
             "log_path": str(log_path),
             "has_log": has_log,
-            "has_outputs": bool(vcf and nodup) or legacy_complete,
+            "has_outputs": _step1_outputs_complete(vcf, nodup, zc_vcf),
             "has_zc_vcf": bool(zc_vcf),
             "in_vcfs_folder": sample in in_vcfs_folder,
             "reason": reason,
@@ -5698,9 +5721,7 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
             except OSError:
                 pass
         else:
-            vcf_out = next(iter(_align_glob(sample_dir, "*_filtered_hapall_annotated.vcf")), None)
-            nodup_out = next(iter(_align_glob(sample_dir, "*_nodup.bam")), None)
-            passed = bool(vcf_out and nodup_out) or _legacy_step1_complete(sample_dir)
+            passed = _step1_outputs_complete(*_step1_output_files(_AlignListing(sample_dir)))
 
         if not passed and sample not in force_set:
             continue

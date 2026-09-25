@@ -34,29 +34,39 @@ from datetime import datetime as _dt, timezone as _timezone
 # single-process here, so a threading.Lock is sufficient.
 _STEP1_DISPATCH_LOCK = threading.Lock()
 
-# Per-sample status cache for the Step 1 status endpoint. A sample that has
-# written .provenance/exit_code is terminal — its on-disk outputs won't change
-# until it is re-run (which rewrites exit_code, bumping the mtime). We key the
-# cache on that mtime so a poll over a mostly-finished 1000-sample project does
-# a single stat() per completed sample instead of re-globbing every sample's
-# whole output tree every 5 seconds (what tripped "Failed to load Step 1
-# status"). Maps sample_dir path -> (exit_code_mtime_ns, cached_entry_without_
-# in_vcfs_folder). Access is under the GIL from the sync-endpoint threadpool;
-# dict get/set are atomic enough that no extra lock is warranted.
+# Per-sample status cache for the Step 1 status endpoint. A terminal sample
+# (complete or error) is re-derived only when its directory changes: the key
+# is the sample dir's own mtime, which every run moves — the batch removes
+# alignment_*/ before it starts, vsnp3 writes a new timestamped stats workbook
+# when it finishes, and the batch touches the directory after writing
+# exit_code so that a failed re-run that left nothing new behind is seen too.
+# That one mtime comes from the listing every request of a project switch
+# shares (step1_index), so a poll over a mostly-finished project costs nothing
+# per sample beyond that listing, instead of re-globbing every sample's whole
+# output tree every 5 seconds (what tripped "Failed to load Step 1 status").
+# It used to be keyed on .provenance/exit_code's mtime, which cost a stat per
+# sample per poll of its own and left every sample completed from the command
+# line (no sentinel) uncached and re-listed on every poll.
+# Maps sample_dir path -> (dir_mtime_ns, cached_entry_without_in_vcfs_folder).
+# Access is under the GIL from the sync-endpoint threadpool; dict get/set are
+# atomic enough that no extra lock is warranted.
 _STEP1_STATUS_CACHE: Dict[str, tuple] = {}
 
 # The same answers on disk, in <project>/step1/, so a backend that has just
-# started — every Open OnDemand launch — does not open every sample's
-# exit_code and list every sample dir to rebuild them. Keyed per sample on the
-# exit_code mtime AND the sample dir's mtime: the dir's mtime is what notices a
+# started — every Open OnDemand launch — does not list every sample dir to
+# rebuild them. Keyed per sample on the sample dir's mtime, which notices a
 # change made while no backend was watching (outputs deleted, a re-run's
-# cleanup), which the in-memory key never had to.
+# cleanup, a finished run). Version 2: version 1 carried the exit_code mtime
+# as a second key.
 _STEP1_STATUS_DISK_BASENAME = ".step1_status_cache.json"
-_STEP1_STATUS_DISK_VERSION = 1
+_STEP1_STATUS_DISK_VERSION = 2
 # step1 dir -> ((size, mtime_ns) of the file, its samples), so a poll only
 # re-reads the file when it changed.
 _STEP1_STATUS_DISK_MEMO: Dict[str, Tuple[tuple, Dict[str, list]]] = {}
-_STEP1_STATUS_FIELDS = ("status", "has_log", "has_outputs", "has_zc_vcf")
+# `reason` is cached with the rest: for a terminal sample it is fixed text
+# (the error hint, or the note on a sample aligned before this GUI), and
+# re-deriving it for a cached entry dropped that note.
+_STEP1_STATUS_FIELDS = ("status", "has_log", "has_outputs", "has_zc_vcf", "reason")
 
 
 def _step1_status_disk_load(step1_dir: Path) -> Dict[str, list]:
@@ -100,6 +110,7 @@ def _step1_status_disk_save(step1_dir: Path, updates: Dict[str, list], present: 
             os.chmod(path, 0o664)  # share the cache with the project's group
         except OSError:
             pass
+        step1_index.touched(step1_dir)
     except Exception:
         if tmp:
             try:
@@ -109,16 +120,18 @@ def _step1_status_disk_save(step1_dir: Path, updates: Dict[str, list], present: 
     _STEP1_STATUS_DISK_MEMO.pop(str(step1_dir), None)
 
 
-def _step1_status_from_disk(stored: Any, ec_mtime: int, dir_mtime: Optional[int]) -> Optional[Dict[str, Any]]:
-    """The cached fields of one stored sample, when its two keys still match."""
-    if not (isinstance(stored, list) and len(stored) == 3 and dir_mtime is not None):
+def _step1_status_from_disk(stored: Any, dir_mtime: Optional[int]) -> Optional[Dict[str, Any]]:
+    """The cached fields of one stored sample, when its key still matches."""
+    if not (isinstance(stored, list) and len(stored) == 2 and dir_mtime is not None):
         return None
-    if stored[0] != ec_mtime or stored[1] != dir_mtime or not isinstance(stored[2], dict):
+    if stored[0] != dir_mtime or not isinstance(stored[1], dict):
         return None
-    fields = stored[2]
+    fields = stored[1]
     if fields.get("status") not in ("complete", "error"):
         return None
-    if not all(isinstance(fields.get(k), bool) for k in _STEP1_STATUS_FIELDS[1:]):
+    if not all(isinstance(fields.get(k), bool) for k in ("has_log", "has_outputs", "has_zc_vcf")):
+        return None
+    if not isinstance(fields.get("reason"), str):
         return None
     return {k: fields[k] for k in _STEP1_STATUS_FIELDS}
 
@@ -133,6 +146,7 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app import ref_contigs
+from app import step1_index
 from app.fanout import fan_out
 from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 from app.step2_inventory import (
@@ -717,27 +731,17 @@ def _is_shared_project(cfg: Dict, project_dir: Path) -> bool:
         return False
 
 
-# Per-sample-dir memo for _step1_sample_names: path -> (mtime_ns, has_fastq).
-# Adding or removing a read inside a sample dir bumps that dir's own mtime, so
-# invalidation is inherent; the cap only guards against unbounded growth across
-# many projects, and a clear() merely costs one re-listing pass.
-_STEP1_NAMES_CACHE: Dict[str, tuple] = {}
-_STEP1_NAMES_CACHE_MAX = 50_000
-
-
 def _step1_sample_names(step1_dir: Path) -> List[str]:
     """Discover step1 sample names: subdirs holding at least one *.fastq.gz.
 
     One name-suffix test replaces the old three-glob chain
     (*_R1*.fastq.gz or *_1*.fastq.gz or *.fastq.gz): any name the first two
-    patterns match necessarily ends in .fastq.gz, so the boolean is identical —
-    and one scandir per sample dir replaces three directory walks. The result
-    per dir is then memoized on the dir's mtime, because this function runs
-    inside step2/vcf_count, the hottest request in the Step 2 pane: at 8,179
-    samples the un-memoized listing cost 8k–24k directory reads per call,
-    seconds on cold GPFS and minutes on WSL's drvfs, repeated on every
-    comparison switch. Dot-prefixed read names are skipped explicitly to keep
-    glob's hidden-file exclusion.
+    patterns match necessarily ends in .fastq.gz, so the boolean is identical.
+    Answered from the Step 1 index (step1_index): the one listing every
+    request of a project switch shares, and per-directory facts keyed on each
+    directory's mtime, so a sample seen before costs no directory read at all,
+    in this process or the next. Dot-prefixed read names are skipped
+    explicitly to keep glob's hidden-file exclusion.
 
     Filters out hidden / underscore-prefixed dirs (the writer's _provenance/
     sibling) so they don't get treated as samples.
@@ -747,50 +751,12 @@ def _step1_sample_names(step1_dir: Path) -> List[str]:
     dispatch a batch should use `_step1_dispatch_plan()` which applies the
     stricter "paired + non-junk" gate.
     """
-    if len(_STEP1_NAMES_CACHE) > _STEP1_NAMES_CACHE_MAX:
-        _STEP1_NAMES_CACHE.clear()
-    try:
-        with os.scandir(step1_dir) as it:
-            entries = sorted(it, key=lambda e: e.name)
-    except OSError:
-        return []
-
-    def _sample_if_reads(entry) -> Optional[str]:
-        if entry.name.startswith(("_", ".")):
-            return None
-        try:
-            if not entry.is_dir():
-                return None
-            mtime_ns = entry.stat().st_mtime_ns
-        except OSError:
-            return None
-        hit = _STEP1_NAMES_CACHE.get(entry.path)
-        if hit is not None and hit[0] == mtime_ns:
-            has_fastq = hit[1]
-        else:
-            has_fastq = False
-            try:
-                with os.scandir(entry.path) as files:
-                    for f in files:
-                        if f.name.endswith(".fastq.gz") and not f.name.startswith("."):
-                            has_fastq = True
-                            break
-            except OSError:
-                has_fastq = False
-            # The racy-timestamp guard (same rule make and ccache use): only
-            # cache an answer whose dir mtime is comfortably in the past. On a
-            # coarse-timestamp filesystem (1 s NFS/SMB mounts, stale drvfs
-            # attribute caches) a dir scanned in the same tick its first read
-            # lands in would otherwise pin has_fastq=False with an mtime the
-            # arrival does not change. A dir still being written to just gets
-            # re-listed next call — the pre-memo cost, only while it is hot.
-            if time.time_ns() - mtime_ns > 2_000_000_000:
-                _STEP1_NAMES_CACHE[entry.path] = (mtime_ns, has_fastq)
-        return entry.name if has_fastq else None
-
-    # Every sample's stat (and, on a memo miss, its listing) at once: each is
-    # a round trip on shared storage (see fanout).
-    return [n for n in fan_out(_sample_if_reads, entries) if n]
+    lst = step1_index.listing(step1_dir)
+    fx = step1_index.facts(step1_dir, lst)
+    return [
+        s.name for s in lst.regular()
+        if any(not f[0].startswith(".") for f in fx.get(s.name, {}).get("fq", []))
+    ]
 
 
 def _step1_browser_samples(step1_dir: Path) -> List[Dict]:
@@ -803,39 +769,23 @@ def _step1_browser_samples(step1_dir: Path) -> List[Dict]:
     but a native GUI run may have had them removed after alignment — either
     way the sample dir (with its vSNP outputs) is a real sample and should
     list. `is_pair` is best-effort from whatever reads remain on disk, mirroring
-    the R1/R2 detection used elsewhere; it only drives the "R1+R2" badge."""
-    try:
-        with os.scandir(step1_dir) as it:
-            entries = sorted(it, key=lambda e: e.name)
-    except OSError:
-        return []
+    the R1/R2 detection used elsewhere; it only drives the "R1+R2" badge.
 
-    def _is_sample_dir(e) -> bool:
-        if e.name.startswith(("_", ".")):
-            return False
-        try:
-            return e.is_dir()
-        except OSError:
-            return False
-
-    def _describe(e) -> Dict:
-        # One directory read per sample, not two globs: the R2 test listed the
-        # dir once for *_R2*.fastq.gz and — on the common `_2` naming, which
-        # misses the first pattern — again for *_2*.fastq.gz. Same patterns,
-        # same rule as pathlib's glob (case-sensitive, dotfiles included).
-        try:
-            with os.scandir(e.path) as files:
-                has_r2 = any(
-                    fnmatch.fnmatchcase(f.name, "*_R2*.fastq.gz")
-                    or fnmatch.fnmatchcase(f.name, "*_2*.fastq.gz")
-                    for f in files
-                )
-        except OSError:
-            has_r2 = False
-        return {"sample": e.name, "is_pair": has_r2}
-
-    # All samples at once: each read is a round trip on shared storage.
-    return fan_out(_describe, [e for e in entries if _is_sample_dir(e)])
+    From the Step 1 index: the same patterns and the same rule as pathlib's
+    glob (case-sensitive, dotfiles included), applied to the read names the
+    index recorded for each directory, so a project seen before is answered
+    without listing a single sample dir."""
+    lst = step1_index.listing(step1_dir)
+    fx = step1_index.facts(step1_dir, lst)
+    out: List[Dict] = []
+    for s in lst.regular():
+        names = [f[0] for f in fx.get(s.name, {}).get("fq", [])]
+        has_r2 = any(
+            fnmatch.fnmatchcase(n, "*_R2*.fastq.gz") or fnmatch.fnmatchcase(n, "*_2*.fastq.gz")
+            for n in names
+        )
+        out.append({"sample": s.name, "is_pair": has_r2})
+    return out
 
 
 # T-46 Phase 1: filter at dispatch time so Step 1 doesn't abort on samples
@@ -5138,6 +5088,11 @@ def _step1_dispatch(
             "  STATUS=$?",
             "  echo $STATUS > .provenance/exit_code",
             "  date -u +%s.%N > .provenance/finished_at",
+            # The status caches are keyed on the sample directory's mtime
+            # (see _STEP1_STATUS_CACHE). A run that succeeds moves it anyway
+            # (a new stats workbook); this makes sure a failed re-run that
+            # left nothing new behind is noticed too.
+            "  touch . 2>/dev/null || true",
             "  if [ \"$STATUS\" -eq 0 ]; then",
             "    END_TS=$(date +%s)",
             "    DURATION=$((END_TS-START_TS))",
@@ -5285,67 +5240,49 @@ def step1_status(project: str):
             stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
             in_vcfs_folder.add(stem)
 
-    try:
-        with os.scandir(step1_dir) as it:
-            sample_entries = sorted(it, key=lambda e: e.name)
-    except OSError:
-        sample_entries = []
+    # One listing of step1/, shared with every other request of this switch
+    # (see step1_index). Writer/janitor scaffolding (_provenance/) and dot-dirs
+    # are left out so they don't surface as "Unknown" samples in the GUI.
+    lst = step1_index.listing(step1_dir)
+    sample_entries = lst.regular()
 
     disk_cache = _step1_status_disk_load(step1_dir)
     disk_updates: Dict[str, list] = {}
+    # Every sample directory's mtime, from the shared listing: the one key of
+    # both status caches. Fetched for all samples at once here rather than one
+    # at a time from inside the per-sample task (which, running in the pool,
+    # could not fan out), and shared with the other requests of this switch.
+    dir_mtimes = lst.mtimes()
 
-    def _dir_mtime(dir_entry) -> Optional[int]:
-        try:
-            return dir_entry.stat().st_mtime_ns
-        except OSError:
-            return None
-
-    def _sample_status(dir_entry) -> Optional[Dict[str, Any]]:
-        # Skip writer/janitor scaffolding (e.g. _provenance/) so they don't
-        # surface as "Unknown" samples in the GUI.
-        if dir_entry.name.startswith(("_", ".")):
-            return None
-        try:
-            if not dir_entry.is_dir():
-                return None
-        except OSError:
-            return None
-        sample_dir = Path(dir_entry.path)
-        sample = sample_dir.name
+    def _sample_status(s: step1_index.Sample) -> Optional[Dict[str, Any]]:
+        sample_dir = Path(s.path)
+        sample = s.name
         log_path = sample_dir / "run_step1.log"
         exit_code_path = sample_dir / ".provenance" / "exit_code"
 
-        # Fast path: a sample with an exit_code sentinel is terminal. Serve it
-        # from cache (keyed on the sentinel's mtime) so we skip the per-sample
-        # globs below on every poll. in_vcfs_folder is layered on fresh since it
-        # tracks the separate VCF collection, which the user can change anytime.
+        # Fast path: a terminal sample whose directory has not changed. Serve it
+        # from cache so we skip the per-sample globs below on every poll.
+        # in_vcfs_folder is layered on fresh since it tracks the separate VCF
+        # collection, which the user can change anytime.
         cache_key = str(sample_dir)
-        try:
-            ec_mtime = exit_code_path.stat().st_mtime_ns
-        except OSError:
-            ec_mtime = None
-        if ec_mtime is not None:
+        dir_mtime = dir_mtimes.get(sample)
+        if dir_mtime is not None:
             cached = _STEP1_STATUS_CACHE.get(cache_key)
-            if cached and cached[0] == ec_mtime:
+            if cached and cached[0] == dir_mtime:
                 entry = dict(cached[1])
                 entry["in_vcfs_folder"] = sample in in_vcfs_folder
-                entry["reason"] = _step1_status_reason(entry.get("status", ""), sample_dir, min_bytes)
                 return entry
             # Not seen by this process yet: the answer a previous backend
-            # left on disk, if neither key has moved since.
+            # left on disk, if the directory has not moved since.
             stored = disk_cache.get(sample)
-            fields = (
-                _step1_status_from_disk(stored, ec_mtime, _dir_mtime(dir_entry))
-                if stored is not None else None
-            )
+            fields = _step1_status_from_disk(stored, dir_mtime) if stored is not None else None
             if fields is not None:
                 kept = {"sample": sample, "status": fields["status"], "log_path": str(log_path),
                         "has_log": fields["has_log"], "has_outputs": fields["has_outputs"],
-                        "has_zc_vcf": fields["has_zc_vcf"]}
-                _STEP1_STATUS_CACHE[cache_key] = (ec_mtime, kept)
+                        "has_zc_vcf": fields["has_zc_vcf"], "reason": fields["reason"]}
+                _STEP1_STATUS_CACHE[cache_key] = (dir_mtime, kept)
                 entry = dict(kept)
                 entry["in_vcfs_folder"] = sample in in_vcfs_folder
-                entry["reason"] = _step1_status_reason(entry["status"], sample_dir, min_bytes)
                 return entry
 
         # One listing of the sample dir and of each alignment dir answers all
@@ -5380,12 +5317,10 @@ def step1_status(project: str):
         # "Error" before transitioning to "Complete" once the VCF landed.
         status = "not_started"
         legacy_complete = False
-        exit_code_str = ""
-        if ec_mtime is not None:  # the stat above: it exists
-            try:
-                exit_code_str = exit_code_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                exit_code_str = ""
+        try:
+            exit_code_str = exit_code_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            exit_code_str = ""
         if exit_code_str:
             status = "complete" if exit_code_str == "0" else "error"
         elif vcf and nodup:
@@ -5433,27 +5368,26 @@ def step1_status(project: str):
             "in_vcfs_folder": sample in in_vcfs_folder,
             "reason": reason,
         }
-        # Cache terminal samples (exit_code written) so later polls take the
-        # fast path above. Store everything except in_vcfs_folder and reason,
-        # which are re-layered per poll (the former tracks the VCF collection;
-        # the latter is cheap and kept fresh alongside it).
-        if ec_mtime is not None and status in ("complete", "error"):
+        # Cache terminal samples so later polls take the fast path above —
+        # those with a sentinel and those completed from the command line
+        # alike. Store everything except in_vcfs_folder, which is re-layered
+        # per poll because it tracks the VCF collection.
+        if dir_mtime is not None and status in ("complete", "error"):
             _STEP1_STATUS_CACHE[cache_key] = (
-                ec_mtime, {k: v for k, v in entry.items() if k not in ("in_vcfs_folder", "reason")}
+                dir_mtime, {k: v for k, v in entry.items() if k != "in_vcfs_folder"}
             )
-            # Persisted only once both timestamps are comfortably in the past,
-            # the same racy-timestamp guard as _STEP1_NAMES_CACHE: on a coarse
-            # (1 s) filesystem a change landing in the same tick would
-            # otherwise leave both keys looking unchanged.
-            dir_mtime = _dir_mtime(dir_entry)
-            if dir_mtime is not None and time.time_ns() - max(ec_mtime, dir_mtime) > 2_000_000_000:
-                disk_updates[sample] = [ec_mtime, dir_mtime, {k: entry[k] for k in _STEP1_STATUS_FIELDS}]
+            # Persisted only once the timestamp is comfortably in the past, the
+            # same racy-timestamp guard as the Step 1 index: on a coarse (1 s)
+            # filesystem a change landing in the same tick would otherwise
+            # leave the key looking unchanged.
+            if time.time_ns() - dir_mtime > 2_000_000_000:
+                disk_updates[sample] = [dir_mtime, {k: entry[k] for k in _STEP1_STATUS_FIELDS}]
         return entry
 
     # Every sample at once: on shared storage each check is a round trip, and
     # one after another they were minutes on a 9,000-sample project.
     statuses = [e for e in fan_out(_sample_status, sample_entries) if e is not None]
-    _step1_status_disk_save(step1_dir, disk_updates, {e.name for e in sample_entries})
+    _step1_status_disk_save(step1_dir, disk_updates, {s.name for s in sample_entries})
     # job_id so the GUI can follow the trim -> batch hand-off: the trim job
     # finishes, this starts reporting the batch's id, and the log pane re-points.
     return {
@@ -5557,6 +5491,7 @@ def step1_remove_sample(project: str, sample: str):
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to remove sample: {exc}")
     _STEP1_STATUS_CACHE.pop(str(step1_dir / sample), None)
+    step1_index.invalidate(step1_dir)
     return {"quarantined": sample, "files": moved}
 
 
@@ -5622,6 +5557,7 @@ def quarantine_restore(project: str, sample: str):
             shutil.rmtree(qdir)
         except OSError:
             pass
+    step1_index.invalidate(project_dir / "step1")
     return {"restored": restored, "skipped": skipped, "sample": sample}
 
 
@@ -7026,14 +6962,24 @@ _QC_SCANS: Dict[str, Dict[str, Any]] = {}  # str(step1_dir) -> scan state
 _QC_KEEP_READY = 4
 
 
-def _qc_run_scanner(scan_dir: Path, direct: bool = False, progress_cb=None) -> List[Dict[str, Any]]:
+def _qc_run_scanner(scan_dir: Path, direct: bool = False, progress_cb=None,
+                    index: Optional[Dict[str, list]] = None) -> List[Dict[str, Any]]:
     """Run one qc_scan.py subprocess to completion and return its rows.
-    progress_cb (if given) receives (done, total) as the scan advances."""
+    progress_cb (if given) receives (done, total) as the scan advances.
+    `index`, when given, is {workbook path: [mtime_ns, size]} — what the scan
+    would otherwise discover by listing every sample dir — handed over in a
+    temp file so the subprocess reads nothing the backend already knows."""
     out_fd, out_path = tempfile.mkstemp(prefix="qc_scan_", suffix=".json")
     os.close(out_fd)
     cmd = [sys.executable, str(_QC_SCANNER), str(scan_dir), "--out", out_path]
     if direct:
         cmd.append("--direct")
+    index_path = None
+    if index is not None:
+        idx_fd, index_path = tempfile.mkstemp(prefix="qc_scan_index_", suffix=".json")
+        with os.fdopen(idx_fd, "w", encoding="utf-8") as fh:
+            json.dump(index, fh)
+        cmd += ["--index", index_path]
     err_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:
         # stderr goes to a file, not a pipe: we block reading stdout for the
@@ -7058,10 +7004,12 @@ def _qc_run_scanner(scan_dir: Path, direct: bool = False, progress_cb=None) -> L
             return json.load(fh).get("rows", [])
     finally:
         err_file.close()
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+        for stale in (out_path, index_path):
+            if stale:
+                try:
+                    os.unlink(stale)
+                except OSError:
+                    pass
 
 
 def _qc_evict_lru() -> None:
@@ -7095,7 +7043,18 @@ def _qc_start_scan(step1_dir: Path) -> Dict[str, Any]:
 
     def _worker() -> None:
         try:
-            rows = _qc_run_scanner(step1_dir, progress_cb=_progress)
+            # Every stats workbook and its signature, from the Step 1 index:
+            # the listing this switch's other requests share, and nothing
+            # re-read for a sample dir whose mtime has not moved. Without it
+            # the scan listed and stat()ed every sample dir on every fresh
+            # backend, 16,000 round trips before it could say "nothing to do".
+            try:
+                index = step1_index.stats_sigs(step1_dir)
+            except Exception:
+                index = None
+            rows = _qc_run_scanner(step1_dir, progress_cb=_progress, index=index)
+            # The scan may have rewritten its cache file in step1/.
+            step1_index.touched(step1_dir)
         except Exception as exc:
             state["error"] = str(exc)
             state["status"] = "error"
@@ -7199,6 +7158,10 @@ def qc_summary(project: str, refresh: int = 0):
     key = str(step1_dir)
     state = _QC_SCANS.get(key)
     if state is None or state["status"] == "error" or (refresh and state["status"] == "ready"):
+        if refresh:
+            # Refresh means "look again": the shared listing must not answer
+            # from a few seconds ago.
+            step1_index.invalidate(step1_dir)
         if state is not None and state["status"] == "error":
             with _QC_STATE_LOCK:
                 if _QC_SCANS.get(key) is state:
@@ -7474,7 +7437,7 @@ def posthoc_status_all(project: str, tool: str = "snp_analysis", run_id: Optiona
     if not step2_dir.exists():
         return {"groups": {}}
     output_dir = _resolve_step2_output_dir(step2_dir, run_id)
-    groups: Dict[str, Any] = {}
+    group_dirs: List[Tuple[str, Path]] = []
     try:
         with os.scandir(output_dir) as it:
             for entry in it:
@@ -7487,13 +7450,21 @@ def posthoc_status_all(project: str, tool: str = "snp_analysis", run_id: Optiona
                         continue
                 except OSError:
                     continue
-                group_dir = Path(entry.path)
-                lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
-                _posthoc_clear_stale_lock(lock_path)
-                groups[name] = _posthoc_group_state(group_dir, tool_obj, lock_path)
+                group_dirs.append((name, Path(entry.path)))
     except OSError:
         return {"groups": {}}
-    return {"groups": groups}
+
+    def _state(item: Tuple[str, Path]) -> Tuple[str, Dict[str, Any]]:
+        name, group_dir = item
+        # One listing of the group folder stands in for the twenty-odd
+        # existence checks the state used to make against it.
+        gd = _GroupFiles(group_dir)
+        lock_path = _posthoc_lock_path(group_dir, tool_obj.tool_id)
+        _posthoc_clear_stale_lock(lock_path, gd)
+        return name, _posthoc_group_state(group_dir, tool_obj, lock_path, gd)
+
+    # Every group at once: a 37-group run was 800 round trips one after another.
+    return {"groups": dict(fan_out(_state, group_dirs))}
 
 
 @app.get("/api/projects/{project}/reference_lock")
@@ -7698,7 +7669,8 @@ def step2_runs_list(project: str):
     if run_dirs:
         # One liveness lookup for the whole listing, not one per folder.
         live_run_id = _step2_live_run_id(step2_dir)
-        for run_id in _step2_runs_newest_first(run_dirs.keys()):
+
+        def _describe(run_id: str) -> Dict[str, Any]:
             run_entry = run_dirs[run_id]
             # Per-run isolation. One folder must never be able to empty this
             # list: a 500 here is swallowed by the frontend, so the failure
@@ -7708,7 +7680,7 @@ def step2_runs_list(project: str):
                 shape = _step2_run_shape(run_entry)
                 state = _step2_run_state(shape, run_id == live_run_id)
                 parts = _step2_split_run_name(run_id) or {}
-                results.append({
+                return {
                     "run_id": run_id,
                     "started_at": meta["started_at"],
                     "status": meta["status"],
@@ -7726,10 +7698,10 @@ def step2_runs_list(project: str):
                     "staged_vcfs": shape["staged_vcfs"],
                     "has_results": shape["has_results"],
                     "gui_launched": shape["has_gui_cmd"],
-                })
+                }
             except Exception:
                 logger.exception("step2/runs: could not read run folder %s", run_entry)
-                results.append({
+                return {
                     "run_id": run_id,
                     "started_at": None,
                     "status": "unknown",
@@ -7742,7 +7714,11 @@ def step2_runs_list(project: str):
                     "staged_vcfs": 0,
                     "has_results": False,
                     "gui_launched": False,
-                })
+                }
+
+        # Every comparison folder at once: each is a listing and a metadata
+        # read, and the Ames owl project has 282 of them.
+        results = fan_out(_describe, _step2_runs_newest_first(run_dirs.keys()))
     else:
         # Legacy flat layout: group dirs directly under step2/ (no run dirs).
         def _is_group(d):
@@ -9240,26 +9216,17 @@ def step1_edits(project: str):
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    try:
-        with os.scandir(step1_dir) as it:
-            sample_entries = sorted(it, key=lambda e: e.name)
-    except OSError:
-        sample_entries = []
+    # Both artifacts of an edit — the patched VCF and its log — live under
+    # vcf_edits/, so only a sample dir holding one has anything to report.
+    # Which dirs those are is a direct-child question, so the Step 1 index
+    # answers it (every dir under step1/, hidden and scaffolding included, as
+    # the exists() check before it did) without a stat per sample.
+    lst = step1_index.listing(step1_dir)
+    fx = step1_index.facts(step1_dir, lst)
 
-    def _sample_edits(dir_entry) -> Optional[Tuple[str, Dict[str, Any]]]:
-        try:
-            if not dir_entry.is_dir():
-                return None
-        except OSError:
-            return None
-        sample_dir = Path(dir_entry.path)
-        sample = sample_dir.name
-        # Both artifacts of an edit — the patched VCF and its log — live under
-        # vcf_edits/, so a sample without one has nothing to report. Asking
-        # that first is one stat; the glob-and-sort below is several listings
-        # and a stat per VCF, and it used to run for every sample.
-        if not (sample_dir / "vcf_edits").exists():
-            return None
+    def _sample_edits(s: step1_index.Sample) -> Optional[Tuple[str, Dict[str, Any]]]:
+        sample_dir = Path(s.path)
+        sample = s.name
         # Non-recursive on purpose: a **/ glob here walked every sample's whole
         # output subtree per request — the same class of cost that made the
         # status endpoint time out at ~1000 samples. The zc VCF only ever
@@ -9278,8 +9245,9 @@ def step1_edits(project: str):
             }
         return None
 
-    # Every sample at once: each check is a round trip on shared storage.
-    return dict(e for e in fan_out(_sample_edits, sample_entries) if e is not None)
+    with_edits = [s for s in lst.samples if fx.get(s.name, {}).get("edits")]
+    # The few that have one, at once: each check is a round trip on shared storage.
+    return dict(e for e in fan_out(_sample_edits, with_edits) if e is not None)
 
 
 
@@ -9396,7 +9364,7 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
         })
     top.sort(key=lambda x: x["label"])
 
-    groups = []
+    group_dirs: List[Path] = []
     for d in sorted(output_dir.iterdir()):
         if not d.is_dir():
             continue
@@ -9404,7 +9372,32 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
             continue
         if d.name.startswith("."):
             continue
-        fasta_path = _find_group_fasta(d)
+        group_dirs.append(d)
+
+    def _is_file(e) -> bool:
+        try:
+            return e.is_file()
+        except OSError:
+            return False
+
+    def _group(d: Path) -> Optional[Dict[str, Any]]:
+        # One listing of the group folder answers everything below: the fasta
+        # lookup (three globs before), the labeled-tree set and the file list
+        # (two more listings and a stat per file before) — about sixteen
+        # round trips a group down to one, plus the alignment's stat. Same
+        # rules as the pathlib calls it replaces: case-sensitive, dotfiles
+        # included, symlinks followed.
+        try:
+            with os.scandir(d) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            entries = []
+        fasta_path = None
+        for pattern in ("*.fasta", "*.fa", "*.fna"):
+            matches = [e.name for e in entries if fnmatch.fnmatchcase(e.name, pattern)]
+            if matches:
+                fasta_path = d / matches[-1]
+                break
         fasta_count, fasta_columns, fasta_has_outgroup = _fasta_dims(fasta_path)
         # The reference/outgroup is a record in the alignment but not a sample of
         # the group, so it is not counted as one. Only subtracted when it is
@@ -9417,47 +9410,58 @@ def step2_outputs(project: str, run_id: Optional[str] = Query(None)):
         # for placing run samples in context. Unlabeled file is still on
         # disk for anyone going via the filesystem.
         labeled_bases = {
-            f.name.removesuffix("_labeled.tre")
-            for f in d.iterdir()
-            if f.is_file() and f.name.endswith("_labeled.tre")
+            e.name.removesuffix("_labeled.tre")
+            for e in entries
+            if e.name.endswith("_labeled.tre") and _is_file(e)
         }
         files = []
-        for f in sorted(d.iterdir()):
-            if f.is_file():
-                if f.name.endswith(".tre") and not f.name.endswith("_labeled.tre"):
-                    if f.name.removesuffix(".tre") in labeled_bases:
+        for e in entries:
+            if _is_file(e):
+                if e.name.endswith(".tre") and not e.name.endswith("_labeled.tre"):
+                    if e.name.removesuffix(".tre") in labeled_bases:
                         continue
-                ext = f.suffix.lstrip(".")
+                ext = Path(e.name).suffix.lstrip(".")
                 files.append({
-                    "label": f.name,
-                    "path": str(f),
+                    "label": e.name,
+                    "path": e.path,
                     "type": ext or "file",
-                    "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__{f.name}",
+                    "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__{e.name}",
                 })
-            elif f.is_dir() and f.name == "posthoc":
-                for pf in sorted(f.iterdir()):
-                    if pf.is_file():
-                        ext = pf.suffix.lstrip(".")
+            elif e.name == "posthoc":
+                try:
+                    if not e.is_dir():
+                        continue
+                    with os.scandir(e.path) as pit:
+                        sub = sorted(pit, key=lambda x: x.name)
+                except OSError:
+                    continue
+                for pf in sub:
+                    if _is_file(pf):
+                        ext = Path(pf.name).suffix.lstrip(".")
                         files.append({
                             "label": f"posthoc/{pf.name}",
-                            "path": str(pf),
+                            "path": pf.path,
                             "type": ext or "file",
                             "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__posthoc__{pf.name}",
                         })
-        if files:
-            groups.append({
-                "name": d.name,
-                "files": files,
-                "posthoc_possible": fasta_count >= 3,
-                "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
-                "posthoc_sequence_count": fasta_count,
-                # The group's shape, for the results pane to show beside its name.
-                # Zero on the degenerate groups vSNP3 marks TOO_FEW_SAMPLES (a
-                # header and no sequence); the pane shows nothing rather than
-                # "1 x 0".
-                "sample_count": sample_count,
-                "snp_count": fasta_columns,
-            })
+        if not files:
+            return None
+        return {
+            "name": d.name,
+            "files": files,
+            "posthoc_possible": fasta_count >= 3,
+            "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
+            "posthoc_sequence_count": fasta_count,
+            # The group's shape, for the results pane to show beside its name.
+            # Zero on the degenerate groups vSNP3 marks TOO_FEW_SAMPLES (a
+            # header and no sequence); the pane shows nothing rather than
+            # "1 x 0".
+            "sample_count": sample_count,
+            "snp_count": fasta_columns,
+        }
+
+    # Every group at once: a 37-group run was 600 round trips one after another.
+    groups = [g for g in fan_out(_group, group_dirs) if g is not None]
     resolved_run_id = output_dir.name if output_dir != step2_dir else "legacy"
 
     # When there is nothing to draw, say WHY. "No Step 2 outputs found yet." was
@@ -10838,6 +10842,9 @@ def vcf_edit(project: str, payload: VcfEditRequest):
     }
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
+    # vcf_edits/ is a direct child the Step 1 index reports on; a listing from
+    # a moment ago must not keep saying this sample has none.
+    step1_index.invalidate(step1_dir)
 
     return {
         "patched_vcf": str(patched_vcf),
@@ -11715,7 +11722,52 @@ if _frontend_dist.exists():
                 return _FileResponse(_frontend_dist / fname)
 
 
-def _posthoc_group_state(group_dir: Path, tool, lock_path: Path) -> Dict[str, Any]:
+class _GroupFiles:
+    """The names in a group folder — and, when asked, in its legacy posthoc/
+    subfolder — from one listing each, so the dozen existence checks the
+    post-hoc state makes per group cost one round trip instead of one apiece.
+    Path.exists() follows symlinks, so a symlinked name is asked of the disk."""
+
+    def __init__(self, group_dir: Path):
+        self.dir = group_dir
+        self.names = self._list(group_dir)
+        self._legacy: Optional[Dict[str, bool]] = None
+
+    @staticmethod
+    def _list(d: Path) -> Dict[str, bool]:
+        try:
+            with os.scandir(d) as it:
+                return {e.name: e.is_symlink() for e in it}
+        except OSError:
+            return {}
+
+    def _names_for(self, path: Path) -> Optional[Dict[str, bool]]:
+        parent = path.parent
+        if parent == self.dir:
+            return self.names
+        if parent == self.dir / POSTHOC_LEGACY_SUBDIR:
+            if self._legacy is None:
+                self._legacy = self._list(parent) if POSTHOC_LEGACY_SUBDIR in self.names else {}
+            return self._legacy
+        return None
+
+    def exists(self, path: Path) -> bool:
+        names = self._names_for(path)
+        if names is None:
+            return path.exists()
+        if path.name not in names:
+            return False
+        return not names[path.name] or path.exists()
+
+    def forget(self, path: Path) -> None:
+        """The caller just removed this file; the listing must not keep it."""
+        names = self._names_for(path)
+        if names is not None:
+            names.pop(path.name, None)
+
+
+def _posthoc_group_state(group_dir: Path, tool, lock_path: Path,
+                         gd: Optional[_GroupFiles] = None) -> Dict[str, Any]:
     """One group's post-hoc state: is it running, what came out, and what broke.
 
     The failure report is the point. A job that dies on its first step still
@@ -11725,18 +11777,38 @@ def _posthoc_group_state(group_dir: Path, tool, lock_path: Path) -> Dict[str, An
     hides stats.json, so the group showed a ready chip above an empty file list
     and the run looked like it had worked. Outputs now mean deliverables only,
     and the error travels so the pane can say what happened instead of nothing.
+
+    `gd` is the group folder's listing when the caller has one; every existence
+    check then comes from it (see posthoc_output_path for the lookup rule this
+    reproduces: current layout first, then the legacy subfolder).
     """
+    def _exists(p: Path) -> bool:
+        return gd.exists(p) if gd is not None else p.exists()
+
+    def _output(rel: str) -> Path:
+        if gd is None:
+            return posthoc_output_path(group_dir, rel)
+        direct = group_dir / rel
+        if _exists(direct):
+            return direct
+        legacy = group_dir / POSTHOC_LEGACY_SUBDIR / rel
+        if _exists(legacy):
+            return legacy
+        return direct
+
     outputs = []
     for rel in tool.outputs:
-        path = posthoc_output_path(group_dir, rel)
-        outputs.append({"path": str(path), "exists": path.exists()})
+        path = _output(rel)
+        outputs.append({"path": str(path), "exists": _exists(path)})
     state: Dict[str, Any] = {
-        "running": lock_path.exists(),
+        "running": _exists(lock_path),
         "outputs": outputs,
         "status": "",
         "message": "",
     }
-    stats_path = posthoc_output_path(group_dir, tool.stats_file)
+    stats_path = _output(tool.stats_file)
+    if gd is not None and not _exists(stats_path):
+        return state
     try:
         stats = json.loads(stats_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -11752,15 +11824,16 @@ def _posthoc_lock_path(group_dir: Path, tool: str) -> Path:
     return group_dir / f".{tool}.lock"
 
 
-def _posthoc_clear_stale_lock(lock_path: Path) -> None:
+def _posthoc_clear_stale_lock(lock_path: Path, gd: Optional[_GroupFiles] = None) -> None:
     """Drop the lock when the job it names is over.
 
     Also sweeps a lock left in the legacy posthoc/ subfolder by a run started
     before the results moved up a level: nothing reads it any more, and left in
     place it is a permanent "running" for anyone who looks at the folder.
+    `gd` is the group folder's listing when the caller has one.
     """
     for path in (lock_path, lock_path.parent / POSTHOC_LEGACY_SUBDIR / lock_path.name):
-        if not path.exists():
+        if not (gd.exists(path) if gd is not None else path.exists()):
             continue
         try:
             job_id = path.read_text(encoding="utf-8").strip()
@@ -11768,10 +11841,14 @@ def _posthoc_clear_stale_lock(lock_path: Path) -> None:
             continue
         if not job_id:
             path.unlink()
+            if gd is not None:
+                gd.forget(path)
             continue
         job = job_manager.get_job(job_id)
         if not job or job.get("status") in {"succeeded", "failed", "cancelled"}:
             path.unlink()
+            if gd is not None:
+                gd.forget(path)
 
 
 def _posthoc_stub_command(cfg: Dict, stats_path: Path, group: str, tool: str) -> str:

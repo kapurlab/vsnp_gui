@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.main as m
+from app import step1_index as si
 from app.projects import update_project_meta
 
 
@@ -95,7 +96,7 @@ def main() -> int:
         assert_eq(m._scan_vcf_db(tmp / "missing")[0], [], "missing dir -> empty, no raise")
 
         # ------------------------------------------------------------------
-        print("\n[_step1_sample_names: subsumption + mtime-keyed memo]")
+        print("\n[_step1_sample_names: subsumption + the mtime-keyed Step 1 index]")
         step1 = tmp / "step1"
         for name, reads in [("s_r1", ["x_R1_001.fastq.gz"]),
                             ("s_underscore1", ["y_1.fastq.gz"]),
@@ -112,7 +113,8 @@ def main() -> int:
         for d in step1.iterdir():
             st = d.stat()
             os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns - 10_000_000_000))
-        m._STEP1_NAMES_CACHE.clear()
+        si.invalidate(step1)
+        si._FACTS_MEMO.clear()
         got = m._step1_sample_names(step1)
         assert_eq(got, ["s_plain", "s_r1", "s_underscore1"],
                   "all three legacy patterns matched; empty/dot-only/underscore skipped")
@@ -132,6 +134,10 @@ def main() -> int:
             assert_eq(inner_lists["n"], 0, "no per-sample listing on a warm call")
             (step1 / "s_empty" / "new.fastq.gz").write_text("@\n")
             bump_mtime(step1 / "s_empty")
+            # A change inside a sample dir is seen when the shared listing
+            # expires (a few seconds) or at once when the app made it; the
+            # test stands in for the expiry.
+            si.invalidate(step1)
             got3 = m._step1_sample_names(step1)
             assert_true("s_empty" in got3, "a bumped dir re-lists and joins")
             assert_true(inner_lists["n"] >= 1, "exactly the changed dir was re-listed")
@@ -281,21 +287,23 @@ def main() -> int:
                   "bare (unquoted) echo still accepted")
 
         # ------------------------------------------------------------------
-        print("\n[_step1_sample_names refuses to cache a racy timestamp]")
+        print("\n[the Step 1 index refuses to record a racy timestamp]")
         racy = step1 / "s_racy"
         racy.mkdir()
         # Freshly created: its mtime is 'now', inside the 2 s guard window, so
-        # the empty answer must NOT be cached — a read arriving within the same
-        # coarse-filesystem tick would otherwise be pinned invisible.
+        # the empty answer must NOT be recorded — a read arriving within the
+        # same coarse-filesystem tick would otherwise be pinned invisible.
+        si.invalidate(step1)
         m._step1_sample_names(step1)
-        assert_true(str(racy) not in m._STEP1_NAMES_CACHE,
-                    "an entry whose mtime is ~now is not cached")
-        # Age the directory artificially: now it may cache.
+        assert_true("s_racy" not in si._load(step1),
+                    "an entry whose mtime is ~now is not recorded in the index")
+        # Age the directory artificially: now it may be recorded.
         st = racy.stat()
         os.utime(racy, ns=(st.st_atime_ns, st.st_mtime_ns - 10_000_000_000))
+        si.invalidate(step1)
         m._step1_sample_names(step1)
-        assert_true(str(racy) in m._STEP1_NAMES_CACHE,
-                    "a comfortably-past mtime is cached")
+        assert_true("s_racy" in si._load(step1),
+                    "a comfortably-past mtime is recorded")
 
         # ------------------------------------------------------------------
         print("\n[posthoc_status_all mirrors the per-group endpoint]")

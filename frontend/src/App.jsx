@@ -356,6 +356,7 @@ export default function App() {
   const [projSampleFilter, setProjSampleFilter] = useState("");   // as-you-type sample filter for the Projects list
   const [excluded, setExcluded] = useState({});
   const [step1Status, setStep1Status] = useState([]);
+  const [step1StatusFor, setStep1StatusFor] = useState("");   // the project step1Status was loaded for
   // Batch-level status from /step1/status (returned alongside per-sample
   // statuses). "running" disables the Run button so clicks can't spawn a
   // second concurrent batch. Empty string when no batch has ever been
@@ -451,6 +452,7 @@ export default function App() {
   const [step2Runs, setStep2Runs] = useState([]);
   const [step2SelectedRun, setStep2SelectedRun] = useState(null);
   const [step2Outputs, setStep2Outputs] = useState([]);
+  const [step2OutputsFor, setStep2OutputsFor] = useState(""); // the project step2Outputs/Groups were loaded for
   const [step2Groups, setStep2Groups] = useState([]);
   const [step2OutputsError, setStep2OutputsError] = useState("");
   // Why the Comparison list is missing. It used to fail silently, so a 500 from
@@ -935,6 +937,27 @@ export default function App() {
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
   }, [step1Status]);
+
+  // VCFs in the comparison set called against a renamed copy of the project
+  // reference: another file name, exactly the same contigs (backend
+  // ref_contigs.py). They are compared as the project reference, and this
+  // says so where the set is described — someone may not want that, and
+  // needs to know before Build rather than find it in a tree.
+  const renamedRefs = (step2RefAudit && !step2RefAudit.error && step2RefAudit.renamed) || [];
+  const renamedNote = renamedRefs.length ? (
+    <div className="note warning" style={{ fontSize: "0.85em" }}>
+      {renamedRefs.map((r) => (
+        <div key={r.reference}>
+          <strong>Note:</strong> {r.count.toLocaleString()} VCF{r.count === 1 ? "" : "s"} in{" "}
+          {vcfsFolderName || "vcf_database"} {r.count === 1 ? "was" : "were"} called against{" "}
+          <strong>{r.reference}</strong>, a renamed copy of <strong>{step2RefAudit.project_reference}</strong>{" "}
+          (every contig name and length is identical), so {r.count === 1 ? "it is" : "they are"} treated as{" "}
+          {step2RefAudit.project_reference}. If that is not what you want, re-run those samples against{" "}
+          {step2RefAudit.project_reference}, or exclude them from the comparison.
+        </div>
+      ))}
+    </div>
+  ) : null;
 
   const step1MisfitCount = useMemo(
     () => step1Status.filter((s) => s.status === "misfit").length,
@@ -1744,6 +1767,7 @@ export default function App() {
       return;
     }
     const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/vcfs`);
+    if (selectedProjectRef.current !== project) return;   // the user has moved on
     if (res.ok) {
       const data = await res.json();
       setVcfsFolderCount(data.count || 0);
@@ -1933,6 +1957,30 @@ export default function App() {
     setProjectReference("");
     setVcfsCollectResult(null);
     setVcfsForceSet(new Set());
+    // A switch shows nothing of the previous project. Every pane's data is
+    // cleared here, before the new project's requests go out, and each pane
+    // says it is loading until its own project's answer lands. The old rows
+    // under the new project's name read as that project's data — and on a
+    // large project on shared storage they stayed on screen for minutes.
+    setQcRows([]);
+    setQcError("");
+    setQcScan(null);
+    setStep1Edits({});
+    setStep1EditedCount(0);
+    setStep1Status([]);
+    setStep1StatusError("");
+    setStep1StatusFor("");
+    setQuarantine([]);
+    setStep2Outputs([]);
+    setStep2Groups([]);
+    setStep2Groupings({});
+    setPosthocStatus({});
+    setStep2EmptyReason(null);
+    setStep2OutputsError("");
+    setStep2RunsError("");
+    setStep2OutputsFor("");
+    setInputs({ files: [], total_bytes: 0, count: 0 });
+    setSraReport({ downloaded: [], already_in_step1: [], failed: [] });
     loadVcfsFolder(selectedProject);
     if (!selectedProject) return () => { cancelled = true; };
     // Seed projectReference from the already-loaded projects list (fast, no extra fetch)
@@ -2887,6 +2935,7 @@ export default function App() {
       groups = data.groups || [];
       setStep2Groups(groups);
     }
+    setStep2OutputsFor(proj);
     loadStep2Groupings({ stale: superseded });
     const countRes = await fetch(`${API_BASE}/api/projects/${proj}/step2/vcf_count`);
     if (superseded()) return;
@@ -2924,21 +2973,28 @@ export default function App() {
   // to know to press.
   async function loadStep2ReferenceAudit() {
     if (!selectedProject) { setStep2RefAudit(null); return; }
+    const proj = selectedProject;
+    const stale = () => selectedProjectRef.current !== proj;
     setStep2RefAuditBusy(true);
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/reference_audit`);
+      const res = await fetch(`${API_BASE}/api/projects/${proj}/step2/reference_audit`);
+      if (stale()) return;
       if (!res.ok) {
         const msg = await res.json().catch(() => ({}));
+        if (stale()) return;
         setStep2RefAudit({ error: msg.detail || `HTTP ${res.status}`, mixed: false });
         return;
       }
-      setStep2RefAudit(await res.json());
+      const audit = await res.json();
+      if (stale()) return;
+      setStep2RefAudit(audit);
     } catch (e) {
+      if (stale()) return;
       // A failed check must not become a silent veto: report it and let the
       // run proceed rather than blocking on our own inability to look.
       setStep2RefAudit({ error: e?.message || "network error", mixed: false });
     } finally {
-      setStep2RefAuditBusy(false);
+      if (!stale()) setStep2RefAuditBusy(false);
     }
   }
 
@@ -2975,7 +3031,9 @@ export default function App() {
 
   async function loadVcfSourceSamples() {
     if (!selectedProject) return;
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/vcf_database/samples`);
+    const proj = selectedProject;
+    const res = await fetch(`${API_BASE}/api/projects/${proj}/step2/vcf_database/samples`);
+    if (selectedProjectRef.current !== proj) return;   // the user has moved on
     if (res.ok) {
       const samples = await res.json();
       setVcfSourceSamples(samples);
@@ -3474,6 +3532,7 @@ export default function App() {
     setInputsLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/projects/${project}/inputs`);
+      if (selectedProjectRef.current !== project) return;   // the user has moved on
       if (res.ok) {
         const data = await res.json();
         setInputs(data);
@@ -3481,9 +3540,10 @@ export default function App() {
         setInputs({ files: [], total_bytes: 0, count: 0 });
       }
     } catch (_) {
+      if (selectedProjectRef.current !== project) return;
       setInputs({ files: [], total_bytes: 0, count: 0 });
     } finally {
-      setInputsLoading(false);
+      if (selectedProjectRef.current === project) setInputsLoading(false);
     }
   }
 
@@ -3495,6 +3555,7 @@ export default function App() {
     }
     try {
       const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/sra-download-report`);
+      if (selectedProjectRef.current !== project) return;   // the user has moved on
       if (res.ok) {
         const data = await res.json();
         setSraReport({
@@ -4255,12 +4316,17 @@ export default function App() {
 
   async function loadQuarantine() {
     if (!selectedProject) { setQuarantine([]); return; }
+    const proj = selectedProject;
+    const stale = () => selectedProjectRef.current !== proj;
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/quarantine`);
+      const res = await fetch(`${API_BASE}/api/projects/${proj}/quarantine`);
+      if (stale()) return;
       if (!res.ok) { setQuarantine([]); return; }
       const data = await res.json();
+      if (stale()) return;
       setQuarantine(data.quarantine || []);
     } catch {
+      if (stale()) return;
       setQuarantine([]);
     }
   }
@@ -4680,16 +4746,24 @@ export default function App() {
 
   async function loadStep1Status() {
     if (!selectedProject) return;
+    // Project guard: a slow answer for the project the user has since left
+    // must not land in the pane of the one they are looking at.
+    const proj = selectedProject;
+    const stale = () => selectedProjectRef.current !== proj;
     setStep1StatusError("");
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/status`);
+      const res = await fetch(`${API_BASE}/api/projects/${proj}/step1/status`);
+      if (stale()) return;
       if (!res.ok) {
         const msg = await res.json();
+        if (stale()) return;
         setStep1StatusError(msg.detail || "Failed to load Step 1 status");
         return;
       }
       const data = await res.json();
+      if (stale()) return;
       setStep1Status(data.samples || []);
+      setStep1StatusFor(proj);
       setStep1JobStatus(data.job_status || "");
       setStep1JobStartedAt(data.job_started_at || "");
       // The trim finished and the batch it queued has claimed the run: point the
@@ -4700,6 +4774,7 @@ export default function App() {
         setJobId(data.job_id);
       }
     } catch (err) {
+      if (stale()) return;
       setStep1StatusError("Failed to load Step 1 status");
     }
   }
@@ -6842,7 +6917,7 @@ export default function App() {
             <div className="block">
               <h3>Reference</h3>
               {projectReference ? (
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                   <span
                     style={{
                       padding: "3px 10px",
@@ -6858,6 +6933,14 @@ export default function App() {
                   <span className="muted" style={{ fontSize: "0.8em" }}>
                     (set at project level — change in Projects panel)
                   </span>
+                  {renamedRefs.length ? (
+                    <span className="muted" style={{ fontSize: "0.8em", flexBasis: "100%" }}>
+                      {renamedRefs.map((r) =>
+                        `${r.count.toLocaleString()} VCF${r.count === 1 ? "" : "s"} in ${vcfsFolderName || "vcf_database"} `
+                        + `name ${r.reference}, a renamed copy of this reference (identical contigs)`
+                      ).join("; ")} — treated as {projectReference}.
+                    </span>
+                  ) : null}
                 </div>
               ) : (
                 <>
@@ -7029,7 +7112,9 @@ export default function App() {
                 />
               ) : null}
               {step1StatusError ? <div className="note error">{step1StatusError}</div> : null}
-              {step1Status.length ? (
+              {selectedProject && step1StatusFor !== selectedProject && !step1StatusError ? (
+                <div className="note"><span className="pulse-dot" /> Loading samples for {selectedProject}… <Elapsed /></div>
+              ) : step1Status.length ? (
                 step1StatusFiltered.length ? (
                 <ul className="sample-list">
                   {step1StatusFiltered.map((s) => (
@@ -7296,7 +7381,7 @@ export default function App() {
                           ? `Showing ${visibleQcRows.length} of ${qcRows.length} sample(s) for ${selectedProject}.`
                           : `Loaded ${qcRows.length} sample(s) for ${selectedProject}.`)
                       : qcLoading
-                        ? <>Loading sample stats… <Elapsed /></>
+                        ? <>Loading Step 1 results for {selectedProject}… <Elapsed /></>
                         : "No stats loaded yet."}
                   </div>
                 )}
@@ -8223,6 +8308,7 @@ export default function App() {
                     Step 1 Results is kept out of the comparison automatically. Leave this ticked unless you
                     want to compare the reference databases on their own.
                   </div>
+                  {renamedNote}
                 </div>
 
                 <div className="step2-src">
@@ -9282,20 +9368,7 @@ export default function App() {
               </div>
             ) : null}
 
-            {step2RefAudit && !step2RefAudit.error && (step2RefAudit.renamed || []).length ? (
-              <div className="note" style={{ marginBottom: "0.6rem", fontSize: "0.9em" }}>
-                {step2RefAudit.renamed.map((r) => (
-                  <div key={r.reference}>
-                    <strong>{r.count} VCF{r.count === 1 ? "" : "s"}</strong> name{r.count === 1 ? "s" : ""}{" "}
-                    <strong>{r.reference}</strong> as {r.count === 1 ? "its" : "their"} reference, but{" "}
-                    {r.count === 1 ? "its" : "their"} contigs — every sequence name and length — are
-                    exactly <strong>{step2RefAudit.project_reference}</strong>'s. That is the same
-                    reference saved under another file name, so {r.count === 1 ? "it is" : "they are"}{" "}
-                    compared with the rest.
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            {step2Mode !== "build" ? renamedNote : null}
 
             <div className="block">
                 {(reference || projectReference) ? (
@@ -9463,7 +9536,9 @@ export default function App() {
             {posthocRunError ? <div className="note error">{posthocRunError}</div> : null}
             {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
-            {(() => {
+            {selectedProject && step2OutputsFor !== selectedProject && !step2OutputsError && !step2RunsError ? (
+              <div className="note"><span className="pulse-dot" /> Loading Step 2 results for {selectedProject}… <Elapsed /></div>
+            ) : (() => {
               const snpTool = posthocTools.find((tool) => tool.id === "snp_analysis");
               const snpToolAvailable = snpTool ? snpTool.available : true;
               const snpToolMissing = snpTool && !snpTool.available;

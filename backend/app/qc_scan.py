@@ -279,9 +279,15 @@ def _stats_files(step1_dir: str, include_direct: bool) -> dict:
     return found
 
 
-def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = False):
-    """Yields ('progress', done, total) tuples, then ('rows', rows, stats)."""
-    sigs = _stats_files(step1_dir, include_direct)
+def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = False,
+         sigs: dict = None):
+    """Yields ('progress', done, total) tuples, then ('rows', rows, stats).
+
+    `sigs` is {workbook path: [mtime_ns, size]} when the caller already knows
+    which workbooks there are (the backend's Step 1 index does); otherwise
+    they are discovered here."""
+    if sigs is None:
+        sigs = _stats_files(step1_dir, include_direct)
     files = sorted(sigs)
     total = len(files)
 
@@ -342,6 +348,7 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="write the result JSON here")
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--direct", action="store_true", help="also scan *_stats.xlsx directly in step1_dir (post-hoc folders)")
+    ap.add_argument("--index", default="", help="JSON of {workbook path: [mtime_ns, size]}: scan exactly these, discovering nothing")
     args = ap.parse_args()
 
     step1_dir = os.path.abspath(args.step1_dir)
@@ -355,8 +362,12 @@ def main() -> int:
     if workers < 1:
         workers = min(8, max(2, (os.cpu_count() or 2) // 2))
 
+    sigs = None
+    if args.index:
+        with open(args.index, encoding="utf-8") as fh:
+            sigs = {str(k): [int(v[0]), int(v[1])] for k, v in json.load(fh).items()}
     result = None
-    for item in scan(step1_dir, cache_path, workers, include_direct=args.direct):
+    for item in scan(step1_dir, cache_path, workers, include_direct=args.direct, sigs=sigs):
         if item[0] == "progress":
             print(f"P {item[1]} {item[2]}", flush=True)
         else:

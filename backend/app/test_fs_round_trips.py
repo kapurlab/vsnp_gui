@@ -37,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.main as m
 from app import fanout
+from app import projects as pj
+from app import step1_index as si
 import qc_scan
 
 FAILURES = []
@@ -145,6 +147,95 @@ def old_alias_map(vsnp3_path: Path):
     return aliases
 
 
+def old_sample_names(step1_dir: Path):
+    try:
+        with os.scandir(step1_dir) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        if entry.name.startswith(("_", ".")):
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        has_fastq = False
+        try:
+            with os.scandir(entry.path) as files:
+                for f in files:
+                    if f.name.endswith(".fastq.gz") and not f.name.startswith("."):
+                        has_fastq = True
+                        break
+        except OSError:
+            has_fastq = False
+        if has_fastq:
+            out.append(entry.name)
+    return out
+
+
+def old_scan_step1(step1_dir: Path, seen: set) -> int:
+    if not step1_dir.is_dir():
+        return 0
+    sample_dirs = []
+    try:
+        with os.scandir(step1_dir) as it:
+            for entry in it:
+                if entry.name.startswith(("_", ".")):
+                    continue
+                if entry.is_dir():
+                    sample_dirs.append((entry.path, entry.is_symlink()))
+    except OSError:
+        return 0
+    step1_dev = pj._dir_device(step1_dir)
+    for sample_path, is_link in sample_dirs:
+        dev = pj._dir_device(Path(sample_path)) if is_link else step1_dev
+        try:
+            with os.scandir(sample_path) as it:
+                for entry in it:
+                    if pj._is_read_file(entry.name):
+                        pj._add_read_identity(entry, dev, seen)
+        except OSError:
+            pass
+    return len(sample_dirs)
+
+
+def old_group(d: Path, project: str):
+    """step2_outputs' per-group loop body as it was: three globs, two listings,
+    a stat per file."""
+    def _safe_name(value):
+        return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value)
+    fasta_path = m._find_group_fasta(d)
+    fasta_count, fasta_columns, fasta_has_outgroup = m._fasta_dims(fasta_path)
+    sample_count = fasta_count - 1 if fasta_has_outgroup else fasta_count
+    labeled_bases = {
+        f.name.removesuffix("_labeled.tre") for f in d.iterdir()
+        if f.is_file() and f.name.endswith("_labeled.tre")
+    }
+    files = []
+    for f in sorted(d.iterdir()):
+        if f.is_file():
+            if f.name.endswith(".tre") and not f.name.endswith("_labeled.tre"):
+                if f.name.removesuffix(".tre") in labeled_bases:
+                    continue
+            ext = f.suffix.lstrip(".")
+            files.append({"label": f.name, "path": str(f), "type": ext or "file",
+                          "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__{f.name}"})
+        elif f.is_dir() and f.name == "posthoc":
+            for pf in sorted(f.iterdir()):
+                if pf.is_file():
+                    ext = pf.suffix.lstrip(".")
+                    files.append({"label": f"posthoc/{pf.name}", "path": str(pf), "type": ext or "file",
+                                  "download_name": f"{_safe_name(project)}__{_safe_name(d.name)}__posthoc__{pf.name}"})
+    if not files:
+        return None
+    return {"name": d.name, "files": files, "posthoc_possible": fasta_count >= 3,
+            "posthoc_reason": "" if fasta_count >= 3 else "Requires a FASTA with at least 3 sequences",
+            "posthoc_sequence_count": fasta_count, "sample_count": sample_count, "snp_count": fasta_columns}
+
+
 def old_stats_files(step1_dir: str, include_direct: bool):
     patterns = [os.path.join(step1_dir, "*", "*_stats.xlsx")]
     if include_direct:
@@ -195,6 +286,12 @@ def awkward_step1(root: Path) -> Path:
     touch(root / "outside" / "L" / "L_R2.fastq.gz")
     touch(root / "outside" / "L" / "alignment_REF" / "L_zc.vcf")
     os.symlink(root / "outside" / "L", s1 / "L")                             # symlinked sample
+    touch(root / "dl" / "M_R1.fastq.gz"); touch(root / "dl" / "M_R2.fastq.gz")
+    touch(s1 / "M" / "M_2025_stats.xlsx")
+    os.symlink(root / "dl" / "M_R1.fastq.gz", s1 / "M" / "M_R1.fastq.gz")    # reads linked from download/
+    os.symlink(root / "dl" / "M_R2.fastq.gz", s1 / "M" / "M_R2.fastq.gz")
+    touch(s1 / "N" / "N_unmapped_R1.fastq.gz")                               # not a read
+    os.symlink("/nonexistent/N_R1.fastq.gz", s1 / "N" / "N_R1.fastq.gz")      # a dangling read
     (s1 / "_provenance").mkdir(); (s1 / ".hidden").mkdir()
     touch(s1 / "stray.txt"); touch(s1 / "top_stats.xlsx")
     return s1
@@ -227,12 +324,74 @@ def test_align_listing(s1: Path):
 
 
 def test_listings(s1: Path):
-    print("sample browser, Results scan discovery")
+    print("sample browser, Results scan discovery, sample names, card reads: from the index")
+    si.invalidate(s1)
     check(m._step1_browser_samples(s1), old_browser_samples(s1), "the sample browser list is unchanged")
     check(qc_scan._stats_files(str(s1), False), old_stats_files(str(s1), False),
           "the Results scan finds the same workbooks, with the same stats")
     check(qc_scan._stats_files(str(s1), True), old_stats_files(str(s1), True),
           "and the same with top-level workbooks included")
+    check(si.stats_sigs(s1), old_stats_files(str(s1), False),
+          "the index hands the scan the same workbooks and stats")
+    check(m._step1_sample_names(s1), old_sample_names(s1), "the sample names are unchanged")
+    seen_old, seen_new = set(), set()
+    check((pj._scan_step1(s1, seen_new), seen_new), (old_scan_step1(s1, seen_old), seen_old),
+          "the card's sample count and read identities are unchanged")
+    check(any(isinstance(x, str) for x in seen_new), True, "a dangling read still counts, by its path")
+    check(si.listing(s1) is si.listing(s1), True, "one listing serves the requests of one moment")
+
+
+def awkward_group(root: Path) -> Path:
+    g = root / "run" / "G1"
+    touch(g / "G1-2026.fasta", b">root\nACGT\n>a\nACGT\n>b\nACGT\n")
+    touch(g / ".hidden.fasta", b">x\nA\n")                     # pathlib's glob sees dotfiles
+    touch(g / "z.fa"); touch(g / "weird.fna")                   # lose to the .fasta
+    touch(g / "G1-2026.tre"); touch(g / "G1-2026_labeled.tre") # labeled hides its base
+    touch(g / "other.tre")                                     # no labeled sibling: shown
+    os.symlink("/nonexistent/dead.tre", g / "dead.tre")        # dangling: not a file
+    touch(root / "elsewhere.xlsx")
+    os.symlink(root / "elsewhere.xlsx", g / "link.xlsx")       # a link to a file: a file
+    touch(g / "posthoc" / "kdp.png"); (g / "posthoc" / "deep").mkdir()
+    touch(g / "posthoc" / "stats.json", b'{"status": "error", "message": "boom"}')
+    (g / "notposthoc").mkdir(); touch(g / "notposthoc" / "x.txt")
+    touch(g / "snp_matrix.csv"); touch(g / "closest_neighbor.png")
+    touch(g / ".snp_analysis.lock", b"job-that-no-longer-exists")
+    return g
+
+
+def test_group_listing(root: Path):
+    print("Step 2 group folders: one listing instead of sixteen calls")
+    g = awkward_group(root / "grp")
+    # The old loop is the oracle; step2_outputs' _group is reached through the
+    # endpoint, so the comparison runs the endpoint on a run holding the group.
+    proj = root / "grp"
+    (proj / "step2").mkdir()
+    os.rename(root / "grp" / "run", proj / "step2" / "2026-01-01_00-00-00")
+    (proj / "project.json").write_text(json.dumps({"name": "grp", "reference": "REF"}))
+    m._project_dir_for = lambda c, p: proj
+    d = proj / "step2" / "2026-01-01_00-00-00" / "G1"
+    expected = old_group(d, "grp")
+    with Calls() as calls:
+        got = m.step2_outputs("grp", "2026-01-01_00-00-00")["groups"]
+    check(got, [expected], "the group's files, fasta and shape are unchanged")
+    check(calls.n <= 12, True, f"and cost a handful of calls, not one per file ({calls.n})")
+    tool = m.posthoc_get_tool("snp_analysis")
+    # The post-hoc state, from a listing and from the disk, on two copies of
+    # the folder (clearing a stale lock is a side effect).
+    twin = proj / "twin"
+    shutil.copytree(d, twin, symlinks=True)
+    lock = m._posthoc_lock_path(d, tool.tool_id)
+    m._posthoc_clear_stale_lock(lock)
+    old_state = m._posthoc_group_state(d, tool, lock)
+    gd = m._GroupFiles(twin)
+    lock2 = m._posthoc_lock_path(twin, tool.tool_id)
+    with Calls() as calls:
+        m._posthoc_clear_stale_lock(lock2, gd)
+        new_state = m._posthoc_group_state(twin, tool, lock2, gd)
+    fix = lambda st: json.loads(json.dumps(st).replace(str(twin), str(d)))
+    check(fix(new_state), old_state, "the post-hoc state is unchanged (legacy posthoc/ included)")
+    check(lock2.exists(), False, "and the stale lock is still cleared")
+    check(calls.n <= 6, True, f"from one listing of the folder ({calls.n} calls)")
 
 
 def test_endpoints(root: Path, s1: Path):
@@ -244,7 +403,7 @@ def test_endpoints(root: Path, s1: Path):
     m._project_dir_for = lambda c, p: proj
     check(m.step1_edits("p"), old_edits(s1), "the edits list is unchanged")
     status = m.step1_status("p")["samples"]
-    check([s["sample"] for s in status], ["A", "B", "C", "D", "E", "F", "G", "H", "L"],
+    check([s["sample"] for s in status], ["A", "B", "C", "D", "E", "F", "G", "H", "L", "M", "N"],
           "the status list has every sample, in order, and nothing else")
     by = {s["sample"]: s for s in status}
     check(by["B"]["status"], "complete", "a legacy alignment/ sample reads as complete")
@@ -289,21 +448,37 @@ def test_budgets(root: Path):
     (proj / "step2" / "vcf_database").mkdir(parents=True)
     (proj / "project.json").write_text(json.dumps({"name": "budget", "reference": "REF"}))
     m._project_dir_for = lambda c, p: proj
+    old = time.time() - 60   # past the racy-timestamp guard, so the index records them
+    for p in sorted(s1.rglob("*"), key=lambda p: -len(p.parts)):
+        os.utime(p, (old, old), follow_symlinks=False)
+    si.invalidate(s1)
     with Calls() as cold:
         m.step1_status("budget")
     with Calls() as warm:
         m.step1_status("budget")
+    # The index is built once per project, ever: one listing a sample.
+    with Calls() as build:
+        si.facts(s1)
     with Calls() as edits:
         m.step1_edits("budget")
     with Calls() as browser:
         m.step1_samples("budget")
-    print(f"       per sample: status cold {cold.n / n:.1f}, warm {warm.n / n:.1f}, "
-          f"edits {edits.n / n:.1f}, browser {browser.n / n:.1f}")
-    # Was ~11, ~1, ~6 and 3 (2 on R2 naming) calls per sample.
-    check(cold.n <= 5 * n + 20, True, "status, first visit: at most 5 calls a sample")
-    check(warm.n <= 1 * n + 20, True, "status, revisit: 1 call a sample")
-    check(edits.n <= 1 * n + 20, True, "edits: 1 call a sample")
-    check(browser.n <= 1 * n + 20, True, "sample browser: 1 call a sample")
+    with Calls() as names:
+        m._step1_sample_names(s1)
+    with Calls() as card:
+        pj._scan_step1(s1, set())
+    print(f"       per sample: status never seen {cold.n / n:.1f}, warm {warm.n / n:.1f}, "
+          f"index build {build.n / n:.1f}, edits {edits.n / n:.1f}, browser {browser.n / n:.1f}, "
+          f"names {names.n / n:.1f}, card {card.n / n:.1f}")
+    # Was ~11, ~1, ~6 and 3 (2 on R2 naming) calls per sample; then 5, 1, 1, 1.
+    check(cold.n <= 5 * n + 20, True, "status, never seen: at most 5 calls a sample")
+    check(warm.n <= 20, True, "status, revisit within the listing's life: no call a sample")
+    check(build.n <= 1 * n + 20, True, "building the index: 1 listing a sample")
+    # The listing made for the status call, and the index, answer the rest.
+    check(edits.n <= 20, True, "edits: no call per sample")
+    check(browser.n <= 20, True, "sample browser: no call per sample")
+    check(names.n <= 20, True, "sample names: no call per sample")
+    check(card.n <= 20, True, "project card: no call per sample")
 
 
 class Opens:
@@ -375,30 +550,103 @@ def test_status_survives_restart(root: Path):
     def restart():
         m._STEP1_STATUS_CACHE.clear()
         m._STEP1_STATUS_DISK_MEMO.clear()
+        si._LISTINGS.clear()
 
     restart()
     with Calls() as calls, Opens(s1) as opens:
         again = m.step1_status("restart")["samples"]
     check(again, first, "a fresh backend reports exactly what the last one did")
     check(opens.n <= 2, True, f"without opening the samples' files ({opens.n} opens)")
-    # Counted here: the exit_code stat. Not visible to this counter: the stat
-    # of each sample dir's own entry, which is the second key.
-    check(calls.n <= 2 * n + 10, True, "at most two stats a sample")
+    # Counted here: the stat of each sample dir, the one key.
+    check(calls.n <= 1 * n + 20, True, f"one stat a sample ({calls.n} calls)")
 
-    # A change made while no backend was watching must not be answered from disk.
+    # A change made while no backend was watching must not be answered from
+    # disk. A finished run moves the directory's mtime: a successful one by
+    # writing a new stats workbook, and the batch touches the directory after
+    # writing exit_code so a failed re-run is seen too (test below).
     shutil.rmtree(s1 / "S005" / "alignment_REF")
     touch(s1 / "S007" / ".provenance" / "exit_code", b"1\n")
+    os.utime(s1 / "S007")
     restart()
     by = {e["sample"]: e for e in m.step1_status("restart")["samples"]}
     check(by["S005"]["has_outputs"], False, "deleted outputs are noticed (the dir's mtime moved)")
-    check(by["S007"]["status"], "error", "a rewritten exit_code is noticed")
+    check(by["S007"]["status"], "error", "a rewritten exit_code is noticed once the batch touches the dir")
+    src = Path(m.__file__).read_text(encoding="utf-8")
+    check('"  touch . 2>/dev/null || true",' in src, True, "and the batch does touch it after exit_code")
 
     # A damaged file is ignored, not trusted.
     (s1 / m._STEP1_STATUS_DISK_BASENAME).write_text(json.dumps(
-        {"version": m._STEP1_STATUS_DISK_VERSION, "samples": {"S001": [1, 2, {"status": 5}]}}))
+        {"version": m._STEP1_STATUS_DISK_VERSION, "samples": {"S001": [1, {"status": 5}]}}))
     restart()
     by = {e["sample"]: e for e in m.step1_status("restart")["samples"]}
     check(by["S001"]["status"], "complete", "a damaged entry is recomputed")
+
+
+def test_index_survives_restart(root: Path):
+    """A fresh backend answers the sample-directory questions from the index,
+    with one stat per sample, and notices what changed while it was away."""
+    print("the Step 1 index across a backend restart")
+    proj = root / "index"
+    s1 = proj / "step1"
+    n = 40
+    for i in range(n):
+        d = s1 / f"S{i:03d}"
+        touch(d / f"S{i:03d}_1.fastq.gz")
+        if i % 3:
+            touch(d / f"S{i:03d}_2.fastq.gz")
+        touch(d / f"S{i:03d}_2026-01-01_stats.xlsx", b"x" * (10 + i))
+        touch(d / "alignment_REF" / f"S{i:03d}_zc.vcf")
+        touch(d / ".provenance" / "exit_code", b"0\n")
+    old = time.time() - 60
+    for p in sorted(s1.rglob("*"), key=lambda p: -len(p.parts)):
+        os.utime(p, (old, old), follow_symlinks=False)
+    (proj / "step2" / "vcf_database").mkdir(parents=True)
+    (proj / "project.json").write_text(json.dumps({"name": "index", "reference": "REF"}))
+    m._project_dir_for = lambda c, p: proj
+
+    def answers():
+        seen: set = set()
+        return (m._step1_sample_names(s1), m._step1_browser_samples(s1), m.step1_edits("index"),
+                (pj._scan_step1(s1, seen), seen), si.stats_sigs(s1))
+
+    def restart():
+        si._LISTINGS.clear()
+        si._FACTS_MEMO.clear()
+
+    si.invalidate(s1)
+    first = answers()
+    check((s1 / si.INDEX_BASENAME).exists(), True, "the answers are written beside the samples")
+    check(len(first[0]), n, "every sample has reads")
+    check(sum(1 for b in first[1] if b["is_pair"]), n - len(range(0, n, 3)), "pairs are told from singles")
+    restart()
+    with Calls() as calls:
+        again = answers()
+    check(again, first, "a fresh backend gives exactly the answers the last one did")
+    check(calls.n <= n + 20, True, f"for one stat a sample and no listing of any of them ({calls.n} calls)")
+
+    # Changes made while no backend was watching: each moves its directory's mtime.
+    touch(s1 / "S005" / "vcf_edits" / "S005_patchlog.jsonl")
+    os.unlink(s1 / "S007" / "S007_2026-01-01_stats.xlsx")
+    touch(s1 / "S009" / "S009_2.fastq.gz")
+    shutil.rmtree(s1 / "S011")
+    touch(s1 / "S099" / "S099_1.fastq.gz")
+    restart()
+    names, browser, edits, (count, _seen), sigs = answers()
+    check("S005" in edits, True, "an edit folder that appeared is reported")
+    check(any(str(s1 / "S007") in k for k in sigs), False, "a stats workbook that went is gone from the scan")
+    check(next(b["is_pair"] for b in browser if b["sample"] == "S009"), True, "a read that arrived makes a pair")
+    check("S011" in names, False, "a removed sample is gone")
+    check(("S099" in names, count), (True, n), "an added sample is counted")
+
+    # A damaged index is ignored, not trusted; an index written by another
+    # version likewise.
+    (s1 / si.INDEX_BASENAME).write_text(json.dumps({"version": si._INDEX_VERSION,
+                                                      "samples": {"S001": [1, {"fq": [], "stats": {}, "edits": True}]}}))
+    restart()
+    check("S001" in m._step1_sample_names(s1), True, "a damaged entry is recomputed")
+    (s1 / si.INDEX_BASENAME).write_text("not json")
+    restart()
+    check(answers()[0], names, "an unreadable index is rebuilt")
 
 
 def test_staging(root: Path):
@@ -446,6 +694,8 @@ def main():
         test_budgets(tmp)
         test_fanout_errors()
         test_status_survives_restart(tmp)
+        test_group_listing(tmp)
+        test_index_survives_restart(tmp)
         test_staging(tmp)
         test_import_reads(tmp)
     finally:

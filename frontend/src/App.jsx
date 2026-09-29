@@ -8865,22 +8865,23 @@ export default function App() {
                       {step2UnclaimedInRun.length > 0 ? (
                         <>
                           <strong>{step2UnclaimedInRun.length} VCF{step2UnclaimedInRun.length === 1 ? "" : "s"} in{" "}
-                          {vcfsFolderName || "vcf_database"} belong{step2UnclaimedInRun.length === 1 ? "s" : ""} to no source above.</strong>{" "}
-                          {step2UnclaimedInRun.length === 1 ? "It was" : "They were"} copied or imported in earlier, and
-                          {step2UnclaimedInRun.length === 1 ? " is" : " are"} neither one of this project's Step 1 samples nor in a
-                          reference database set up for this reference, so no tick box above can drop{" "}
-                          {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
+                          {vcfsFolderName || "vcf_database"} {step2UnclaimedInRun.length === 1 ? "has" : "have"} no Step 1 folder
+                          in this project.</strong>{" "}
+                          {step2UnclaimedInRun.length === 1 ? "It was" : "They were"} copied or imported in earlier — no folder of
+                          {step2UnclaimedInRun.length === 1 ? " its" : " their"} name is under step1/ — and no reference database set
+                          up for this reference holds {step2UnclaimedInRun.length === 1 ? "it" : "them"}, so no tick box above can
+                          drop {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
                           {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} included regardless. To leave{" "}
                           {step2UnclaimedInRun.length === 1 ? "it" : "them"} out, tick{" "}
                           {step2UnclaimedInRun.length === 1 ? "it" : "them"} in the list here (they are marked{" "}
-                          <em>no source</em> in the sample list too), or use <em>Compare a list of samples</em>, which
+                          <em>no Step 1 folder</em> in the sample list too), or use <em>Compare a list of samples</em>, which
                           compares only what you name.
                         </>
                       ) : (
                         <>
                           <strong>The {step2UnclaimedInSelection.length} VCF{step2UnclaimedInSelection.length === 1 ? "" : "s"} in{" "}
-                          {vcfsFolderName || "vcf_database"} that belong{step2UnclaimedInSelection.length === 1 ? "s" : ""} to no
-                          source above {step2UnclaimedInSelection.length === 1 ? "is" : "are all"} excluded from this run.</strong>
+                          {vcfsFolderName || "vcf_database"} with no Step 1 folder in this project{" "}
+                          {step2UnclaimedInSelection.length === 1 ? "is" : "are all"} excluded from this run.</strong>
                         </>
                       )}
                       <Step2UnclaimedList
@@ -9299,7 +9300,11 @@ export default function App() {
                             const toInclude = toggleable.filter(n => step2BuildExcluded[n]);
                             return (
                               <>
-                                <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                                {/* Pinned to the top of the scrolling list, so the bulk
+                                    buttons are in reach wherever the list is scrolled to.
+                                    Opaque: --surface is defined only in the dark theme. */}
+                                <div style={{position:"sticky", top:0, zIndex:2, background:"var(--surface, var(--panel))"}}>
+                                <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)"}}>
                                   {filtered.length === listedTotal
                                     ? `${filtered.length} samples`
                                     : `${filtered.length} of ${listedTotal} samples`}
@@ -9326,7 +9331,7 @@ export default function App() {
                                 {/* Search, then act on everything found: exclude it, or
                                     exclude everything and put back just what a search
                                     finds. A tick is an exclusion, as on each row. */}
-                                <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px", padding:"4px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)", fontFamily:"sans-serif"}}>
+                                <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px", padding:"4px 8px", borderBottom:"1px solid var(--border)", fontFamily:"sans-serif"}}>
                                   <button type="button" className="ghost action" disabled={!toExclude.length}
                                     onClick={() => setStep2BuildExcludedMany(toExclude, true)}
                                     title={q ? "Tick every sample the filter shows, leaving them all out of this run" : "Tick every sample, leaving them all out of this run; then filter and put back just the ones to compare"}>
@@ -9341,6 +9346,7 @@ export default function App() {
                                     {q ? "These act on the samples the filter shows." : "Filter first to act on just the samples it finds."}{" "}
                                     Samples on the remove list or excluded in Step 1 stay as they are.
                                   </span>
+                                </div>
                                 </div>
                                 {filtered.map(s => {
                                   const lockedByBlocklist = !!step2Blocklist[s.sample];
@@ -9423,7 +9429,7 @@ export default function App() {
                                       // false. Only a sample a configured database actually
                                       // holds gets that badge; the rest are "imported".
                                       //
-                                      // "no source" is the warning's set exactly (unclaimedSamples):
+                                      // "no Step 1 folder" is the warning's set exactly (unclaimedSamples):
                                       // "imported" alone also covered a VCF imported under the name of
                                       // one of this project's Step 1 samples, which box 1 does claim —
                                       // so pointing people at "imported" to find the unclaimed ones
@@ -9431,12 +9437,12 @@ export default function App() {
                                       const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
                                       const origin = s.source_type === "step1"
                                         ? "step1"
-                                        : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no source" : "imported"));
+                                        : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no Step 1 folder" : "imported"));
                                       const palette = origin === "step1"
                                         ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
                                         : origin === "ref db"
                                           ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
-                                          : origin === "no source"
+                                          : origin === "no Step 1 folder"
                                             ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
                                             : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
                                       return (
@@ -9445,8 +9451,8 @@ export default function App() {
                                             ? "Produced by this project's Step 1"
                                             : origin === "ref db"
                                               ? "Held by a reference database configured for this project's reference"
-                                              : origin === "no source"
-                                                ? "In vcf_database but claimed by no source — copied or imported in earlier, not one of this project's Step 1 samples, and in no reference database set up for this reference. No tick box above can drop it; tick the box on the left to leave it out."
+                                              : origin === "no Step 1 folder"
+                                                ? `No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${vcfsFolderName || "vcf_database"}. No tick box above can drop it; tick the box on the left to leave it out.`
                                                 : "Not recorded as collected from this project's Step 1 (imported, or copied into vcf_database by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared."}
                                           style={{
                                             flexShrink:0,
@@ -9893,7 +9899,7 @@ export default function App() {
                   const why = [];
                   if (outN > 0) why.push(`${outN} left out by unticked sources`);
                   if (excludedN > 0) why.push(excludedText(excludedN));
-                  if (unclaimedN > 0) why.push(`includes ${unclaimedN} claimed by no source`);
+                  if (unclaimedN > 0) why.push(`includes ${unclaimedN} with no Step 1 folder`);
                   return `This run compares ${cmpN} of the ${inSet} VCFs in the set`
                     + (why.length ? ` (${why.join("; ")})` : "")
                     + ready;

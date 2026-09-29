@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { selectStep2Run, comparisonSamples, unclaimedSamples,
          listTokens, matchTier, resolveList,
-         exclusionReasons, blockReason, blocklistSummary } from "../src/step2Selection.js";
+         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch } from "../src/step2Selection.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -301,6 +301,23 @@ test("each excluded sample is counted once, under the tier that decides it", () 
   assert.deepEqual(r, { blocklist: 2, step1: 1, build: 1 });
   assert.equal(r.blocklist + r.step1 + r.build,
                keep.size - comparisonSamples(keep, tiers).length);
+});
+
+// --- Filtering by defining-SNP group ---------------------------------------
+
+test("a group name typed in full means that group, not every group it prefixes", () => {
+  const known = new Set(["lineage-04", "lineage-04f", "lineage-03"]);
+  assert.equal(groupFilterMatch(["Lineage-04", "Lineage-04F"], known, "lineage-04"), true);
+  assert.equal(groupFilterMatch(["Lineage-04F"], known, "lineage-04"), false);
+  assert.equal(groupFilterMatch(["Lineage-04F"], known, "lineage-04f"), true);
+});
+
+test("part of a name matches every group containing it; no groups, no match", () => {
+  const known = new Set(["hpai_a3_v5", "hpai_a4_v5"]);
+  assert.equal(groupFilterMatch(["HPAI_A3_V5"], known, "a3"), true);
+  assert.equal(groupFilterMatch(["HPAI_A4_V5"], known, "a3"), false);
+  assert.equal(groupFilterMatch([], known, "a3"), false);
+  assert.equal(groupFilterMatch(undefined, known, "a3"), false);
 });
 
 if (!process.exitCode) console.log(`step2 selection: ${passed} tests passed`);

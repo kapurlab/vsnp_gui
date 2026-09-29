@@ -197,6 +197,24 @@ export function exclusionReasons(keep, { blocklist, step1Excluded, buildExcluded
   return out;
 }
 
+/**
+ * Whether a sample's defining-SNP groups match the filter text.
+ *
+ * A group name typed out in full means that group exactly, so "Lineage-04"
+ * is not also "Lineage-04F" (whose members are, correctly, still Lineage-04
+ * members too — they carry its SNP). Anything shorter matches every group
+ * containing it. Case never matters.
+ *
+ * @param {string[]|undefined} groups   the sample's groups
+ * @param {Set<string>} knownLower      every group name, lower-cased
+ * @param {string} q                    the filter, already lower-cased
+ */
+export function groupFilterMatch(groups, knownLower, q) {
+  if (!q || !groups || !groups.length) return false;
+  if (knownLower && knownLower.has(q)) return groups.some((g) => String(g).toLowerCase() === q);
+  return groups.some((g) => String(g).toLowerCase().includes(q));
+}
+
 // --- Why the remove list holds a sample back -------------------------------
 //
 // Tier A is not one workbook. The backend reads every

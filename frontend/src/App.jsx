@@ -8,7 +8,7 @@ import Elapsed from "./Elapsed.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
 import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList,
-         exclusionReasons, blockReason, blocklistSummary } from "./step2Selection.js";
+         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch } from "./step2Selection.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -364,7 +364,7 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
               </span>
               <span style={{flex:"0 1 auto", minWidth:0, maxWidth:"55%", overflow:"hidden", textOverflow:"ellipsis",
                             whiteSpace:"nowrap", fontFamily:"sans-serif", fontStyle:"italic", color:"var(--muted)"}}>
-                {state === "compared" ? "compared"
+                {state === "compared" ? "included"
                   : state === "build" ? "excluded"
                   : state === "step1" ? "excluded in Step 1"
                   : removeListLabel(reason)}
@@ -706,11 +706,23 @@ export default function App() {
   // samples. Lets every "Filter samples…" box match the spelling a SNP table
   // or a tree uses.
   const [projectNameAliases, setProjectNameAliases] = useState({});
+  // {stored sample name: the name vsnp3 prints for it}, from the reference
+  // metadata through the same index (see /name-aliases) — the label beside
+  // each sample in the Step 2 lists.
+  const [projectNameDisplay, setProjectNameDisplay] = useState({});
+  // Defining-SNP groups per VCF in vcf_database (/step2/sample-groups), shown
+  // in the Step 2 sample list and matched by its filter. Off until asked for:
+  // the first look reads every VCF. The choice is remembered per browser.
+  const [sampleGroupsOn, setSampleGroupsOn] = useState(() => {
+    try { return window.localStorage.getItem("vsnp_gui.step2.showGroups") === "1"; } catch { return false; }
+  });
+  const [sampleGroups, setSampleGroups] = useState(null);
+  const [sampleGroupsBusy, setSampleGroupsBusy] = useState(false);
+  const sampleGroupsGenRef = useRef(0);
   // Accessions available from an enabled reference panel — these override a
   // Step 1 exclusion (an external panel VCF isn't a Step 1 sample), so the build
   // list shows them kept rather than "excluded in Step 1".
   const [step2PanelAccessions, setStep2PanelAccessions] = useState({});
-  const [step2BuildMeta, setStep2BuildMeta] = useState({});
   // Step 2 Results group search: {groupName: [sample names]} parsed from the
   // run summary HTML, and the live (case-insensitive) search text.
   const [step2Groupings, setStep2Groupings] = useState({});
@@ -1378,6 +1390,46 @@ export default function App() {
     }),
     [step2RunSelection, step2Blocklist, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
   );
+
+  // Groups for the rows, when shown and for this project.
+  const sampleGroupsByFile = (sampleGroupsOn && sampleGroups && sampleGroups.available
+    && sampleGroups.project === selectedProject) ? (sampleGroups.groups || {}) : null;
+  const groupNamesLower = useMemo(
+    () => new Set(((sampleGroups && sampleGroups.group_names) || []).map((g) => String(g).toLowerCase())),
+    [sampleGroups]
+  );
+
+  // A filter matches a group by name (see groupFilterMatch). `q` is already
+  // lower-cased by the caller.
+  function groupMatches(filename, q) {
+    return groupFilterMatch(sampleGroupsByFile && sampleGroupsByFile[filename], groupNamesLower, q);
+  }
+
+  useEffect(() => {
+    if (!sampleGroupsOn || !selectedProject) return undefined;
+    // A beat after the list lands, so a project switch's own requests reach
+    // shared storage first.
+    const t = setTimeout(() => { loadSampleGroups(); }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sampleGroupsOn, selectedProject, vcfSourceSamples, s2QualThreshold, s2MqThreshold, s2NoFilters, s2HashGroups]);
+
+  const sampleGroupsStatus = (() => {
+    if (!sampleGroupsOn) return "the defining-SNP groups each sample falls into, for filtering";
+    const g = sampleGroups && sampleGroups.project === selectedProject ? sampleGroups : null;
+    if (!g) return sampleGroupsBusy ? "reading VCFs…" : "";
+    if (!g.available) return `Groups unavailable: ${g.reason || "unknown reason"}.`;
+    if (g.pending) {
+      return `Reading VCFs for groups: ${(g.total - g.pending).toLocaleString()} of ${g.total.toLocaleString()}… (once only; later looks are quick)`;
+    }
+    const found = new Set();
+    Object.values(g.groups || {}).forEach((gs) => gs.forEach((x) => found.add(x)));
+    const file = String(g.define_filter || "").split("/").pop();
+    return `${found.size} group${found.size === 1 ? "" : "s"} among these samples, from ${file}`
+      + ` at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}`
+      + `${g.unreadable ? ` · ${g.unreadable} VCF${g.unreadable === 1 ? "" : "s"} could not be read` : ""}.`
+      + " Density filtering, when on, can still change a run's groups.";
+  })();
 
   // Which workbook holds back each sample the ticks would otherwise compare —
   // above all, the ones only a copy of the list outside the reference's own
@@ -3218,7 +3270,6 @@ export default function App() {
     loadStep2PanelAccessions();
     loadProjectNameAliases();
     loadStep2Panels();
-    loadStep2BuildMeta();
   }
 
   // Per-panel sample lists for every reference DB matching this project's
@@ -3284,8 +3335,45 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setProjectNameAliases(data.aliases || {});
+        setProjectNameDisplay(data.display || {});
       }
     } catch (e) { /* filters fall back to the names as stored */ }
+  }
+
+  // Read the groups, asking again while the backend still has VCFs to read
+  // (each request reads for a bounded time, so none outlasts a proxy).
+  async function loadSampleGroups() {
+    const proj = selectedProject;
+    if (!proj) { setSampleGroups(null); return; }
+    // A newer request (another project, a changed threshold) supersedes this
+    // one; without the generation both would keep polling.
+    const gen = ++sampleGroupsGenRef.current;
+    const current = () => gen === sampleGroupsGenRef.current && selectedProjectRef.current === proj;
+    setSampleGroupsBusy(true);
+    try {
+      const qs = new URLSearchParams({
+        qual_threshold: String(s2QualThreshold),
+        mq_threshold: String(s2MqThreshold),
+        no_filters: s2NoFilters ? "true" : "false",
+        hash_groups: s2HashGroups ? "true" : "false",
+      });
+      for (let round = 0; round < 60; round++) {
+        const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(proj)}/step2/sample-groups?${qs}`);
+        if (!current()) return;
+        if (!res.ok) {
+          setSampleGroups({ project: proj, available: false, reason: `the request failed (HTTP ${res.status})` });
+          return;
+        }
+        const data = await res.json();
+        if (!current()) return;
+        setSampleGroups({ ...data, project: proj });
+        if (!data.pending) return;
+      }
+    } catch (e) {
+      if (current()) setSampleGroups({ project: proj, available: false, reason: String(e) });
+    } finally {
+      if (current()) setSampleGroupsBusy(false);
+    }
   }
 
   // Does `name` — or the other name Step 2 shows for it — contain `q`?
@@ -3351,20 +3439,6 @@ export default function App() {
       }, 400);
       return next;
     });
-  }
-
-  // Load the project reference's metadata as a {VCF-stem: display-label} map so
-  // the build list can show metadata next to each sample.
-  async function loadStep2BuildMeta() {
-    const ref = projectReference || reference;
-    if (!ref) { setStep2BuildMeta({}); return; }
-    const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(ref)}/metadata`);
-    if (res.ok) {
-      const data = await res.json();
-      const map = {};
-      (data.rows || []).forEach((r) => { if (r.original) map[r.original] = r.display_name; });
-      setStep2BuildMeta(map);
-    }
   }
 
   // Parse the run's vSNP3 summary into {groupName: [sample names]} so the
@@ -8796,7 +8870,7 @@ export default function App() {
                           {step2UnclaimedInRun.length === 1 ? " is" : " are"} neither one of this project's Step 1 samples nor in a
                           reference database set up for this reference, so no tick box above can drop{" "}
                           {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
-                          {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} compared regardless. To leave{" "}
+                          {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} included regardless. To leave{" "}
                           {step2UnclaimedInRun.length === 1 ? "it" : "them"} out, tick{" "}
                           {step2UnclaimedInRun.length === 1 ? "it" : "them"} in the list here (they are marked{" "}
                           <em>no source</em> in the sample list too), or use <em>Compare a list of samples</em>, which
@@ -8821,7 +8895,7 @@ export default function App() {
                         sources={step2BlocklistSources}
                         refName={projectReference || reference}
                         refDir={step2BlocklistRefDir}
-                        meta={step2BuildMeta}
+                        meta={projectNameDisplay}
                         dbFolderName={vcfsFolderName || "vcf_database"}
                         onToggle={toggleStep2BuildExcluded}
                         onSetMany={setStep2BuildExcludedMany}
@@ -9105,12 +9179,28 @@ export default function App() {
                         <div style={{padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
                           <input
                             type="text"
-                            placeholder="Filter samples…"
+                            placeholder={sampleGroupsOn ? "Filter by name, metadata or group…" : "Filter by name or metadata…"}
                             value={vcfSourceFilter}
                             onChange={e => setVcfSourceFilter(e.target.value)}
                             style={{width:"100%", boxSizing:"border-box", fontSize:"0.85em", padding:"3px 6px"}}
                             autoFocus
                           />
+                          <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"8px", marginTop:"4px", fontFamily:"sans-serif", fontSize:"0.8em"}}>
+                            <label className="checkbox" style={{margin:0}}
+                              title="The groups each sample will fall into, read from its VCF by vsnp3's rules and the defining-SNP workbook, at the thresholds under Step 2 Options. The filter then matches a group name too.">
+                              <input
+                                type="checkbox"
+                                checked={sampleGroupsOn}
+                                onChange={(e) => {
+                                  const on = e.target.checked;
+                                  setSampleGroupsOn(on);
+                                  try { window.localStorage.setItem("vsnp_gui.step2.showGroups", on ? "1" : "0"); } catch { /* per-browser nicety only */ }
+                                }}
+                              />
+                              Show groups
+                            </label>
+                            <span className="muted">{sampleGroupsStatus}</span>
+                          </div>
                         </div>
                         {step2BlocklistIneffective.length ? (
                           <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
@@ -9180,7 +9270,8 @@ export default function App() {
                           {(() => {
                             const q = vcfSourceFilter.trim().toLowerCase();
                             const matching = q
-                              ? vcfSourceSamples.filter(s => nameMatches(s.sample, q) || s.filename.toLowerCase().includes(q))
+                              ? vcfSourceSamples.filter(s => nameMatches(s.sample, q) || s.filename.toLowerCase().includes(q)
+                                  || groupMatches(s.filename, q))
                               : vcfSourceSamples;
                             // Untick a source and its VCFs leave the run, so they leave this
                             // list too — showing them unmarked reads as "still included".
@@ -9197,6 +9288,15 @@ export default function App() {
                                 || step2BuildExcluded[s.sample]
                                 || (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))  // panel overrides Step 1 exclusion
                             ).length;
+                            // What the two bulk buttons would tick or untick: the shown
+                            // rows whose box can change (not the remove list, not Step 1
+                            // Results, not a source left unticked).
+                            const toggleable = [...new Set(filtered
+                              .filter(s => !step2LeftOutSet.has(s.sample) && !step2Blocklist[s.sample]
+                                && !(step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))
+                              .map(s => s.sample))];
+                            const toExclude = toggleable.filter(n => !step2BuildExcluded[n]);
+                            const toInclude = toggleable.filter(n => step2BuildExcluded[n]);
                             return (
                               <>
                                 <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
@@ -9223,6 +9323,25 @@ export default function App() {
                                     </span>
                                   )}
                                 </div>
+                                {/* Search, then act on everything found: exclude it, or
+                                    exclude everything and put back just what a search
+                                    finds. A tick is an exclusion, as on each row. */}
+                                <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px", padding:"4px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)", fontFamily:"sans-serif"}}>
+                                  <button type="button" className="ghost action" disabled={!toExclude.length}
+                                    onClick={() => setStep2BuildExcludedMany(toExclude, true)}
+                                    title={q ? "Tick every sample the filter shows, leaving them all out of this run" : "Tick every sample, leaving them all out of this run; then filter and put back just the ones to compare"}>
+                                    {q ? "Exclude all shown" : "Exclude all"} ({toExclude.length.toLocaleString()})
+                                  </button>
+                                  <button type="button" className="ghost action" disabled={!toInclude.length}
+                                    onClick={() => setStep2BuildExcludedMany(toInclude, false)}
+                                    title={q ? "Untick every sample the filter shows, putting them back in this run" : "Untick every sample ticked here, putting them all back in this run"}>
+                                    {q ? "Include all shown" : "Include all"} ({toInclude.length.toLocaleString()})
+                                  </button>
+                                  <span style={{color:"var(--muted)", fontSize:"0.85em"}}>
+                                    {q ? "These act on the samples the filter shows." : "Filter first to act on just the samples it finds."}{" "}
+                                    Samples on the remove list or excluded in Step 1 stay as they are.
+                                  </span>
+                                </div>
                                 {filtered.map(s => {
                                   const lockedByBlocklist = !!step2Blocklist[s.sample];
                                   const blockWhy = lockedByBlocklist
@@ -9242,9 +9361,15 @@ export default function App() {
                                   // Only visible when the user asked to see what this run drops.
                                   const leftOut = step2LeftOutSet.has(s.sample);
                                   const struck = isExcluded || leftOut;
-                                  const metaLabel = step2BuildMeta[s.sample];
+                                  const metaLabel = projectNameDisplay[s.sample];
+                                  const rowGroups = sampleGroupsByFile ? sampleGroupsByFile[s.filename] : null;
                                   return (
-                                  <div key={s.filename} title={blockTip ? `${blockTip}\nFile: ${s.filename}` : s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
+                                  <div key={s.filename} title={[
+                                    blockTip,
+                                    metaLabel && metaLabel !== s.sample ? `Metadata: ${metaLabel}` : "",
+                                    rowGroups && rowGroups.length ? `Groups: ${rowGroups.join(", ")}` : "",
+                                    blockTip || (metaLabel && metaLabel !== s.sample) || (rowGroups && rowGroups.length) ? `File: ${s.filename}` : s.filename,
+                                  ].filter(Boolean).join("\n")} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
@@ -9284,6 +9409,9 @@ export default function App() {
                                       {metaLabel && metaLabel !== s.sample && (
                                         <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
                                       )}
+                                      {rowGroups && rowGroups.length ? (
+                                        <span style={{color:"var(--accent)", fontFamily:"sans-serif", fontWeight:600}}> · {rowGroups.join(", ")}</span>
+                                      ) : null}
                                     </span>
                                     {(() => {
                                       // The manifest only knows "step1" vs "imported", so the

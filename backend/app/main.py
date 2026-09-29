@@ -146,6 +146,7 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app import ref_contigs
+from app import sample_groups
 from app import step1_index
 from app.fanout import fan_out
 from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
@@ -7838,14 +7839,62 @@ def project_name_aliases(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     aliases = _project_aliases(project_dir, cfg)
+    meta_file = _project_metadata_file(project_dir, cfg)
+    # The metadata name alone, for the label beside each sample in the Step 2
+    # build list. That list used to look column A up verbatim, but column A
+    # names the VCF FILE (`X_zc.vcf`), so it found nothing and showed no
+    # metadata at all; the index knows vsnp3's own matching rules.
+    meta = name_aliases.load(meta_file)
     out: Dict[str, List[str]] = {}
-    if aliases:
+    display: Dict[str, str] = {}
+    if aliases or meta:
         for n in _project_sample_names(project_dir):
-            others = [c for c in aliases.counterparts(n) if c != n]
-            if others:
-                out[n] = others
-    return {"aliases": out, "count": len(out),
-            "metadata_file": str(_project_metadata_file(project_dir, cfg) or "")}
+            if aliases:
+                others = [c for c in aliases.counterparts(n) if c != n]
+                if others:
+                    out[n] = others
+            shown = meta.display_of(n) if meta else None
+            if shown and shown != n:
+                display[n] = shown
+    return {"aliases": out, "count": len(out), "display": display,
+            "metadata_file": str(meta_file or "")}
+
+
+@app.get("/api/projects/{project}/step2/sample-groups")
+def step2_sample_groups(project: str, qual_threshold: int = sample_groups.QUAL_THRESHOLD,
+                        mq_threshold: int = sample_groups.MQ_THRESHOLD, no_filters: bool = False,
+                        hash_groups: bool = False, budget_s: float = 20.0):
+    """The defining-SNP groups each VCF in vcf_database will fall into.
+
+    Read from the VCFs by vsnp3's own rules (see app/sample_groups.py), at the
+    thresholds and filter settings the next Run will use, so the build list can
+    show a sample's groups and filter on them before anything is run. Only
+    asked for when the pane shows groups, so a project switch never pays for
+    it. The first request reads every VCF, for at most `budget_s` seconds, and
+    reports how many are still `pending`; the pane asks again until none are.
+    After that a request is one stat per VCF.
+    """
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    step2_dir = project_dir / "step2"
+    empty = {"available": False, "groups": {}, "group_names": [], "total": 0,
+             "read": 0, "unreadable": 0, "pending": 0, "define_filter": ""}
+    df_path, why = sample_groups.define_filter_of(_project_reference_dir(project_dir, cfg))
+    if df_path is None:
+        return {**empty, "reason": why}
+    try:
+        defs = sample_groups.load_definitions(df_path, hash_groups)
+    except Exception as exc:
+        return {**empty, "reason": f"{df_path.name} could not be read: {exc}",
+                "define_filter": str(df_path)}
+    db = vcf_db_dir(step2_dir)
+    files = [(e.filename, db / e.filename) for e in db_entries(db)] if db.is_dir() else []
+    out = sample_groups.sample_groups(
+        files, defs, step2_dir / sample_groups.CACHE_BASENAME if step2_dir.is_dir() else None,
+        qual_threshold=qual_threshold, mq_threshold=mq_threshold, no_filters=no_filters,
+        budget_s=min(max(budget_s, 1.0), 60.0),
+    )
+    return {**out, "available": True, "reason": "", "define_filter": str(df_path)}
 
 
 @app.get("/api/projects/{project}/step2/panel-accessions")

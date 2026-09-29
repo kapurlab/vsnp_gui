@@ -1839,3 +1839,119 @@ th.qc-sortable { padding: 0; }
 .qc-sort-btn:hover .qc-sort-arrow { opacity: 0.8; }
 th.qc-sorted { color: var(--accent); }
 th.qc-sorted .qc-sort-arrow { opacity: 1; }
+
+/* --- Step 2 sample lists: a row opens to show what one line cuts off -------
+   Rows stay one line so a 20,000-sample list can still be scanned; a click
+   opens the whole of it underneath — every group, the metadata name, the file
+   and why the sample is in or out — as text that can be read to the end,
+   selected and copied. The controls here reset the global button look (accent
+   fill, lift on hover), which is for actions, not for these. */
+.sample-row { cursor: pointer; }
+.sample-row:hover, .sample-row.is-open { background: var(--panel-2); }
+/* The row's ▸ exists only on the row under the pointer and on an open row. A
+   box on every row — even a pseudo-element, which is no DOM node but is still
+   laid out — made a 23,671-row list measurably slower to draw (see App.jsx). */
+.sample-row:hover::after,
+.sample-row.is-open::after {
+  content: "\25B8";
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  color: var(--text);
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 11px;
+  line-height: 1;
+}
+.sample-row.is-open::after { transform: rotate(90deg); }
+.group-chip-name,
+.group-chip-copy,
+.sd-copy {
+  box-shadow: none;
+  transition: color 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
+}
+.group-chip-name:hover:not(:disabled),
+.group-chip-copy:hover:not(:disabled),
+.sd-copy:hover:not(:disabled) { transform: none; box-shadow: none; }
+.group-chip-name:focus-visible,
+.group-chip-copy:focus-visible,
+.sd-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.sample-detail {
+  padding: 10px 14px 12px 36px;
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: auto;
+  user-select: text;
+}
+.sample-detail dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+}
+.sample-detail dt { color: var(--muted); font-size: 12px; padding-top: 1px; white-space: nowrap; }
+.sample-detail dd { margin: 0; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.sample-detail .sd-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.sample-detail .sd-muted { color: var(--muted); }
+.sample-detail .sd-hint { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+
+.sd-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+.sd-copy:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.sd-copy.is-done { color: var(--success); border-color: var(--success); }
+.sd-copy svg, .group-chip-copy svg { width: 12px; height: 12px; }
+
+.group-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 999px;
+  background: var(--accent-subtle, #e3efee);
+  color: var(--accent-dark, #2c6664);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  overflow: hidden;
+}
+.group-chip-name {
+  padding: 0 4px 0 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  user-select: text;
+}
+.group-chip-copy {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px 0 3px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+}
+.group-chip:hover { background: color-mix(in srgb, var(--accent) 22%, var(--accent-subtle, #e3efee)); }
+.group-chip-copy:hover:not(:disabled) { opacity: 1; }
+.group-chip-copy.is-done { opacity: 1; color: var(--success); }
+.group-chip.is-active { background: var(--accent); color: var(--accent-text); }
+.group-chip.is-active:hover { background: var(--accent); }
+.group-chip.is-active .group-chip-copy.is-done { color: var(--accent-text); }

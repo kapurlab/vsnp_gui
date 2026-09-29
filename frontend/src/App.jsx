@@ -260,28 +260,175 @@ function removeListLabel(reason) {
     : `other copy: row ${reason.row} of remove_from_analysis`;
 }
 
-// The same, in full, for a tooltip: the workbook, the row, and what to change.
-function removeListTooltip(reason, refName, refDir) {
-  const ref = refName || "this project's reference";
-  if (!reason) {
-    return `On the remove_from_analysis list of ${ref}: every Step 2 run against it leaves this sample out.`;
+// --- A sample, in full ---------------------------------------------------------
+//
+// A row in the Step 2 lists is one line so a 20,000-sample list can be scanned,
+// and a line cuts off whatever does not fit — the end of a long group list, a
+// long metadata name. The tooltip that used to carry the rest could be read
+// but not selected or copied, and hid the rows beneath it. A click on the row
+// opens it instead: everything, as text, each value copyable, each group a
+// chip that lists only that group's samples.
+
+const CopyIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"
+    strokeLinecap="round" strokeLinejoin="round">
+    <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+    <path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" />
+  </svg>
+);
+
+const CheckIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2"
+    strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 8.5l3.2 3L13 4.5" />
+  </svg>
+);
+
+// Copy through the Clipboard API, else through a selected text box (which a
+// page may still do in answer to a click where the API is refused), else hand
+// the text over in a dialog to copy by hand.
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* fall through */ }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  document.body.removeChild(area);
+  if (!ok) window.prompt("The browser would not copy it — select and copy it here:", text);
+  return ok;
+}
+
+// Copy, and say so for a moment, so a click is not taken on trust.
+function useCopied() {
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (!done) return undefined;
+    const t = setTimeout(() => setDone(false), 1400);
+    return () => clearTimeout(t);
+  }, [done]);
+  const copy = async (text) => {
+    if (await copyToClipboard(text)) setDone(true);
+  };
+  return [done, copy];
+}
+
+// True when a selection was just dragged inside `el`: the click that ends the
+// drag must not also act, or selecting a group's name would filter by it.
+function selectionWithin(el) {
+  const sel = window.getSelection ? window.getSelection() : null;
+  return !!(sel && !sel.isCollapsed && sel.rangeCount && el && el.contains(sel.anchorNode));
+}
+
+function CopyValue({ text, what, caption = "Copy" }) {
+  const [done, copy] = useCopied();
+  return (
+    <button type="button" className={`sd-copy${done ? " is-done" : ""}`}
+      onClick={() => copy(text)} title={`Copy ${what}`}>
+      {done ? <CheckIcon /> : <CopyIcon />}
+      {done ? "Copied" : caption}
+    </button>
+  );
+}
+
+// `active` when the list is already filtered to this group: then the chip is
+// shown selected, and a click clears the filter again.
+function GroupChip({ name, active, onFilter }) {
+  const [done, copy] = useCopied();
+  return (
+    <span className={`group-chip${active ? " is-active" : ""}`}>
+      <button type="button" className="group-chip-name" aria-pressed={active}
+        title={active ? `Showing only the samples in ${name} — click to show every sample again` : `List only the samples in ${name}`}
+        onClick={(e) => { if (!selectionWithin(e.currentTarget)) onFilter(name); }}>
+        {name}
+      </button>
+      <button type="button" className={`group-chip-copy${done ? " is-done" : ""}`}
+        onClick={() => copy(name)} title={`Copy ${name}`} aria-label={`Copy ${name}`}>
+        {done ? <CheckIcon /> : <CopyIcon />}
+      </button>
+    </span>
+  );
+}
+
+// `groups` is null when groups are not shown, [] when the sample has none.
+function SampleDetail({ sample, file, meta, groups, groupsNote, run, origin, source, activeGroup, onGroup }) {
+  return (
+    <div className="sample-detail">
+      <dl>
+        <dt>Sample</dt>
+        <dd><span className="sd-mono">{sample}</span><CopyValue text={sample} what="the sample name" /></dd>
+        {meta ? (
+          <>
+            <dt>Metadata</dt>
+            <dd><span className="sd-mono">{meta}</span><CopyValue text={meta} what="the metadata name" /></dd>
+          </>
+        ) : null}
+        {groups ? (
+          <>
+            <dt>{groups.length ? `Groups (${groups.length})` : "Groups"}</dt>
+            <dd>
+              {groups.length
+                ? groups.map((g) => (
+                  <GroupChip key={g} name={g} onFilter={onGroup}
+                    active={!!activeGroup && g.toLowerCase() === activeGroup.toLowerCase()} />
+                ))
+                : <span className="sd-muted">{groupsNote}</span>}
+              {groups.length > 1
+                ? <CopyValue text={groups.join("\n")} what="every group, one per line" caption="Copy all" />
+                : null}
+              {groups.length ? <span className="sd-hint">Click a group to list only its samples; click it again to list them all.</span> : null}
+            </dd>
+          </>
+        ) : null}
+        <dt>In this run</dt>
+        <dd>{run}</dd>
+        <dt>Origin</dt>
+        <dd>{origin}</dd>
+        <dt>File</dt>
+        <dd><span className="sd-mono">{file}</span><CopyValue text={file} what="the file name" /></dd>
+        {source ? (
+          <>
+            <dt>Recorded source</dt>
+            <dd><span className="sd-mono">{source}</span><CopyValue text={source} what="the path" /></dd>
+          </>
+        ) : null}
+      </dl>
+    </div>
+  );
+}
+
+// Why a sample is in or out of this run, in words, for SampleDetail.
+function runStatus({ leftOut, mode, blockWhy, refName, refDir, qcExcluded, keptByPanel, buildExcluded }) {
+  if (leftOut) {
+    return mode === "list"
+      ? "Left out: not on the pasted list."
+      : "Left out: the source it came from is unticked above.";
   }
-  const lines = [`Row ${reason.row} of ${reason.source.path}`];
-  if (reason.own) {
-    lines.push(
-      `That is the remove_from_analysis list of ${ref}, so every Step 2 run against it leaves this `
-      + "sample out. To include the sample, delete the row (Reference Editor)."
-    );
-  } else {
-    lines.push(
-      `That workbook is in a second folder named ${ref}. vsnp3 reads only the first folder of that name`
-      + `${refDir ? ` (${refDir})` : ""}, which is the one the Reference Editor shows, so this row is not in `
-      + "the list you see there. This app still leaves out every name in every copy. To include the "
-      + "sample, delete the row or that workbook."
+  if (blockWhy) {
+    return (
+      <span>
+        Excluded by the remove_from_analysis list: row {blockWhy.row} of{" "}
+        <span className="sd-mono">{blockWhy.source.path}</span>
+        {blockWhy.own
+          ? ". Every Step 2 run against this reference leaves it out; delete the row to include it."
+          : `, in a second folder named ${refName || "for this reference"} that vsnp3 itself never reads`
+            + `${refDir ? ` (it reads ${refDir})` : ""}. This app still leaves it out; delete the row or that workbook to include it.`}
+        {blockWhy.also.map((a) => (
+          <span key={`${a.source.path}:${a.row}`}> Also row {a.row} of <span className="sd-mono">{a.source.path}</span>.</span>
+        ))}
+      </span>
     );
   }
-  reason.also.forEach((a) => lines.push(`Also row ${a.row} of ${a.source.path}`));
-  return lines.join("\n");
+  if (qcExcluded) return "Excluded in Step 1 Results; change it there to include it.";
+  if (buildExcluded) return "Excluded: ticked in this list.";
+  if (keptByPanel) return "Included: an enabled reference database keeps it despite its Step 1 exclusion.";
+  return "Included.";
 }
 
 // The VCFs no source can claim, listed where the warning about them is. They
@@ -290,8 +437,15 @@ function removeListTooltip(reason, refName, refDir) {
 // does claim. The box is the build list's own Exclude box (tier C), so a tick
 // here and a tick there are the same tick.
 function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, meta, dbFolderName,
-                              onToggle, onSetMany, onCopy }) {
+                              groupsByFile, groupsNote, activeGroup, onToggle, onSetMany, onCopy, onGroup }) {
   const names = [...new Set(samples.map((s) => s.sample))];
+  // Rows opened to show everything (SampleDetail), as in the sample list.
+  const [openRows, setOpenRows] = useState(() => new Set());
+  const toggleRow = (key) => setOpenRows((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   const stateOf = (name) => {
     if (tiers.blocklist[name]) return "blocklist";
     if (tiers.step1Excluded[name] && !tiers.panelAccessions[name]) return "step1";
@@ -339,14 +493,16 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
           // one reads as the database itself, which says nothing.
           const src = String(s.source_path || "");
           const inDb = src.endsWith(`/${dbFolderName}/${s.filename}`);
-          const tip = [
-            state === "blocklist" ? removeListTooltip(reason, refName, refDir) : "",
-            state === "step1" ? "Excluded in Step 1 Results — change it there to include it." : "",
-            `File: ${s.filename}`,
-            src && !inDb ? `Recorded source: ${src}` : "",
-          ].filter(Boolean).join("\n");
+          const open = openRows.has(s.filename);
+          const rowGroups = groupsByFile ? groupsByFile[s.filename] : null;
           return (
-            <div key={s.filename} title={tip}
+            <React.Fragment key={s.filename}>
+            <div className={`sample-row${open ? " is-open" : ""}`}
+              onClick={(e) => {
+                if (e.target.closest("input, button, a")) return;
+                if (selectionWithin(e.currentTarget)) return;
+                toggleRow(s.filename);
+              }}
               style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px",
                       borderBottom:"1px solid var(--border)", opacity: out ? 0.6 : 1}}>
               <input
@@ -354,6 +510,7 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
                 checked={out}
                 disabled={state === "blocklist" || state === "step1"}
                 onChange={(e) => onToggle(s.sample, e.target.checked)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); toggleRow(s.filename); } }}
                 style={{flexShrink:0}}
               />
               <span style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
@@ -370,6 +527,24 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
                   : removeListLabel(reason)}
               </span>
             </div>
+            {open ? (
+              <SampleDetail
+                sample={s.sample}
+                file={s.filename}
+                meta={label && label !== s.sample ? label : ""}
+                groups={groupsByFile ? (rowGroups || []) : null}
+                groupsNote={rowGroups ? groupsNote : "Not read yet."}
+                run={runStatus({
+                  leftOut: false, blockWhy: reason, refName, refDir,
+                  qcExcluded: state === "step1", buildExcluded: state === "build",
+                })}
+                origin={`No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${dbFolderName}.`}
+                source={src && !inDb ? src : ""}
+                activeGroup={activeGroup}
+                onGroup={onGroup}
+              />
+            ) : null}
+            </React.Fragment>
           );
         })}
       </div>
@@ -677,6 +852,10 @@ export default function App() {
   const [step2RefFixBusy, setStep2RefFixBusy] = useState("");
   const [vcfSourceFilter, setVcfSourceFilter] = useState("");
   const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
+  // Rows of the Step 2 sample list opened to show everything (SampleDetail).
+  const [step2OpenRows, setStep2OpenRows] = useState(() => new Set());
+  // The sample list itself, so a group chosen elsewhere can bring it into view.
+  const step2ListRef = useRef(null);
   // The browse list shows what THIS RUN will compare, not everything the
   // folder holds: samples whose source is unticked are hidden by default and
   // revealed struck through by this toggle (the files themselves stay put).
@@ -1404,6 +1583,9 @@ export default function App() {
   function groupMatches(filename, q) {
     return groupFilterMatch(sampleGroupsByFile && sampleGroupsByFile[filename], groupNamesLower, q);
   }
+
+  // Another project's rows are other rows.
+  useEffect(() => { setStep2OpenRows(new Set()); }, [selectedProject]);
 
   useEffect(() => {
     if (!sampleGroupsOn || !selectedProject) return undefined;
@@ -3422,6 +3604,28 @@ export default function App() {
         body: JSON.stringify({ samples }),
       });
     } catch (e) { /* best-effort; debounced retry on next toggle */ }
+  }
+
+  function toggleStep2Row(key) {
+    setStep2OpenRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  // List only one group's samples, from a chip anywhere in the pane — or, when
+  // the list already shows just that group, every sample again.
+  function showStep2Group(group) {
+    if (vcfSourceOpen && vcfSourceFilter.trim().toLowerCase() === group.toLowerCase()) {
+      setVcfSourceFilter("");
+      return;
+    }
+    setVcfSourceFilter(group);
+    setVcfSourceOpen(true);
+    setTimeout(() => {
+      if (step2ListRef.current) step2ListRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
   }
 
   function toggleStep2BuildExcluded(sample, checked) {
@@ -8898,9 +9102,13 @@ export default function App() {
                         refDir={step2BlocklistRefDir}
                         meta={projectNameDisplay}
                         dbFolderName={vcfsFolderName || "vcf_database"}
+                        groupsByFile={sampleGroupsByFile}
+                        groupsNote={`None at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}.`}
                         onToggle={toggleStep2BuildExcluded}
                         onSetMany={setStep2BuildExcludedMany}
                         onCopy={copyText}
+                        activeGroup={vcfSourceOpen ? vcfSourceFilter.trim() : ""}
+                        onGroup={showStep2Group}
                       />
                     </div>
                   ) : null}
@@ -9158,7 +9366,7 @@ export default function App() {
                 ) : null}
                 {importStatus ? <div className="note">{importStatus}</div> : null}
                 {vcfSourceSamples.length > 0 && (
-                  <div style={{marginTop:"6px"}}>
+                  <div style={{marginTop:"6px"}} ref={step2ListRef}>
                     <button
                       className="ghost action"
                       onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); }}
@@ -9344,7 +9552,7 @@ export default function App() {
                                   </button>
                                   <span style={{color:"var(--muted)", fontSize:"0.85em"}}>
                                     {q ? "These act on the samples the filter shows." : "Filter first to act on just the samples it finds."}{" "}
-                                    Samples on the remove list or excluded in Step 1 stay as they are.
+                                    Samples on the remove list or excluded in Step 1 stay as they are. Click a sample to see all of it.
                                   </span>
                                 </div>
                                 </div>
@@ -9353,9 +9561,6 @@ export default function App() {
                                   const blockWhy = lockedByBlocklist
                                     ? blockReason(s.sample, step2BlocklistWhere, step2BlocklistSources)
                                     : null;
-                                  const blockTip = lockedByBlocklist
-                                    ? removeListTooltip(blockWhy, projectReference || reference, step2BlocklistRefDir)
-                                    : "";
                                   const inPanel = !!step2PanelAccessions[s.sample];
                                   // A reference-panel accession overrides a Step 1 exclusion (it's an
                                   // external panel VCF, not a Step 1 sample). Blocklist still wins.
@@ -9369,22 +9574,69 @@ export default function App() {
                                   const struck = isExcluded || leftOut;
                                   const metaLabel = projectNameDisplay[s.sample];
                                   const rowGroups = sampleGroupsByFile ? sampleGroupsByFile[s.filename] : null;
-                                  return (
-                                  <div key={s.filename} title={[
-                                    blockTip,
-                                    metaLabel && metaLabel !== s.sample ? `Metadata: ${metaLabel}` : "",
-                                    rowGroups && rowGroups.length ? `Groups: ${rowGroups.join(", ")}` : "",
-                                    blockTip || (metaLabel && metaLabel !== s.sample) || (rowGroups && rowGroups.length) ? `File: ${s.filename}` : s.filename,
-                                  ].filter(Boolean).join("\n")} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
+                                  // The manifest only knows "step1" vs "imported", so the
+                                  // badge used to read "ref db" for everything that was not
+                                  // a Step 1 sample — including hand-copied VCFs and Step 1
+                                  // samples whose folder was later removed. On a project
+                                  // with no reference database configured at all, a list of
+                                  // 185 rows every one of which claimed "ref db" was simply
+                                  // false. Only a sample a configured database actually
+                                  // holds gets that badge; the rest are "imported".
+                                  //
+                                  // "no Step 1 folder" is the warning's set exactly (unclaimedSamples):
+                                  // "imported" alone also covered a VCF imported under the name of
+                                  // one of this project's Step 1 samples, which box 1 does claim —
+                                  // so pointing people at "imported" to find the unclaimed ones
+                                  // pointed them at thousands of rows on a big set.
+                                  const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
+                                  const origin = s.source_type === "step1"
+                                    ? "step1"
+                                    : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no Step 1 folder" : "imported"));
+                                  const palette = origin === "step1"
+                                    ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
+                                    : origin === "ref db"
+                                      ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
+                                      : origin === "no Step 1 folder"
+                                        ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
+                                        : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
+                                  const dbName = vcfsFolderName || "vcf_database";
+                                  const originText = origin === "step1"
+                                    ? "Collected from this project's Step 1."
+                                    : origin === "ref db"
+                                      ? "Held by a reference database configured for this project's reference."
+                                      : origin === "no Step 1 folder"
+                                        ? `No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${dbName}. No tick box above can drop it; tick the box on the left to leave it out.`
+                                        : `Not recorded as collected from this project's Step 1 (imported, or copied into ${dbName} by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared.`;
+                                  const open = step2OpenRows.has(s.filename);
+                                  const src = String(s.source_path || "");
+                                  // Nothing here may add to every row: at 23,671 rows, a toggle
+                                  // button made the list 17% slower to draw, and even a CSS ▸
+                                  // on every row cost a quarter more to open it. The ▸ appears
+                                  // on hover and on an open row only (styles.css), and a closed
+                                  // row is its div alone.
+                                  const rowEl = (
+                                  <div
+                                    key={s.filename}
+                                    className={`sample-row${open ? " is-open" : ""}`}
+                                    onClick={(e) => {
+                                      // The checkbox and the chevron act for themselves; a
+                                      // drag that selected text is a selection, not a click.
+                                      if (e.target.closest("input, button, a")) return;
+                                      if (selectionWithin(e.currentTarget)) return;
+                                      toggleStep2Row(s.filename);
+                                    }}
+                                    style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}
+                                  >
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
                                       disabled={locked || leftOut}
                                       onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
+                                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); toggleStep2Row(s.filename); } }}
                                       title={leftOut
                                         ? "Left out of this run — the source it came from is unticked above; tick that source to include it"
                                         : lockedByBlocklist
-                                        ? blockTip
+                                        ? "On the reference's remove_from_analysis list — click the row for the workbook and row"
                                         : keptByPanel
                                           ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
                                           : (effectiveQc
@@ -9419,55 +9671,45 @@ export default function App() {
                                         <span style={{color:"var(--accent)", fontFamily:"sans-serif", fontWeight:600}}> · {rowGroups.join(", ")}</span>
                                       ) : null}
                                     </span>
-                                    {(() => {
-                                      // The manifest only knows "step1" vs "imported", so the
-                                      // badge used to read "ref db" for everything that was not
-                                      // a Step 1 sample — including hand-copied VCFs and Step 1
-                                      // samples whose folder was later removed. On a project
-                                      // with no reference database configured at all, a list of
-                                      // 185 rows every one of which claimed "ref db" was simply
-                                      // false. Only a sample a configured database actually
-                                      // holds gets that badge; the rest are "imported".
-                                      //
-                                      // "no Step 1 folder" is the warning's set exactly (unclaimedSamples):
-                                      // "imported" alone also covered a VCF imported under the name of
-                                      // one of this project's Step 1 samples, which box 1 does claim —
-                                      // so pointing people at "imported" to find the unclaimed ones
-                                      // pointed them at thousands of rows on a big set.
-                                      const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
-                                      const origin = s.source_type === "step1"
-                                        ? "step1"
-                                        : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no Step 1 folder" : "imported"));
-                                      const palette = origin === "step1"
-                                        ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
-                                        : origin === "ref db"
-                                          ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
-                                          : origin === "no Step 1 folder"
-                                            ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
-                                            : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
-                                      return (
-                                        <span
-                                          title={origin === "step1"
-                                            ? "Produced by this project's Step 1"
-                                            : origin === "ref db"
-                                              ? "Held by a reference database configured for this project's reference"
-                                              : origin === "no Step 1 folder"
-                                                ? `No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${vcfsFolderName || "vcf_database"}. No tick box above can drop it; tick the box on the left to leave it out.`
-                                                : "Not recorded as collected from this project's Step 1 (imported, or copied into vcf_database by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared."}
-                                          style={{
-                                            flexShrink:0,
-                                            fontSize:"0.8em",
-                                            padding:"0 4px",
-                                            borderRadius:"3px",
-                                            background: palette.bg,
-                                            color: palette.fg,
-                                          }}
-                                        >
-                                          {origin}
-                                        </span>
-                                      );
-                                    })()}
+                                    <span
+                                      title={originText}
+                                      style={{
+                                        flexShrink:0,
+                                        fontSize:"0.8em",
+                                        padding:"0 4px",
+                                        borderRadius:"3px",
+                                        background: palette.bg,
+                                        color: palette.fg,
+                                      }}
+                                    >
+                                      {origin}
+                                    </span>
                                   </div>
+                                  );
+                                  if (!open) return rowEl;
+                                  return (
+                                  <React.Fragment key={s.filename}>
+                                    {rowEl}
+                                    <SampleDetail
+                                      sample={s.sample}
+                                      file={s.filename}
+                                      meta={metaLabel && metaLabel !== s.sample ? metaLabel : ""}
+                                      groups={sampleGroupsByFile ? (rowGroups || []) : null}
+                                      groupsNote={rowGroups
+                                        ? `None at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}.`
+                                        : "Not read yet."}
+                                      run={runStatus({
+                                        leftOut, mode: step2Mode, blockWhy,
+                                        refName: projectReference || reference, refDir: step2BlocklistRefDir,
+                                        qcExcluded: effectiveQc, keptByPanel,
+                                        buildExcluded: !!step2BuildExcluded[s.sample],
+                                      })}
+                                      origin={originText}
+                                      source={src && !src.endsWith(`/${dbName}/${s.filename}`) ? src : ""}
+                                      activeGroup={vcfSourceFilter.trim()}
+                                      onGroup={(g) => setVcfSourceFilter((f) => (f.trim().toLowerCase() === g.toLowerCase() ? "" : g))}
+                                    />
+                                  </React.Fragment>
                                   );
                                 })}
                                 {filtered.length === 0 && (

@@ -7793,13 +7793,35 @@ def step2_blocklist_get(project: str):
     ref = _project_reference(project_dir) or ""
     ref_dir = _project_reference_dir(project_dir, cfg)
     ineffective = _remove_list_entries(ref_dir)["ineffective"] if ref_dir else []
+    # {name: [[source index, Excel row], ...]} — what the pane quotes beside a
+    # blocked sample, so "why is this left out?" has an answer on screen. A
+    # source outside the reference's own folder is the case that needed it:
+    # its names are in no list the Reference Editor shows.
+    where: Dict[str, List[List[int]]] = {}
+    sources: List[Dict[str, Any]] = []
+    for i, src in enumerate(_reference_blocklist_sources(cfg, ref)):
+        for name, row in src["rows"]:
+            where.setdefault(name, []).append([i, row])
+        sources.append({
+            "path": src["path"],
+            "file": src["file"],
+            "folder": src["folder"],
+            "in_reference_dir": src["in_reference_dir"],
+            "count": len(src["rows"]),
+        })
     return {
         "reference": ref,
-        # As written — which is exactly what vsnp3 will act on.
-        "samples": _reference_blocklist_names(cfg, ref),
+        # As written — which is exactly what vsnp3 will act on. The same set
+        # _reference_blocklist_names returns, from the same read.
+        "samples": sorted(where),
         # Entries written as metadata display names: vsnp3 matches file names,
         # so these remove nothing, and the pane must not show them as blocked.
         "ineffective": ineffective,
+        # The folder vsnp3 resolves the reference to — the one whose list the
+        # Reference Editor shows.
+        "reference_dir": str(ref_dir) if ref_dir else "",
+        "sources": sources,
+        "where": where,
     }
 
 
@@ -7938,9 +7960,23 @@ def _write_step1_exclusions(step2_dir: Path, samples) -> List[str]:
     return names
 
 
-def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]:
-    """Tier A: names in the reference's *_remove_from_analysis.xlsx — a permanent
-    per-reference blocklist, never included in any analysis. Read-only here."""
+def _reference_blocklist_sources(cfg: Dict, reference: Optional[str]) -> List[Dict[str, Any]]:
+    """Every workbook tier A reads, with the rows each one lists.
+
+    One entry per *_remove_from_analysis*.xlsx in a folder named `reference`
+    under any registered reference root. Usually that is one file. It can be
+    more: a second folder of the same name in another reference location, which
+    vsnp3 never reads (its first hit wins) and the Reference Editor never shows,
+    still removes samples here. Without the file and row of each name, a sample
+    blocked by a workbook nobody opened reads as blocked for no reason.
+
+    Entry shape: {path, file, folder, in_reference_dir, rows: [(name, row), ...]}.
+    `in_reference_dir` says whether the workbook is in the folder vsnp3 resolves
+    -t to — the first registered root holding the name, which is also the one
+    the Reference Editor opens — or None when no registered root holds it. It
+    is decided from the resolved roots and folder checks this walk makes
+    anyway, so knowing it costs no filesystem call.
+    """
     if not reference:
         return []
     # Search EVERY registered reference root, not just the single configured
@@ -7948,30 +7984,54 @@ def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]
     # registered while the GUI's primary root holds only supplemental refs). The
     # configured root is included first; reference_roots() adds the rest from
     # reference_options_paths.txt. De-duped by resolved path.
-    roots: List[Path] = []
+    roots: List[Tuple[Path, str]] = []
     seen_roots: set = set()
+    registered_keys: List[str] = []   # reference_roots(), resolved, in vsnp3's order
     configured = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
-    candidates = ([Path(configured)] if configured else []) + list(
-        reference_roots(Path(str(cfg.get("vsnp3_path", "") or "")))
-    )
-    for r in candidates:
+    candidates = ([(Path(configured), False)] if configured else []) + [
+        (r, True) for r in reference_roots(Path(str(cfg.get("vsnp3_path", "") or "")))
+    ]
+    for r, registered in candidates:
         try:
             key = str(r.resolve())
         except OSError:
             key = str(r)
+        if registered:
+            registered_keys.append(key)
         if key in seen_roots:
             continue
         seen_roots.add(key)
-        roots.append(r)
-    names: set = set()
-    for root in roots:
+        roots.append((r, key))
+    holding: set = set()              # resolved roots with a folder of this name
+    found: List[Tuple[str, Dict[str, Any]]] = []
+    for root, key in roots:
         ref_dir = root / reference
         if not ref_dir.is_dir():
             continue
-        for f in ref_dir.glob("*remove_from_analysis*.xlsx"):
+        holding.add(key)
+        for f in sorted(ref_dir.glob("*remove_from_analysis*.xlsx")):
             if f.name.startswith("~$"):
                 continue
-            names.update(_read_remove_xlsx_names(f))
+            found.append((key, {
+                "path": str(f),
+                "file": f.name,
+                "folder": str(ref_dir),
+                "rows": _read_remove_xlsx_rows(f),
+            }))
+    # vsnp3's -t rule (and _project_reference_dir's): first registered root
+    # that holds the folder wins.
+    own_key = next((k for k in registered_keys if k in holding), None)
+    for key, src in found:
+        src["in_reference_dir"] = (key == own_key) if own_key else None
+    return [src for _key, src in found]
+
+
+def _reference_blocklist_names(cfg: Dict, reference: Optional[str]) -> List[str]:
+    """Tier A: names in the reference's *_remove_from_analysis.xlsx — a permanent
+    per-reference blocklist, never included in any analysis. Read-only here."""
+    names: set = set()
+    for src in _reference_blocklist_sources(cfg, reference):
+        names.update(name for name, _row in src["rows"])
     return sorted(names)
 
 
@@ -8051,15 +8111,20 @@ def _read_step2_build_exclusions(step2_dir: Path) -> List[str]:
     return []
 
 
-# path -> (mtime_ns, size, names). A blocklist workbook changes only when
-# someone edits the reference, yet pandas.read_excel was re-parsing it
-# (~50–300 ms) on every step2/vcf_count call — the hottest request in the
+# path -> (mtime_ns, size, [(name, row), ...]). A blocklist workbook changes
+# only when someone edits the reference, yet pandas.read_excel was re-parsing
+# it (~50–300 ms) on every step2/vcf_count call — the hottest request in the
 # Step 2 pane. An edit changes mtime and misses the cache.
 _REMOVE_XLSX_CACHE: Dict[str, tuple] = {}
 
 
-def _read_remove_xlsx_names(path: Path) -> List[str]:
-    """Read sample names from a header-less single-column remove xlsx."""
+def _read_remove_xlsx_rows(path: Path) -> List[Tuple[str, int]]:
+    """(name, Excel row) for every entry of a header-less single-column remove
+    xlsx.
+
+    The row is the one Excel shows: header=None keeps leading blank rows, so
+    position + 1 is where a person scrolls to. The Step 2 pane quotes it, so
+    that a blocked sample names the row that blocked it."""
     try:
         st = path.stat()
     except OSError:
@@ -8071,17 +8136,22 @@ def _read_remove_xlsx_names(path: Path) -> List[str]:
     try:
         import pandas as pd  # vsnp3 env
         df = pd.read_excel(path, header=None)
-        names = [
-            str(s).strip()
-            for s in df.iloc[:, 0].tolist()
-            if str(s).strip() and str(s).strip().lower() != "nan"
-        ]
+        rows = []
+        for i, s in enumerate(df.iloc[:, 0].tolist()):
+            name = str(s).strip()
+            if name and name.lower() != "nan":
+                rows.append((name, i + 1))
     except Exception:
         return []
     if len(_REMOVE_XLSX_CACHE) > 512:
         _REMOVE_XLSX_CACHE.clear()
-    _REMOVE_XLSX_CACHE[key] = (st.st_mtime_ns, st.st_size, names)
-    return list(names)
+    _REMOVE_XLSX_CACHE[key] = (st.st_mtime_ns, st.st_size, rows)
+    return list(rows)
+
+
+def _read_remove_xlsx_names(path: Path) -> List[str]:
+    """Read sample names from a header-less single-column remove xlsx."""
+    return [name for name, _row in _read_remove_xlsx_rows(path)]
 
 
 @app.get("/api/projects/{project}/step2/build-exclusions")

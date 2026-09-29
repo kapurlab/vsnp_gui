@@ -22,6 +22,7 @@
 //   tiers        the three exclusion stores, unioned at run time by the
 //                backend and mirrored by comparisonSamples:
 //                  A blocklist  — the reference's *_remove_from_analysis.xlsx
+//                                 (every copy of it; see blockReason)
 //                  B step1      — ticked in Step 1 Results; EXEMPTED for an
 //                                 accession an enabled panel supplies
 //                  C build      — ticked in the Step 2 sample list
@@ -169,6 +170,98 @@ export function comparisonSamples(keep, { blocklist, step1Excluded, buildExclude
  */
 export function unclaimedSamples(setSamples, projectSamples, panelSampleSet) {
   return setSamples.filter((s) => !projectSamples.has(s) && !panelSampleSet.has(s));
+}
+
+/**
+ * How many of `keep` each tier holds back, each sample counted once under the
+ * tier that decides it: the remove list first (nothing in the pane can
+ * override it), then Step 1 Results, then the build list. The three counts sum
+ * to keep minus comparisonSamples(keep, tiers), so "500 excluded" can say
+ * where the 500 went.
+ *
+ * @param {Set<string>|string[]} keep
+ * @param {object} tiers  the same shape comparisonSamples takes
+ * @returns {{blocklist: number, step1: number, build: number}}
+ */
+export function exclusionReasons(keep, { blocklist, step1Excluded, buildExcluded, panelAccessions } = {}) {
+  const A = blocklist || {};
+  const B = step1Excluded || {};
+  const C = buildExcluded || {};
+  const exempt = panelAccessions || {};
+  const out = { blocklist: 0, step1: 0, build: 0 };
+  for (const s of keep || []) {
+    if (A[s]) out.blocklist++;
+    else if (B[s] && !exempt[s]) out.step1++;
+    else if (C[s]) out.build++;
+  }
+  return out;
+}
+
+// --- Why the remove list holds a sample back -------------------------------
+//
+// Tier A is not one workbook. The backend reads every
+// *_remove_from_analysis*.xlsx in every folder named for the reference, across
+// all the registered reference locations — so a second folder of that name,
+// which vsnp3 itself never reads and the Reference Editor never opens, still
+// removes samples. The pane used to say only "blocked (reference)", and a
+// sample listed nowhere the user could look read as blocked for no reason.
+//
+// /step2/blocklist now says where each name is: `where` maps a name to
+// [[source index, Excel row], ...] and each source says whether it is in the
+// reference's own folder (`in_reference_dir`; null when the reference resolves
+// nowhere, which is treated as its own, since there is nothing to contrast).
+
+const isOwn = (source) => source.in_reference_dir !== false;
+
+/**
+ * The workbook and row that hold `name` back, preferring the reference's own
+ * list (the one a person can find and edit) when several do.
+ *
+ * @returns {null | {source: object, row: number, own: boolean,
+ *                   also: {source: object, row: number}[]}}
+ */
+export function blockReason(name, where, sources) {
+  const entry = (where || {})[name];
+  if (!entry || !entry.length) return null;   // most names: on no list at all
+  const hits = entry
+    .map(([i, row]) => ({ source: (sources || [])[i], row }))
+    .filter((h) => h.source);
+  if (!hits.length) return null;
+  const ownAt = hits.findIndex((h) => isOwn(h.source));
+  const pick = ownAt >= 0 ? ownAt : 0;
+  return {
+    source: hits[pick].source,
+    row: hits[pick].row,
+    own: isOwn(hits[pick].source),
+    also: hits.filter((_, k) => k !== pick),
+  };
+}
+
+/**
+ * The remove-list picture for what the pane is showing: which samples are held
+ * back by the reference's own list, and which ONLY by a workbook in another
+ * folder — the ones nobody will find by opening the reference's list. Each name
+ * is counted once, under the workbook blockReason quotes for it, so the counts
+ * across `own` and `elsewhere` sum to `blocked.length`.
+ *
+ * @param {Iterable<string>} samples
+ * @returns {{blocked: string[], own: {source: object, names: string[]}[],
+ *            elsewhere: {source: object, names: string[]}[]}}
+ */
+export function blocklistSummary(samples, where, sources) {
+  const own = new Map();
+  const elsewhere = new Map();
+  const blocked = [];
+  for (const name of new Set(samples || [])) {
+    const reason = blockReason(name, where, sources);
+    if (!reason) continue;
+    blocked.push(name);
+    const bucket = reason.own ? own : elsewhere;
+    if (!bucket.has(reason.source)) bucket.set(reason.source, []);
+    bucket.get(reason.source).push(name);
+  }
+  const list = (m) => [...m.entries()].map(([source, names]) => ({ source, names }));
+  return { blocked, own: list(own), elsewhere: list(elsewhere) };
 }
 
 // --- A pasted list of names, resolved against the project -----------------

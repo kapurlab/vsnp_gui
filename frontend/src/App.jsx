@@ -7,7 +7,8 @@ import CopyLogButton from "./CopyLogButton";
 import Elapsed from "./Elapsed.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
-import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList } from "./step2Selection.js";
+import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList,
+         exclusionReasons, blockReason, blocklistSummary } from "./step2Selection.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -245,6 +246,134 @@ function Step2EmptyPane({ reason, runId, runTitle, jumpTitle, busy, onResume, on
       {when ? `Created ${when}, ` : ""}it holds no staged VCFs and no results, so
       there is nothing to run and nothing to show. {jumpButton}
     </div>
+  );
+}
+
+// Why the remove list holds a sample back, short enough to sit after its name.
+// "blocked (reference)" was the whole of it before, and could not be checked
+// against anything — see blockReason in step2Selection.js. The row comes
+// first because a narrow pane truncates the end.
+function removeListLabel(reason) {
+  if (!reason) return "on the reference's remove_from_analysis list";
+  return reason.own
+    ? `row ${reason.row} of remove_from_analysis`
+    : `other copy: row ${reason.row} of remove_from_analysis`;
+}
+
+// The same, in full, for a tooltip: the workbook, the row, and what to change.
+function removeListTooltip(reason, refName, refDir) {
+  const ref = refName || "this project's reference";
+  if (!reason) {
+    return `On the remove_from_analysis list of ${ref}: every Step 2 run against it leaves this sample out.`;
+  }
+  const lines = [`Row ${reason.row} of ${reason.source.path}`];
+  if (reason.own) {
+    lines.push(
+      `That is the remove_from_analysis list of ${ref}, so every Step 2 run against it leaves this `
+      + "sample out. To include the sample, delete the row (Reference Editor)."
+    );
+  } else {
+    lines.push(
+      `That workbook is in a second folder named ${ref}. vsnp3 reads only the first folder of that name`
+      + `${refDir ? ` (${refDir})` : ""}, which is the one the Reference Editor shows, so this row is not in `
+      + "the list you see there. This app still leaves out every name in every copy. To include the "
+      + "sample, delete the row or that workbook."
+    );
+  }
+  reason.also.forEach((a) => lines.push(`Also row ${a.row} of ${a.source.path}`));
+  return lines.join("\n");
+}
+
+// The VCFs no source can claim, listed where the warning about them is. They
+// used to be findable only by scrolling the full sample list for an "imported"
+// badge, which on a 23,671-sample set also marked thousands that a tick box
+// does claim. The box is the build list's own Exclude box (tier C), so a tick
+// here and a tick there are the same tick.
+function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, meta, dbFolderName,
+                              onToggle, onSetMany, onCopy }) {
+  const names = [...new Set(samples.map((s) => s.sample))];
+  const stateOf = (name) => {
+    if (tiers.blocklist[name]) return "blocklist";
+    if (tiers.step1Excluded[name] && !tiers.panelAccessions[name]) return "step1";
+    if (tiers.buildExcluded[name]) return "build";
+    return "compared";
+  };
+  const compared = names.filter((n) => stateOf(n) === "compared");
+  const ticked = names.filter((n) => stateOf(n) === "build");
+  const heldBack = names.length - compared.length;
+  return (
+    <details style={{marginTop:"6px"}}>
+      <summary style={{cursor:"pointer", fontWeight:600}}>
+        {names.length === 1 ? "Show it" : `Show the ${names.length}`}
+        {heldBack > 0 && compared.length > 0 ? ` (${heldBack} already excluded)` : ""}
+      </summary>
+      <div style={{display:"flex", flexWrap:"wrap", gap:"6px", margin:"6px 0"}}>
+        {compared.length > 0 ? (
+          <button type="button" className="ghost action" onClick={() => onSetMany(compared, true)}
+            title="Tick Exclude for every one of these that this run would compare">
+            {compared.length === 1 ? "Exclude it" : `Exclude all ${compared.length}`}
+          </button>
+        ) : null}
+        {ticked.length > 0 ? (
+          <button type="button" className="ghost action" onClick={() => onSetMany(ticked, false)}
+            title="Untick Exclude for every one of these you excluded">
+            {ticked.length === 1 ? "Put it back" : `Put back all ${ticked.length}`}
+          </button>
+        ) : null}
+        <button type="button" className="ghost action" onClick={() => onCopy(names.join("\n"))}
+          title="Copy these sample names, one per line">
+          Copy names
+        </button>
+      </div>
+      <div style={{fontFamily:"sans-serif", color:"var(--muted)", marginBottom:"2px"}}>
+        Tick a sample to leave it out of this run.
+      </div>
+      <div style={{maxHeight:"220px", overflowY:"auto", border:"1px solid var(--border)", borderRadius:"4px",
+                   background:"var(--panel)", fontFamily:"monospace", fontSize:"0.95em", color:"var(--text)"}}>
+        {samples.map((s) => {
+          const state = stateOf(s.sample);
+          const reason = state === "blocklist" ? blockReason(s.sample, where, sources) : null;
+          const out = state !== "compared";
+          const label = meta[s.sample];
+          // The manifest remembers where a linked import points; a copied
+          // one reads as the database itself, which says nothing.
+          const src = String(s.source_path || "");
+          const inDb = src.endsWith(`/${dbFolderName}/${s.filename}`);
+          const tip = [
+            state === "blocklist" ? removeListTooltip(reason, refName, refDir) : "",
+            state === "step1" ? "Excluded in Step 1 Results — change it there to include it." : "",
+            `File: ${s.filename}`,
+            src && !inDb ? `Recorded source: ${src}` : "",
+          ].filter(Boolean).join("\n");
+          return (
+            <div key={s.filename} title={tip}
+              style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px",
+                      borderBottom:"1px solid var(--border)", opacity: out ? 0.6 : 1}}>
+              <input
+                type="checkbox"
+                checked={out}
+                disabled={state === "blocklist" || state === "step1"}
+                onChange={(e) => onToggle(s.sample, e.target.checked)}
+                style={{flexShrink:0}}
+              />
+              <span style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                <span style={{textDecoration: out ? "line-through" : "none"}}>{s.sample}</span>
+                {label && label !== s.sample ? (
+                  <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {label}</span>
+                ) : null}
+              </span>
+              <span style={{flex:"0 1 auto", minWidth:0, maxWidth:"55%", overflow:"hidden", textOverflow:"ellipsis",
+                            whiteSpace:"nowrap", fontFamily:"sans-serif", fontStyle:"italic", color:"var(--muted)"}}>
+                {state === "compared" ? "compared"
+                  : state === "build" ? "excluded"
+                  : state === "step1" ? "excluded in Step 1"
+                  : removeListLabel(reason)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
@@ -566,6 +695,13 @@ export default function App() {
   // Remove-list entries written as metadata display names: vsnp3 matches
   // file names, so these remove nothing. Shown as a warning, never as blocked.
   const [step2BlocklistIneffective, setStep2BlocklistIneffective] = useState([]);
+  // Where each blocked name comes from: the workbooks tier A read (each saying
+  // whether it is in the reference's own folder) and {name: [[source, row]]}.
+  // Without these a sample blocked by a second copy of the reference's list —
+  // one the Reference Editor never shows — read as blocked for no reason.
+  const [step2BlocklistSources, setStep2BlocklistSources] = useState([]);
+  const [step2BlocklistWhere, setStep2BlocklistWhere] = useState({});
+  const [step2BlocklistRefDir, setStep2BlocklistRefDir] = useState("");
   // {stored sample name: [every other name it goes by]}, for this project's
   // samples. Lets every "Filter samples…" box match the spelling a SNP table
   // or a tree uses.
@@ -1209,13 +1345,47 @@ export default function App() {
 
   // Unclaimed VCFs that this run actually compares. The raw unclaimed set is
   // not the right number to put on screen: once the user acts on the warning
-  // and unticks them in the sample list, an exclusion tier drops them, and a
+  // and ticks them out (Exclude is a tick), an exclusion tier drops them, and a
   // note still saying "compared regardless" would be telling them their fix
   // did not work.
-  const step2UnclaimedInRun = useMemo(() => {
-    const unclaimed = new Set(step2UnclaimedSamples);
-    return step2ComparisonSamples.filter((s) => unclaimed.has(s));
-  }, [step2UnclaimedSamples, step2ComparisonSamples]);
+  const step2UnclaimedSet = useMemo(() => new Set(step2UnclaimedSamples), [step2UnclaimedSamples]);
+  const step2UnclaimedInRun = useMemo(
+    () => step2ComparisonSamples.filter((s) => step2UnclaimedSet.has(s)),
+    [step2UnclaimedSet, step2ComparisonSamples]
+  );
+
+  // Every unclaimed sample the ticks keep, compared or not. The list under the
+  // warning shows these rather than only the compared ones, so a sample ticked
+  // out there stays on screen to be put back.
+  const step2UnclaimedInSelection = useMemo(
+    () => [...step2RunSelection.keep].filter((s) => step2UnclaimedSet.has(s)),
+    [step2UnclaimedSet, step2RunSelection]
+  );
+  // ...and their rows (one per file) for that list.
+  const step2UnclaimedRows = useMemo(() => {
+    const inSel = new Set(step2UnclaimedInSelection);
+    return vcfSourceSamples.filter((s) => inSel.has(s.sample));
+  }, [step2UnclaimedInSelection, vcfSourceSamples]);
+
+  // "500 excluded" said nothing about why. Each held-back sample, counted once
+  // under the tier that decides it.
+  const step2ExclusionReasons = useMemo(
+    () => exclusionReasons(step2RunSelection.keep, {
+      blocklist: step2Blocklist,
+      step1Excluded: step2QcExcluded,
+      buildExcluded: step2BuildExcluded,
+      panelAccessions: step2PanelAccessions,
+    }),
+    [step2RunSelection, step2Blocklist, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
+  );
+
+  // Which workbook holds back each sample the ticks would otherwise compare —
+  // above all, the ones only a copy of the list outside the reference's own
+  // folder holds back, which nobody finds by opening the reference's list.
+  const step2BlockSummary = useMemo(
+    () => blocklistSummary(step2RunSelection.keep, step2BlocklistWhere, step2BlocklistSources),
+    [step2RunSelection, step2BlocklistWhere, step2BlocklistSources]
+  );
 
   // Why Step 2 cannot run, as one string — so the button, its tooltip and the
   // note under it can never disagree, and a disabled Run always says what is
@@ -3085,7 +3255,13 @@ export default function App() {
   // Tier A: the reference-level permanent blocklist for this project's
   // reference. Shown locked in the build list; never included in an analysis.
   async function loadStep2Blocklist() {
-    if (!selectedProject) { setStep2Blocklist({}); return; }
+    if (!selectedProject) {
+      setStep2Blocklist({});
+      setStep2BlocklistSources([]);
+      setStep2BlocklistWhere({});
+      setStep2BlocklistRefDir("");
+      return;
+    }
     try {
       const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/blocklist`);
       if (res.ok) {
@@ -3094,6 +3270,9 @@ export default function App() {
         (data.samples || []).forEach((s) => { map[s] = true; });
         setStep2Blocklist(map);
         setStep2BlocklistIneffective(data.ineffective || []);
+        setStep2BlocklistSources(data.sources || []);
+        setStep2BlocklistWhere(data.where || {});
+        setStep2BlocklistRefDir(data.reference_dir || "");
       }
     } catch (e) { /* best-effort; the build still works without it */ }
   }
@@ -3158,8 +3337,13 @@ export default function App() {
   }
 
   function toggleStep2BuildExcluded(sample, checked) {
+    setStep2BuildExcludedMany([sample], checked);
+  }
+
+  function setStep2BuildExcludedMany(samples, checked) {
     setStep2BuildExcluded((prev) => {
-      const next = { ...prev, [sample]: checked };
+      const next = { ...prev };
+      samples.forEach((s) => { next[s] = checked; });
       if (step2BuildExcludeTimerRef.current) clearTimeout(step2BuildExcludeTimerRef.current);
       step2BuildExcludeTimerRef.current = setTimeout(() => {
         step2BuildExcludeTimerRef.current = null;
@@ -4660,7 +4844,7 @@ export default function App() {
     setStep2JobStatus(data.status || "running");
     setStep2JobStartedAt("");
     setStep2Controllable(true);
-    const blk = data.blocklist_count > 0 ? `, ${data.blocklist_count} reference-blocked` : "";
+    const blk = data.blocklist_count > 0 ? `, ${data.blocklist_count} on the remove_from_analysis list` : "";
     const kept = data.panel_exempt_count > 0 ? `, ${data.panel_exempt_count} kept via panel` : "";
     const countSuffix = excludedCount > 0
       ? ` (excluding ${excludedCount}${blk}${kept}${data.comparison_count != null ? ` · comparing ${data.comparison_count}` : ""})`
@@ -8602,17 +8786,47 @@ export default function App() {
                   {/* VCFs no tick box can reach. They are compared whatever the
                       ticks say, so the pane has to name them: they were the whole
                       of a run that looked like it had picked 185 samples at random. */}
-                  {!step2RunSelection.noSourceTicked && step2UnclaimedInRun.length > 0 ? (
-                    <div className="note warning" style={{fontSize:"0.82em"}}>
-                      <strong>{step2UnclaimedInRun.length} VCF{step2UnclaimedInRun.length === 1 ? "" : "s"} in{" "}
-                      {vcfsFolderName || "vcf_database"} belong{step2UnclaimedInRun.length === 1 ? "s" : ""} to no source above.</strong>{" "}
-                      {step2UnclaimedInRun.length === 1 ? "It was" : "They were"} copied or imported in earlier and
-                      {step2UnclaimedInRun.length === 1 ? " is" : " are"} not one of this project's Step 1 samples, so no tick box
-                      above can drop {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
-                      {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} compared regardless. To leave{" "}
-                      {step2UnclaimedInRun.length === 1 ? "it" : "them"} out, untick{" "}
-                      {step2UnclaimedInRun.length === 1 ? "it" : "them"} in the sample list below (marked{" "}
-                      <em>imported</em>), or use <em>Compare a list of samples</em>, which compares only what you name.
+                  {!step2RunSelection.noSourceTicked && step2UnclaimedInSelection.length > 0 ? (
+                    <div className={step2UnclaimedInRun.length > 0 ? "note warning" : "note"} style={{fontSize:"0.82em"}}>
+                      {step2UnclaimedInRun.length > 0 ? (
+                        <>
+                          <strong>{step2UnclaimedInRun.length} VCF{step2UnclaimedInRun.length === 1 ? "" : "s"} in{" "}
+                          {vcfsFolderName || "vcf_database"} belong{step2UnclaimedInRun.length === 1 ? "s" : ""} to no source above.</strong>{" "}
+                          {step2UnclaimedInRun.length === 1 ? "It was" : "They were"} copied or imported in earlier, and
+                          {step2UnclaimedInRun.length === 1 ? " is" : " are"} neither one of this project's Step 1 samples nor in a
+                          reference database set up for this reference, so no tick box above can drop{" "}
+                          {step2UnclaimedInRun.length === 1 ? "it" : "them"} and{" "}
+                          {step2UnclaimedInRun.length === 1 ? "it is" : "they are"} compared regardless. To leave{" "}
+                          {step2UnclaimedInRun.length === 1 ? "it" : "them"} out, tick{" "}
+                          {step2UnclaimedInRun.length === 1 ? "it" : "them"} in the list here (they are marked{" "}
+                          <em>no source</em> in the sample list too), or use <em>Compare a list of samples</em>, which
+                          compares only what you name.
+                        </>
+                      ) : (
+                        <>
+                          <strong>The {step2UnclaimedInSelection.length} VCF{step2UnclaimedInSelection.length === 1 ? "" : "s"} in{" "}
+                          {vcfsFolderName || "vcf_database"} that belong{step2UnclaimedInSelection.length === 1 ? "s" : ""} to no
+                          source above {step2UnclaimedInSelection.length === 1 ? "is" : "are all"} excluded from this run.</strong>
+                        </>
+                      )}
+                      <Step2UnclaimedList
+                        samples={step2UnclaimedRows}
+                        tiers={{
+                          blocklist: step2Blocklist,
+                          step1Excluded: step2QcExcluded,
+                          buildExcluded: step2BuildExcluded,
+                          panelAccessions: step2PanelAccessions,
+                        }}
+                        where={step2BlocklistWhere}
+                        sources={step2BlocklistSources}
+                        refName={projectReference || reference}
+                        refDir={step2BlocklistRefDir}
+                        meta={step2BuildMeta}
+                        dbFolderName={vcfsFolderName || "vcf_database"}
+                        onToggle={toggleStep2BuildExcluded}
+                        onSetMany={setStep2BuildExcludedMany}
+                        onCopy={copyText}
+                      />
                     </div>
                   ) : null}
                 </div>
@@ -8910,6 +9124,58 @@ export default function App() {
                             stay in every run. Fix them in the Reference Editor (“Rewrite as file names”).
                           </div>
                         ) : null}
+                        {/* Which workbook holds each struck-through sample back. The
+                            second note is the answer to "blocked, but not in the
+                            remove_from_analysis file": a copy of the list in another
+                            folder of the reference's name, which vsnp3 never reads
+                            and the Reference Editor never opens. */}
+                        {step2BlockSummary.own.length > 0 ? (() => {
+                          const n = step2BlockSummary.own.reduce((t, o) => t + o.names.length, 0);
+                          const refName = projectReference || reference || "this reference";
+                          return (
+                            <div className="note" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                              <strong>{n} sample{n === 1 ? " is" : "s are"} on the reference’s remove_from_analysis
+                              list</strong>, so every Step 2 run against {refName} leaves {n === 1 ? "it" : "them"} out.{" "}
+                              {step2BlockSummary.own.length === 1 ? "The list is " : "The lists are "}
+                              {step2BlockSummary.own.map((o, i) => (
+                                <span key={o.source.path}>
+                                  {i > 0 ? " and " : ""}<code style={{wordBreak:"break-all"}}>{o.source.path}</code>
+                                  {step2BlockSummary.own.length > 1 ? ` (${o.names.length})` : ""}
+                                </span>
+                              ))}
+                              . {n === 1 ? "It is" : "Each one is"} struck through below with the row it is on; change
+                              the list in the Reference Editor.
+                              {step2BlockSummary.own.length > 1
+                                ? " vsnp3 stops with an error when a reference folder holds more than one remove list, so merge them into one."
+                                : ""}
+                            </div>
+                          );
+                        })() : null}
+                        {step2BlockSummary.elsewhere.length > 0 ? (() => {
+                          const n = step2BlockSummary.elsewhere.reduce((t, o) => t + o.names.length, 0);
+                          const refName = projectReference || reference || "this reference";
+                          return (
+                            <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                              <strong>{n} sample{n === 1 ? " is" : "s are"} left out by a remove_from_analysis list
+                              that is not the reference’s own.</strong>{" "}
+                              {n === 1 ? "It is" : "They are"} listed in{" "}
+                              {step2BlockSummary.elsewhere.map((o, i) => (
+                                <span key={o.source.path}>
+                                  {i > 0 ? " and " : ""}<code style={{wordBreak:"break-all"}}>{o.source.path}</code>
+                                  {step2BlockSummary.elsewhere.length > 1 ? ` (${o.names.length})` : ""}
+                                </span>
+                              ))}
+                              , in a second folder named {refName} in another reference location. vsnp3 reads only
+                              the first folder of that name
+                              {step2BlocklistRefDir ? <> (<code style={{wordBreak:"break-all"}}>{step2BlocklistRefDir}</code>)</> : null}
+                              , which is the one the Reference Editor shows, so {n === 1 ? "this sample is" : "these samples are"} not
+                              in the list you see there. This app still leaves out every name in every copy. To put{" "}
+                              {n === 1 ? "it" : "them"} back, delete {n === 1 ? "its row" : "their rows"} or{" "}
+                              {step2BlockSummary.elsewhere.length === 1 ? "that workbook" : "those workbooks"}
+                              {n <= 8 ? <>: {step2BlockSummary.elsewhere.flatMap((o) => o.names).join(", ")}.</> : "."}
+                            </div>
+                          );
+                        })() : null}
                         <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
                           {(() => {
                             const q = vcfSourceFilter.trim().toLowerCase();
@@ -8959,6 +9225,12 @@ export default function App() {
                                 </div>
                                 {filtered.map(s => {
                                   const lockedByBlocklist = !!step2Blocklist[s.sample];
+                                  const blockWhy = lockedByBlocklist
+                                    ? blockReason(s.sample, step2BlocklistWhere, step2BlocklistSources)
+                                    : null;
+                                  const blockTip = lockedByBlocklist
+                                    ? removeListTooltip(blockWhy, projectReference || reference, step2BlocklistRefDir)
+                                    : "";
                                   const inPanel = !!step2PanelAccessions[s.sample];
                                   // A reference-panel accession overrides a Step 1 exclusion (it's an
                                   // external panel VCF, not a Step 1 sample). Blocklist still wins.
@@ -8972,7 +9244,7 @@ export default function App() {
                                   const struck = isExcluded || leftOut;
                                   const metaLabel = step2BuildMeta[s.sample];
                                   return (
-                                  <div key={s.filename} title={s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
+                                  <div key={s.filename} title={blockTip ? `${blockTip}\nFile: ${s.filename}` : s.filename} style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}>
                                     <input
                                       type="checkbox"
                                       checked={isExcluded}
@@ -8981,7 +9253,7 @@ export default function App() {
                                       title={leftOut
                                         ? "Left out of this run — the source it came from is unticked above; tick that source to include it"
                                         : lockedByBlocklist
-                                        ? "On the reference blocklist (…_remove_from_analysis.xlsx) — never included in any analysis; edit the reference file to change it"
+                                        ? blockTip
                                         : keptByPanel
                                           ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
                                           : (effectiveQc
@@ -8989,12 +9261,15 @@ export default function App() {
                                             : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
                                       style={{flexShrink:0, cursor: (locked || leftOut) ? "not-allowed" : "pointer"}}
                                     />
-                                    <span style={{flex:"1 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textDecoration: struck ? "line-through" : "none"}}>
-                                      {s.sample}
+                                    <span style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                                      {/* Only the name is struck: a line through the reason
+                                          made the one thing that explains the row the
+                                          hardest part of it to read. */}
+                                      <span style={{textDecoration: struck ? "line-through" : "none"}}>{s.sample}</span>
                                       {leftOut ? (
                                         <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic"}}> — source unticked, not in this run</span>
                                       ) : lockedByBlocklist ? (
-                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — blocked (reference)</span>
+                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — {removeListLabel(blockWhy)}</span>
                                       ) : keptByPanel ? (
                                         <span style={{color:"var(--success, #2e7d32)", fontFamily:"sans-serif", fontStyle:"italic"}}> — in reference panel (kept despite Step 1 exclusion)</span>
                                       ) : effectiveQc ? (
@@ -9019,20 +9294,32 @@ export default function App() {
                                       // 185 rows every one of which claimed "ref db" was simply
                                       // false. Only a sample a configured database actually
                                       // holds gets that badge; the rest are "imported".
+                                      //
+                                      // "no source" is the warning's set exactly (unclaimedSamples):
+                                      // "imported" alone also covered a VCF imported under the name of
+                                      // one of this project's Step 1 samples, which box 1 does claim —
+                                      // so pointing people at "imported" to find the unclaimed ones
+                                      // pointed them at thousands of rows on a big set.
                                       const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
-                                      const origin = s.source_type === "step1" ? "step1" : (inRefDb ? "ref db" : "imported");
+                                      const origin = s.source_type === "step1"
+                                        ? "step1"
+                                        : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no source" : "imported"));
                                       const palette = origin === "step1"
                                         ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
                                         : origin === "ref db"
                                           ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
-                                          : {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"};
+                                          : origin === "no source"
+                                            ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
+                                            : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
                                       return (
                                         <span
                                           title={origin === "step1"
                                             ? "Produced by this project's Step 1"
                                             : origin === "ref db"
                                               ? "Held by a reference database configured for this project's reference"
-                                              : "In vcf_database but claimed by no source — copied or imported in earlier, and not one of this project's Step 1 samples. No tick box above can drop it; untick it here to leave it out."}
+                                              : origin === "no source"
+                                                ? "In vcf_database but claimed by no source — copied or imported in earlier, not one of this project's Step 1 samples, and in no reference database set up for this reference. No tick box above can drop it; tick the box on the left to leave it out."
+                                                : "Not recorded as collected from this project's Step 1 (imported, or copied into vcf_database by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared."}
                                           style={{
                                             flexShrink:0,
                                             fontSize:"0.8em",
@@ -9446,6 +9733,17 @@ export default function App() {
                   // to Run" is only true when step2RunBlock has no objection.
                   const cmpN = step2ComparisonSamples.length;
                   const ready = step2RunBlock ? "" : " — ready to Run";
+                  // Where the excluded ones went: "5 excluded by the
+                  // remove_from_analysis list", or "5 excluded: 3 by …, 2 in …".
+                  const r = step2ExclusionReasons;
+                  const whyParts = [
+                    [r.blocklist, "by the remove_from_analysis list"],
+                    [r.step1, "in Step 1 Results"],
+                    [r.build, "in the sample list"],
+                  ].filter(([n]) => n > 0);
+                  const excludedText = (n) => (whyParts.length === 1
+                    ? `${n} excluded ${whyParts[0][1]}`
+                    : `${n} excluded${whyParts.length ? `: ${whyParts.map(([k, t]) => `${k} ${t}`).join(", ")}` : ""}`);
                   if (step2Mode === "list") {
                     if (runN === 0) {
                       return `VCFs in set: ${inSet} — paste sample names above to choose what this run compares`;
@@ -9453,7 +9751,7 @@ export default function App() {
                     const dbs = step2RunSelection.fromDbs > 0
                       ? ` + ${step2RunSelection.fromDbs} from the ticked databases` : "";
                     const dropped = runN - cmpN > 0
-                      ? ` · ${runN - cmpN} of them excluded` : "";
+                      ? ` · ${excludedText(runN - cmpN)}` : "";
                     const others = outN > 0
                       ? ` · ${outN} other${outN === 1 ? "" : "s"} in vcf_database stay out of this run` : "";
                     return `This run compares ${cmpN} sample${cmpN === 1 ? "" : "s"} `
@@ -9466,10 +9764,10 @@ export default function App() {
                   const unclaimedN = step2UnclaimedInRun.length;
                   const why = [];
                   if (outN > 0) why.push(`${outN} left out by unticked sources`);
-                  if (excludedN > 0) why.push(`${excludedN} excluded`);
+                  if (excludedN > 0) why.push(excludedText(excludedN));
                   if (unclaimedN > 0) why.push(`includes ${unclaimedN} claimed by no source`);
                   return `This run compares ${cmpN} of the ${inSet} VCFs in the set`
-                    + (why.length ? ` (${why.join(", ")})` : "")
+                    + (why.length ? ` (${why.join("; ")})` : "")
                     + ready;
                 })()}
               </div>

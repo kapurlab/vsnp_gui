@@ -20,7 +20,8 @@
 
 import assert from "node:assert/strict";
 import { selectStep2Run, comparisonSamples, unclaimedSamples,
-         listTokens, matchTier, resolveList } from "../src/step2Selection.js";
+         listTokens, matchTier, resolveList,
+         exclusionReasons, blockReason, blocklistSummary } from "../src/step2Selection.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -239,6 +240,67 @@ test("the tiers are unchanged", () => {
   assert.equal(matchTier("ERR036186", "ERR036186_Malawi"), 2);
   assert.equal(matchTier("13-1941-6-S4-L001", "13-1941"), 3);
   assert.equal(matchTier("ERR036186", "SRR999"), 0);
+});
+
+// --- Why a sample is excluded ----------------------------------------------
+//
+// Reported from the Ames HPC: samples struck through as "blocked (reference)"
+// that were nowhere in the reference's remove_from_analysis workbook. Tier A
+// reads every *_remove_from_analysis*.xlsx in every folder named for the
+// reference, across all registered reference locations, so a second copy of
+// the folder — never read by vsnp3, never shown by the Reference Editor — held
+// samples back with nothing on screen to say which file did it.
+
+const own = { path: "/refs/a/H5/H5_remove_from_analysis.xlsx", file: "H5_remove_from_analysis.xlsx",
+              folder: "/refs/a/H5", in_reference_dir: true, count: 2 };
+const shadow = { path: "/refs/b/H5/H5_remove_from_analysis.xlsx", file: "H5_remove_from_analysis.xlsx",
+                 folder: "/refs/b/H5", in_reference_dir: false, count: 2 };
+// 22-A on both lists, 22-B only on the reference's own, 22-C only on the copy.
+const where = { "22-A": [[1, 7], [0, 3]], "22-B": [[0, 4]], "22-C": [[1, 9]] };
+const sources = [own, shadow];
+
+test("a blocked sample names the reference's own workbook and row first", () => {
+  const r = blockReason("22-A", where, sources);
+  assert.equal(r.source, own);
+  assert.equal(r.row, 3);
+  assert.equal(r.own, true);
+  assert.deepEqual(r.also, [{ source: shadow, row: 7 }]);
+});
+
+test("a sample only a second copy of the list holds back says so", () => {
+  const r = blockReason("22-C", where, sources);
+  assert.equal(r.source, shadow);
+  assert.equal(r.row, 9);
+  assert.equal(r.own, false);
+});
+
+test("a name on no list has no reason, and a reference that resolves nowhere is its own", () => {
+  assert.equal(blockReason("22-Z", where, sources), null);
+  const orphan = [{ ...own, in_reference_dir: null }];
+  assert.equal(blockReason("22-B", { "22-B": [[0, 4]] }, orphan).own, true);
+});
+
+test("the summary splits what the reference's list holds back from what only a copy does", () => {
+  const s = blocklistSummary(["22-A", "22-B", "22-C", "22-D", "22-A"], where, sources);
+  assert.deepEqual(s.blocked, ["22-A", "22-B", "22-C"]);
+  assert.deepEqual(s.own, [{ source: own, names: ["22-A", "22-B"] }]);
+  assert.deepEqual(s.elsewhere, [{ source: shadow, names: ["22-C"] }]);
+});
+
+test("each excluded sample is counted once, under the tier that decides it", () => {
+  const keep = new Set(["a", "b", "c", "d", "e", "f"]);
+  const tiers = {
+    blocklist: mapOf(["a", "b"]),
+    step1Excluded: mapOf(["b", "c", "d"]),
+    buildExcluded: mapOf(["c", "e"]),
+    panelAccessions: mapOf(["d"]),
+  };
+  const r = exclusionReasons(keep, tiers);
+  // a, b: remove list (b is in Step 1 too). c: Step 1 (and build). d: Step 1
+  // but a panel exempts it. e: build. f: compared.
+  assert.deepEqual(r, { blocklist: 2, step1: 1, build: 1 });
+  assert.equal(r.blocklist + r.step1 + r.build,
+               keep.size - comparisonSamples(keep, tiers).length);
 });
 
 if (!process.exitCode) console.log(`step2 selection: ${passed} tests passed`);

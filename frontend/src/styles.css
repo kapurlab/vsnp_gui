@@ -525,6 +525,22 @@ label {
   font-size: 12px;
 }
 
+/* The same list drawn a window at a time (VirtualRows). Its box keeps the
+   ul's look; the gap between rows is inside each row, so a row's height is
+   the whole step from one row to the next. */
+.step1-status .step1-vlist {
+  max-height: 240px;
+  padding: 0 6px 0 0;
+}
+.step1-status .step1-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  padding-bottom: 8px;
+}
+
 .step1-status .sample-name {
   font-weight: 600;
   font-size: 12px;
@@ -1847,6 +1863,11 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
    selected and copied. The controls here reset the global button look (accent
    fill, lift on hover), which is for actions, not for these. */
 .sample-row { cursor: pointer; }
+/* Drawn a window at a time (VirtualRows.jsx), which places each row from one
+   measured height, so a closed row is always that height: a row with groups
+   or a metadata name (sans-serif) drew 20 px and one without 18 px. One line
+   height for every font in it, and the taller of the two. */
+.s2-vrows .sample-row { height: 2em; line-height: 1.5; }
 .sample-row:hover, .sample-row.is-open { background: var(--panel-2); }
 /* The row's ▸ exists only on the row under the pointer and on an open row. A
    box on every row — even a pseudo-element, which is no DOM node but is still
@@ -1955,3 +1976,131 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
 .group-chip.is-active { background: var(--accent); color: var(--accent-text); }
 .group-chip.is-active:hover { background: var(--accent); }
 .group-chip.is-active .group-chip-copy.is-done { color: var(--accent-text); }
+
+/* --- The Step 2 sample list's box, and the same box expanded --------------
+   Expanded, it is drawn over most of the window (the page's 1400 px column
+   does not bound it) with the page dimmed behind, like the other modals; the
+   rows take whatever height the header leaves. Esc or Collapse puts it back. */
+.s2-list-panel {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.s2-list-panel.is-expanded {
+  position: fixed;
+  inset: 16px;
+  /* Under the modals (.modal-backdrop is 50), so one opened from anywhere
+     still comes up on top of it. */
+  z-index: 45;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+}
+.s2-list-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  background: rgba(15, 23, 42, 0.35);
+}
+.s2-list-titlebar {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+.s2-list-titlebar .muted { font-size: 12px; }
+.s2-list-head {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface, var(--panel-2));
+}
+.s2-list-filterrow { display: flex; align-items: center; gap: 6px; }
+/* The filter box, with a × at its right end while it holds text. */
+.s2-filter { position: relative; flex: 1 1 auto; min-width: 0; display: flex; }
+.s2-filter input { flex: 1 1 auto; min-width: 0; width: 100%; box-sizing: border-box; }
+.s2-filter-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 20px;
+  text-align: center;
+  cursor: pointer;
+  box-shadow: none;
+}
+.s2-filter-clear:hover:not(:disabled) {
+  transform: translateY(-50%);
+  box-shadow: none;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.s2-filter-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.s2-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  font-size: 0.8em;
+}
+.s2-expand svg { width: 13px; height: 13px; }
+.s2-list-fact {
+  margin-top: 4px;
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 0.8em;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.s2-list-fact code { font-size: 0.95em; }
+.s2-list-fact.is-warn { color: var(--badge-warning-fg, #92400e); }
+.s2-list-fact.is-failed { color: var(--danger, #a94442); }
+.s2-list-status { margin-top: 2px; font-size: 1.1em; }
+.s2-retry { padding: 1px 8px; font-size: 0.95em; margin-left: 2px; }
+.s2-list-bar { font-size: 0.8em; background: var(--surface, var(--panel)); }
+.s2-count-link {
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  padding: 0 2px;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  box-shadow: none;
+}
+.s2-count-link:hover:not(:disabled) { transform: none; box-shadow: none; text-decoration-style: solid; }
+.s2-count-link[aria-pressed="true"] { background: var(--panel-2); font-weight: 700; text-decoration: none; }
+.s2-count-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The notes about the remove list sit inside the box, not against its edge. */
+.s2-list-panel > .note {
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.s2-list-panel > .note.warning { border-width: 0 0 1px; border-radius: 0; }
+.s2-list-rows {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 0.8em;
+  font-family: monospace;
+}
+.s2-list-panel.is-expanded .s2-list-rows { flex: 1 1 auto; min-height: 0; }
+.s2-list-panel.is-expanded .s2-list-head,
+.s2-list-panel.is-expanded .s2-list-bar,
+.s2-list-panel.is-expanded > .note { flex-shrink: 0; }

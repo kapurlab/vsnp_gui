@@ -8,7 +8,9 @@ import Elapsed from "./Elapsed.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
 import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList,
-         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch } from "./step2Selection.js";
+         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch,
+         resolveBlocklist } from "./step2Selection.js";
+import VirtualRows from "./VirtualRows.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -249,6 +251,23 @@ function Step2EmptyPane({ reason, runId, runTitle, jumpTitle, busy, onResume, on
   );
 }
 
+// The Step 2 sample list's requests, as the list names them while it waits.
+const STEP2_LOAD_LABELS = {
+  samples: "the samples in vcf_database",
+  remove: "the remove list",
+  step1: "the Step 1 exclusions",
+  ticked: "this list's ticks",
+  panelAcc: "the reference databases' samples",
+  panels: "the reference databases",
+  names: "the metadata names",
+};
+
+// ["a"] -> "a", ["a", "b"] -> "a and b", ["a", "b", "c"] -> "a, b and c".
+function joinWords(words) {
+  if (words.length < 2) return words.join("");
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
 // Why the remove list holds a sample back, short enough to sit after its name.
 // "blocked (reference)" was the whole of it before, and could not be checked
 // against anything — see blockReason in step2Selection.js. The row comes
@@ -274,6 +293,21 @@ const CopyIcon = () => (
     strokeLinecap="round" strokeLinejoin="round">
     <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
     <path d="M10.5 5.5V4A1.5 1.5 0 0 0 9 2.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" />
+  </svg>
+);
+
+// Four corners out / in: the sample list over most of the window, and back.
+const ExpandIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"
+    strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" />
+  </svg>
+);
+
+const CollapseIcon = () => (
+  <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6"
+    strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5" />
   </svg>
 );
 
@@ -437,7 +471,8 @@ function runStatus({ leftOut, mode, blockWhy, refName, refDir, qcExcluded, keptB
 // does claim. The box is the build list's own Exclude box (tier C), so a tick
 // here and a tick there are the same tick.
 function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, meta, dbFolderName,
-                              groupsByFile, groupsNote, activeGroup, onToggle, onSetMany, onCopy, onGroup }) {
+                              groupsByFile, groupsNote, activeGroup, onToggle, onSetMany, onCopy, onGroup,
+                              ready = true }) {
   const names = [...new Set(samples.map((s) => s.sample))];
   // Rows opened to show everything (SampleDetail), as in the sample list.
   const [openRows, setOpenRows] = useState(() => new Set());
@@ -463,13 +498,13 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
       </summary>
       <div style={{display:"flex", flexWrap:"wrap", gap:"6px", margin:"6px 0"}}>
         {compared.length > 0 ? (
-          <button type="button" className="ghost action" onClick={() => onSetMany(compared, true)}
+          <button type="button" className="ghost action" disabled={!ready} onClick={() => onSetMany(compared, true)}
             title="Tick Exclude for every one of these that this run would compare">
             {compared.length === 1 ? "Exclude it" : `Exclude all ${compared.length}`}
           </button>
         ) : null}
         {ticked.length > 0 ? (
-          <button type="button" className="ghost action" onClick={() => onSetMany(ticked, false)}
+          <button type="button" className="ghost action" disabled={!ready} onClick={() => onSetMany(ticked, false)}
             title="Untick Exclude for every one of these you excluded">
             {ticked.length === 1 ? "Put it back" : `Put back all ${ticked.length}`}
           </button>
@@ -482,9 +517,15 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
       <div style={{fontFamily:"sans-serif", color:"var(--muted)", marginBottom:"2px"}}>
         Tick a sample to leave it out of this run.
       </div>
-      <div style={{maxHeight:"220px", overflowY:"auto", border:"1px solid var(--border)", borderRadius:"4px",
-                   background:"var(--panel)", fontFamily:"monospace", fontSize:"0.95em", color:"var(--text)"}}>
-        {samples.map((s) => {
+      {/* A window at a time (VirtualRows): on a project of imported VCFs every
+          one of them can be here, and a closed <details> still holds its rows. */}
+      <VirtualRows
+        style={{maxHeight:"220px", overflowY:"auto", border:"1px solid var(--border)", borderRadius:"4px",
+                background:"var(--panel)", fontFamily:"monospace", fontSize:"0.95em", color:"var(--text)"}}
+        items={samples}
+        itemKey={(s) => s.filename}
+        isOpen={(s) => openRows.has(s.filename)}
+        renderItem={(s) => {
           const state = stateOf(s.sample);
           const reason = state === "blocklist" ? blockReason(s.sample, where, sources) : null;
           const out = state !== "compared";
@@ -496,7 +537,7 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
           const open = openRows.has(s.filename);
           const rowGroups = groupsByFile ? groupsByFile[s.filename] : null;
           return (
-            <React.Fragment key={s.filename}>
+            <>
             <div className={`sample-row${open ? " is-open" : ""}`}
               onClick={(e) => {
                 if (e.target.closest("input, button, a")) return;
@@ -508,7 +549,7 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
               <input
                 type="checkbox"
                 checked={out}
-                disabled={state === "blocklist" || state === "step1"}
+                disabled={state === "blocklist" || state === "step1" || !ready}
                 onChange={(e) => onToggle(s.sample, e.target.checked)}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); toggleRow(s.filename); } }}
                 style={{flexShrink:0}}
@@ -544,10 +585,10 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
                 onGroup={onGroup}
               />
             ) : null}
-            </React.Fragment>
+            </>
           );
-        })}
-      </div>
+        }}
+      />
     </details>
   );
 }
@@ -851,6 +892,8 @@ export default function App() {
   const [step2RefAuditBusy, setStep2RefAuditBusy] = useState(false);
   const [step2RefFixBusy, setStep2RefFixBusy] = useState("");
   const [vcfSourceFilter, setVcfSourceFilter] = useState("");
+  // The sample list's filter box, so its clear button can hand focus back.
+  const vcfSourceFilterRef = useRef(null);
   const [vcfSourceOpen, setVcfSourceOpen] = useState(false);
   // Rows of the Step 2 sample list opened to show everything (SampleDetail).
   const [step2OpenRows, setStep2OpenRows] = useState(() => new Set());
@@ -860,6 +903,18 @@ export default function App() {
   // folder holds: samples whose source is unticked are hidden by default and
   // revealed struck through by this toggle (the files themselves stay put).
   const [vcfSourceShowLeftOut, setVcfSourceShowLeftOut] = useState(false);
+  // Show only the samples one reason holds back ("remove" | "step1" |
+  // "ticked"), picked from the counts above the list; "" shows them all.
+  const [vcfSourceOnly, setVcfSourceOnly] = useState("");
+  // The sample list drawn over most of the window instead of in its 320 px
+  // box, for reading a big set. Esc, or Collapse, puts it back.
+  const [step2ListExpanded, setStep2ListExpanded] = useState(false);
+  // What the sample list is still waiting for, and what could not be read:
+  // {project, since, pending: {key: n}, failed: {key: reason}, done: {key:
+  // true}}. `since`
+  // is when the oldest of the pending requests started, so the counter runs
+  // from the click and does not restart as each request lands.
+  const [step2ListLoad, setStep2ListLoad] = useState(null);
   // Step 2 build-list exclusions (separate from Step 1 QC exclusions): a map
   // of {sampleName: true} for samples checked "Exclude" in the Build VCF set
   // list, plus a sample->display-label map for showing reference metadata.
@@ -889,6 +944,9 @@ export default function App() {
   // metadata through the same index (see /name-aliases) — the label beside
   // each sample in the Step 2 lists.
   const [projectNameDisplay, setProjectNameDisplay] = useState({});
+  // Where those names came from: {project, file, rows}. The list says it, so
+  // "no metadata file" and "a file that names none of these" are told apart.
+  const [projectNameSource, setProjectNameSource] = useState(null);
   // Defining-SNP groups per VCF in vcf_database (/step2/sample-groups), shown
   // in the Step 2 sample list and matched by its filter. Off until asked for:
   // the first look reads every VCF. The choice is remembered per browser.
@@ -896,7 +954,11 @@ export default function App() {
     try { return window.localStorage.getItem("vsnp_gui.step2.showGroups") === "1"; } catch { return false; }
   });
   const [sampleGroups, setSampleGroups] = useState(null);
-  const [sampleGroupsBusy, setSampleGroupsBusy] = useState(false);
+  // {project, since}: when the wait for that project's groups began (epoch
+  // ms), from the tick or the change that asks again until they land. The
+  // status's counter runs from it, so it starts on the click, runs on across
+  // every request of a long first read, and survives the list being closed.
+  const [sampleGroupsWait, setSampleGroupsWait] = useState(null);
   const sampleGroupsGenRef = useRef(0);
   // Accessions available from an enabled reference panel — these override a
   // Step 1 exclusion (an external panel VCF isn't a Step 1 sample), so the build
@@ -1520,18 +1582,30 @@ export default function App() {
     ]
   );
 
+  // The remove list as vsnp3 applies it to this set. An entry can name the
+  // VCF file (X_zc.vcf, X_zc) rather than the sample, and vsnp3 removes the
+  // sample either way; the pane looked entries up by sample name, so those
+  // samples read as compared while every run left them out. Every tier-A
+  // question below asks these two, never the names as written.
+  const step2BlockResolved = useMemo(
+    () => resolveBlocklist(vcfSourceSamples, step2Blocklist, step2BlocklistWhere),
+    [vcfSourceSamples, step2Blocklist, step2BlocklistWhere]
+  );
+  const step2Blocked = step2BlockResolved.blocked;
+  const step2BlockedWhere = step2BlockResolved.where;
+
   // What vsnp3 will actually read: the selection above minus the three
   // exclusion tiers. Everything on screen counts THIS, never `keep` — `keep`
   // knows only about the source ticks, which is how a comparison the user had
   // narrowed to 25 samples still announced 8,607.
   const step2ComparisonSamples = useMemo(
     () => comparisonSamples(step2RunSelection.keep, {
-      blocklist: step2Blocklist,
+      blocklist: step2Blocked,
       step1Excluded: step2QcExcluded,
       buildExcluded: step2BuildExcluded,
       panelAccessions: step2PanelAccessions,
     }),
-    [step2RunSelection, step2Blocklist, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
+    [step2RunSelection, step2Blocked, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
   );
 
   // Unclaimed VCFs that this run actually compares. The raw unclaimed set is
@@ -1562,12 +1636,12 @@ export default function App() {
   // under the tier that decides it.
   const step2ExclusionReasons = useMemo(
     () => exclusionReasons(step2RunSelection.keep, {
-      blocklist: step2Blocklist,
+      blocklist: step2Blocked,
       step1Excluded: step2QcExcluded,
       buildExcluded: step2BuildExcluded,
       panelAccessions: step2PanelAccessions,
     }),
-    [step2RunSelection, step2Blocklist, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
+    [step2RunSelection, step2Blocked, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
   );
 
   // Groups for the rows, when shown and for this project.
@@ -1587,23 +1661,58 @@ export default function App() {
   // Another project's rows are other rows.
   useEffect(() => { setStep2OpenRows(new Set()); }, [selectedProject]);
 
+  // The expanded list: Esc puts it back, the page behind it stays still, and
+  // it goes when the list is hidden. Only while the list is really on screen:
+  // a project that vanished under it (loadAll deselects it) must not leave the
+  // page locked with nothing drawn.
+  const step2ListExpandedShown = step2ListExpanded && vcfSourceOpen && vcfSourceSamples.length > 0
+    && Boolean(selectedProject);
   useEffect(() => {
-    if (!sampleGroupsOn || !selectedProject) return undefined;
+    if (!step2ListExpandedShown) return undefined;
+    const onKey = (e) => { if (e.key === "Escape") setStep2ListExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    const body = document.body;
+    const before = body.style.overflow;
+    body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); body.style.overflow = before; };
+  }, [step2ListExpandedShown]);
+  useEffect(() => { if (!vcfSourceOpen) setStep2ListExpanded(false); }, [vcfSourceOpen]);
+  useEffect(() => { setStep2ListExpanded(false); }, [selectedProject]);
+
+  useEffect(() => {
+    // Unticked, nothing is awaited, so the next tick counts from 0s.
+    if (!sampleGroupsOn || !selectedProject) { setSampleGroupsWait(null); return undefined; }
+    // Claimed now, not when the request goes out: a load still asking for an
+    // older setting stops, and can no longer end this wait. The wait starts
+    // now too, so the counter is there on the click; a change mid-wait
+    // carries the same wait on.
+    const gen = ++sampleGroupsGenRef.current;
+    setSampleGroupsWait((w) => (w && w.project === selectedProject ? w : { project: selectedProject, since: Date.now() }));
     // A beat after the list lands, so a project switch's own requests reach
     // shared storage first.
-    const t = setTimeout(() => { loadSampleGroups(); }, 600);
+    const t = setTimeout(() => { loadSampleGroups(gen); }, 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sampleGroupsOn, selectedProject, vcfSourceSamples, s2QualThreshold, s2MqThreshold, s2NoFilters, s2HashGroups]);
 
+  const sampleGroupsSince = sampleGroupsOn && sampleGroupsWait && sampleGroupsWait.project === selectedProject
+    ? sampleGroupsWait.since : 0;
   const sampleGroupsStatus = (() => {
     if (!sampleGroupsOn) return "the defining-SNP groups each sample falls into, for filtering";
     const g = sampleGroups && sampleGroups.project === selectedProject ? sampleGroups : null;
-    if (!g) return sampleGroupsBusy ? "reading VCFs…" : "";
-    if (!g.available) return `Groups unavailable: ${g.reason || "unknown reason"}.`;
-    if (g.pending) {
-      return `Reading VCFs for groups: ${(g.total - g.pending).toLocaleString()} of ${g.total.toLocaleString()}… (once only; later looks are quick)`;
+    // The standard counter, for as long as the groups are awaited.
+    const counter = sampleGroupsSince ? <> <Elapsed since={sampleGroupsSince} /></> : null;
+    if (g && g.available && g.pending) {
+      const done = `${(g.total - g.pending).toLocaleString()} of ${g.total.toLocaleString()}`;
+      // Every round the pane asks has gone by: say it stopped, not "…".
+      if (!counter) return `Read ${done} VCFs for groups, then stopped asking. Untick and tick Show groups to read the rest.`;
+      return <>Reading VCFs for groups: {done}…{counter} (once only; later looks are quick)</>;
     }
+    // Nothing newer to show yet: the first look, or one after a change (the
+    // rows keep the last look's groups until it lands).
+    if (counter) return <>{g ? "Updating groups…" : "Reading VCFs for groups…"}{counter}</>;
+    if (!g) return "";
+    if (!g.available) return `Groups unavailable: ${g.reason || "unknown reason"}.`;
     const found = new Set();
     Object.values(g.groups || {}).forEach((gs) => gs.forEach((x) => found.add(x)));
     const file = String(g.define_filter || "").split("/").pop();
@@ -1617,8 +1726,8 @@ export default function App() {
   // above all, the ones only a copy of the list outside the reference's own
   // folder holds back, which nobody finds by opening the reference's list.
   const step2BlockSummary = useMemo(
-    () => blocklistSummary(step2RunSelection.keep, step2BlocklistWhere, step2BlocklistSources),
-    [step2RunSelection, step2BlocklistWhere, step2BlocklistSources]
+    () => blocklistSummary(step2RunSelection.keep, step2BlockedWhere, step2BlocklistSources),
+    [step2RunSelection, step2BlockedWhere, step2BlocklistSources]
   );
 
   // Why Step 2 cannot run, as one string — so the button, its tooltip and the
@@ -1628,6 +1737,51 @@ export default function App() {
   // particular was invisible, because the note explaining it renders only in
   // the Step 1 branch that a project-level reference replaces. Empty string =
   // nothing blocking. First reason wins.
+  // What the sample list is still reading, and what failed, for this project.
+  const step2Load = step2ListLoad && step2ListLoad.project === selectedProject ? step2ListLoad : null;
+  // "list" is the whole cascade (loadVcfSourceSamples), held only so the
+  // counter keeps its start; it is never a thing the list names.
+  const step2LoadPending = step2Load ? Object.keys(step2Load.pending).filter((k) => k !== "list") : [];
+  const step2LoadFailed = step2Load ? step2Load.failed : {};
+  // The requests whose answers decide what a run compares. The metadata names
+  // are only labels, so a run need not wait for them.
+  const step2RunLoadKeys = ["samples", "remove", "step1", "ticked", "panelAcc", "panels"];
+  // A tick saves the whole set of ticks, so none may be made before the saved
+  // ones have arrived: one made against an empty set would overwrite them.
+  const step2TicksReady = Boolean(step2Load && step2Load.done && step2Load.done.ticked
+    && !step2LoadPending.includes("ticked") && !step2LoadFailed.ticked);
+  // What the sample list is waiting for, with the standard counter, and what
+  // it could not read, with a way to ask again. Shown in the list's header
+  // when it is open, and under its button when it is not, so a failure is
+  // never hidden behind a closed list (or a listing that never arrived).
+  const step2LoadFailedKeys = Object.keys(step2LoadFailed);
+  const step2ListStatusLines = (
+    <>
+      {step2LoadPending.length > 0 ? (
+        <div className="s2-list-fact">
+          Still reading {joinWords(step2LoadPending.map((k) => STEP2_LOAD_LABELS[k] || k))}…{" "}
+          <Elapsed since={step2Load.since} />
+          {step2LoadPending.some((k) => k !== "names")
+            ? " The marks and counts below can still change."
+            : ""}
+        </div>
+      ) : null}
+      {step2LoadFailedKeys.length > 0 ? (
+        <div className="s2-list-fact is-failed">
+          Could not read {joinWords(step2LoadFailedKeys.map((k) => STEP2_LOAD_LABELS[k] || k))}{" "}
+          ({step2LoadFailed[step2LoadFailedKeys[0]]}).{" "}
+          {step2LoadFailed.remove ? "Samples on the remove list are not marked, so the counts may be too high. " : ""}
+          {step2LoadFailed.names ? "Samples show without their metadata names. " : ""}
+          {step2LoadFailed.ticked ? "Ticks can be made again once the saved ones are read. " : ""}
+          {step2LoadFailedKeys.some((k) => step2RunLoadKeys.includes(k)) ? "Run waits until it is read. " : ""}
+          <button type="button" className="ghost action s2-retry" onClick={() => loadVcfSourceSamples()}>
+            Try again
+          </button>
+        </div>
+      ) : null}
+    </>
+  );
+
   const step2RunBlock = useMemo(() => {
     if (!selectedProject) return "Select a project first.";
     if (!settingsReady) return "Set the vSNP3 path and Projects root in Settings first.";
@@ -1636,6 +1790,20 @@ export default function App() {
     }
     const inSet = step2VcfCount > 0 || Boolean(selected && selected.step2_vcfs > 0);
     if (!inSet) return "The comparison set is empty — press Build comparison set above.";
+    // A run sends what the list holds, and the list's Step 1 exclusions REPLACE
+    // the stored ones: a Run clicked before they arrived, or after they failed,
+    // compared samples the list would have shown as held back.
+    // A failure first: it is the one that needs doing something about.
+    const failed = step2RunLoadKeys.filter((k) => step2LoadFailed[k]);
+    if (failed.length) {
+      return `Could not read ${joinWords(failed.map((k) => STEP2_LOAD_LABELS[k]))} `
+        + `(${step2LoadFailed[failed[0]]}). Press Try again in the sample list below, or reload the page.`;
+    }
+    const waiting = step2RunLoadKeys.filter((k) => step2LoadPending.includes(k));
+    if (waiting.length) {
+      return `Still reading ${joinWords(waiting.map((k) => STEP2_LOAD_LABELS[k]))}; `
+        + "Run waits so that it compares what the sample list shows.";
+    }
     if (step2VcfCount > 0 && step2RunSelection.keep.size === 0) {
       return step2Mode === "list"
         ? "None of the pasted sample names matched a sample in the comparison set."
@@ -1680,7 +1848,7 @@ export default function App() {
   }, [
     selectedProject, settingsReady, reference, projectReference, selected,
     step2VcfCount, step2RunSelection, step2ComparisonSamples, step2Mode,
-    step2RefAudit, step2RefAuditBusy, step2AmbiguousSamples, vcfsFolderName,
+    step2RefAudit, step2RefAuditBusy, step2AmbiguousSamples, vcfsFolderName, step2Load,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -2559,6 +2727,22 @@ export default function App() {
     setVcfSourceSamples([]);
     setVcfSourceFilter("");
     setVcfSourceOpen(false);
+    setVcfSourceOnly("");
+    setStep2ListExpanded(false);
+    // Nothing of the last project's remove list, exclusions or metadata names
+    // may stand in for this one's while they load: the list says it is still
+    // reading them instead, and Run waits for them.
+    setStep2Blocklist({});
+    setStep2BlocklistIneffective([]);
+    setStep2BlocklistSources([]);
+    setStep2BlocklistWhere({});
+    setStep2BlocklistRefDir("");
+    setStep2QcExcluded({});
+    setStep2BuildExcluded({});
+    setStep2PanelAccessions({});
+    setProjectNameAliases({});
+    setProjectNameDisplay({});
+    setProjectNameSource(null);
     // Clear the import-sources textarea on project change. Otherwise paths
     // from a previous project's import (a different reference, possibly
     // different shared DBs) survive the switch and get re-injected into
@@ -3433,25 +3617,87 @@ export default function App() {
     }
   }
 
+  // The sample list's requests, tracked, so the list can say what it is still
+  // waiting for — with the standard counter — and what could not be read.
+  // They used to land in silence: on shared storage the metadata names came
+  // half a minute after the rows, and a remove list that failed to load
+  // looked exactly like one that removes nothing. `pending` counts, so a key
+  // asked for twice is waited on until both answers are in.
+  function step2LoadBegin(proj, key) {
+    setStep2ListLoad((prev) => {
+      const same = prev && prev.project === proj;
+      const waiting = same && Object.keys(prev.pending).length > 0;
+      const pending = { ...(same ? prev.pending : {}) };
+      pending[key] = (pending[key] || 0) + 1;
+      const failed = { ...(same ? prev.failed : {}) };
+      delete failed[key];
+      const done = { ...(same ? prev.done : {}) };
+      return { project: proj, since: waiting ? prev.since : Date.now(), pending, failed, done };
+    });
+  }
+
+  function step2LoadEnd(proj, key, error = "") {
+    setStep2ListLoad((prev) => {
+      if (!prev || prev.project !== proj) return prev;
+      const pending = { ...prev.pending };
+      if (pending[key] > 1) pending[key] -= 1; else delete pending[key];
+      const failed = { ...prev.failed };
+      const done = { ...prev.done };
+      if (error) failed[key] = error; else { delete failed[key]; done[key] = true; }
+      return { ...prev, pending, failed, done };
+    });
+  }
+
+  // One tracked GET: the parsed body, or null when it failed (the reason is
+  // kept for the list to show) or the project changed while it was out.
+  async function step2ListFetch(proj, key, url) {
+    step2LoadBegin(proj, key);
+    let error = "";
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        error = body && body.detail ? `HTTP ${res.status}: ${body.detail}` : `HTTP ${res.status}`;
+        return null;
+      }
+      const data = await res.json();
+      return selectedProjectRef.current === proj ? data : null;
+    } catch (e) {
+      error = (e && e.message) || String(e);
+      return null;
+    } finally {
+      step2LoadEnd(proj, key, error);
+    }
+  }
+
   async function loadVcfSourceSamples() {
     if (!selectedProject) return;
     const proj = selectedProject;
-    const res = await fetch(`${API_BASE}/api/projects/${proj}/step2/vcf_database/samples`);
-    if (selectedProjectRef.current !== proj) return;   // the user has moved on
-    if (res.ok) {
-      const samples = await res.json();
-      setVcfSourceSamples(samples);
-      // step2VcfCount has ONE writer (loadStep2Outputs, from step2/vcf_count).
-      // Setting it here as well made the headline flip between two populations
-      // depending on which request answered last.
+    // Held from here until the requests after the listing have gone out, so
+    // the wait is one wait: without it, the counter went back to 0s when the
+    // listing landed and the remove list and metadata names had yet to start.
+    step2LoadBegin(proj, "list");
+    try {
+      const samples = await step2ListFetch(proj, "samples", `${API_BASE}/api/projects/${proj}/step2/vcf_database/samples`);
+      if (selectedProjectRef.current !== proj) return;   // the user has moved on
+      if (samples) {
+        setVcfSourceSamples(samples);
+        // step2VcfCount has ONE writer (loadStep2Outputs, from step2/vcf_count).
+        // Setting it here as well made the headline flip between two populations
+        // depending on which request answered last.
+      }
+      // Each begins its own wait before its first await, so all are pending
+      // by the time the cascade's own hold is let go.
+      loadStep2ReferenceAudit();
+      loadStep2BuildExclusions();
+      loadStep2QcExclusions();
+      loadStep2Blocklist();
+      loadStep2PanelAccessions();
+      loadProjectNameAliases();
+      loadStep2Panels();
+    } finally {
+      step2LoadEnd(proj, "list");
     }
-    loadStep2ReferenceAudit();
-    loadStep2BuildExclusions();
-    loadStep2QcExclusions();
-    loadStep2Blocklist();
-    loadStep2PanelAccessions();
-    loadProjectNameAliases();
-    loadStep2Panels();
   }
 
   // Per-panel sample lists for every reference DB matching this project's
@@ -3459,30 +3705,25 @@ export default function App() {
   // an unticked panel, the run-time "leave these out" set.
   async function loadStep2Panels() {
     if (!selectedProject) { setStep2PanelSamples({}); return; }
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/panels`);
-      if (res.ok) {
-        const data = await res.json();
-        const map = {};
-        (data.panels || []).forEach((p) => { map[p.path] = p.samples || []; });
-        setStep2PanelSamples(map);
-      }
-    } catch (e) { /* best-effort; the Build tab falls back to sample_count */ }
+    const proj = selectedProject;
+    // On failure the Build tab falls back to sample_count; the list says so.
+    const data = await step2ListFetch(proj, "panels", `${API_BASE}/api/projects/${proj}/step2/panels`);
+    if (!data) return;
+    const map = {};
+    (data.panels || []).forEach((p) => { map[p.path] = p.samples || []; });
+    setStep2PanelSamples(map);
   }
 
   // Pull the Step 1 QC exclusions so the build list can pre-check (and lock)
   // samples the user already dropped in Step 1 Results.
   async function loadStep2QcExclusions() {
     if (!selectedProject) { setStep2QcExcluded({}); return; }
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/qc_exclude`);
-      if (res.ok) {
-        const data = await res.json();
-        const map = {};
-        (data.samples || []).forEach((s) => { map[s] = true; });
-        setStep2QcExcluded(map);
-      }
-    } catch (e) { /* best-effort; the build still works without it */ }
+    const proj = selectedProject;
+    const data = await step2ListFetch(proj, "step1", `${API_BASE}/api/projects/${proj}/qc_exclude`);
+    if (!data) return;
+    const map = {};
+    (data.samples || []).forEach((s) => { map[s] = true; });
+    setStep2QcExcluded(map);
   }
 
   // Tier A: the reference-level permanent blocklist for this project's
@@ -3495,44 +3736,38 @@ export default function App() {
       setStep2BlocklistRefDir("");
       return;
     }
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/blocklist`);
-      if (res.ok) {
-        const data = await res.json();
-        const map = {};
-        (data.samples || []).forEach((s) => { map[s] = true; });
-        setStep2Blocklist(map);
-        setStep2BlocklistIneffective(data.ineffective || []);
-        setStep2BlocklistSources(data.sources || []);
-        setStep2BlocklistWhere(data.where || {});
-        setStep2BlocklistRefDir(data.reference_dir || "");
-      }
-    } catch (e) { /* best-effort; the build still works without it */ }
+    const proj = selectedProject;
+    const data = await step2ListFetch(proj, "remove", `${API_BASE}/api/projects/${proj}/step2/blocklist`);
+    if (!data) return;
+    const map = {};
+    (data.samples || []).forEach((s) => { map[s] = true; });
+    setStep2Blocklist(map);
+    setStep2BlocklistIneffective(data.ineffective || []);
+    setStep2BlocklistSources(data.sources || []);
+    setStep2BlocklistWhere(data.where || {});
+    setStep2BlocklistRefDir(data.reference_dir || "");
   }
 
   async function loadProjectNameAliases() {
     if (!selectedProject) { setProjectNameAliases({}); return; }
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(selectedProject)}/name-aliases`);
-      if (res.ok) {
-        const data = await res.json();
-        setProjectNameAliases(data.aliases || {});
-        setProjectNameDisplay(data.display || {});
-      }
-    } catch (e) { /* filters fall back to the names as stored */ }
+    const proj = selectedProject;
+    // On failure the filters fall back to the names as stored; the list says so.
+    const data = await step2ListFetch(proj, "names", `${API_BASE}/api/projects/${encodeURIComponent(proj)}/name-aliases`);
+    if (!data) return;
+    setProjectNameAliases(data.aliases || {});
+    setProjectNameDisplay(data.display || {});
+    setProjectNameSource({ project: proj, file: data.metadata_file || "", rows: data.metadata_rows || 0 });
   }
 
   // Read the groups, asking again while the backend still has VCFs to read
   // (each request reads for a bounded time, so none outlasts a proxy).
-  async function loadSampleGroups() {
+  // `gen` is the effect's claim: a newer one (another project, a changed
+  // threshold) supersedes this load; without it both would keep polling.
+  async function loadSampleGroups(gen) {
     const proj = selectedProject;
-    if (!proj) { setSampleGroups(null); return; }
-    // A newer request (another project, a changed threshold) supersedes this
-    // one; without the generation both would keep polling.
-    const gen = ++sampleGroupsGenRef.current;
     const current = () => gen === sampleGroupsGenRef.current && selectedProjectRef.current === proj;
-    setSampleGroupsBusy(true);
     try {
+      if (!proj) { setSampleGroups(null); return; }
       const qs = new URLSearchParams({
         qual_threshold: String(s2QualThreshold),
         mq_threshold: String(s2MqThreshold),
@@ -3554,7 +3789,8 @@ export default function App() {
     } catch (e) {
       if (current()) setSampleGroups({ project: proj, available: false, reason: String(e) });
     } finally {
-      if (current()) setSampleGroupsBusy(false);
+      // However the wait ends (groups, a refusal, an error), its counter stops.
+      if (current()) setSampleGroupsWait(null);
     }
   }
 
@@ -3570,28 +3806,24 @@ export default function App() {
   // Accessions backed by an enabled reference panel — override Step 1 exclusions.
   async function loadStep2PanelAccessions() {
     if (!selectedProject) { setStep2PanelAccessions({}); return; }
-    try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/panel-accessions`);
-      if (res.ok) {
-        const data = await res.json();
-        const map = {};
-        (data.samples || []).forEach((s) => { map[s] = true; });
-        setStep2PanelAccessions(map);
-      }
-    } catch (e) { /* best-effort */ }
+    const proj = selectedProject;
+    const data = await step2ListFetch(proj, "panelAcc", `${API_BASE}/api/projects/${proj}/step2/panel-accessions`);
+    if (!data) return;
+    const map = {};
+    (data.samples || []).forEach((s) => { map[s] = true; });
+    setStep2PanelAccessions(map);
   }
 
   // Step 2 build-list exclusions: a separate, Step-2-only removal set. Hydrate
   // from the backend so checkboxes survive reloads.
   async function loadStep2BuildExclusions() {
     if (!selectedProject) { setStep2BuildExcluded({}); return; }
-    const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/build-exclusions`);
-    if (res.ok) {
-      const data = await res.json();
-      const map = {};
-      (data.samples || []).forEach((s) => { map[s] = true; });
-      setStep2BuildExcluded(map);
-    }
+    const proj = selectedProject;
+    const data = await step2ListFetch(proj, "ticked", `${API_BASE}/api/projects/${proj}/step2/build-exclusions`);
+    if (!data) return;
+    const map = {};
+    (data.samples || []).forEach((s) => { map[s] = true; });
+    setStep2BuildExcluded(map);
   }
 
   async function _persistStep2BuildExclusions(map) {
@@ -3633,6 +3865,7 @@ export default function App() {
   }
 
   function setStep2BuildExcludedMany(samples, checked) {
+    if (!step2TicksReady) return;   // see step2TicksReady
     setStep2BuildExcluded((prev) => {
       const next = { ...prev };
       samples.forEach((s) => { next[s] = checked; });
@@ -7578,9 +7811,22 @@ export default function App() {
                 <div className="note"><span className="pulse-dot" /> Loading samples for {selectedProject}… <Elapsed /></div>
               ) : step1Status.length ? (
                 step1StatusFiltered.length ? (
-                <ul className="sample-list">
-                  {step1StatusFiltered.map((s) => (
-                    <li key={s.sample}>
+                // Drawn a window at a time (VirtualRows): a project whose 23,671
+                // imported VCFs each have a Step 1 folder put 166,000 elements on
+                // the page here, and every keystroke anywhere redrew them — 128 ms
+                // a key in the Step 2 filter, against 30 without them.
+                <VirtualRows
+                  className="sample-list step1-vlist"
+                  role="list"
+                  aria-label="Step 1 samples"
+                  items={step1StatusFiltered}
+                  itemKey={(s) => s.sample}
+                  isOpen={(s) => Boolean(s.reason)}
+                  tallRows={2}
+                  estimate={34}
+                  resetKey={step1SampleFilter.trim()}
+                  renderItem={(s) => (
+                    <div className="step1-row" role="listitem">
                       <span
                         className={`badge ${s.status}`}
                         title={
@@ -7612,9 +7858,9 @@ export default function App() {
                           Remove
                         </button>
                       </div>
-                    </li>
-                  ))}
-                </ul>
+                    </div>
+                  )}
+                />
                 ) : (
                   <div className="note">No samples match “{step1SampleFilter.trim()}”.</div>
                 )
@@ -9091,12 +9337,12 @@ export default function App() {
                       <Step2UnclaimedList
                         samples={step2UnclaimedRows}
                         tiers={{
-                          blocklist: step2Blocklist,
+                          blocklist: step2Blocked,
                           step1Excluded: step2QcExcluded,
                           buildExcluded: step2BuildExcluded,
                           panelAccessions: step2PanelAccessions,
                         }}
-                        where={step2BlocklistWhere}
+                        where={step2BlockedWhere}
                         sources={step2BlocklistSources}
                         refName={projectReference || reference}
                         refDir={step2BlocklistRefDir}
@@ -9106,6 +9352,7 @@ export default function App() {
                         groupsNote={`None at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}.`}
                         onToggle={toggleStep2BuildExcluded}
                         onSetMany={setStep2BuildExcludedMany}
+                        ready={step2TicksReady}
                         onCopy={copyText}
                         activeGroup={vcfSourceOpen ? vcfSourceFilter.trim() : ""}
                         onGroup={showStep2Group}
@@ -9365,11 +9612,21 @@ export default function App() {
                   </button>
                 ) : null}
                 {importStatus ? <div className="note">{importStatus}</div> : null}
-                {vcfSourceSamples.length > 0 && (
+                {(vcfSourceSamples.length > 0 || step2LoadPending.includes("samples") || step2LoadFailed.samples) && (
                   <div style={{marginTop:"6px"}} ref={step2ListRef}>
+                    {vcfSourceSamples.length === 0 ? (
+                      // The first look at a big set: nothing to browse until
+                      // the listing lands, so say that it is coming.
+                      step2LoadPending.includes("samples") ? (
+                        <div className="muted" style={{fontSize:"0.85em"}}>
+                          Reading the samples in {vcfsFolderName || "vcf_database"}…{" "}
+                          <Elapsed since={step2Load ? step2Load.since : undefined} />
+                        </div>
+                      ) : null
+                    ) : (
                     <button
                       className="ghost action"
-                      onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); }}
+                      onClick={() => { setVcfSourceOpen(o => !o); setVcfSourceFilter(""); setVcfSourceOnly(""); }}
                       style={{fontSize:"0.85em"}}
                     >
                       {vcfSourceOpen ? "▲ Hide" : "▼ Browse"}{" "}
@@ -9383,17 +9640,296 @@ export default function App() {
                         ? "samples from this run's ticked sources"
                         : `samples in ${vcfsFolderName || "vcf_database"}`}
                     </button>
-                    {vcfSourceOpen && (
-                      <div style={{marginTop:"6px", border:"1px solid var(--border)", borderRadius:"4px", overflow:"hidden"}}>
-                        <div style={{padding:"6px 8px", borderBottom:"1px solid var(--border)", background:"var(--surface)"}}>
+                    )}
+                    {!(vcfSourceOpen && vcfSourceSamples.length > 0)
+                      && (vcfSourceSamples.length > 0 || step2LoadFailed.samples) ? (
+                      <div className="s2-list-status">{step2ListStatusLines}</div>
+                    ) : null}
+                    {vcfSourceOpen && vcfSourceSamples.length > 0 && (() => {
+                      const dbName = vcfsFolderName || "vcf_database";
+                      const refName = projectReference || reference || "this reference";
+                      const q = vcfSourceFilter.trim().toLowerCase();
+                      const matching = q
+                        ? vcfSourceSamples.filter(s => nameMatches(s.sample, q) || s.filename.toLowerCase().includes(q)
+                            || groupMatches(s.filename, q))
+                        : vcfSourceSamples;
+                      // Untick a source and its VCFs leave the run, so they leave this
+                      // list too — showing them unmarked reads as "still included".
+                      // The files are untouched; the toggle brings them back struck through.
+                      const inRun = vcfSourceShowLeftOut
+                        ? matching
+                        : matching.filter(s => !step2LeftOutSet.has(s.sample));
+                      const listedTotal = vcfSourceShowLeftOut
+                        ? vcfSourceSamples.length
+                        : vcfSourceSamples.length - step2LeftOutSet.size;
+                      // Why a sample is held back, under the one reason that decides
+                      // it, in the order a run applies them: the remove list (nothing
+                      // here overrides it), then Step 1 Results, then a tick here.
+                      const reasonOf = (s) => {
+                        if (step2LeftOutSet.has(s.sample)) return "";
+                        if (step2Blocked[s.sample]) return "remove";
+                        if (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]) return "step1";
+                        if (step2BuildExcluded[s.sample]) return "ticked";
+                        return "";
+                      };
+                      const held = { remove: new Set(), step1: new Set(), ticked: new Set() };
+                      inRun.forEach((s) => { const r = reasonOf(s); if (r) held[r].add(s.sample); });
+                      const only = vcfSourceOnly && held[vcfSourceOnly] ? vcfSourceOnly : "";
+                      const filtered = only ? inRun.filter((s) => reasonOf(s) === only) : inRun;
+                      const narrowed = Boolean(q || only);
+                      // What the two bulk buttons would tick or untick: the shown
+                      // rows whose box can change (not the remove list, not Step 1
+                      // Results, not a source left unticked).
+                      const toggleable = [...new Set(filtered
+                        .filter(s => !step2LeftOutSet.has(s.sample) && !step2Blocked[s.sample]
+                          && !(step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))
+                        .map(s => s.sample))];
+                      const toExclude = toggleable.filter(n => !step2BuildExcluded[n]);
+                      const toInclude = toggleable.filter(n => step2BuildExcluded[n]);
+                      const fmt = (n) => n.toLocaleString();
+                      const HELD_LABEL = { remove: "on the remove list", step1: "excluded in Step 1", ticked: "ticked here" };
+                      const HELD_COLOR = { remove: "var(--warning, #8a6d3b)", step1: "var(--danger, #a94442)", ticked: "var(--danger, #a94442)" };
+                      // The hard filters, by count, so "Include all" plainly leaves them out.
+                      const stay = [
+                        held.remove.size ? `the ${fmt(held.remove.size)} on the remove list` : "",
+                        held.step1.size ? `the ${fmt(held.step1.size)} excluded in Step 1` : "",
+                      ].filter(Boolean);
+
+                      // --- What the list knows about itself, one line each ---
+                      const namesSrc = projectNameSource && projectNameSource.project === selectedProject ? projectNameSource : null;
+                      const loaded = (k) => Boolean(step2Load && step2Load.done && step2Load.done[k]
+                        && !step2LoadPending.includes(k) && !step2LoadFailed[k]);
+                      const namesKnown = Boolean(namesSrc) && loaded("names");
+                      const setNames = [...new Set(vcfSourceSamples.map((s) => s.sample))];
+                      const named = namesKnown ? setNames.filter((n) => projectNameDisplay[n]).length : 0;
+                      const metaFile = namesSrc ? String(namesSrc.file || "").split("/").pop() : "";
+                      const removeKnown = loaded("remove");
+                      const blockedInSet = setNames.filter((n) => step2Blocked[n]).length;
+                      const listedNames = Object.keys(step2Blocklist).length;
+                      const unmatchedNames = listedNames - step2BlockResolved.matched.size;
+                      const removeFiles = step2BlocklistSources.map((x) => x.path);
+
+                      const renderRow = (s) => {
+                        const lockedByBlocklist = !!step2Blocked[s.sample];
+                        const blockWhy = lockedByBlocklist
+                          ? blockReason(s.sample, step2BlockedWhere, step2BlocklistSources)
+                          : null;
+                        const inPanel = !!step2PanelAccessions[s.sample];
+                        // A reference-panel accession overrides a Step 1 exclusion (it's an
+                        // external panel VCF, not a Step 1 sample). Blocklist still wins.
+                        const qcExcludedRaw = !!step2QcExcluded[s.sample];
+                        const keptByPanel = qcExcludedRaw && inPanel && !lockedByBlocklist;
+                        const effectiveQc = qcExcludedRaw && !inPanel;
+                        const locked = lockedByBlocklist || effectiveQc; // tier A/B — not toggleable here
+                        const isExcluded = !!step2BuildExcluded[s.sample] || locked;
+                        // Only visible when the user asked to see what this run drops.
+                        const leftOut = step2LeftOutSet.has(s.sample);
+                        const struck = isExcluded || leftOut;
+                        const metaLabel = projectNameDisplay[s.sample];
+                        const rowGroups = sampleGroupsByFile ? sampleGroupsByFile[s.filename] : null;
+                        // The manifest only knows "step1" vs "imported", so the
+                        // badge used to read "ref db" for everything that was not
+                        // a Step 1 sample — including hand-copied VCFs and Step 1
+                        // samples whose folder was later removed. On a project
+                        // with no reference database configured at all, a list of
+                        // 185 rows every one of which claimed "ref db" was simply
+                        // false. Only a sample a configured database actually
+                        // holds gets that badge; the rest are "imported".
+                        //
+                        // "no Step 1 folder" is the warning's set exactly (unclaimedSamples):
+                        // "imported" alone also covered a VCF imported under the name of
+                        // one of this project's Step 1 samples, which box 1 does claim —
+                        // so pointing people at "imported" to find the unclaimed ones
+                        // pointed them at thousands of rows on a big set.
+                        const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
+                        const origin = s.source_type === "step1"
+                          ? "step1"
+                          : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no Step 1 folder" : "imported"));
+                        const palette = origin === "step1"
+                          ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
+                          : origin === "ref db"
+                            ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
+                            : origin === "no Step 1 folder"
+                              ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
+                              : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
+                        const originText = origin === "step1"
+                          ? "Collected from this project's Step 1."
+                          : origin === "ref db"
+                            ? "Held by a reference database configured for this project's reference."
+                            : origin === "no Step 1 folder"
+                              ? `No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${dbName}. No tick box above can drop it; tick the box on the left to leave it out.`
+                              : `Not recorded as collected from this project's Step 1 (imported, or copied into ${dbName} by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared.`;
+                        const open = step2OpenRows.has(s.filename);
+                        const src = String(s.source_path || "");
+                        // Only the rows in view are drawn (VirtualRows), so a row may
+                        // carry what it needs; the ▸ still shows on hover and on an
+                        // open row only (styles.css).
+                        const rowEl = (
+                        <div
+                          className={`sample-row${open ? " is-open" : ""}`}
+                          onClick={(e) => {
+                            // The checkbox and the chevron act for themselves; a
+                            // drag that selected text is a selection, not a click.
+                            if (e.target.closest("input, button, a")) return;
+                            if (selectionWithin(e.currentTarget)) return;
+                            toggleStep2Row(s.filename);
+                          }}
+                          style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}
+                        >
                           <input
-                            type="text"
-                            placeholder={sampleGroupsOn ? "Filter by name, metadata or group…" : "Filter by name or metadata…"}
-                            value={vcfSourceFilter}
-                            onChange={e => setVcfSourceFilter(e.target.value)}
-                            style={{width:"100%", boxSizing:"border-box", fontSize:"0.85em", padding:"3px 6px"}}
-                            autoFocus
+                            type="checkbox"
+                            checked={isExcluded}
+                            disabled={locked || leftOut || !step2TicksReady}
+                            onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
+                            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); toggleStep2Row(s.filename); } }}
+                            title={leftOut
+                              ? "Left out of this run — the source it came from is unticked above; tick that source to include it"
+                              : !step2TicksReady && !locked
+                              ? "Waiting for this list's saved ticks to load"
+                              : lockedByBlocklist
+                              ? "On the reference's remove_from_analysis list — click the row for the workbook and row"
+                              : keptByPanel
+                                ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
+                                : (effectiveQc
+                                  ? "Excluded in Step 1 Results — change it there to include in Step 2"
+                                  : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
+                            style={{flexShrink:0, cursor: (locked || leftOut || !step2TicksReady) ? "not-allowed" : "pointer"}}
                           />
+                          <span style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
+                            {/* Only the name is struck: a line through the reason
+                                made the one thing that explains the row the
+                                hardest part of it to read. */}
+                            <span style={{textDecoration: struck ? "line-through" : "none"}}>{s.sample}</span>
+                            {leftOut ? (
+                              <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic"}}> — source unticked, not in this run</span>
+                            ) : lockedByBlocklist ? (
+                              <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — {removeListLabel(blockWhy)}</span>
+                            ) : keptByPanel ? (
+                              <span style={{color:"var(--success, #2e7d32)", fontFamily:"sans-serif", fontStyle:"italic"}}> — in reference panel (kept despite Step 1 exclusion)</span>
+                            ) : effectiveQc ? (
+                              <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
+                            ) : null}
+                            {s.ambiguous ? (
+                              <span
+                                title="Two files in vcf_database claim this sample. They hold different calls, so a run refuses rather than letting directory order choose. Delete or rename the one you do not want."
+                                style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}
+                              > — two files for this sample</span>
+                            ) : null}
+                            {metaLabel && metaLabel !== s.sample && (
+                              <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
+                            )}
+                            {rowGroups && rowGroups.length ? (
+                              <span style={{color:"var(--accent)", fontFamily:"sans-serif", fontWeight:600}}> · {rowGroups.join(", ")}</span>
+                            ) : null}
+                          </span>
+                          <span
+                            title={originText}
+                            style={{
+                              flexShrink:0,
+                              fontSize:"0.8em",
+                              padding:"0 4px",
+                              borderRadius:"3px",
+                              background: palette.bg,
+                              color: palette.fg,
+                            }}
+                          >
+                            {origin}
+                          </span>
+                        </div>
+                        );
+                        if (!open) return rowEl;
+                        return (
+                        <>
+                          {rowEl}
+                          <SampleDetail
+                            sample={s.sample}
+                            file={s.filename}
+                            meta={metaLabel && metaLabel !== s.sample ? metaLabel : ""}
+                            groups={sampleGroupsByFile ? (rowGroups || []) : null}
+                            groupsNote={rowGroups
+                              ? `None at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}.`
+                              : "Not read yet."}
+                            run={runStatus({
+                              leftOut, mode: step2Mode, blockWhy,
+                              refName: projectReference || reference, refDir: step2BlocklistRefDir,
+                              qcExcluded: effectiveQc, keptByPanel,
+                              buildExcluded: !!step2BuildExcluded[s.sample],
+                            })}
+                            origin={originText}
+                            source={src && !src.endsWith(`/${dbName}/${s.filename}`) ? src : ""}
+                            activeGroup={vcfSourceFilter.trim()}
+                            onGroup={(g) => setVcfSourceFilter((f) => (f.trim().toLowerCase() === g.toLowerCase() ? "" : g))}
+                          />
+                        </>
+                        );
+                      };
+
+                      return (
+                      <>
+                      {step2ListExpandedShown ? (
+                        <div className="s2-list-backdrop" onClick={() => setStep2ListExpanded(false)} />
+                      ) : null}
+                      <div
+                        className={`s2-list-panel${step2ListExpandedShown ? " is-expanded" : ""}`}
+                        role={step2ListExpandedShown ? "dialog" : undefined}
+                        aria-modal={step2ListExpandedShown ? "true" : undefined}
+                        aria-label={step2ListExpandedShown ? `Samples in ${dbName}` : undefined}
+                      >
+                        {step2ListExpandedShown ? (
+                          <div className="s2-list-titlebar">
+                            <strong>{fmt(listedTotal)} samples in {dbName}</strong>
+                            <span className="muted">Esc or Collapse returns to the page</span>
+                          </div>
+                        ) : null}
+                        <div className="s2-list-head">
+                          <div className="s2-list-filterrow">
+                            <div className="s2-filter">
+                              <input
+                                ref={vcfSourceFilterRef}
+                                type="text"
+                                placeholder={sampleGroupsOn ? "Filter by name, metadata or group…" : "Filter by name or metadata…"}
+                                value={vcfSourceFilter}
+                                onChange={e => setVcfSourceFilter(e.target.value)}
+                                // Esc empties the box first, the way a search field does;
+                                // only an empty box lets it through to put the list back.
+                                onKeyDown={(e) => {
+                                  if (e.key === "Escape" && vcfSourceFilter) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setVcfSourceFilter("");
+                                  }
+                                }}
+                                style={{fontSize:"0.85em", padding:"3px 26px 3px 6px"}}
+                                autoFocus
+                              />
+                              {vcfSourceFilter ? (
+                                <button
+                                  type="button"
+                                  className="s2-filter-clear"
+                                  aria-label="Clear the filter"
+                                  title="Clear the filter (Esc)"
+                                  onClick={() => {
+                                    setVcfSourceFilter("");
+                                    if (vcfSourceFilterRef.current) vcfSourceFilterRef.current.focus();
+                                  }}
+                                >
+                                  ×
+                                </button>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              className="ghost action s2-expand"
+                              aria-pressed={step2ListExpandedShown}
+                              onClick={() => setStep2ListExpanded((x) => !x)}
+                              title={step2ListExpandedShown
+                                ? "Put the list back in its place on the page (Esc)"
+                                : "Show this list over most of the window, for reading a big set; Esc puts it back"}
+                            >
+                              {step2ListExpandedShown ? <CollapseIcon /> : <ExpandIcon />}
+                              {step2ListExpandedShown ? "Collapse" : "Expand"}
+                            </button>
+                          </div>
                           <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"8px", marginTop:"4px", fontFamily:"sans-serif", fontSize:"0.8em"}}>
                             <label className="checkbox" style={{margin:0}}
                               title="The groups each sample will fall into, read from its VCF by vsnp3's rules and the defining-SNP workbook, at the thresholds under Step 2 Options. The filter then matches a group name too.">
@@ -9410,9 +9946,44 @@ export default function App() {
                             </label>
                             <span className="muted">{sampleGroupsStatus}</span>
                           </div>
+                          {/* What is still on its way, with the standard counter.
+                              The rows are on screen before the remove list and the
+                              metadata names, and without this they looked final. */}
+                          {step2ListStatusLines}
+                          {namesKnown ? (
+                            !namesSrc.file ? (
+                              <div className="s2-list-fact">
+                                No metadata workbook (<code>*meta*.xlsx</code>) in {refName}’s folder, so samples show
+                                under their file names, as in vsnp3’s tables.
+                              </div>
+                            ) : named === 0 ? (
+                              <div className="s2-list-fact is-warn">
+                                <code>{metaFile}</code> ({fmt(namesSrc.rows)} row{namesSrc.rows === 1 ? "" : "s"}) names none of
+                                these {fmt(setNames.length)} samples. vsnp3 looks each VCF’s file name up in its first column
+                                (with or without <code>.vcf</code> and <code>_zc</code>), so its tables will show these under
+                                their file names too.
+                              </div>
+                            ) : (
+                              <div className="s2-list-fact">
+                                Metadata names for {fmt(named)} of {fmt(setNames.length)} samples, from <code>{metaFile}</code>.
+                              </div>
+                            )
+                          ) : null}
+                          {removeKnown && blockedInSet === 0 ? (
+                            removeFiles.length === 0 ? (
+                              <div className="s2-list-fact">No remove_from_analysis list for {refName}, so it leaves nothing out.</div>
+                            ) : (
+                              <div className="s2-list-fact">
+                                The remove_from_analysis list (<code style={{wordBreak:"break-all"}}>{removeFiles.join(", ")}</code>)
+                                names {fmt(listedNames)} sample{listedNames === 1 ? "" : "s"}, and none of them is a VCF in this set,
+                                so it leaves nothing out. vsnp3 matches a listed name to a VCF file named <code>NAME</code>,{" "}
+                                <code>NAME.vcf</code> or <code>NAME_zc.vcf</code>.
+                              </div>
+                            )
+                          ) : null}
                         </div>
                         {step2BlocklistIneffective.length ? (
-                          <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                          <div className="note warning" style={{fontSize:"0.82em"}}>
                             <strong>{step2BlocklistIneffective.length} entr{step2BlocklistIneffective.length === 1 ? "y" : "ies"} in
                             the reference’s remove_from_analysis list {step2BlocklistIneffective.length === 1 ? "is" : "are"} written
                             as a metadata name and will remove nothing.</strong> vsnp3 matches VCF file names, so{" "}
@@ -9430,9 +10001,8 @@ export default function App() {
                             and the Reference Editor never opens. */}
                         {step2BlockSummary.own.length > 0 ? (() => {
                           const n = step2BlockSummary.own.reduce((t, o) => t + o.names.length, 0);
-                          const refName = projectReference || reference || "this reference";
                           return (
-                            <div className="note" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                            <div className="note" style={{fontSize:"0.82em"}}>
                               <strong>{n} sample{n === 1 ? " is" : "s are"} on the reference’s remove_from_analysis
                               list</strong>, so every Step 2 run against {refName} leaves {n === 1 ? "it" : "them"} out.{" "}
                               {step2BlockSummary.own.length === 1 ? "The list is " : "The lists are "}
@@ -9444,6 +10014,9 @@ export default function App() {
                               ))}
                               . {n === 1 ? "It is" : "Each one is"} struck through below with the row it is on; change
                               the list in the Reference Editor.
+                              {unmatchedNames > 0
+                                ? ` ${fmt(unmatchedNames)} other name${unmatchedNames === 1 ? "" : "s"} on it match${unmatchedNames === 1 ? "es" : ""} no VCF in this set.`
+                                : ""}
                               {step2BlockSummary.own.length > 1
                                 ? " vsnp3 stops with an error when a reference folder holds more than one remove list, so merge them into one."
                                 : ""}
@@ -9452,9 +10025,8 @@ export default function App() {
                         })() : null}
                         {step2BlockSummary.elsewhere.length > 0 ? (() => {
                           const n = step2BlockSummary.elsewhere.reduce((t, o) => t + o.names.length, 0);
-                          const refName = projectReference || reference || "this reference";
                           return (
-                            <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.4em"}}>
+                            <div className="note warning" style={{fontSize:"0.82em"}}>
                               <strong>{n} sample{n === 1 ? " is" : "s are"} left out by a remove_from_analysis list
                               that is not the reference’s own.</strong>{" "}
                               {n === 1 ? "It is" : "They are"} listed in{" "}
@@ -9475,256 +10047,101 @@ export default function App() {
                             </div>
                           );
                         })() : null}
-                        <div style={{maxHeight:"320px", overflowY:"auto", fontSize:"0.8em", fontFamily:"monospace"}}>
-                          {(() => {
-                            const q = vcfSourceFilter.trim().toLowerCase();
-                            const matching = q
-                              ? vcfSourceSamples.filter(s => nameMatches(s.sample, q) || s.filename.toLowerCase().includes(q)
-                                  || groupMatches(s.filename, q))
-                              : vcfSourceSamples;
-                            // Untick a source and its VCFs leave the run, so they leave this
-                            // list too — showing them unmarked reads as "still included".
-                            // The files are untouched; the toggle brings them back struck through.
-                            const filtered = vcfSourceShowLeftOut
-                              ? matching
-                              : matching.filter(s => !step2LeftOutSet.has(s.sample));
-                            const listedTotal = vcfSourceShowLeftOut
-                              ? vcfSourceSamples.length
-                              : vcfSourceSamples.length - step2LeftOutSet.size;
-                            const excludedCount = filtered.filter(s =>
-                              !step2LeftOutSet.has(s.sample)
-                              && (step2Blocklist[s.sample]
-                                || step2BuildExcluded[s.sample]
-                                || (step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))  // panel overrides Step 1 exclusion
-                            ).length;
-                            // What the two bulk buttons would tick or untick: the shown
-                            // rows whose box can change (not the remove list, not Step 1
-                            // Results, not a source left unticked).
-                            const toggleable = [...new Set(filtered
-                              .filter(s => !step2LeftOutSet.has(s.sample) && !step2Blocklist[s.sample]
-                                && !(step2QcExcluded[s.sample] && !step2PanelAccessions[s.sample]))
-                              .map(s => s.sample))];
-                            const toExclude = toggleable.filter(n => !step2BuildExcluded[n]);
-                            const toInclude = toggleable.filter(n => step2BuildExcluded[n]);
-                            return (
-                              <>
-                                {/* Pinned to the top of the scrolling list, so the bulk
-                                    buttons are in reach wherever the list is scrolled to.
-                                    Opaque: --surface is defined only in the dark theme. */}
-                                <div style={{position:"sticky", top:0, zIndex:2, background:"var(--surface, var(--panel))"}}>
-                                <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)"}}>
-                                  {filtered.length === listedTotal
-                                    ? `${filtered.length} samples`
-                                    : `${filtered.length} of ${listedTotal} samples`}
-                                  {excludedCount > 0 && (
-                                    <span style={{color:"var(--danger, #a94442)"}}> · {excludedCount} excluded from Step 2</span>
-                                  )}
-                                  {!q && (
-                                    <span> · <strong>{step2ComparisonSamples.length}</strong> will be compared</span>
-                                  )}
-                                  {step2LeftOutSet.size > 0 && (
-                                    <span style={{color:"var(--warning, #8a6d3b)"}}>
-                                      {" · "}{step2LeftOutSet.size} not in this run{" "}
-                                      ({step2Mode === "list" ? "not on your list" : "source unticked"}){" — "}
-                                      <button
-                                        type="button"
-                                        onClick={() => setVcfSourceShowLeftOut(v => !v)}
-                                        style={{background:"none", border:"none", padding:0, font:"inherit", color:"inherit", textDecoration:"underline", cursor:"pointer"}}
-                                      >
-                                        {vcfSourceShowLeftOut ? "hide them" : "show them"}
-                                      </button>
-                                    </span>
-                                  )}
-                                </div>
-                                {/* Search, then act on everything found: exclude it, or
-                                    exclude everything and put back just what a search
-                                    finds. A tick is an exclusion, as on each row. */}
-                                <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px", padding:"4px 8px", borderBottom:"1px solid var(--border)", fontFamily:"sans-serif"}}>
-                                  <button type="button" className="ghost action" disabled={!toExclude.length}
-                                    onClick={() => setStep2BuildExcludedMany(toExclude, true)}
-                                    title={q ? "Tick every sample the filter shows, leaving them all out of this run" : "Tick every sample, leaving them all out of this run; then filter and put back just the ones to compare"}>
-                                    {q ? "Exclude all shown" : "Exclude all"} ({toExclude.length.toLocaleString()})
-                                  </button>
-                                  <button type="button" className="ghost action" disabled={!toInclude.length}
-                                    onClick={() => setStep2BuildExcludedMany(toInclude, false)}
-                                    title={q ? "Untick every sample the filter shows, putting them back in this run" : "Untick every sample ticked here, putting them all back in this run"}>
-                                    {q ? "Include all shown" : "Include all"} ({toInclude.length.toLocaleString()})
-                                  </button>
-                                  <span style={{color:"var(--muted)", fontSize:"0.85em"}}>
-                                    {q ? "These act on the samples the filter shows." : "Filter first to act on just the samples it finds."}{" "}
-                                    Samples on the remove list or excluded in Step 1 stay as they are. Click a sample to see all of it.
-                                  </span>
-                                </div>
-                                </div>
-                                {filtered.map(s => {
-                                  const lockedByBlocklist = !!step2Blocklist[s.sample];
-                                  const blockWhy = lockedByBlocklist
-                                    ? blockReason(s.sample, step2BlocklistWhere, step2BlocklistSources)
-                                    : null;
-                                  const inPanel = !!step2PanelAccessions[s.sample];
-                                  // A reference-panel accession overrides a Step 1 exclusion (it's an
-                                  // external panel VCF, not a Step 1 sample). Blocklist still wins.
-                                  const qcExcludedRaw = !!step2QcExcluded[s.sample];
-                                  const keptByPanel = qcExcludedRaw && inPanel && !lockedByBlocklist;
-                                  const effectiveQc = qcExcludedRaw && !inPanel;
-                                  const locked = lockedByBlocklist || effectiveQc; // tier A/B — not toggleable here
-                                  const isExcluded = !!step2BuildExcluded[s.sample] || locked;
-                                  // Only visible when the user asked to see what this run drops.
-                                  const leftOut = step2LeftOutSet.has(s.sample);
-                                  const struck = isExcluded || leftOut;
-                                  const metaLabel = projectNameDisplay[s.sample];
-                                  const rowGroups = sampleGroupsByFile ? sampleGroupsByFile[s.filename] : null;
-                                  // The manifest only knows "step1" vs "imported", so the
-                                  // badge used to read "ref db" for everything that was not
-                                  // a Step 1 sample — including hand-copied VCFs and Step 1
-                                  // samples whose folder was later removed. On a project
-                                  // with no reference database configured at all, a list of
-                                  // 185 rows every one of which claimed "ref db" was simply
-                                  // false. Only a sample a configured database actually
-                                  // holds gets that badge; the rest are "imported".
-                                  //
-                                  // "no Step 1 folder" is the warning's set exactly (unclaimedSamples):
-                                  // "imported" alone also covered a VCF imported under the name of
-                                  // one of this project's Step 1 samples, which box 1 does claim —
-                                  // so pointing people at "imported" to find the unclaimed ones
-                                  // pointed them at thousands of rows on a big set.
-                                  const inRefDb = s.source_type !== "step1" && step2PanelSampleSet.has(s.sample);
-                                  const origin = s.source_type === "step1"
-                                    ? "step1"
-                                    : (inRefDb ? "ref db" : (step2UnclaimedSet.has(s.sample) ? "no Step 1 folder" : "imported"));
-                                  const palette = origin === "step1"
-                                    ? {bg:"var(--accent-subtle, #dff0d8)", fg:"var(--accent-dark, #3c763d)"}
-                                    : origin === "ref db"
-                                      ? {bg:"var(--info-subtle, #d9edf7)", fg:"var(--info-dark, #31708f)"}
-                                      : origin === "no Step 1 folder"
-                                        ? {bg:"var(--badge-warning-bg, #fef3c7)", fg:"var(--badge-warning-fg, #92400e)"}
-                                        : {bg:"var(--panel-2, #f1ede6)", fg:"var(--muted, #6e7b82)"};
-                                  const dbName = vcfsFolderName || "vcf_database";
-                                  const originText = origin === "step1"
-                                    ? "Collected from this project's Step 1."
-                                    : origin === "ref db"
-                                      ? "Held by a reference database configured for this project's reference."
-                                      : origin === "no Step 1 folder"
-                                        ? `No folder named ${s.sample} under this project's step1/, and no reference database set up for this reference holds it: the VCF was copied or imported into ${dbName}. No tick box above can drop it; tick the box on the left to leave it out.`
-                                        : `Not recorded as collected from this project's Step 1 (imported, or copied into ${dbName} by hand), but it has the name of one of this project's Step 1 samples, so box 1 above decides whether it is compared.`;
-                                  const open = step2OpenRows.has(s.filename);
-                                  const src = String(s.source_path || "");
-                                  // Nothing here may add to every row: at 23,671 rows, a toggle
-                                  // button made the list 17% slower to draw, and even a CSS ▸
-                                  // on every row cost a quarter more to open it. The ▸ appears
-                                  // on hover and on an open row only (styles.css), and a closed
-                                  // row is its div alone.
-                                  const rowEl = (
-                                  <div
-                                    key={s.filename}
-                                    className={`sample-row${open ? " is-open" : ""}`}
-                                    onClick={(e) => {
-                                      // The checkbox and the chevron act for themselves; a
-                                      // drag that selected text is a selection, not a click.
-                                      if (e.target.closest("input, button, a")) return;
-                                      if (selectionWithin(e.currentTarget)) return;
-                                      toggleStep2Row(s.filename);
-                                    }}
-                                    style={{display:"flex", alignItems:"center", gap:"8px", padding:"2px 8px", borderBottom:"1px solid var(--border)", opacity: struck ? 0.55 : 1}}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={isExcluded}
-                                      disabled={locked || leftOut}
-                                      onChange={e => toggleStep2BuildExcluded(s.sample, e.target.checked)}
-                                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); toggleStep2Row(s.filename); } }}
-                                      title={leftOut
-                                        ? "Left out of this run — the source it came from is unticked above; tick that source to include it"
-                                        : lockedByBlocklist
-                                        ? "On the reference's remove_from_analysis list — click the row for the workbook and row"
-                                        : keptByPanel
-                                          ? "In an enabled reference panel — kept in Step 2 even though this accession was excluded in Step 1"
-                                          : (effectiveQc
-                                            ? "Excluded in Step 1 Results — change it there to include in Step 2"
-                                            : (isExcluded ? "Excluded from Step 2 — uncheck to include" : "Exclude this sample from Step 2"))}
-                                      style={{flexShrink:0, cursor: (locked || leftOut) ? "not-allowed" : "pointer"}}
-                                    />
-                                    <span style={{flex:"1 1 auto", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>
-                                      {/* Only the name is struck: a line through the reason
-                                          made the one thing that explains the row the
-                                          hardest part of it to read. */}
-                                      <span style={{textDecoration: struck ? "line-through" : "none"}}>{s.sample}</span>
-                                      {leftOut ? (
-                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic"}}> — source unticked, not in this run</span>
-                                      ) : lockedByBlocklist ? (
-                                        <span style={{color:"var(--warning, #8a6d3b)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}> — {removeListLabel(blockWhy)}</span>
-                                      ) : keptByPanel ? (
-                                        <span style={{color:"var(--success, #2e7d32)", fontFamily:"sans-serif", fontStyle:"italic"}}> — in reference panel (kept despite Step 1 exclusion)</span>
-                                      ) : effectiveQc ? (
-                                        <span style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic"}}> — excluded in Step 1</span>
-                                      ) : null}
-                                      {s.ambiguous ? (
-                                        <span
-                                          title="Two files in vcf_database claim this sample. They hold different calls, so a run refuses rather than letting directory order choose. Delete or rename the one you do not want."
-                                          style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}
-                                        > — two files for this sample</span>
-                                      ) : null}
-                                      {metaLabel && metaLabel !== s.sample && (
-                                        <span style={{color:"var(--muted)", fontFamily:"sans-serif", fontStyle:"italic"}}> — {metaLabel}</span>
-                                      )}
-                                      {rowGroups && rowGroups.length ? (
-                                        <span style={{color:"var(--accent)", fontFamily:"sans-serif", fontWeight:600}}> · {rowGroups.join(", ")}</span>
-                                      ) : null}
-                                    </span>
-                                    <span
-                                      title={originText}
-                                      style={{
-                                        flexShrink:0,
-                                        fontSize:"0.8em",
-                                        padding:"0 4px",
-                                        borderRadius:"3px",
-                                        background: palette.bg,
-                                        color: palette.fg,
-                                      }}
-                                    >
-                                      {origin}
-                                    </span>
-                                  </div>
-                                  );
-                                  if (!open) return rowEl;
-                                  return (
-                                  <React.Fragment key={s.filename}>
-                                    {rowEl}
-                                    <SampleDetail
-                                      sample={s.sample}
-                                      file={s.filename}
-                                      meta={metaLabel && metaLabel !== s.sample ? metaLabel : ""}
-                                      groups={sampleGroupsByFile ? (rowGroups || []) : null}
-                                      groupsNote={rowGroups
-                                        ? `None at QUAL > ${s2QualThreshold}, MQ ≥ ${s2MqThreshold}${s2NoFilters ? ", filters off" : ""}.`
-                                        : "Not read yet."}
-                                      run={runStatus({
-                                        leftOut, mode: step2Mode, blockWhy,
-                                        refName: projectReference || reference, refDir: step2BlocklistRefDir,
-                                        qcExcluded: effectiveQc, keptByPanel,
-                                        buildExcluded: !!step2BuildExcluded[s.sample],
-                                      })}
-                                      origin={originText}
-                                      source={src && !src.endsWith(`/${dbName}/${s.filename}`) ? src : ""}
-                                      activeGroup={vcfSourceFilter.trim()}
-                                      onGroup={(g) => setVcfSourceFilter((f) => (f.trim().toLowerCase() === g.toLowerCase() ? "" : g))}
-                                    />
-                                  </React.Fragment>
-                                  );
-                                })}
-                                {filtered.length === 0 && (
-                                  <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>
-                                    {matching.length > 0
-                                      ? "Every sample here is left out of this run — its source is unticked above."
-                                      : "No samples match"}
-                                  </div>
-                                )}
-                              </>
-                            );
-                          })()}
+                        {/* Above the rows, not in them: in reach wherever the list is
+                            scrolled to. */}
+                        <div className="s2-list-bar">
+                          <div style={{padding:"3px 8px", fontSize:"0.9em", fontFamily:"sans-serif", color:"var(--muted)", borderBottom:"1px solid var(--border)"}}>
+                            {filtered.length === listedTotal
+                              ? `${fmt(filtered.length)} samples`
+                              : `${fmt(filtered.length)} of ${fmt(listedTotal)} samples`}
+                            {/* Each reason a sample is held back, counted once under
+                                the one that decides it; a count shows only those. */}
+                            {["remove", "step1", "ticked"].map((k) => (held[k].size > 0 || only === k ? (
+                              <span key={k}>
+                                {" · "}
+                                <button
+                                  type="button"
+                                  className="s2-count-link"
+                                  aria-pressed={only === k}
+                                  onClick={() => setVcfSourceOnly((o) => (o === k ? "" : k))}
+                                  style={{color: HELD_COLOR[k]}}
+                                  title={only === k
+                                    ? "Show every sample again"
+                                    : `Show only the ${fmt(held[k].size)} ${HELD_LABEL[k]}`}
+                                >
+                                  {fmt(held[k].size)} {HELD_LABEL[k]}
+                                </button>
+                                {only === k ? <span> (shown alone — click to show all)</span> : null}
+                              </span>
+                            ) : null))}
+                            {/* Not a number until the lists that decide it are in: a
+                                count made without the remove list read as final. */}
+                            {!narrowed && (step2RunLoadKeys.some((k) => step2LoadPending.includes(k)) ? (
+                              <span> · counting what will be compared…</span>
+                            ) : step2RunLoadKeys.some((k) => step2LoadFailed[k]) ? (
+                              <span> · not counted until {joinWords(step2RunLoadKeys.filter((k) => step2LoadFailed[k]).map((k) => STEP2_LOAD_LABELS[k]))} can be read</span>
+                            ) : (
+                              <span> · <strong>{fmt(step2ComparisonSamples.length)}</strong> will be compared</span>
+                            ))}
+                            {step2LeftOutSet.size > 0 && (
+                              <span style={{color:"var(--warning, #8a6d3b)"}}>
+                                {" · "}{step2LeftOutSet.size} not in this run{" "}
+                                ({step2Mode === "list" ? "not on your list" : "source unticked"}){" — "}
+                                <button
+                                  type="button"
+                                  onClick={() => setVcfSourceShowLeftOut(v => !v)}
+                                  style={{background:"none", border:"none", padding:0, font:"inherit", color:"inherit", textDecoration:"underline", cursor:"pointer"}}
+                                >
+                                  {vcfSourceShowLeftOut ? "hide them" : "show them"}
+                                </button>
+                              </span>
+                            )}
+                          </div>
+                          {/* Search, then act on everything found: exclude it, or
+                              exclude everything and put back just what a search
+                              finds. A tick is an exclusion, as on each row. */}
+                          <div style={{display:"flex", flexWrap:"wrap", alignItems:"center", gap:"6px", padding:"4px 8px", borderBottom:"1px solid var(--border)", fontFamily:"sans-serif"}}>
+                            <button type="button" className="ghost action" disabled={!toExclude.length || !step2TicksReady}
+                              onClick={() => setStep2BuildExcludedMany(toExclude, true)}
+                              title={narrowed ? "Tick every sample shown, leaving them all out of this run" : "Tick every sample, leaving them all out of this run; then filter and put back just the ones to compare"}>
+                              {narrowed ? "Exclude all shown" : "Exclude all"} ({fmt(toExclude.length)})
+                            </button>
+                            <button type="button" className="ghost action" disabled={!toInclude.length || !step2TicksReady}
+                              onClick={() => setStep2BuildExcludedMany(toInclude, false)}
+                              title={narrowed ? "Untick every sample shown, putting them back in this run" : "Untick every sample ticked here, putting them all back in this run"}>
+                              {narrowed ? "Include all shown" : "Include all"} ({fmt(toInclude.length)})
+                            </button>
+                            <span style={{color:"var(--muted)", fontSize:"0.85em"}}>
+                              {narrowed ? "These act on the samples shown." : "Filter first to act on just the samples it finds."}{" "}
+                              {stay.length
+                                ? `${joinWords(stay).replace(/^t/, "T")} stay out whatever these do.`
+                                : "Samples on the remove list or excluded in Step 1 stay as they are."}{" "}
+                              Click a sample to see all of it.
+                            </span>
+                          </div>
                         </div>
+                        <VirtualRows
+                          className="s2-list-rows"
+                          style={step2ListExpandedShown ? undefined : {maxHeight:"320px"}}
+                          items={filtered}
+                          itemKey={(s) => s.filename}
+                          isOpen={(s) => step2OpenRows.has(s.filename)}
+                          renderItem={renderRow}
+                          resetKey={`${q}|${only}|${vcfSourceShowLeftOut}`}
+                          empty={(
+                            <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>
+                              {only
+                                ? `None of the samples shown is ${HELD_LABEL[only]}.`
+                                : matching.length > 0
+                                  ? "Every sample here is left out of this run — its source is unticked above."
+                                  : "No samples match"}
+                            </div>
+                          )}
+                        />
                       </div>
-                    )}
+                      </>
+                      );
+                    })()}
                   </div>
                 )}
                 {importProjectLock && selectedProject !== importProjectLock ? (

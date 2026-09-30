@@ -232,6 +232,61 @@ export function groupFilterMatch(groups, knownLower, q) {
 const isOwn = (source) => source.in_reference_dir !== false;
 
 /**
+ * Every remove-list spelling that drops this database file from a run.
+ *
+ * vsnp3's Remove_From_Analysis turns each listed name N into the file names
+ * N, N.vcf and N_zc.vcf, and drops the staged VCF with one of those names.
+ * Read backwards, as backend/app/step2_staging.py's removal_keys does, that is
+ * this list. Staging decompresses a `.gz`, so its name is taken without it.
+ * The sample name itself is always among the keys.
+ */
+export function removalKeys(filename) {
+  const f = String(filename || "");
+  const staged = f.endsWith(".gz") ? f.slice(0, -3) : f;
+  const keys = [staged];
+  if (staged.endsWith(".vcf")) {
+    const stem = staged.slice(0, -4);
+    keys.push(stem);
+    if (stem.endsWith("_zc")) keys.push(stem.slice(0, -3));
+  }
+  return keys;
+}
+
+/**
+ * The remove list as vsnp3 applies it to this set, keyed by sample.
+ *
+ * /step2/blocklist gives the names as the workbook writes them. The pane
+ * looked those up by sample name, so an entry written as the file name
+ * (`X_zc.vcf`, or `X_zc`) held X out of every run while the list showed X
+ * ticked in and counted it as compared. Here each file answers to every
+ * spelling that removes it, and the result is keyed by the sample it stands
+ * for. The names as written stay in, so nothing that blocked before stops.
+ *
+ * @param {{filename: string, sample: string}[]} rows  the set, a row a file
+ * @param {Record<string, boolean>} listed   names as written
+ * @param {Record<string, number[][]>} where name -> [[source, row], ...]
+ * @returns {{blocked: Record<string, boolean>,
+ *            where: Record<string, number[][]>,
+ *            matched: Set<string>}}  matched: the listed names that hit a file
+ */
+export function resolveBlocklist(rows, listed, where) {
+  const L = listed || {};
+  const W = where || {};
+  const blocked = { ...L };
+  const at = { ...W };
+  const matched = new Set();
+  for (const r of rows || []) {
+    for (const k of removalKeys(r.filename)) {
+      if (!L[k]) continue;
+      blocked[r.sample] = true;
+      if (!at[r.sample] && W[k]) at[r.sample] = W[k];
+      matched.add(k);
+    }
+  }
+  return { blocked, where: at, matched };
+}
+
+/**
  * The workbook and row that hold `name` back, preferring the reference's own
  * list (the one a person can find and edit) when several do.
  *

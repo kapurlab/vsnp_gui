@@ -481,6 +481,62 @@ def test_budgets(root: Path):
     check(card.n <= 20, True, "project card: no call per sample")
 
 
+def old_project_sample_names(project_dir: Path):
+    """_project_sample_names before v0.4.113: a stat per VCF (Path.is_file)."""
+    from app import name_aliases
+    names: set = set()
+    step1_dir = project_dir / "step1"
+    if step1_dir.is_dir():
+        try:
+            names.update(d.name for d in step1_dir.iterdir()
+                         if d.is_dir() and not d.name.startswith(("_", ".")))
+        except OSError:
+            pass
+    db = m.vcf_db_dir(project_dir / "step2")
+    if db.is_dir():
+        try:
+            for f in db.iterdir():
+                if f.is_file() and ".vcf" in f.name:
+                    names.add(name_aliases.vsnp3_file_keys(f.name)[-1])
+        except OSError:
+            pass
+    return sorted(names)
+
+
+def test_project_sample_names(root: Path):
+    """/name-aliases lists the project once: no stat per VCF, same names.
+
+    It is the request behind the metadata names in the Step 2 sample list, and
+    on the Ames modified_NL set (23,671 VCFs) its stat per file kept those
+    names off the screen for about half a minute."""
+    print("project sample names (/name-aliases)")
+    proj = root / "names"
+    s1 = proj / "step1"
+    for d in ("S1", "S2", "_scratch", ".hidden"):
+        (s1 / d).mkdir(parents=True)
+    touch(s1 / "notes.txt")
+    (root / "elsewhere").mkdir()
+    os.symlink(root / "elsewhere", s1 / "S3")                  # a linked sample dir
+    os.symlink(root / "nowhere", s1 / "gone")                  # dangling
+    db = proj / "step2" / "vcf_database"
+    for f in ("A_zc.vcf", "B_zc.vcf.gz", "C.vcf", ".hidden_zc.vcf", "notes.vcf.bak",
+              ".vcf_source_manifest.csv", "readme.txt"):
+        touch(db / f)
+    (db / "D.vcf").mkdir()                                     # a folder with a VCF's name
+    os.symlink(db / "A_zc.vcf", db / "E_zc.vcf")               # a linked VCF
+    os.symlink(db / "missing_zc.vcf", db / "F_zc.vcf")         # dangling
+    check(m._project_sample_names(proj), old_project_sample_names(proj),
+          "the same names as the stat-per-file walk, on an awkward layout")
+    big = root / "names_big"
+    (big / "step1").mkdir(parents=True)
+    for i in range(300):
+        touch(big / "step2" / "vcf_database" / f"X{i:04d}_zc.vcf")
+    with Calls() as c:
+        got = m._project_sample_names(big)
+    check(len(got), 300, "300 VCFs, 300 names")
+    check(c.n <= 20, True, f"no call per VCF ({c.n} for 300)")
+
+
 class Opens:
     """Counts files opened under a directory, in every thread."""
 
@@ -692,6 +748,7 @@ def main():
         test_alias_map(tmp)
         test_endpoints(tmp, s1)
         test_budgets(tmp)
+        test_project_sample_names(tmp)
         test_fanout_errors()
         test_status_survives_restart(tmp)
         test_group_listing(tmp)

@@ -21,7 +21,8 @@
 import assert from "node:assert/strict";
 import { selectStep2Run, comparisonSamples, unclaimedSamples,
          listTokens, matchTier, resolveList,
-         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch } from "../src/step2Selection.js";
+         exclusionReasons, blockReason, blocklistSummary, groupFilterMatch,
+         removalKeys, resolveBlocklist } from "../src/step2Selection.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -301,6 +302,63 @@ test("each excluded sample is counted once, under the tier that decides it", () 
   assert.deepEqual(r, { blocklist: 2, step1: 1, build: 1 });
   assert.equal(r.blocklist + r.step1 + r.build,
                keep.size - comparisonSamples(keep, tiers).length);
+});
+
+// --- The remove list, matched as vsnp3 matches it ---------------------------
+//
+// vsnp3 drops a staged VCF whose file name is N, N.vcf or N_zc.vcf for a
+// listed name N. The pane matched the sample name only, so an entry written
+// as the file name held a sample out of every run while the list showed it
+// ticked in and counted it among "will be compared".
+
+test("a file answers to the names vsnp3 would remove it by", () => {
+  assert.deepEqual(removalKeys("X_zc.vcf"), ["X_zc.vcf", "X_zc", "X"]);
+  assert.deepEqual(removalKeys("X_zc.vcf.gz"), ["X_zc.vcf", "X_zc", "X"]);   // staged decompressed
+  assert.deepEqual(removalKeys("X.vcf"), ["X.vcf", "X"]);
+  assert.deepEqual(removalKeys("X_import1_zc.vcf"), ["X_import1_zc.vcf", "X_import1_zc", "X_import1"]);
+});
+
+test("an entry written as the file name blocks the sample, as vsnp3 does", () => {
+  const rows = [
+    { filename: "24-1-original_zc.vcf", sample: "24-1-original" },
+    { filename: "24-2-original_zc.vcf", sample: "24-2-original" },
+    { filename: "24-3-original_zc.vcf.gz", sample: "24-3-original" },
+    { filename: "24-4-original_zc.vcf", sample: "24-4-original" },
+    { filename: "24-5-original_zc.vcf", sample: "24-5-original" },
+    { filename: "24-6-original_zc.vcf", sample: "24-6-original" },
+  ];
+  const listed = mapOf(["24-1-original", "24-2-original_zc.vcf", "24-3-original_zc",
+                        "24-4-original.vcf", "not-in-this-set"]);
+  const where = { "24-1-original": [[0, 1]], "24-2-original_zc.vcf": [[0, 2]], "24-3-original_zc": [[0, 3]],
+                  "24-4-original.vcf": [[0, 4]], "not-in-this-set": [[0, 5]] };
+  const r = resolveBlocklist(rows, listed, where);
+  assert.equal(r.blocked["24-1-original"], true);                 // as before: the bare name
+  assert.equal(r.blocked["24-2-original"], true);                 // the file name
+  assert.equal(r.blocked["24-3-original"], true);                 // the file name without .vcf, on a .gz
+  // vsnp3 looks for 24-4-original.vcf, which is not this file: not blocked.
+  assert.equal(r.blocked["24-4-original"], undefined);
+  assert.equal(r.blocked["24-5-original"], undefined);
+  assert.deepEqual(r.where["24-2-original"], [[0, 2]]);           // the row that did it
+  assert.deepEqual(r.where["24-3-original"], [[0, 3]]);
+  assert.deepEqual([...r.matched].sort(), ["24-1-original", "24-2-original_zc.vcf", "24-3-original_zc"]);
+  // What was blocked before still is.
+  for (const n of Object.keys(listed)) assert.equal(r.blocked[n], true);
+});
+
+test("a blocked file name leaves the run and is counted on the remove list", () => {
+  const rows = [{ filename: "A_zc.vcf", sample: "A" }, { filename: "B_zc.vcf", sample: "B" }];
+  const r = resolveBlocklist(rows, mapOf(["A_zc.vcf"]), { "A_zc.vcf": [[0, 1]] });
+  const tiers = { blocklist: r.blocked, step1Excluded: {}, buildExcluded: {}, panelAccessions: {} };
+  assert.deepEqual(comparisonSamples(new Set(["A", "B"]), tiers), ["B"]);
+  assert.deepEqual(exclusionReasons(new Set(["A", "B"]), tiers), { blocklist: 1, step1: 0, build: 0 });
+  const sources = [{ path: "/refs/R/R_remove_from_analysis.xlsx", in_reference_dir: true }];
+  assert.equal(blockReason("A", r.where, sources).row, 1);
+});
+
+test("no remove list, nothing blocked", () => {
+  const r = resolveBlocklist([{ filename: "A_zc.vcf", sample: "A" }], {}, {});
+  assert.deepEqual(r.blocked, {});
+  assert.equal(r.matched.size, 0);
 });
 
 // --- Filtering by defining-SNP group ---------------------------------------

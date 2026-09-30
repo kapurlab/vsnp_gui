@@ -481,6 +481,112 @@ def test_budgets(root: Path):
     check(card.n <= 20, True, "project card: no call per sample")
 
 
+def old_igv_bam_set(step1_dir: Path) -> set:
+    """preview_xlsx's sample set, as it was built: a look inside every folder."""
+    out: set = set()
+    if step1_dir.is_dir():
+        for d in step1_dir.iterdir():
+            if not d.is_dir() or d.name.startswith(("_", ".")):
+                continue
+            if m._align_glob(d, f"{d.name}_nodup.bam"):
+                out.add(d.name)
+            if "_" in d.name:
+                prefix = d.name.split("_")[0]
+                if prefix and m._align_glob(d, f"{prefix}_nodup.bam"):
+                    out.add(prefix)
+    return out
+
+
+def old_igv_vcf_set(vcf_source_dir: Path) -> set:
+    out: set = set()
+    if vcf_source_dir.is_dir():
+        for f in vcf_source_dir.iterdir():
+            if not f.is_file():
+                continue
+            name = f.name
+            for suffix in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
+                if name.endswith(suffix):
+                    out.add(name[: -len(suffix)])
+                    break
+    return out
+
+
+def test_preview_igv_sets(root: Path):
+    """The table preview's "which rows can open in IGV" sets: the same answers
+    as the walk of every Step 1 folder they replace, for the cost of one
+    listing plus a look at the samples the table's rows actually name."""
+    from app import xlsx_html as xh
+    print("table preview: rows that can open in IGV")
+    proj = root / "preview"
+    s1 = proj / "step1"
+    touch(s1 / "A" / "alignment_REF" / "A_nodup.bam")                        # reads
+    touch(s1 / "B" / "alignment" / "B_nodup.bam")                            # legacy layout
+    touch(s1 / "C" / "alignment_REF" / "C_zc.vcf")                           # no reads
+    touch(s1 / "D_S4_L001" / "alignment_REF" / "D_nodup.bam")                # BAM named by the bare prefix
+    touch(s1 / "E_S1_L001" / "alignment_REF" / "E_S1_L001_nodup.bam")        # BAM named by the folder
+    (s1 / "F_x").mkdir(parents=True)                                         # empty folder
+    touch(s1 / "G" / "alignment_bogus")                                      # an alignment_* FILE
+    touch(s1 / "G" / "alignment_X" / "G_nodup.bam")
+    (s1 / "H" / "alignment_REF").mkdir(parents=True)                         # empty alignment dir
+    touch(root / "outside" / "L" / "alignment_REF" / "L_nodup.bam")
+    os.symlink(root / "outside" / "L", s1 / "L")                             # symlinked sample
+    touch(s1 / "24-029315-007-original" / "alignment_REF" / "24-029315-007-original_nodup.bam")
+    touch(s1 / "24-029315-0071-original" / "alignment_REF" / "24-029315-0071-original_nodup.bam")
+    touch(s1 / "Mg-280" / "alignment_REF" / "Mg-280_nodup.bam")              # dashed on disk
+    touch(s1 / "19-1234" / "alignment_REF" / "19-1234_nodup.bam")
+    (s1 / "X").mkdir(parents=True)                                           # no reads under the bare name...
+    touch(s1 / "X_S1_L001" / "alignment_REF" / "X_S1_L001_nodup.bam")        # ...only under the lane folder
+    (s1 / "_provenance").mkdir(); (s1 / ".hidden").mkdir()
+    touch(s1 / "stray.txt")
+    db = proj / "step2" / "vcf_database"
+    touch(db / "C_zc.vcf"); touch(db / "V1_zc.vcf.gz"); touch(db / "V2.vcf"); touch(db / "V3.vcf.gz")
+    touch(db / "notes.txt"); touch(db / ".hidden_zc.vcf"); (db / "sub").mkdir()
+    os.symlink(db / "C_zc.vcf", db / "V4_zc.vcf")
+    os.symlink("/nonexistent/V5_zc.vcf", db / "V5_zc.vcf")                   # dangling
+
+    old_bams = old_igv_bam_set(s1)
+    old_vcfs = old_igv_vcf_set(db)
+    si.invalidate(s1)
+    with Calls() as build:
+        bams = m._igv_bam_stems(s1)
+    vcfs = m._igv_vcf_stems(db)
+    check(vcfs, old_vcfs, "imported-VCF samples: the same set")
+    check("D" in old_bams and "D_S4_L001" not in old_bams and "E_S1_L001" in old_bams
+          and "E" not in old_bams and "X_S1_L001" in old_bams and "X" not in old_bams,
+          True, "the fixture exercises the prefix rule both ways")
+
+    labels = ["A", "B", "C", "D", "D_S4_L001", "E", "E_S1_L001", "F_x", "F", "G", "H", "L",
+              "24-029315-007_GWTE_2024-09-26_AH0238161_AK", "24-029315-007", "24-029315-0071",
+              "Mg_280", "Mg_280_extra", "Mg-280", "19-1234_2_Bovine_USA", "19-1234", "X",
+              "X_S1_L001", "X_S1_L001_extra", "V1", "V1_meta", "V2", "nothing", "Z_1", "",
+              "_provenance", ".hidden", "stray.txt"]
+    with Calls() as ask:
+        for name in sorted(set(labels) | set(bams)):
+            check(name in bams, name in old_bams, f"membership of {name!r}")
+    with Calls() as again:
+        for name in labels:
+            name in bams
+    for label in labels:
+        for sets in ((bams, vcfs), (bams,), (vcfs, bams)):
+            olds = tuple(old_bams if s is bams else s for s in sets)
+            check(xh._canonical_stem(label, *sets), xh._canonical_stem(label, *olds),
+                  f"row label {label!r} resolves the same")
+    check(sorted(xh._union_stems(bams, vcfs)), sorted(old_bams | old_vcfs | set(bams)),
+          "the pooled candidates cover both sets")
+    n_dirs = sum(1 for d in s1.iterdir() if d.is_dir())
+    with Calls() as walk:
+        old_igv_bam_set(s1)
+    print(f"       {n_dirs} folders: building the old set {walk.n} calls; the candidates {build.n}, "
+          f"confirming {len(set(labels) | set(bams))} names {ask.n}, asking again {again.n}")
+    check(build.n <= 6, True, "the candidates cost a listing, not a look inside each folder")
+    # pathlib's glob holds its own scandir, so this counter sees only part of
+    # the old walk; the latency model in perf/ charges all of it (32,740 calls
+    # a preview on the 8,171-sample fixture).
+    check(walk.n >= n_dirs, True, "the old set touched every folder")
+    check(ask.n <= 4 * len(set(bams)) + 4, True, "confirming a name: at most 4 calls, once")
+    check(again.n, 0, "a name asked about twice costs nothing the second time")
+
+
 def old_project_sample_names(project_dir: Path):
     """_project_sample_names before v0.4.113: a stat per VCF (Path.is_file)."""
     from app import name_aliases
@@ -748,6 +854,7 @@ def main():
         test_alias_map(tmp)
         test_endpoints(tmp, s1)
         test_budgets(tmp)
+        test_preview_igv_sets(tmp)
         test_project_sample_names(tmp)
         test_fanout_errors()
         test_status_survives_restart(tmp)

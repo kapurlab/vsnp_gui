@@ -22,6 +22,38 @@ modelled calls — for the page load, a cold switch, a switch away and a warm
 revisit. Run it twice: the first pass builds the on-disk caches, the second
 is what a new Open OnDemand session costs.
 
+`igv_bench.py` replays what the browser fires when a cascade-table cell is
+clicked — `/step1/files`, then the igv.js sequence through `/serve` (FASTA
+index, a sequence slice, the calls VCF, the BAM index, the BAM header, a
+block of reads, the annotation) — and a table preview cold, warm and as a
+scroll batch, reporting each request's wall time and modelled calls;
+`--concurrent N` also times one `/serve` while N previews are in flight.
+
+    $PY igv_bench.py --fx /tmp/fx --ms 1 --label before --concurrent 6
+
+Numbers on the 8,171-sample owl at 1 ms per call, before and after the
+preview stopped walking every Step 1 folder (v0.4.115 -> next):
+
+                                  v0.4.115              after
+    table preview, cold           46.3 s   32,740     1.45 s     654 calls
+    table preview, cached         45.9 s   32,725     0.08 s      38
+    table preview, scroll batch   45.3 s   32,731     0.08 s      38
+    /serve, one igv.js request    0.04 s       25     0.02 s       9
+    IGV launch, 8 requests        0.60 s      392     0.49 s     309
+
+The preview built "which samples have a BAM" by looking inside all 8,171
+folders on every request — three times that on the 24,000-sample project,
+minutes on shared storage, cache hits and 200-row scroll batches included —
+which is what a table tab held a browser connection open with while IGV's
+requests waited in line. It now takes its candidates from the shared Step 1
+listing and looks only at the samples the table's rows name (`LazyStems` in
+xlsx_html.py); the cache key no longer carries the sample sets, and a cached
+window instead records the rows it drew without reads and asks about just
+those. `preview_equiv`-style checks (the same tables rendered by both trees)
+came out byte-identical for the full page, a scroll batch, the cached page,
+the small-sheet renderer and a clade selection. What remains of the IGV
+launch is `/step1/files`, most of it the GFF lookup over every reference dir.
+
 `endpoint_calls.py` counts calls per endpoint in-process (cold and warm);
 `dump_endpoints.py` writes every endpoint's JSON so two trees can be diffed
 on one fixture (`awkward_extras.py` makes the fixture awkward first:

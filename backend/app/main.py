@@ -14,6 +14,7 @@ import socket
 import json
 import os
 import time
+from stat import S_ISREG
 import subprocess
 import shutil
 import gzip
@@ -9724,7 +9725,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "15"  # 15: reference metadata resolves row labels to samples
+_XLSX_RENDER_VERSION = "16"  # 16: windows record the rows drawn without reads; sample sets left the key
 #                              14: escape cell text in <script>, sanitize font names
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
@@ -9852,16 +9853,20 @@ def _xlsx_cache_prune(cache_dir: Path, budget: int) -> None:
 def _xlsx_cache_path(
     target: Path,
     project: str,
-    samples_with_bams: set,
-    samples_with_vcfs: set,
     extra: str = "",
 ) -> Optional[Path]:
     """Where this file's rendered preview lives, or None if it can't be cached.
 
     The key covers the spreadsheet's identity (path, size, mtime) and every
-    input that changes the OUTPUT — the project, the renderer version, and the
-    sample sets that decide which cells become IGV links (a sample gaining a
-    BAM must not keep serving a preview that says it has none).
+    input that changes the OUTPUT that can be known without reading the
+    project: the project, the renderer version, and `extra` (a clade
+    selection, the metadata that renames rows). Which rows can open in IGV is
+    deliberately NOT in it. It used to be — the full set of samples with a
+    BAM — and building that set meant looking inside every Step 1 folder for
+    every preview, cache hit or not: 24,000 folder reads on the largest
+    project, minutes on shared storage, before the cache was even consulted.
+    A cached window instead records the rows it drew without reads, and
+    _preview_links_stale asks about just those (see preview_xlsx).
 
     Not stored in the project: a Step 2 run folder is something people zip up
     and share, and a shared project may well be read-only to the person
@@ -9879,8 +9884,6 @@ def _xlsx_cache_path(
                 str(st.st_size),
                 str(st.st_mtime_ns),
                 project,
-                ",".join(sorted(samples_with_bams)),
-                ",".join(sorted(samples_with_vcfs)),
                 extra,
             ]).encode("utf-8")
         ).hexdigest()
@@ -10256,6 +10259,83 @@ def tree_scale(project: str, path: str = Query(...)):
     }
 
 
+def _igv_bam_stems(step1_dir: Path):
+    """The samples a table row can open with reads, confirmed one at a time.
+
+    Every regular Step 1 folder is a candidate under its own name and, when
+    the name carries a lane suffix (`13-1941-6_S4_L001`), under its bare
+    prefix as well — the spelling a table row uses, mirrored from
+    _resolve_sample_dir. A candidate is confirmed by the test the preview has
+    always made, `<name>_nodup.bam` under the folder's alignment_*/ (or the
+    legacy alignment/), but only when a row's label reaches it. The candidates
+    cost one listing, the one every request of a project switch shares.
+    """
+    from app import xlsx_html
+    names = [s.name for s in step1_index.listing(step1_dir).regular()] if step1_dir.is_dir() else []
+    name_set = set(names)
+    by_prefix: Dict[str, List[str]] = {}
+    for n in names:
+        if "_" in n:
+            prefix = n.split("_")[0]
+            if prefix:
+                by_prefix.setdefault(prefix, []).append(n)
+
+    def confirm(name: str) -> bool:
+        if name in name_set and _AlignListing(step1_dir / name).glob(f"{name}_nodup.bam"):
+            return True
+        return any(_AlignListing(step1_dir / d).glob(f"{name}_nodup.bam")
+                   for d in by_prefix.get(name, ()))
+
+    return xlsx_html.LazyStems(name_set | set(by_prefix), confirm)
+
+
+def _igv_vcf_stems(vcf_source_dir: Path) -> set:
+    """Samples with an imported VCF in step2/vcf_database/ (calls-only IGV,
+    anchored to the project reference), by the standard vSNP3 suffixes."""
+    out: set = set()
+    try:
+        with os.scandir(vcf_source_dir) as it:
+            for e in it:
+                try:
+                    if not e.is_file():
+                        continue
+                except OSError:
+                    continue
+                name = e.name
+                for suffix in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
+                    if name.endswith(suffix):
+                        out.add(name[: -len(suffix)])
+                        break
+    except OSError:
+        pass
+    return out
+
+
+def _preview_links_stale(window: Dict[str, Any], samples_with_bams, samples_with_vcfs) -> bool:
+    """Did a row this cached table drew without reads gain them since?
+
+    The window lists the rows it could not link and the ones it linked as
+    calls-only; those are the only rows whose answer can improve, and on most
+    tables there are none. A row that had reads keeps its link: if the BAM has
+    since gone, the viewer says so when the cell is clicked.
+    """
+    for stem in window.get("unlinked") or ():
+        if stem in samples_with_bams or stem in samples_with_vcfs:
+            return True
+    for stem in window.get("calls_only") or ():
+        if stem in samples_with_bams:
+            return True
+    return False
+
+
+def _preview_etag(cached: Path, window: Dict[str, Any]) -> str:
+    """The cache entry's name plus a digest of the one thing that can change
+    under the same name — which rows could open — so a re-render after a
+    sample gained reads is a new ETag and the browser fetches it."""
+    links = json.dumps([window.get("unlinked") or [], window.get("calls_only") or []])
+    return f"{cached.name}-{hashlib.sha256(links.encode('utf-8')).hexdigest()[:12]}"
+
+
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(request: Request, project: str, path: str = Query(...), download: int = 0,
                  rows_from: Optional[int] = None, rows_count: int = 200,
@@ -10336,45 +10416,18 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                      + (f"&selection={quote(selection, safe='')}" if selection else "")
                      + "&download=1")
     full_table_href = f"?path={_q_path}"
-    # Build sets of samples loadable in IGV so the cascade-table render
-    # can correctly enable / grey out the "↗ this" affordance per row:
+    # Which samples can open in IGV, so the cascade-table render can enable
+    # or grey out the "↗ this" affordance per row:
     #   - samples_with_bams: have a Step 1 BAM (full IGV: reads + calls)
     #   - samples_with_vcfs: have an imported VCF in step2/vcf_database/
     #     (calls-only IGV, anchored to the project reference)
-    # A sample qualifies for "↗ this" if it's in either set.
-    samples_with_bams: set[str] = set()
-    samples_with_vcfs: set[str] = set()
-    step1_dir = project_dir / "step1"
-    if step1_dir.is_dir():
-        for d in step1_dir.iterdir():
-            if not d.is_dir() or d.name.startswith(("_", ".")):
-                continue
-            # BAMs live in alignment_<ref>/ (or the legacy alignment/), so
-            # _align_glob is enough. This used to be `d.glob("**/...")` —
-            # a full RECURSIVE walk of every sample directory, twice, on
-            # every preview: thousands of directory trees walked before the
-            # spreadsheet was even opened.
-            if _align_glob(d, f"{d.name}_nodup.bam"):
-                samples_with_bams.add(d.name)
-            # _resolve_sample_dir accepts a bare sample name even when the
-            # step1 dir carries lane suffixes (e.g. dir `13-1941-6_S4_L001`
-            # resolves from input `13-1941-6`). Mirror that fallback here so
-            # cascade stems match.
-            if "_" in d.name:
-                prefix = d.name.split("_")[0]
-                if prefix and _align_glob(d, f"{prefix}_nodup.bam"):
-                    samples_with_bams.add(prefix)
-    vcf_source_dir = vcf_db_dir(project_dir / "step2")
-    if vcf_source_dir.is_dir():
-        for f in vcf_source_dir.iterdir():
-            if not f.is_file():
-                continue
-            name = f.name
-            # Strip the standard vSNP3 suffixes back to the stem.
-            for suffix in ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf"):
-                if name.endswith(suffix):
-                    samples_with_vcfs.add(name[: -len(suffix)])
-                    break
+    # A sample qualifies for "↗ this" if it's in either set. The BAM set is
+    # lazy: the preview used to look inside every Step 1 folder to build it —
+    # 24,000 folder reads on the largest project, on EVERY request, scroll
+    # batches and cache hits included — when only the table's own rows are
+    # ever asked about. Now a row's sample is looked at when a row reaches it.
+    samples_with_bams = _igv_bam_stems(project_dir / "step1")
+    samples_with_vcfs = _igv_vcf_stems(vcf_db_dir(project_dir / "step2"))
 
     # Rendered previews are cached on disk. A finished Step 2 table never
     # changes, and the big ones take tens of seconds to parse (openpyxl has to
@@ -10388,38 +10441,28 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
     # it decides which cells become IGV links.
     aliases = _project_aliases(project_dir, cfg)
     cached = _xlsx_cache_path(
-        target, project, samples_with_bams, samples_with_vcfs,
+        target, project,
         extra=("|".join(filter(None, [
             f"sel:{selection}" if selection_samples is not None else "",
             _aliases_fingerprint(project_dir, cfg),
         ]))),
     )
-    # The cache file's hash NAME already encodes every input that can change
-    # the rendered output (file identity, renderer version, project, bam/vcf
-    # sets, selection token), which makes it two things at once:
+    # The cache file's hash NAME encodes every input that can change the
+    # rendered output and is known without reading the project (file
+    # identity, renderer version, project, selection token, metadata), which
+    # makes it two things at once:
     #
-    #   * The ETag. A browser that already holds this exact render sends it
-    #     back as If-None-Match and gets an empty 304 instead of a multi-MB
-    #     page — re-opening an unchanged table (routine when comparing groups)
-    #     stops re-shipping everything.
+    #   * The ETag, with a digest of which rows could open (_preview_etag). A
+    #     browser that already holds this exact render sends it back as
+    #     If-None-Match and gets an empty 304 instead of a multi-MB page —
+    #     re-opening an unchanged table (routine when comparing groups) stops
+    #     re-shipping everything.
     #   * The in-process memo key. A disk-cache HIT still cost a full read and
     #     json.loads of a ~34 MB window PER REQUEST — including every 200-row
     #     scroll batch, so paging a big table re-parsed the whole window five
     #     times over. The parsed dict is kept for the most recent windows;
     #     invalidation is inherent because a different render is a different
     #     file name.
-    etag = cached.name if cached is not None else None
-    if etag and not download and cached.exists() \
-            and _etag_matches(request.headers.get("if-none-match", ""), etag):
-        try:
-            os.utime(cached, None)  # still counts as recently used
-        except OSError:
-            pass
-        return Response(status_code=304, headers={
-            "ETag": f'"{etag}"',
-            "Cache-Control": "no-cache",
-            "Vary": "Accept-Encoding",
-        })
     window = None
     if cached is not None and cached.exists():
         window = _XLSX_WINDOW_MEMO.get(cached.name)
@@ -10431,6 +10474,10 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                 _xlsx_window_memo_put(cached.name, window)
             except (OSError, ValueError):
                 window = None  # unreadable or stale entry: re-render below
+        if window is not None and _preview_links_stale(window, samples_with_bams, samples_with_vcfs):
+            # A row this render could not open can open now: draw it again.
+            # The new window takes the same name, and a new ETag.
+            window = None
         if window is not None:
             # Mark it recently used so pruning drops the tables nobody opens,
             # not the one being read right now.
@@ -10438,6 +10485,14 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                 os.utime(cached, None)
             except OSError:
                 pass
+    etag = _preview_etag(cached, window) if cached is not None and window is not None else None
+    if etag and not download \
+            and _etag_matches(request.headers.get("if-none-match", ""), etag):
+        return Response(status_code=304, headers={
+            "ETag": f'"{etag}"',
+            "Cache-Control": "no-cache",
+            "Vary": "Accept-Encoding",
+        })
 
     if window is None:
         try:
@@ -10513,6 +10568,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
                                 detail=f"xlsx render failed: {type(e).__name__}: {e}")
         if cached is not None:
             _xlsx_window_memo_put(cached.name, window)
+            etag = _preview_etag(cached, window)
             try:
                 cached.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cached.with_suffix(".part")
@@ -10591,8 +10647,8 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
 
     # ETag on both response shapes; Cache-Control: no-cache means "revalidate
     # every time" — the browser always asks, and an unchanged render costs a
-    # 304 instead of the body. (Never "immutable": the etag changes when the
-    # bam/vcf sample sets change, and the browser must notice.)
+    # 304 instead of the body. (Never "immutable": the etag changes when a row
+    # that could not open can, and the browser must notice.)
     resp_headers = (
         {"ETag": f'"{etag}"', "Cache-Control": "no-cache", "Vary": "Accept-Encoding"}
         if etag else None
@@ -10715,8 +10771,9 @@ _IGV_SERVE_MEDIA_TYPES = {
 }
 
 
-def _range_response(target: Path, request: Request, media_type: str):
-    file_size = target.stat().st_size
+def _range_response(target: Path, request: Request, media_type: str, file_size: Optional[int] = None):
+    if file_size is None:
+        file_size = target.stat().st_size
     range_header = request.headers.get("range") or request.headers.get("Range")
     if not range_header:
         def _full():
@@ -10776,6 +10833,45 @@ def _under(child: Path, parent: Path) -> bool:
     return child_s == parent_s or child_s.startswith(parent_s.rstrip(os.sep) + os.sep)
 
 
+def _serve_root_forms(roots) -> List[set]:
+    """Each root in both its as-given (normalized) and fully-resolved form —
+    the two spellings _serve_path_allowed compares against. Computed once per
+    launch by _serve_roots rather than per request: igv.js makes a dozen
+    requests to open one sample, and resolving every root walks its path
+    component by component on shared storage."""
+    forms: List[set] = []
+    for root in roots:
+        if not str(root).strip():
+            continue
+        f = {Path(os.path.normpath(str(root)))}
+        try:
+            f.add(root.resolve())
+        except OSError:
+            pass
+        forms.append(f)
+    return forms
+
+
+def _serve_path_allowed_forms(requested: Path, root_forms: List[set],
+                              resolved: Optional[Path] = None) -> bool:
+    """_serve_path_allowed with the roots' forms already computed, and the
+    requested path's resolved form too when the caller already has it."""
+    candidates = {Path(os.path.normpath(str(requested)))}
+    if resolved is not None:
+        candidates.add(resolved)
+    else:
+        try:
+            candidates.add(requested.resolve())
+        except OSError:
+            pass
+    for forms in root_forms:
+        for cand in candidates:
+            for form in forms:
+                if _under(cand, form):
+                    return True
+    return False
+
+
 def _serve_path_allowed(requested: Path, roots) -> bool:
     """May this path be served? True when it is inside one of `roots`.
 
@@ -10791,24 +10887,46 @@ def _serve_path_allowed(requested: Path, roots) -> bool:
     walk out of a root, and every accepted path is still confined to a root the
     operator configured.
     """
-    candidates = {Path(os.path.normpath(str(requested)))}
-    try:
-        candidates.add(requested.resolve())
-    except OSError:
-        pass
-    for root in roots:
-        if not str(root).strip():
-            continue
-        forms = {Path(os.path.normpath(str(root)))}
-        try:
-            forms.add(root.resolve())
-        except OSError:
-            pass
-        for cand in candidates:
-            for form in forms:
-                if _under(cand, form):
-                    return True
-    return False
+    return _serve_path_allowed_forms(requested, _serve_root_forms(roots))
+
+
+# project -> (monotonic time computed, root forms). See _serve_roots.
+_SERVE_ROOTS_MEMO: Dict[str, tuple] = {}
+_SERVE_ROOTS_TTL_S = 3.0
+
+
+def _serve_roots(project: str) -> List[set]:
+    """The roots a serve request for this project may read from, in the forms
+    _serve_path_allowed_forms compares against, kept for a few seconds.
+
+    Opening one sample in igv.js is a dozen requests — the FASTA index, the
+    sequence, the calls, the BAM index, the header, each block of reads, the
+    annotation — and every one of them re-read the config file and resolved
+    every reference root component by component: 25 round trips a request on
+    the latency model, of which the file itself was one. A settings change
+    is seen within the TTL; the per-request resolve of the REQUESTED path
+    stays, since that is what confines it to a root.
+    """
+    now = time.monotonic()
+    hit = _SERVE_ROOTS_MEMO.get(project)
+    if hit is not None and now - hit[0] < _SERVE_ROOTS_TTL_S:
+        return hit[1]
+    cfg = load_config()
+    roots = [_project_dir_for(cfg, project)]
+    roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
+    # The configured reference root is where the UI gets its GFF paths from
+    # (find_gff_for_fasta walks it), so this endpoint must be willing to serve
+    # from it. It is NOT always listed in reference_options_paths.txt: a local
+    # install that finds every reference already available elsewhere deliberately
+    # drops its own managed dir from that file.
+    configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
+    if configured_refs:
+        roots.append(Path(configured_refs))
+    forms = _serve_root_forms(roots)
+    if len(_SERVE_ROOTS_MEMO) > 64:
+        _SERVE_ROOTS_MEMO.clear()
+    _SERVE_ROOTS_MEMO[project] = (now, forms)
+    return forms
 
 
 @app.get("/api/projects/{project}/serve")
@@ -10821,26 +10939,28 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
     GFF lives next to the source fasta in the reference dir, not in the
     project's alignment dir).
     """
-    cfg = load_config()
-    project_dir = _project_dir_for(cfg, project)
-    roots = [project_dir]
-    roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
-    # The configured reference root is where the UI gets its GFF paths from
-    # (find_gff_for_fasta walks it), so this endpoint must be willing to serve
-    # from it. It is NOT always listed in reference_options_paths.txt: a local
-    # install that finds every reference already available elsewhere deliberately
-    # drops its own managed dir from that file.
-    configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
-    if configured_refs:
-        roots.append(Path(configured_refs))
-    if not _serve_path_allowed(Path(path), roots):
+    # Resolved once: the walk of the path's components is most of what a
+    # request costs on shared storage, and it used to be made twice.
+    requested = Path(path)
+    try:
+        target = requested.resolve()
+    except OSError:
+        target = None
+    if not _serve_path_allowed_forms(requested, _serve_roots(project), resolved=target):
         raise HTTPException(status_code=400, detail="Path not allowed")
-    target = Path(path).resolve()
-    if not target.exists() or not target.is_file():
+    if target is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    # One stat answers "is there a regular file here" and its size; the
+    # exists / is_file / stat sequence it replaces was three.
+    try:
+        st = target.stat()
+    except OSError:
+        raise HTTPException(status_code=404, detail="File not found")
+    if not S_ISREG(st.st_mode):
         raise HTTPException(status_code=404, detail="File not found")
     suffix = target.suffix.lower()
     media_type = _IGV_SERVE_MEDIA_TYPES.get(suffix, "application/octet-stream")
-    return _range_response(target, request, media_type)
+    return _range_response(target, request, media_type, file_size=st.st_size)
 
 
 @app.post("/api/projects/{project}/vcf_edit")

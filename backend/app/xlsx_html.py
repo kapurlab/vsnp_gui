@@ -170,7 +170,47 @@ def _strip_vcf_suffix(s: str) -> str:
     return out
 
 
-def _union_stems(*stem_sets) -> "set[str]":
+class LazyStems:
+    """Sample stems confirmed one at a time, on first ask.
+
+    The renderers need two things from the set of samples that can open in
+    IGV: every name it might hold, to test a row label against, and whether a
+    name a rule matched really is in it. Building the real set meant looking
+    inside every sample folder of the project — 24,000 folder reads per table
+    on the largest, before a cell was rendered, and again for every scroll
+    batch and every cache hit — when only a table's own rows are ever asked
+    about.
+
+    So the candidates come from one listing and each is confirmed only when a
+    rule reaches it: iterating yields the candidates, ``in`` confirms one,
+    asking the filesystem once and remembering the answer. A name that is not
+    a candidate is refused without a lookup. Every rule that iterates a set of
+    stems confirms the names it would pick, which for a plain set is the
+    membership it always had.
+    """
+
+    def __init__(self, candidates, confirm):
+        self._candidates = set(candidates)
+        self._confirm = confirm
+        self._known: dict = {}
+
+    def __iter__(self):
+        return iter(self._candidates)
+
+    def __len__(self) -> int:
+        return len(self._candidates)
+
+    def __contains__(self, name) -> bool:
+        if name not in self._candidates:
+            return False
+        hit = self._known.get(name)
+        if hit is None:
+            hit = bool(self._confirm(name))
+            self._known[name] = hit
+        return hit
+
+
+def _union_stems(*stem_sets):
     """The known on-disk stems, unioned ONCE per render rather than per row.
 
     `_canonical_stem` accepts several sets and unions them itself, which is a
@@ -181,12 +221,19 @@ def _union_stems(*stem_sets) -> "set[str]":
     now build it once and pass the result.
 
     The single-set case is returned as-is, not copied: callers only read it.
+    A union that includes a LazyStems stays lazy: its candidates are pooled,
+    and a name is confirmed by whichever set holds it.
     """
     non_empty = [s for s in stem_sets if s]
     if not non_empty:
         return set()
     if len(non_empty) == 1:
         return non_empty[0]
+    if any(isinstance(s, LazyStems) for s in non_empty):
+        pooled: set = set()
+        for s in non_empty:
+            pooled |= set(s)
+        return LazyStems(pooled, lambda name: any(name in s for s in non_empty))
     out: set = set()
     for s in non_empty:
         out |= s
@@ -262,17 +309,22 @@ def _canonical_stem(label: str, *stem_sets, aliases=None) -> str:
             extended = _unique_extension(original, known)
             if extended:
                 return extended
+    # Each rule tests the strings first and confirms a stem only when it
+    # would win (`s in known`): on a LazyStems that is the one lookup that
+    # touches the filesystem, so it is made for the handful of names a label
+    # resembles rather than for every sample in the project.
     best: str | None = None
     for s in known:
         if label.startswith(s + "_") and (best is None or len(s) > len(best)):
-            best = s
+            if s in known:
+                best = s
     if best is not None:
         return best
     flat = _flatten_sep(label)
     for s in known:
         fs = _flatten_sep(s)
         if flat == fs or flat.startswith(fs + "-"):
-            if best is None or len(s) > len(best):
+            if (best is None or len(s) > len(best)) and s in known:
                 best = s
     if best is not None:
         return best
@@ -308,7 +360,8 @@ def _unique_extension(head: str, known) -> str | None:
     identify a sample, and no link is better than the wrong one.
     """
     cands = [s for s in known
-             if s == head or s.startswith(head + "-") or s.startswith(head + "_")]
+             if (s == head or s.startswith(head + "-") or s.startswith(head + "_"))
+             and s in known]
     return cands[0] if len(cands) == 1 else None
 
 
@@ -1242,6 +1295,10 @@ def render_window(
     if max_table_bytes is None:
         max_table_bytes = DEFAULT_MAX_TABLE_BYTES
     known_stems = _union_stems(samples_with_bams, samples_with_vcfs)
+    # Rows drawn without reads, kept on the window so a cached render can be
+    # asked whether those samples can open now (see main._preview_links_stale).
+    unlinked: set[str] = set()
+    calls_only: set[str] = set()
     render_rows = min(total_rows, max_rows)
     render_cols = max(1, min(total_cols, max_cells // max(1, render_rows)))
 
@@ -1370,9 +1427,11 @@ def render_window(
                     ) or has_bam or has_vcf
                     if not loadable:
                         classes.append("xlsx-igv-none")
+                        unlinked.add(row_stem)
                     elif (not has_bam) and has_vcf:
                         classes.append("xlsx-variant")
                         classes.append("xlsx-igv-calls-only")
+                        calls_only.add(row_stem)
                     else:
                         classes.append("xlsx-variant")
                 attrs = f' class="{" ".join(classes)}"' if classes else ""
@@ -1435,6 +1494,8 @@ def render_window(
     return {
         "igv_withheld": withheld,
         "igv_withheld_stems": ambiguous,
+        "unlinked": sorted(unlinked),
+        "calls_only": sorted(calls_only),
         "title": title or xlsx_path.name,
         "filename": xlsx_path.name,
         "sheet": sheet_title,
@@ -1493,6 +1554,8 @@ def render_filtered_window(
     if max_table_bytes is None:
         max_table_bytes = DEFAULT_MAX_TABLE_BYTES
     known_stems = _union_stems(samples_with_bams, samples_with_vcfs)
+    unlinked: set[str] = set()
+    calls_only: set[str] = set()
 
     raw_sel = {_strip_vcf_suffix(str(s).strip()) for s in selection
                if str(s).strip()}
@@ -1697,9 +1760,11 @@ def render_filtered_window(
                     ) or has_bam or has_vcf
                     if not loadable:
                         classes.append("xlsx-igv-none")
+                        unlinked.add(row_stem)
                     elif (not has_bam) and has_vcf:
                         classes.append("xlsx-variant")
                         classes.append("xlsx-igv-calls-only")
+                        calls_only.add(row_stem)
                     else:
                         classes.append("xlsx-variant")
                 attrs = f' class="{" ".join(classes)}"' if classes else ""
@@ -1850,6 +1915,8 @@ def render_filtered_window(
             if orig in positions}
     style_css = "".join(f".{cls}{{{style}}}" for style, cls in style_classes.items())
     return {
+        "unlinked": sorted(unlinked),
+        "calls_only": sorted(calls_only),
         "title": title or xlsx_path.name,
         "filename": xlsx_path.name,
         "sheet": sheet_title,

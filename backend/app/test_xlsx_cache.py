@@ -86,17 +86,52 @@ def main() -> int:
         assert_eq(app_main._xlsx_cache_budget_bytes(), 0, "zero budget")
         fake = tmp / "table.xlsx"
         fake.write_text("not really an xlsx")
-        assert_eq(app_main._xlsx_cache_path(fake, "proj", set(), set()), None,
+        assert_eq(app_main._xlsx_cache_path(fake, "proj"), None,
                   "no cache path when disabled")
 
         print("\n[the directory is redirectable, and the key is stable]")
         os.environ["VSNP_GUI_PREVIEW_CACHE_MB"] = "250"
-        p1 = app_main._xlsx_cache_path(fake, "proj", {"A"}, set())
-        p2 = app_main._xlsx_cache_path(fake, "proj", {"A"}, set())
+        p1 = app_main._xlsx_cache_path(fake, "proj", extra="meta:1")
+        p2 = app_main._xlsx_cache_path(fake, "proj", extra="meta:1")
         assert_eq(p1, p2, "same inputs give the same entry")
         assert_true(str(p1).startswith(str(cache)), "entry lands in the chosen dir")
-        p3 = app_main._xlsx_cache_path(fake, "proj", {"A", "B"}, set())
-        assert_true(p1 != p3, "a changed BAM set is a different entry")
+        p3 = app_main._xlsx_cache_path(fake, "proj", extra="meta:2")
+        assert_true(p1 != p3, "a changed selection or metadata is a different entry")
+        p4 = app_main._xlsx_cache_path(fake, "other", extra="meta:1")
+        assert_true(p1 != p4, "another project is a different entry")
+
+        print("\n[which rows can open is checked on a hit, not baked into the key]")
+        # The key no longer carries the sample sets (building them walked
+        # every Step 1 folder); a cached window lists the rows it drew without
+        # reads and only those are asked about again.
+        window = {"unlinked": ["A"], "calls_only": ["B"], "rows": []}
+        assert_true(not app_main._preview_links_stale(window, set(), set()),
+                    "nothing gained: the cached render stands")
+        assert_true(app_main._preview_links_stale(window, {"A"}, set()),
+                    "an unlinked row that now has reads makes the render stale")
+        assert_true(app_main._preview_links_stale(window, set(), {"A"}),
+                    "an unlinked row that now has an imported VCF makes it stale")
+        assert_true(app_main._preview_links_stale(window, {"B"}, set()),
+                    "a calls-only row that now has reads makes it stale")
+        assert_true(not app_main._preview_links_stale(window, set(), {"B"}),
+                    "a calls-only row still without reads does not")
+        assert_true(not app_main._preview_links_stale({"rows": []}, {"A", "B"}, {"A"}),
+                    "a window that linked every row is never stale")
+        asked = []
+
+        class Asks:
+            def __contains__(self, name):
+                asked.append(name)
+                return False
+        app_main._preview_links_stale({"unlinked": ["A"], "calls_only": ["B"]}, Asks(), set())
+        assert_eq(asked, ["A", "B"], "only the rows drawn without reads are asked about")
+        e1 = app_main._preview_etag(p1, {"unlinked": ["A"], "calls_only": []})
+        e2 = app_main._preview_etag(p1, {"unlinked": [], "calls_only": []})
+        assert_true(e1.startswith(p1.name) and e2.startswith(p1.name),
+                    "the ETag carries the entry's name")
+        assert_true(e1 != e2, "a re-render that links a row is a new ETag")
+        assert_eq(e1, app_main._preview_etag(p1, {"unlinked": ["A"], "calls_only": []}),
+                  "the same render has the same ETag")
 
         print("\n[a bad budget value falls back rather than crashing]")
         os.environ["VSNP_GUI_PREVIEW_CACHE_MB"] = "not-a-number"

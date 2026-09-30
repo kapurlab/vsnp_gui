@@ -905,8 +905,13 @@ export default function App() {
   // revealed struck through by this toggle (the files themselves stay put).
   const [vcfSourceShowLeftOut, setVcfSourceShowLeftOut] = useState(false);
   // Show only the samples one reason holds back ("remove" | "step1" |
-  // "ticked"), picked from the counts above the list; "" shows them all.
+  // "ticked"), picked from the counts above the list, or only the ones the
+  // run compares ("compared"); "" shows them all.
   const [vcfSourceOnly, setVcfSourceOnly] = useState("");
+  // The samples the run compared when "compared" was picked. The list shows
+  // these rather than the live set, so a sample ticked out while reading them
+  // stays on screen, struck through, to be put back.
+  const [step2ComparedShown, setStep2ComparedShown] = useState(null);
   // The sample list drawn over most of the window instead of in its 320 px
   // box, for reading a big set. Esc, or Collapse, puts it back.
   const [step2ListExpanded, setStep2ListExpanded] = useState(false);
@@ -9693,9 +9698,33 @@ export default function App() {
                       };
                       const held = { remove: new Set(), step1: new Set(), ticked: new Set() };
                       inRun.forEach((s) => { const r = reasonOf(s); if (r) held[r].add(s.sample); });
-                      const only = vcfSourceOnly && held[vcfSourceOnly] ? vcfSourceOnly : "";
-                      const filtered = only ? inRun.filter((s) => reasonOf(s) === only) : inRun;
+                      const only = vcfSourceOnly === "compared"
+                        ? (step2ComparedShown ? "compared" : "")
+                        : (vcfSourceOnly && held[vcfSourceOnly] ? vcfSourceOnly : "");
+                      const filtered = only === "compared"
+                        ? inRun.filter((s) => step2ComparedShown.has(s.sample))
+                        : only ? inRun.filter((s) => reasonOf(s) === only) : inRun;
                       const narrowed = Boolean(q || only);
+                      // The run's own total. No one search shows it: a tick stays
+                      // with its sample from one search to the next, so a run can
+                      // be picked over several.
+                      const runCounting = step2RunLoadKeys.some((k) => step2LoadPending.includes(k));
+                      const runUnread = step2RunLoadKeys.filter((k) => step2LoadFailed[k]);
+                      const runKnown = !runCounting && runUnread.length === 0;
+                      const comparedN = step2ComparisonSamples.length;
+                      // Every sample the run compares, whichever search picked it,
+                      // so the search is cleared; one typed after that looks
+                      // within them.
+                      const toggleCompared = () => {
+                        if (only === "compared") {
+                          setVcfSourceOnly("");
+                          setStep2ComparedShown(null);
+                          return;
+                        }
+                        setVcfSourceFilter("");
+                        setStep2ComparedShown(new Set(step2ComparisonSamples));
+                        setVcfSourceOnly("compared");
+                      };
                       // What the two bulk buttons would tick or untick: the shown
                       // rows whose box can change (not the remove list, not Step 1
                       // Results, not a source left unticked).
@@ -10074,8 +10103,10 @@ export default function App() {
                               ? `${fmt(filtered.length)} samples`
                               : `${fmt(filtered.length)} of ${fmt(listedTotal)} samples`}
                             {/* Each reason a sample is held back, counted once under
-                                the one that decides it; a count shows only those. */}
-                            {["remove", "step1", "ticked"].map((k) => (held[k].size > 0 || only === k ? (
+                                the one that decides it; a count shows only those.
+                                They count the whole search, so not beside the run's
+                                own list, where none of them is shown. */}
+                            {only !== "compared" && ["remove", "step1", "ticked"].map((k) => (held[k].size > 0 || only === k ? (
                               <span key={k}>
                                 {" · "}
                                 <button
@@ -10095,14 +10126,14 @@ export default function App() {
                             ) : null))}
                             {/* Not a number until the lists that decide it are in: a
                                 count made without the remove list read as final. */}
-                            {!narrowed && (step2RunLoadKeys.some((k) => step2LoadPending.includes(k)) ? (
+                            {(!narrowed || only === "compared") && (runCounting ? (
                               <span> · counting what will be compared…</span>
-                            ) : step2RunLoadKeys.some((k) => step2LoadFailed[k]) ? (
-                              <span> · not counted until {joinWords(step2RunLoadKeys.filter((k) => step2LoadFailed[k]).map((k) => STEP2_LOAD_LABELS[k]))} can be read</span>
+                            ) : runUnread.length ? (
+                              <span> · not counted until {joinWords(runUnread.map((k) => STEP2_LOAD_LABELS[k]))} can be read</span>
                             ) : (
-                              <span> · <strong>{fmt(step2ComparisonSamples.length)}</strong> will be compared</span>
+                              <span> · <strong>{fmt(comparedN)}</strong> will be compared</span>
                             ))}
-                            {step2LeftOutSet.size > 0 && (
+                            {only !== "compared" && step2LeftOutSet.size > 0 && (
                               <span style={{color:"var(--warning, #8a6d3b)"}}>
                                 {" · "}{step2LeftOutSet.size} not in this run{" "}
                                 ({step2Mode === "list" ? "not on your list" : "source unticked"}){" — "}
@@ -10130,11 +10161,45 @@ export default function App() {
                               title={narrowed ? "Untick every sample shown, putting them back in this run" : "Untick every sample ticked here, putting them all back in this run"}>
                               {narrowed ? "Include all shown" : "Include all"} ({fmt(toInclude.length)})
                             </button>
+                            {/* The run as the ticks leave it, across every search:
+                                the buttons' counts are only ever the one on screen. */}
+                            <button type="button"
+                              className={`ghost action${only === "compared" ? " active" : ""}`}
+                              aria-pressed={only === "compared"}
+                              disabled={only !== "compared" && (!runKnown || comparedN === 0)}
+                              onClick={toggleCompared}
+                              title={only === "compared"
+                                ? "Show every sample in the list again"
+                                : runCounting
+                                  ? "Still reading what decides the run; the count comes when it is in"
+                                  : runUnread.length
+                                    ? `Not counted until ${joinWords(runUnread.map((k) => STEP2_LOAD_LABELS[k]))} can be read`
+                                    : comparedN === 0
+                                      ? "Nothing is left to compare: every sample is ticked, or held back above"
+                                      : "List only the samples this run will compare, whichever search picked them"}>
+                              {only === "compared"
+                                ? "Show every sample"
+                                : !runKnown
+                                  ? "Show what this run compares"
+                                  : comparedN === 0
+                                    ? "Nothing to compare"
+                                    : `Show the ${fmt(comparedN)} this run compares`}
+                            </button>
                             <span style={{color:"var(--muted)", fontSize:"0.85em"}}>
-                              {narrowed ? "These act on the samples shown." : "Filter first to act on just the samples it finds."}{" "}
-                              {stay.length
-                                ? `${joinWords(stay).replace(/^t/, "T")} stay out whatever these do.`
-                                : "Samples on the remove list or excluded in Step 1 stay as they are."}{" "}
+                              {only === "compared" ? (
+                                <>
+                                  A sample ticked out here stays in view, struck through, until you show every sample.{" "}
+                                </>
+                              ) : (
+                                <>
+                                  {narrowed
+                                    ? "These act on the samples shown. The rest keep their ticks, so a run can be picked over several searches."
+                                    : "Filter first to act on just the samples it finds. Ticks stay from one search to the next."}{" "}
+                                  {stay.length
+                                    ? `${joinWords(stay).replace(/^t/, "T")} stay out whatever these do.`
+                                    : "Samples on the remove list or excluded in Step 1 stay as they are."}{" "}
+                                </>
+                              )}
                               Click a sample to see all of it.
                             </span>
                           </div>
@@ -10149,7 +10214,11 @@ export default function App() {
                           resetKey={`${q}|${only}|${vcfSourceShowLeftOut}`}
                           empty={(
                             <div style={{padding:"8px", color:"var(--muted)", fontFamily:"sans-serif"}}>
-                              {only
+                              {only === "compared"
+                                ? (q
+                                  ? "None of the samples this run compares matches the filter."
+                                  : "None of them is in the list now. Show every sample to pick again.")
+                                : only
                                 ? `None of the samples shown is ${HELD_LABEL[only]}.`
                                 : matching.length > 0
                                   ? "Every sample here is left out of this run — its source is unticked above."

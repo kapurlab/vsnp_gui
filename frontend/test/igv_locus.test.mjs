@@ -14,7 +14,7 @@
 //   node test/igv_locus.test.mjs
 
 import assert from "node:assert/strict";
-import { normalizeLocus, goToLocus, landingLocus } from "../src/igvLocus.js";
+import { normalizeLocus, goToLocus, landingLocus, alreadyAt } from "../src/igvLocus.js";
 
 let passed = 0;
 async function test(name, fn) {
@@ -133,6 +133,44 @@ await test("a browser without referenceFrameList is not treated as a failure", a
     async search() { /* succeeded, exposes nothing */ },
   };
   assert.equal(await goToLocus(b, "A/Fancy_Ck/NL/FAV33/2021_M:914"), "");
+});
+
+// ---- not navigating to where the viewer already is -----------------------
+//
+// createBrowser is given the locus and usually lands on it; the explicit
+// navigation after it exists for the genomes where it does not. Repeating it
+// makes igv.js rebuild its frames and every track fetch its window again — with
+// reads served by window, the whole window over the wire a second time.
+
+function browserShowing(locus, extra = {}) {
+  const calls = [];
+  return {
+    calls,
+    referenceFrameList: [{ chr: String(locus).split(":")[0] }],
+    currentLoci() { return locus; },
+    async search(l) { calls.push(l); },
+    ...extra,
+  };
+}
+
+await test("a viewer already on the requested window is left alone", async () => {
+  const b = browserShowing("A/Fancy_Ck/NL/FAV33/2021_NS:552-602");
+  assert.equal(await goToLocus(b, "A/Fancy_Ck/NL/FAV33/2021_NS:577"), "");
+  assert.equal(b.calls.length, 0, "search was called although the viewer was there already");
+  // igv.js reports a frame end it has not rounded; a base either way is the same window.
+  assert.ok(alreadyAt(browserShowing("seg8:552-602.4"), "seg8:552-602"));
+  assert.ok(alreadyAt(browserShowing("seg8:553-603"), "seg8:552-602"));
+});
+
+await test("a viewer somewhere else, on 'all', or on several frames is navigated", async () => {
+  for (const shown of ["A/Fancy_Ck/NL/FAV33/2021_NS:1-890", "all", "", ["seg1:1-100", "seg2:1-100"]]) {
+    const b = browserShowing(shown);
+    b.referenceFrameList = [{ chr: "A/Fancy_Ck/NL/FAV33/2021_NS" }];
+    await goToLocus(b, "A/Fancy_Ck/NL/FAV33/2021_NS:577");
+    assert.equal(b.calls.length, 1, `no search for a viewer showing ${JSON.stringify(shown)}`);
+  }
+  assert.equal(alreadyAt(fakeBrowser({ known: OWL }), "seg8:552-602"), false, "no currentLoci: navigate");
+  assert.equal(alreadyAt(null, "seg8:552-602"), false);
 });
 
 // ---- where the viewer opens when nothing was requested -------------------

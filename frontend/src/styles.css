@@ -2111,3 +2111,17 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
 .s2-list-panel.is-expanded .s2-list-head,
 .s2-list-panel.is-expanded .s2-list-bar,
 .s2-list-panel.is-expanded > .note { flex-shrink: 0; }
+
+/* ---- The IGV window (?view=igv) -------------------------------------------
+   The bar above igv.js follows the app's theme like every other pane, and the
+   appearance switch sits in it. igv.js renders inside a shadow root with its
+   own stylesheet, out of reach of these rules; its dark appearance is added
+   there by frontend/src/igvTheme.js. */
+.igv-page { display:flex; flex-direction:column; height:100vh; width:100vw; color:var(--text); }
+.igv-page-bar { display:flex; align-items:center; flex-wrap:wrap; gap:.8rem; padding:.5rem .8rem; border-bottom:1px solid var(--border); background:var(--panel); }
+.igv-page-bar .igv-page-meta { color:var(--muted); font-size:.9em; }
+.igv-page-bar .igv-page-status { color:var(--danger); font-size:.9em; }
+.igv-page-bar .igv-page-transfers { display:flex; flex-wrap:wrap; gap:.25rem .9rem; color:var(--muted); font-size:.85em; }
+.igv-page-bar .igv-page-transfer code { font-size:.95em; color:var(--text); }
+.igv-page-bar .theme-switch { margin-left:auto; }
+.igv-page-body { flex:1; overflow:auto; }

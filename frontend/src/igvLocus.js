@@ -80,9 +80,39 @@ export function landingLocus(browser, requested) {
   return "";
 }
 
+/**
+ * Is the viewer already showing `target`?
+ *
+ * igv.js's own `currentLoci()` names the frame as `chr:start-end`, so this is a
+ * comparison of two locus strings, with a base of tolerance for the rounding
+ * igv.js applies to a frame's end. Navigating to where the viewer already is
+ * is not free: `search()` rebuilds the frames and every track fetches its
+ * window again, and with reads served by window that is the whole window over
+ * the wire a second time. The launch always navigated after createBrowser,
+ * because createBrowser drops the locus on some genomes; now it navigates
+ * only when that actually happened.
+ */
+export function alreadyAt(browser, target) {
+  try {
+    if (!browser || typeof browser.currentLoci !== "function") return false;
+    const shown = browser.currentLoci();
+    const one = Array.isArray(shown) ? (shown.length === 1 ? shown[0] : "") : shown;
+    const parse = (s) => {
+      const m = /^(.+):([\d,]+)-([\d,.]+)$/.exec(String(s || "").trim());
+      return m ? [m[1], parseInt(m[2].replace(/,/g, ""), 10), parseFloat(m[3].replace(/,/g, ""))] : null;
+    };
+    const a = parse(one);
+    const b = parse(target);
+    return !!(a && b && a[0] === b[0] && Math.abs(a[1] - b[1]) <= 1 && Math.abs(a[2] - b[2]) <= 1);
+  } catch (err) {
+    return false;
+  }
+}
+
 export async function goToLocus(browser, locus) {
   if (!browser || !locus) return "";
   const target = normalizeLocus(locus);
+  if (alreadyAt(browser, target)) return "";
   try {
     await browser.search(target);
   } catch (err) {

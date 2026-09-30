@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
-from fastapi.responses import Response, FileResponse, HTMLResponse
+from fastapi.responses import Response, FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
@@ -8520,6 +8520,9 @@ def step1_files(project: str, sample: str = Query(...)):
     return {
         "stats": stats_path,
         "bam": bam_path,
+        # True when the viewer can ask for just the reads in its window
+        # (see reads_ticket): samtools is on this backend.
+        "reads_window": bool(bam_path) and bool(_resolve_samtools(cfg)),
         "alignment_dir": align_dir,
         "reference_fasta": ref_fasta,
         "reference_gff": ref_gff,
@@ -10797,8 +10800,12 @@ def _range_response(target: Path, request: Request, media_type: str, file_size: 
         end = int(end_s) if end_s else file_size - 1
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid Range header")
-    if start < 0 or end >= file_size or start > end:
+    if start < 0 or start >= file_size or start > end:
         return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+    # A last byte past the end of the file means "to the end" (RFC 7233 §2.1),
+    # not an unsatisfiable range: a reader that asks for one BGZF block's worth
+    # beyond the last index entry is asking for the tail of the file.
+    end = min(end, file_size - 1)
     length = end - start + 1
 
     def _slice():
@@ -10927,6 +10934,128 @@ def _serve_roots(project: str) -> List[set]:
         _SERVE_ROOTS_MEMO.clear()
     _SERVE_ROOTS_MEMO[project] = (now, forms)
     return forms
+
+
+_SAMTOOLS_MEMO: Dict[str, str] = {}
+
+
+def _resolve_samtools(cfg: Dict) -> str:
+    """samtools ships in the vsnp3 env the backend runs in: PATH first, then
+    the configured env's bin. Remembered per env path for the process."""
+    key = str(cfg.get("vsnp3_path", "") or "")
+    hit = _SAMTOOLS_MEMO.get(key)
+    if hit is not None:
+        return hit
+    found = shutil.which("samtools") or ""
+    if not found and key:
+        cand = Path(key) / "bin" / "samtools"
+        if cand.exists():
+            found = str(cand)
+    _SAMTOOLS_MEMO[key] = found
+    return found
+
+
+def _sample_bam(project_dir: Path, sample: str) -> Optional[Path]:
+    """The sample's de-duplicated BAM, the one step1_files hands the viewer."""
+    step1_dir = project_dir / "step1"
+    sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
+    if not sample_dir:
+        return None
+    bams = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
+    return bams[-1] if bams else None
+
+
+def _htsget_error(status: int, code: str, message: str):
+    return JSONResponse({"htsget": {"error": code, "message": message}}, status_code=status)
+
+
+@app.get("/api/projects/{project}/reads/{sample}")
+def reads_ticket(project: str, sample: str, format: str = "BAM",
+                 referenceName: Optional[str] = None, start: Optional[int] = None,
+                 end: Optional[int] = None, klass: Optional[str] = Query(None, alias="class")):
+    """Reads for the viewer's window, the htsget way: a ticket naming where to
+    fetch them (see reads_data), instead of the whole contig's block of reads.
+
+    A BAM index locates reads no finer than 16 kb, so on an influenza segment
+    every read of that segment sits in the one block igv.js has to fetch and
+    decode before it can draw 51 bp of it — a transfer that grows with the
+    depth of sequencing, not with what is on screen, and on a deep amplicon
+    run through a remote link that is the wait. igv.js speaks htsget
+    natively (sourceType "htsget"): it asks for a header once, then for each
+    window it looks at, and accepts an ordinary BAM stream for either. samtools
+    on this node reads the same index, keeps only the reads overlapping the
+    window and streams those, so what crosses the link is the depth at that
+    window and nothing else. The plain byte-range path stays as the fallback
+    for a backend without samtools (see step1_files "reads_window").
+    """
+    if format.upper() != "BAM":
+        return _htsget_error(400, "UnsupportedFormat", f"format {format} is not supported; only BAM")
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if _sample_bam(project_dir, sample) is None:
+        return _htsget_error(404, "NotFound", f"no BAM for {sample}")
+    if not _resolve_samtools(cfg):
+        return _htsget_error(503, "Unavailable", "samtools is not available on this backend")
+    params: List[str] = []
+    if klass:
+        params.append(f"class={quote(klass, safe='')}")
+    else:
+        if not referenceName:
+            return _htsget_error(400, "InvalidInput", "referenceName is required")
+        params.append(f"referenceName={quote(referenceName, safe='')}")
+        if start is not None:
+            params.append(f"start={int(start)}")
+        if end is not None:
+            params.append(f"end={int(end)}")
+    # Page-relative, like every URL the viewer is given: the page and the API
+    # share one base under whatever proxy prefix (OOD /rnode, the dashboard's
+    # /t/<tool>) the browser reached them through, which this side cannot see.
+    data_url = (f"./api/projects/{quote(project, safe='')}/reads/{quote(sample, safe='')}/data?"
+                + "&".join(params))
+    return {"htsget": {"format": "BAM", "urls": [{"url": data_url}]}}
+
+
+@app.get("/api/projects/{project}/reads/{sample}/data")
+def reads_data(project: str, sample: str, referenceName: Optional[str] = None,
+               start: Optional[int] = None, end: Optional[int] = None,
+               klass: Optional[str] = Query(None, alias="class")):
+    """The reads a ticket from reads_ticket points at: a BAM holding the
+    header alone (class=header) or the header plus every read overlapping
+    the window, as samtools view writes them. Run to completion rather than
+    streamed, so a failure is an answer (400 with samtools's words) and not a
+    truncated file; a window's worth of reads is small by construction."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    bam = _sample_bam(project_dir, sample)
+    if bam is None:
+        return _htsget_error(404, "NotFound", f"no BAM for {sample}")
+    samtools = _resolve_samtools(cfg)
+    if not samtools:
+        return _htsget_error(503, "Unavailable", "samtools is not available on this backend")
+    if klass == "header":
+        cmd = [samtools, "view", "-b", "-H", str(bam)]
+    else:
+        if not referenceName:
+            return _htsget_error(400, "InvalidInput", "referenceName is required")
+        if (start is not None and start < 0) or (end is not None and end < 0) \
+                or (start is not None and end is not None and end < start):
+            return _htsget_error(400, "InvalidRange", "start and end must be non-negative, start <= end")
+        # htsget positions are 0-based, end exclusive; samtools regions are
+        # 1-based, inclusive. Braces let a contig name carry colons or slashes.
+        first = (start or 0) + 1
+        region = f"{{{referenceName}}}:{first}-{int(end)}" if end is not None else f"{{{referenceName}}}:{first}"
+        cmd = [samtools, "view", "-b", "-1", str(bam), region]   # -1: fast compression; -l would mean a library
+    try:
+        run = subprocess.run(cmd, capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return _htsget_error(504, "Timeout", "samtools took longer than five minutes")
+    except OSError as e:
+        return _htsget_error(503, "Unavailable", f"samtools could not run: {e}")
+    if run.returncode != 0:
+        detail = run.stderr.decode("utf-8", "replace").strip().splitlines()
+        return _htsget_error(400, "InvalidInput", detail[-1] if detail else f"samtools exit {run.returncode}")
+    return Response(content=run.stdout, media_type="application/octet-stream",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/projects/{project}/serve")

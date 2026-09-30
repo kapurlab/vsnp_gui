@@ -2,11 +2,179 @@ import React, { useEffect, useRef, useState } from "react";
 import igv from "igv";
 import { normalizeLocus, goToLocus, landingLocus } from "./igvLocus.js";
 import Elapsed from "./Elapsed.jsx";
+import ThemeToggle from "./ThemeToggle.jsx";
+import { installIgvTheme, whenShadowRoot } from "./igvTheme.js";
+import { formatElapsed } from "./elapsedFormat.js";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
 function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
+}
+
+// The reads track for one sample. When the backend has samtools, igv.js is
+// pointed at the reads-window endpoint (its "htsget" source) and fetches only
+// the reads overlapping what is on screen; otherwise it reads the BAM by byte
+// range, which on a small genome means every read of the contig — see
+// reads_ticket in main.py.
+function readsTrack(project, sample, name, data) {
+  if (data.reads_window) {
+    return {
+      type: "alignment",
+      format: "bam",
+      sourceType: "htsget",
+      name,
+      url: `${API_BASE}/api/projects/${encodeURIComponent(project)}/reads/${encodeURIComponent(sample)}`,
+    };
+  }
+  return {
+    type: "alignment",
+    format: "bam",
+    name,
+    url: serveUrl(project, data.bam),
+    indexURL: serveUrl(project, `${data.bam}.bai`),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// What igv.js is fetching right now.
+//
+// igv.js shows one spinner for the whole load and says nothing about which
+// resource it is waiting for or how far along it is. On the HPC that spinner
+// sat for minutes with no way to tell a slow transfer from a dead one. igv.js
+// loads every resource through XMLHttpRequest, so wrapping open/send ONCE
+// records each request to the serve endpoint — which file, which byte range,
+// how many bytes have arrived — and the bar above the viewer lists whatever is
+// still open, with a counter. When the wait is a 300 MB block of reads on a
+// slow link, the bar says so; when nothing is moving, that shows too.
+const transfers = new Map();
+const transferListeners = new Set();
+let transferSeq = 0;
+// Everything finished since the page opened, for the summary once loaded.
+const transferTotals = { count: 0, bytes: 0 };
+
+function notifyTransfers() {
+  for (const fn of transferListeners) fn();
+}
+
+function describeServeUrl(url) {
+  try {
+    const u = new URL(url, window.location.href);
+    const window_ = /\/reads\/([^/]+)\/data$/.exec(u.pathname);
+    if (window_) {
+      const sample = decodeURIComponent(window_[1]);
+      const header = u.searchParams.get("class") === "header";
+      return { name: header ? `${sample} header` : `${sample} ${u.searchParams.get("referenceName") || ""}:${u.searchParams.get("start") || 0}-${u.searchParams.get("end") || ""}`, kind: header ? "reads header" : "reads in view" };
+    }
+    if (!/\/serve$/.test(u.pathname)) return null;
+    const name = (u.searchParams.get("path") || "").split("/").pop();
+    const lower = name.toLowerCase();
+    const kind = lower.endsWith(".bai") || lower.endsWith(".csi") ? "reads index"
+      : lower.endsWith(".bam") || lower.endsWith(".cram") ? "reads"
+      : lower.endsWith(".fai") ? "sequence index"
+      : /\.(fa|fasta|fna)$/.test(lower) ? "sequence"
+      : /\.vcf(\.gz)?$/.test(lower) ? "calls"
+      : /\.gff3?(\.gz)?$/.test(lower) ? "annotation"
+      : "file";
+    return { name, kind };
+  } catch (_) {
+    return null;
+  }
+}
+
+function rangeSize(range) {
+  const m = /^bytes=(\d+)-(\d+)$/.exec(range || "");
+  return m ? Number(m[2]) - Number(m[1]) + 1 : 0;
+}
+
+(function watchIgvTransfers() {
+  if (typeof XMLHttpRequest === "undefined" || XMLHttpRequest.prototype.__vsnpWatched) return;
+  XMLHttpRequest.prototype.__vsnpWatched = true;
+  const open = XMLHttpRequest.prototype.open;
+  const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+  const send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__vsnp = { url: String(url), range: "" };
+    return open.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (this.__vsnp && String(name).toLowerCase() === "range") this.__vsnp.range = String(value);
+    return setRequestHeader.call(this, name, value);
+  };
+  XMLHttpRequest.prototype.send = function (...args) {
+    const info = this.__vsnp && describeServeUrl(this.__vsnp.url);
+    if (info) {
+      const id = ++transferSeq;
+      const entry = {
+        id, ...info, range: this.__vsnp.range, started: Date.now(),
+        loaded: 0, total: rangeSize(this.__vsnp.range), status: 0,
+      };
+      transfers.set(id, entry);
+      this.addEventListener("progress", (e) => {
+        entry.loaded = e.loaded;
+        if (e.lengthComputable && e.total) entry.total = e.total;
+        notifyTransfers();
+      });
+      this.addEventListener("loadend", () => {
+        entry.status = this.status;
+        transfers.delete(id);
+        transferTotals.count += 1;
+        transferTotals.bytes += entry.loaded;
+        notifyTransfers();
+      });
+      notifyTransfers();
+    }
+    return send.apply(this, args);
+  };
+})();
+
+function useIgvTransfers() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const fn = () => bump((n) => n + 1);
+    transferListeners.add(fn);
+    const tick = setInterval(fn, 1000);   // the counters tick even while no bytes arrive
+    return () => { transferListeners.delete(fn); clearInterval(tick); };
+  }, []);
+  return Array.from(transfers.values());
+}
+
+function formatBytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)} kB`;
+  return `${n} B`;
+}
+
+function IgvTransfers({ loading }) {
+  const open = useIgvTransfers();
+  if (!open.length) {
+    // Still loading with nothing on the wire: igv.js is working on what it
+    // has, so say how much that was.
+    if (loading && transferTotals.count) {
+      return (
+        <span className="igv-page-transfers">
+          received {transferTotals.count} file{transferTotals.count === 1 ? "" : "s"}, {formatBytes(transferTotals.bytes)}
+        </span>
+      );
+    }
+    return null;
+  }
+  const now = Date.now();
+  return (
+    <span className="igv-page-transfers" title="What the viewer is fetching right now, and how much of it has arrived">
+      {open.slice(0, 4).map((t) => (
+        <span key={t.id} className="igv-page-transfer">
+          {t.kind} <code>{t.name}</code>
+          {" "}
+          {t.total ? `${formatBytes(t.loaded)} of ${formatBytes(t.total)}` : formatBytes(t.loaded)}
+          {" · "}
+          {formatElapsed((now - t.started) / 1000)}
+        </span>
+      ))}
+      {open.length > 4 ? <span>+{open.length - 4} more</span> : null}
+    </span>
+  );
 }
 
 // Translate the backend's structured 404 details for /step1/files into a
@@ -111,13 +279,7 @@ export default function IgvStandalone() {
           });
         } catch (_) { /* non-fatal: drop the calls track, keep the BAM */ }
       }
-      if (data.bam) await browserRef.current.loadTrack({
-        type: "alignment",
-        format: "bam",
-        name: `${displayName} · reads`,
-        url: serveUrl(reqProject, data.bam),
-        indexURL: serveUrl(reqProject, `${data.bam}.bai`),
-      });
+      if (data.bam) await browserRef.current.loadTrack(readsTrack(reqProject, sample, `${displayName} · reads`, data));
       loadedRef.current.add(trackKey);
       setMeta((prev) => ({ ...prev, trackCount: loadedRef.current.size }));
       setStatus("");
@@ -202,6 +364,7 @@ export default function IgvStandalone() {
   useEffect(() => {
     if (initialTracks.length === 0) return;
     let cancelled = false;
+    let stopTheme = () => {};
     (async () => {
       const tracks = [];
       let referenceFastaPath = "";
@@ -267,8 +430,8 @@ export default function IgvStandalone() {
         tracks.push({
           project: tProject,
           sample,
+          files: data,
           bamPath: data.bam || "",
-          baiPath: data.bam ? `${data.bam}.bai` : "",
           // Prefer the rich annotated VCF when it exists (step1-derived,
           // has gene/product/AA in the ID column). Fall back to the bare
           // source_vcf for imported samples — fewer fields on hover, but
@@ -321,17 +484,16 @@ export default function IgvStandalone() {
           });
         }
         if (t.bamPath) {
-          out.push({
-            type: "alignment",
-            format: "bam",
-            name: `${displayName} · reads`,
-            url: serveUrl(t.project, t.bamPath),
-            indexURL: serveUrl(t.project, t.baiPath),
-          });
+          out.push(readsTrack(t.project, t.sample, `${displayName} · reads`, t.files));
         }
         return out;
       });
       const config = {
+        // igv.js otherwise begins by fetching its public genome list from
+        // igv.org, then GitHub when that fails — up to twelve seconds of
+        // timeouts on a network that blocks either, for a list this viewer
+        // never uses: the reference is always the project's own FASTA.
+        loadDefaultGenomes: false,
         reference: {
           id: refName.replace(/\.(fa|fasta)$/i, "") || "ref",
           fastaURL: serveUrl(refProject, referenceFastaPath),
@@ -356,6 +518,9 @@ export default function IgvStandalone() {
         tracks: sampleTracks,
       };
       try {
+        // The viewer takes the page's appearance the moment igv.js attaches
+        // its shadow root, and follows the switch in the bar from then on.
+        whenShadowRoot(containerRef.current, (host) => { stopTheme = installIgvTheme(host); });
         const browser = await igv.createBrowser(containerRef.current, config);
         if (cancelled) {
           try { igv.removeBrowser(browser); } catch (e) { /* ignore */ }
@@ -398,6 +563,7 @@ export default function IgvStandalone() {
     })();
     return () => {
       cancelled = true;
+      stopTheme();
       if (browserRef.current) {
         try { igv.removeBrowser(browserRef.current); } catch (e) { /* ignore */ }
         browserRef.current = null;
@@ -414,31 +580,24 @@ export default function IgvStandalone() {
   }, [meta.trackCount]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw" }}>
-      <div
-        style={{
-          padding: "0.5rem 0.8rem",
-          borderBottom: "1px solid #ddd",
-          background: "#f7f7f7",
-          display: "flex",
-          alignItems: "center",
-          gap: "0.8rem",
-        }}
-      >
+    <div className="igv-page">
+      <div className="igv-page-bar">
         <strong>IGV</strong>
-        <span style={{ color: "#666", fontSize: "0.9em" }}>
+        <span className="igv-page-meta">
           {meta.reference}
           {meta.trackCount ? ` · ${meta.trackCount} track${meta.trackCount === 1 ? "" : "s"}` : ""}
           {distinctProjects.length ? ` · ${distinctProjects.join(", ")}` : ""}
         </span>
         {status ? (
-          <span style={{ color: "#b34", fontSize: "0.9em" }}>
+          <span className="igv-page-status">
             {status}
             {status.endsWith("…") ? <> <Elapsed /></> : null}
           </span>
         ) : null}
+        <IgvTransfers loading={status.endsWith("…")} />
+        <ThemeToggle />
       </div>
-      <div ref={containerRef} style={{ flex: 1, overflow: "auto" }} />
+      <div ref={containerRef} className="igv-page-body" />
     </div>
   );
 }

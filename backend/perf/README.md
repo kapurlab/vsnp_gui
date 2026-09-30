@@ -54,6 +54,24 @@ came out byte-identical for the full page, a scroll batch, the cached page,
 the small-sheet renderer and a clade selection. What remains of the IGV
 launch is `/step1/files`, most of it the GFF lookup over every reference dir.
 
+`igv_probe.mjs` opens the IGV page in headless Chrome (Node 22+, no
+packages) against a running backend and prints every request the page makes
+with its byte range, status, size and duration, the page's own status line
+and transfer readout as they change, any igv.js alert, and a screenshot:
+
+    node igv_probe.mjs "http://127.0.0.1:8771/?view=igv&tracks=owl:S&locus=seg8:577" out.png 40 dark 1000
+
+The optional fourth and fifth arguments emulate a colour scheme and a link
+speed in kbit/s, which is how the dark appearance and the transfer readout
+were checked. A real BAM for a fixture sample (reads simulated from the
+fixture reference, `samtools sort` + `index`) stands in for igv.js's data.
+
+Reads are served by window when the backend has samtools (`reads_ticket` /
+`reads_data` in main.py, igv.js's htsget source): the transfer is the depth at
+the window, not the contig's block of reads. That path is a samtools process
+plus two requests per view and is not modelled here; `igv_bench.py` replays
+the byte-range path, which remains the fallback.
+
 `endpoint_calls.py` counts calls per endpoint in-process (cold and warm);
 `dump_endpoints.py` writes every endpoint's JSON so two trees can be diffed
 on one fixture (`awkward_extras.py` makes the fixture awkward first:

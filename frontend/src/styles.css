@@ -1867,13 +1867,19 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
    measured height, so a closed row is always that height: a row with groups
    or a metadata name (sans-serif) drew 20 px and one without 18 px. One line
    height for every font in it, and the taller of the two. */
-.s2-vrows .sample-row { height: 2em; line-height: 1.5; }
+.s2-list-rows .sample-row,
+.s2-unclaimed-rows .sample-row { height: 2em; line-height: 1.5; }
 .sample-row:hover, .sample-row.is-open { background: var(--panel-2); }
 /* The row's ▸ exists only on the row under the pointer and on an open row. A
    box on every row — even a pseudo-element, which is no DOM node but is still
    laid out — made a 23,671-row list measurably slower to draw (see App.jsx). */
-.sample-row:hover::after,
-.sample-row.is-open::after {
+/* Only in the Step 2 lists, whose rows it opens. The Projects panel's sample
+   cards are .sample-row too, and there the arrow landed on a line of its own,
+   so a card grew 22 px under the pointer. */
+.s2-list-rows .sample-row:hover::after,
+.s2-list-rows .sample-row.is-open::after,
+.s2-unclaimed-rows .sample-row:hover::after,
+.s2-unclaimed-rows .sample-row.is-open::after {
   content: "\25B8";
   flex-shrink: 0;
   width: 14px;
@@ -1883,7 +1889,8 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
   font-size: 11px;
   line-height: 1;
 }
-.sample-row.is-open::after { transform: rotate(90deg); }
+.s2-list-rows .sample-row.is-open::after,
+.s2-unclaimed-rows .sample-row.is-open::after { transform: rotate(90deg); }
 .group-chip-name,
 .group-chip-copy,
 .sd-copy {

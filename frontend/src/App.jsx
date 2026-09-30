@@ -520,6 +520,7 @@ function Step2UnclaimedList({ samples, tiers, where, sources, refName, refDir, m
       {/* A window at a time (VirtualRows): on a project of imported VCFs every
           one of them can be here, and a closed <details> still holds its rows. */}
       <VirtualRows
+        className="s2-unclaimed-rows"
         style={{maxHeight:"220px", overflowY:"auto", border:"1px solid var(--border)", borderRadius:"4px",
                 background:"var(--panel)", fontFamily:"monospace", fontSize:"0.95em", color:"var(--text)"}}
         items={samples}
@@ -6564,13 +6565,28 @@ export default function App() {
                       if (q && shown.length === 0) {
                         return <div className="muted" style={{ fontSize: "12px" }}>No samples match “{projSampleFilter}”.</div>;
                       }
-                      return shown.map((g) => {
+                      // Drawn a window at a time against the panel's own scroll box
+                      // (VirtualRows scrollParent): a 23,671-sample project opened
+                      // here put every sample on the page, and every keystroke in
+                      // the app then redrew them. The panel looks and scrolls as it
+                      // did; the 4 px between cards is inside each row, so a row's
+                      // height is the whole step to the next.
+                      return (
+                        <VirtualRows
+                          scrollParent
+                          items={shown}
+                          itemKey={(g) => g.sample}
+                          isOpen={(g) => !!sampleKrakenOpen[`${p.name}::${g.sample}`]}
+                          estimate={33}
+                          tallRows={4}
+                          renderItem={(g) => {
                         const krakenDir = krakenDirForSample(projData[p.name].krakenDirs, g.sample);
                         const key = `${p.name}::${g.sample}`;
                         const open = !!sampleKrakenOpen[key];
                         const kRes = sampleKrakenFiles[key];
                         return (
-                          <div key={g.sample} className="sample-row" style={{ border: "1px solid var(--border)", borderRadius: "8px", background: "var(--panel-2)" }}>
+                          <div style={{ paddingBottom: "4px" }}>
+                          <div className="sample-row" style={{ border: "1px solid var(--border)", borderRadius: "8px", background: "var(--panel-2)" }}>
                             <div
                               style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 10px", cursor: "pointer", fontSize: "12px" }}
                               onClick={() => toggleSample(p.name, g.sample, krakenDir)}
@@ -6609,8 +6625,11 @@ export default function App() {
                               </div>
                             ) : null}
                           </div>
+                          </div>
                         );
-                      });
+                          }}
+                        />
+                      );
                     })()}
                   </div>
                 ) : null}

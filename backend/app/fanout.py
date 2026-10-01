@@ -5,7 +5,7 @@ a server. Listing a project's samples, counting its reads or auditing its
 comparison set costs one or more of those per sample — 8,000+ per request on
 the Ames projects — and made one after another they add up to minutes, most of
 it spent idle, waiting on the next reply. Made concurrently they overlap: the
-server answers sixteen requests in flight in about the time it answers one.
+server answers the requests in flight in about the time it answers one.
 
 ``fan_out`` is the one place that decides how many run at once. Its pool is
 shared by every request, so the total in flight stays bounded however many
@@ -13,8 +13,12 @@ requests arrive together (a project switch fires a dozen). A task running in
 the pool never fans out again — a nested call runs its items in place instead
 — so the pool can never deadlock waiting on itself.
 
-VSNP_GUI_FS_WORKERS sets the width (default 16); 1 makes every call serial,
-exactly as before.
+VSNP_GUI_FS_WORKERS sets the width (default 64); 1 makes every call serial,
+exactly as before. The width was 16 until v0.4.125. Once each request was down
+to one stat per sample the shared pool was what a project switch waited on:
+on the 8,171-sample model at 1 ms a call, 64 took a warm switch from 2.4 s to
+1.2 s and the page load from 0.96 s to 0.30 s. The storage server sees at most
+this many metadata calls from one backend at a time.
 """
 
 from __future__ import annotations
@@ -31,9 +35,9 @@ R = TypeVar("R")
 
 def _width() -> int:
     try:
-        return max(1, int(os.environ.get("VSNP_GUI_FS_WORKERS", "16")))
+        return max(1, int(os.environ.get("VSNP_GUI_FS_WORKERS", "64")))
     except ValueError:
-        return 16
+        return 64
 
 
 WIDTH = _width()

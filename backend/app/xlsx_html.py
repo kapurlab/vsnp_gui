@@ -1176,7 +1176,8 @@ def _cf_dxf_for(cell, row_idx: int, col_idx: int,
     First match wins, mirroring _build_cf_extras — but evaluated per cell as the
     sheet streams past rather than by walking every CF range up front, because
     the ranges in these files span the whole table and materialising them would
-    defeat the point of streaming.
+    defeat the point of streaming. The streaming renderers reach it through
+    _CfMemo, which asks once per distinct (ranges, value, referenced value).
 
     Returns the dxf itself rather than styling for one output format. In a real
     vSNP3 table NOTHING is coloured by a static fill: every colour on screen
@@ -1208,6 +1209,184 @@ def _cf_fragments_for(cell, row_idx: int, col_idx: int,
     """CSS fragments a cell picks up from conditional formatting."""
     dxf = _cf_dxf_for(cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
     return _dxf_style_fragments(dxf) if dxf is not None else []
+
+
+class _CellStyleMemo:
+    """Per-render memo for what a cell shows that depends only on its style.
+
+    openpyxl's read-only cells point at one of the workbook's few style
+    records (a cascade table has four), so the inline CSS and the rotation
+    class are the same for every cell sharing a record, and the formatted
+    text is the same for every cell sharing a record and a value. Computing
+    them per cell was a third of a cold render: on a 72 x 10,001 table the
+    style and value helpers walked openpyxl's style descriptors and formatted
+    the same handful of calls 720,000 times. Keyed on the _style_id a
+    ReadOnlyCell carries; a cell without one is computed directly, as before.
+    """
+    __slots__ = ("_inline", "_rotation", "_values")
+
+    def __init__(self):
+        self._inline: dict = {}
+        self._rotation: dict = {}
+        self._values: dict = {}
+
+    def inline_style(self, cell) -> str:
+        sid = getattr(cell, "_style_id", None)
+        if sid is None:
+            return _cell_inline_style(cell)
+        try:
+            return self._inline[sid]
+        except KeyError:
+            out = self._inline[sid] = _cell_inline_style(cell)
+            return out
+
+    def rotation_class(self, cell) -> str:
+        sid = getattr(cell, "_style_id", None)
+        if sid is None:
+            return _cell_rotation_class(cell)
+        try:
+            return self._rotation[sid]
+        except KeyError:
+            out = self._rotation[sid] = _cell_rotation_class(cell)
+            return out
+
+    def value_html(self, cell) -> str:
+        sid = getattr(cell, "_style_id", None)
+        if sid is None:
+            return _format_cell_value(cell)
+        v = cell.value
+        # The type is part of the key: 1, 1.0 and True are one dict key to
+        # Python and three different strings here.
+        key = (sid, type(v), v)
+        try:
+            return self._values[key]
+        except KeyError:
+            out = self._values[key] = _format_cell_value(cell)
+            return out
+        except TypeError:                   # an unhashable value: format it directly
+            return _format_cell_value(cell)
+
+
+class _CfMemo:
+    """Per-render memo for conditional formatting, exact by construction.
+
+    _cf_dxf_for's answer for a cell is a function of three things: which CF
+    ranges contain the cell's position, the cell's value, and — for a rule
+    whose formula is a cell reference, like vSNP3's `equal B$2` — the value
+    that reference resolves to for this cell. Everything else it reads is the
+    rules themselves, fixed for the render. So a cell whose three inputs match
+    an earlier cell's gets that cell's answer, and only a new combination
+    runs _cf_dxf_for, which stays the one evaluator. On a cascade table the
+    combinations number in the dozens (one range set, about twenty distinct
+    calls, four reference bases) where the cells number in the hundreds of
+    thousands, and evaluating every cell — sorting the rules, re-parsing each
+    formula, comparing — was half of a cold render.
+
+    Range membership is worked out once per distinct band of rows (the rows
+    the same ranges span) as a column -> ranges table, so a cell costs one
+    list index rather than a comparison against every range. The reference
+    lookups mirror _resolve_cf_value exactly — the same anchor offsets, the
+    same sheet shim, the same "unresolvable is None" — because a key that
+    differed from what the evaluator reads could hand a cell another cell's
+    colour. Values are keyed with their type, since 1, 1.0 and True compare
+    equal in Python but not as the text the rules compare.
+    """
+
+    def __init__(self, cf_ranges: list, dxfs: list, cf_sheet, ncols: int):
+        self._cf_ranges = cf_ranges
+        self._dxfs = dxfs
+        self._sheet = cf_sheet
+        self._ncols = max(0, int(ncols))
+        self._dxf_memo: dict = {}
+        self._frag_memo: dict = {}
+        self._cols_by_band: dict = {}
+        self._band_row = None
+        self._band_cols: list = []
+        # Per range, the cell references its cellIs rules name, parsed once
+        # the way _resolve_cf_value parses them for every cell:
+        # (anchor_row, anchor_col, col_abs, col_index, row_abs, row_num).
+        self._refs: list = []
+        for cr, rules in cf_ranges:
+            refs = []
+            for rule in rules:
+                if rule.type != "cellIs" or not rule.formula:
+                    continue
+                text = str(rule.formula[0]).strip()
+                try:
+                    float(text) if ("." in text or "e" in text.lower()) else int(text)
+                    continue                            # a number: nothing to look up
+                except ValueError:
+                    pass
+                if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                    continue                            # a quoted string
+                parsed = _parse_single_ref(text)
+                if parsed is None:
+                    continue                            # resolves to None for every cell
+                col_abs, col_letter, row_abs, row_num = parsed
+                refs.append((cr.min_row, cr.min_col, col_abs,
+                             column_index_from_string(col_letter), row_abs, row_num))
+            self._refs.append(refs)
+
+    def _columns_for_row(self, row_idx: int) -> list:
+        band = tuple(i for i, (cr, _rules) in enumerate(self._cf_ranges)
+                     if cr.min_row <= row_idx <= cr.max_row)
+        cols = self._cols_by_band.get(band)
+        if cols is None:
+            cols = [()] * (self._ncols + 1)
+            for c in range(1, self._ncols + 1):
+                cols[c] = tuple(
+                    i for i in band
+                    if self._cf_ranges[i][0].min_col <= c <= self._cf_ranges[i][0].max_col)
+            self._cols_by_band[band] = cols
+        return cols
+
+    def dxf_for(self, cell, row_idx: int, col_idx: int):
+        """What _cf_dxf_for returns for this cell."""
+        if not self._cf_ranges:
+            return None
+        if row_idx != self._band_row:
+            self._band_cols = self._columns_for_row(row_idx)
+            self._band_row = row_idx
+        if col_idx >= len(self._band_cols):             # past the width the memo was sized for
+            return _cf_dxf_for(cell, row_idx, col_idx, self._cf_ranges, self._dxfs, self._sheet)
+        applicable = self._band_cols[col_idx]
+        if not applicable:
+            return None
+        value = cell.value
+        key = [applicable, type(value), value]
+        for i in applicable:
+            for anchor_row, anchor_col, col_abs, col_index, row_abs, row_num in self._refs[i]:
+                ref_col = col_index if col_abs else col_index + (cell.column - anchor_col)
+                ref_row = row_num if row_abs else row_num + (cell.row - anchor_row)
+                if ref_row < 1 or ref_col < 1:
+                    referenced = None
+                else:
+                    try:
+                        referenced = self._sheet.cell(row=ref_row, column=ref_col).value
+                    except Exception:
+                        referenced = None
+                key.append(type(referenced))
+                key.append(referenced)
+        key = tuple(key)
+        try:
+            return self._dxf_memo[key]
+        except KeyError:
+            dxf = _cf_dxf_for(cell, row_idx, col_idx, self._cf_ranges, self._dxfs, self._sheet)
+            self._dxf_memo[key] = dxf
+            return dxf
+        except TypeError:                               # an unhashable value: evaluate directly
+            return _cf_dxf_for(cell, row_idx, col_idx, self._cf_ranges, self._dxfs, self._sheet)
+
+    def fragments_for(self, cell, row_idx: int, col_idx: int) -> list:
+        """What _cf_fragments_for returns for this cell. Cells that resolve to
+        the same dxf share one list; callers only read it."""
+        dxf = self.dxf_for(cell, row_idx, col_idx)
+        if dxf is None:
+            return []
+        frags = self._frag_memo.get(id(dxf))
+        if frags is None:
+            frags = self._frag_memo[id(dxf)] = _dxf_style_fragments(dxf)
+        return frags
 
 
 def ambiguous_stems(row_labels) -> dict:
@@ -1330,6 +1509,8 @@ def render_window(
         # streamed table painted every cell bright instead of near-white.
         cf_sheet = _CapturedRowsSheet()
         cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
+        style_memo = _CellStyleMemo()
+        cf_memo = _CfMemo(cf_ranges, dxfs, cf_sheet, render_cols)
         positions: dict[int, str] = {}
         # Rows are buffered as per-cell lists rather than one flat string, so
         # the column count can be trimmed after the fact — see the byte budget
@@ -1389,11 +1570,10 @@ def render_window(
                 if not hasattr(cell, "column"):     # EmptyCell: no value, no style
                     cells.append("<td></td>")
                     continue
-                inline = _cell_inline_style(cell)
+                inline = style_memo.inline_style(cell)
                 # CF wins over direct cell styles for the properties it sets,
                 # so its fragments go last (later declarations override).
-                cf_frags = _cf_fragments_for(
-                    cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
+                cf_frags = cf_memo.fragments_for(cell, row_idx, col_idx)
                 if cf_frags:
                     inline = "; ".join([p for p in (inline,) if p] + cf_frags)
                 classes = []
@@ -1407,10 +1587,10 @@ def render_window(
                     classes.append("xlsx-sticky-top")
                 if col_idx <= freeze_col:
                     classes.append("xlsx-sticky-left")
-                rot_class = _cell_rotation_class(cell)
+                rot_class = style_memo.rotation_class(cell)
                 if rot_class:
                     classes.append(rot_class)
-                value = _format_cell_value(cell)
+                value = style_memo.value_html(cell)
                 # A variant cell is marked with a class and NOTHING else. The
                 # sample is already in the row's first cell and the locus in
                 # the header row, so a delegated click handler can work both
@@ -1641,6 +1821,8 @@ def render_filtered_window(
         # asks for it.
         cf_sheet = _CapturedRowsSheet()
         cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
+        style_memo = _CellStyleMemo()
+        cf_memo = _CfMemo(cf_ranges, dxfs, cf_sheet, total_cols)
 
         for row_idx, row in enumerate(
                 ws.iter_rows(min_row=1, max_row=total_rows,
@@ -1711,9 +1893,8 @@ def render_filtered_window(
                 if not hasattr(cell, "column"):     # EmptyCell: no value, no style
                     cells.append("<td></td>")
                     continue
-                inline = _cell_inline_style(cell)
-                cf_frags = _cf_fragments_for(
-                    cell, row_idx, col_idx, cf_ranges, dxfs, cf_sheet)
+                inline = style_memo.inline_style(cell)
+                cf_frags = cf_memo.fragments_for(cell, row_idx, col_idx)
                 if cf_frags:
                     inline = "; ".join([p for p in (inline,) if p] + cf_frags)
                 colored = "background-color" in inline
@@ -1747,10 +1928,10 @@ def render_filtered_window(
                     classes.append("xlsx-sticky-top")
                 if col_idx <= freeze_col:
                     classes.append("xlsx-sticky-left")
-                rot_class = _cell_rotation_class(cell)
+                rot_class = style_memo.rotation_class(cell)
                 if rot_class:
                     classes.append(rot_class)
-                value = _format_cell_value(cell)
+                value = style_memo.value_html(cell)
                 if row_stem and col_idx in positions and colored:
                     has_bam = samples_with_bams is None or row_stem in samples_with_bams
                     has_vcf = (samples_with_vcfs is not None
@@ -2030,6 +2211,7 @@ def write_filtered_xlsx(xlsx_path: Path, dest: Path,
         # renderer does, for the same reason.
         cf_sheet = _CapturedRowsSheet()
         cf_capture_rows = _cf_absolute_ref_rows(cf_ranges)
+        cf_memo = _CfMemo(cf_ranges, dxfs, cf_sheet, last_col)
 
         for row_idx, row in enumerate(
                 ws.iter_rows(min_row=1, max_row=last_row,
@@ -2056,8 +2238,7 @@ def write_filtered_xlsx(xlsx_path: Path, dest: Path,
                         new_cell.fill = copy(cell.fill)
                 except (TypeError, ValueError):
                     pass   # an unusual style is not worth losing the value over
-                dxf = _cf_dxf_for(cell, row_idx, col_idx,
-                                  cf_ranges, dxfs, cf_sheet)
+                dxf = cf_memo.dxf_for(cell, row_idx, col_idx)
                 if dxf is not None:
                     _apply_dxf(new_cell, dxf)
                 emit[pos] = new_cell

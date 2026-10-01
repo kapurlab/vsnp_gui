@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import Response, FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from pathlib import Path
@@ -3883,6 +3884,36 @@ async def ref_upload_file(
     }
 
 
+def _plain_json(data) -> JSONResponse:
+    """A JSON response rendered straight from the data, for the per-sample lists.
+
+    A dict an endpoint returns goes through FastAPI's jsonable_encoder before
+    the response class renders it: a pure-Python walk of every value, which on
+    an 8,000-sample project cost about 430 ms per project switch across the
+    endpoints that use this (300 ms of it the Results rows) against 66 ms for
+    json.dumps — all of it holding the GIL while the switch's other requests
+    waited. Those endpoints build plain JSON types (str, int, float, bool,
+    None, list, dict), which the C encoder renders as they are, and FastAPI
+    passes a Response through untouched. Anything the C encoder rejects falls
+    back to the encoder, so an unexpected Path or datetime still serialises
+    exactly as it always did.
+
+    The functions that build these answers keep returning the data, for the
+    code (and tests) that call them in-process; a thin `<name>_route`
+    wrapper beside each is what the path is registered on.
+
+    One difference to know about: jsonable_encoder also drops every dict key
+    that starts with "_sa" (its sqlalchemy_safe default). None of these
+    answers carry such a key except the Results rows' _sample, which
+    qc_summary leaves out of its copy, so the bodies are byte for byte what
+    they were.
+    """
+    try:
+        return JSONResponse(content=data)
+    except (TypeError, ValueError):
+        return JSONResponse(content=jsonable_encoder(data))
+
+
 @app.get("/api/projects")
 def projects():
     cfg = load_config()
@@ -5240,7 +5271,6 @@ def _step1_dispatch(
     }
 
 
-@app.get("/api/projects/{project}/step1/status")
 def step1_status(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
@@ -5436,6 +5466,12 @@ def step1_status(project: str):
         "job_started_at": job_started_at,
         "samples": statuses,
     }
+
+
+@app.get("/api/projects/{project}/step1/status")
+def step1_status_route(project: str):
+    """The route: step1_status's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(step1_status(project))
 
 
 def _safe_child(parent: Path, name: str) -> Path:
@@ -5667,7 +5703,6 @@ def step1_log(project: str, sample: str):
     return {"sample": sample, "log": "".join(lines)}
 
 
-@app.get("/api/projects/{project}/vcfs")
 def project_vcfs_list(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
@@ -5681,6 +5716,12 @@ def project_vcfs_list(project: str):
         stem = v.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
         samples.append({"filename": v.name, "sample": stem})
     return {"count": len(samples), "path": str(vcfs_dir), "folder_name": vcfs_dir.name, "samples": samples}
+
+
+@app.get("/api/projects/{project}/vcfs")
+def project_vcfs_list_route(project: str):
+    """The route: project_vcfs_list's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(project_vcfs_list(project))
 
 
 class VcfsCollectRequest(BaseModel):
@@ -7193,7 +7234,6 @@ def _qc_table(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
     return header, data
 
 
-@app.get("/api/projects/{project}/qc_summary")
 def qc_summary(project: str, refresh: int = 0):
     """Step 1 Results rows. Non-blocking: while a scan runs this returns
     {"status": "scanning", "done", "total"} for the frontend to poll; when
@@ -7224,8 +7264,12 @@ def qc_summary(project: str, refresh: int = 0):
     with _QC_STATE_LOCK:
         state["used_at"] = time.time()
     # Annotate a copy: verdicts depend on thresholds the user can edit, and
-    # the cached rows must stay pristine for the CSV/XLSX exports.
-    rows = [dict(r) for r in state["rows"] or []]
+    # the cached rows must stay pristine for the CSV/XLSX exports. The copy
+    # leaves out keys starting with "_sa" (_sample), which FastAPI's encoder
+    # has always dropped from the body — see _plain_json. The Results table
+    # keys its rows on `sample`.
+    rows = [{k: v for k, v in r.items() if not k.startswith("_sa")}
+            for r in state["rows"] or []]
     _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
     return {
         "status": "ready",
@@ -7233,6 +7277,12 @@ def qc_summary(project: str, refresh: int = 0):
         "scanned_at": state["scanned_at"],
         "count": len(rows),
     }
+
+
+@app.get("/api/projects/{project}/qc_summary")
+def qc_summary_route(project: str, refresh: int = 0):
+    """The route: qc_summary's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(qc_summary(project, refresh))
 
 
 @app.get("/api/projects/{project}/qc_summary.csv")
@@ -7517,7 +7567,6 @@ def posthoc_status_all(project: str, tool: str = "snp_analysis", run_id: Optiona
     return {"groups": dict(fan_out(_state, group_dirs))}
 
 
-@app.get("/api/projects/{project}/reference_lock")
 def reference_lock(project: str):
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
@@ -7554,6 +7603,12 @@ def reference_lock(project: str):
             "display_name": f"{project}_{refs[0]}"
         })
     return {"references": refs, "samples_by_reference": by_ref}
+
+
+@app.get("/api/projects/{project}/reference_lock")
+def reference_lock_route(project: str):
+    """The route: reference_lock's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(reference_lock(project))
 
 
 class ExcludeRequest(BaseModel):
@@ -7649,7 +7704,6 @@ def step2_vcf_count(project: str):
     }
 
 
-@app.get("/api/projects/{project}/step2/vcf_database/samples")
 def step2_vcf_database_samples(project: str):
     """Return all sample names in the VCF database directory.
 
@@ -7703,6 +7757,12 @@ def step2_vcf_database_samples(project: str):
         })
     samples.sort(key=lambda x: x["sample"].lower())
     return samples
+
+
+@app.get("/api/projects/{project}/step2/vcf_database/samples")
+def step2_vcf_database_samples_route(project: str):
+    """The route: step2_vcf_database_samples's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(step2_vcf_database_samples(project))
 
 
 @app.get("/api/projects/{project}/step2/runs")
@@ -7859,7 +7919,6 @@ def step2_blocklist_get(project: str):
     }
 
 
-@app.get("/api/projects/{project}/name-aliases")
 def project_name_aliases(project: str):
     """{stored sample name: [every other name it goes by]} for this project.
 
@@ -7894,6 +7953,12 @@ def project_name_aliases(project: str):
     return {"aliases": out, "count": len(out), "display": display,
             "metadata_file": str(meta_file or ""),
             "metadata_rows": meta.n_rows if meta else 0}
+
+
+@app.get("/api/projects/{project}/name-aliases")
+def project_name_aliases_route(project: str):
+    """The route: project_name_aliases's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(project_name_aliases(project))
 
 
 @app.get("/api/projects/{project}/step2/sample-groups")
@@ -8611,7 +8676,6 @@ def step1_sample_stats_preview(project: str, sample: str, download: int = 0):
     return HTMLResponse(content=html_page)
 
 
-@app.get("/api/projects/{project}/step1/samples")
 def step1_samples(project: str):
     """List step1 sample directories for the inline project sample browser.
 
@@ -8627,6 +8691,12 @@ def step1_samples(project: str):
         raise HTTPException(status_code=404, detail="Project not found")
     step1_dir = project_dir / "step1"
     return {"samples": _step1_browser_samples(step1_dir)}
+
+
+@app.get("/api/projects/{project}/step1/samples")
+def step1_samples_route(project: str):
+    """The route: step1_samples's answer, rendered without FastAPI's encoder (see _plain_json)."""
+    return _plain_json(step1_samples(project))
 
 
 @app.get("/api/projects/{project}/step1/samples/{sample}/files")

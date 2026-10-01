@@ -104,3 +104,31 @@ groups; "new session" is a fresh backend with the on-disk caches in place,
     new session, cold switch    4.2 s   58,857       2.7 s   16,819
     warm revisit                3.6 s   34,273       2.1 s   16,750
     first ever, cold switch    12.4 s  192,888      10.2 s   85,482
+
+Numbers from the v0.4.125 release (1 ms per call, 8,171-sample owl, caches on
+disk; the "before" column is v0.4.124, whose fan-out pool was 16 wide):
+
+                                v0.4.124            v0.4.125
+    page load (/api/projects)   0.96 s    8,720      0.30 s    8,720 calls
+    warm revisit                2.42 s   16,750      0.79 s   16,750
+
+The call counts are unchanged: what moved is how many are in flight at once
+(fanout.py's pool is 64 wide now; `VSNP_GUI_FS_WORKERS` still overrides it)
+and the Python a switch spends holding the GIL — the per-sample lists skip
+FastAPI's jsonable_encoder (`_plain_json` in main.py; 430 ms of a switch on
+this fixture, 300 ms of it the 13 MB Results answer). At 0 ms per call the
+same switch is pure CPU: cold 1.97 s -> 1.70 s, warm revisit 1.01 s -> 0.58 s.
+
+Two costs the model does not cover were measured on a `cp -cR` clone of
+mtbc0_test01 (68 samples). A cold open of its 72 x 10,001 cascade table
+through /preview-xlsx: 5.2 s -> 2.7 s (render_window alone 4.7 s -> 2.2 s).
+Per-cell style and conditional-format work is memoised (`_CfMemo` and
+`_CellStyleMemo` in xlsx_html.py), and the pages are byte-identical over all
+120 Step 2 tables on this machine — full page, clade filter and the clade's
+xlsx export. A 9.5 MB samtools reads window through reads_data, as igv.js
+fetches it: 291 ms -> 147 ms, because the gzip exclusions in request_safety.py
+now reach the middleware and BAM is no longer compressed a second time.
+
+What remains of a table open is the browser's: the cached 72 x 10,001 page is
+0.7 MB on the wire but 720,000 `<td>`s, about 20 s of parsing and layout in
+Chrome against 0.5 s for a 973-column table. Rows are paged; columns are not.

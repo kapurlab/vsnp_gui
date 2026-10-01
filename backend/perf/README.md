@@ -129,6 +129,20 @@ xlsx export. A 9.5 MB samtools reads window through reads_data, as igv.js
 fetches it: 291 ms -> 147 ms, because the gzip exclusions in request_safety.py
 now reach the middleware and BAM is no longer compressed a second time.
 
-What remains of a table open is the browser's: the cached 72 x 10,001 page is
-0.7 MB on the wire but 720,000 `<td>`s, about 20 s of parsing and layout in
-Chrome against 0.5 s for a 973-column table. Rows are paged; columns are not.
+What remained of a table open was the browser's: the cached 72 x 10,001 page
+was 0.7 MB on the wire but 720,000 `<td>`s, about 20 s of parsing and layout
+in Chrome against 0.5 s for a 973-column table, because rows were paged and
+columns were not.
+
+v0.4.126 pages the columns too. The page inlines the first rows and a window
+of leading columns (`initial_cols_for` in xlsx_html.py: about 40,000 cells,
+400 columns of a 72-row table) and asks for the rest as it is scrolled —
+`rows_from`/`rows_count`/`cols_count` for a block of rows as wide as the page,
+`cols_from`/`cols_count`/`rows_count` for a block of columns as tall as it —
+one request at a time so the table stays square however the two interleave.
+The cached window is unchanged (rows stay whole `<tr>` strings on disk) and is
+split into cells once per process when a column is first asked for. Measured
+in headless Chrome on the same cached 72 x 10,001 table: load event at 0.23 s
+with 28,800 cells (was 20 s with 720,000), the page 1.3 MB instead of 25.7 MB,
+each scroll to the right edge adding 400 columns in one request, and a click
+on a variant cell in column 2,800 opening the right sample at the right locus.

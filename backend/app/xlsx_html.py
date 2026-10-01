@@ -91,12 +91,23 @@ _LOCUS_RE = re.compile(r"^\S+:\d+$")
 STREAM_ABOVE_CELLS = 20_000
 # The window held on the server. Cells are cheap enough now (~25 bytes, see the
 # style palette and delegated IGV handler) that a 1,000 x 1,000 window is a
-# ~25 MB document — held server-side and streamed to the page in row batches,
-# never sent in one piece.
+# ~25 MB document — held server-side and streamed to the page in row and
+# column batches, never sent in one piece.
 DEFAULT_MAX_CELLS = 1_000_000
 DEFAULT_MAX_ROWS = 1_000
 # Rows in the first response. The rest arrive as the user scrolls.
 DEFAULT_INITIAL_ROWS = 200
+# …and columns in the first response: as many leading columns as keep the
+# inlined cells near INITIAL_CELLS, within [MIN_INITIAL_COLS, MAX_INITIAL_COLS];
+# the rest arrive as the user scrolls right (see initial_cols_for). A cascade
+# table is wide, not tall — 72 samples by 10,001 positions on a real run — and
+# inlining every column cost the browser about 20 s of parsing and layout
+# (720,000 cells, 1.45 M DOM nodes) for a page the server had answered in
+# 0.1 s. The same table in a 400-column window opens in about a second, and the
+# positions off to the right come as they are scrolled to.
+INITIAL_CELLS = 40_000
+MIN_INITIAL_COLS = 60
+MAX_INITIAL_COLS = 400
 # …and a cap on the RENDERED BYTES, which is what actually decides whether a
 # page opens and how much disk a cached preview costs. A cell budget alone
 # bounds neither: bytes per cell range from ~30 (a plain cell) to ~450 (a
@@ -2360,21 +2371,121 @@ def view_controls(loci: dict, row_samples: "list[str]") -> str:
     )
 
 
+def initial_cols_for(initial_rows: int) -> int:
+    """How many leading columns the first response inlines, for a page that
+    starts with `initial_rows` rows: about INITIAL_CELLS cells, within the
+    bounds above. 400 columns of a 72-row table, 200 of a 200-row one."""
+    return max(MIN_INITIAL_COLS,
+               min(MAX_INITIAL_COLS, INITIAL_CELLS // max(1, initial_rows)))
+
+
+def _split_row(tr: str) -> "list[str]":
+    """A rendered row's cells, from its HTML. Every cell is written as
+    `<td…>…</td>` with its text HTML-escaped, so the closing tag cannot occur
+    inside one and is a safe seam."""
+    inner = tr[4:-5] if tr.startswith("<tr>") and tr.endswith("</tr>") else tr
+    if not inner:
+        return []
+    parts = inner.split("</td>")
+    return [part + "</td>" for part in parts[:-1]]   # "" follows the last cell
+
+
+def window_cells(window: dict) -> "list[list[str]]":
+    """Each rendered row as its list of cell strings.
+
+    The window keeps its rows as whole `<tr>` strings — that is what the disk
+    cache holds and what every row batch is cut from — and is split into cells
+    once, here, the first time a column is asked for, and kept on the window
+    under a key the cache never writes (see persistable()). On the largest
+    window that fits (a million cells) the split is a few hundred
+    milliseconds once per process, not per scroll.
+    """
+    cells = window.get("_cells")
+    if cells is None:
+        cells = [_split_row(tr) for tr in window["rows"]]
+        window["_cells"] = cells
+    return cells
+
+
+def window_cols(window: dict) -> "list[str]":
+    """The window's `<col>` elements, one per rendered column."""
+    cols = window.get("_cols")
+    if cols is None:
+        cols = re.findall(r"<col\b[^>]*>", window.get("colgroup") or "")
+        window["_cols"] = cols
+    return cols
+
+
+def persistable(window: dict) -> dict:
+    """The window without its in-memory derivations (the keys that start with
+    an underscore), for writing to the cache."""
+    return {k: v for k, v in window.items() if not str(k).startswith("_")}
+
+
+def rows_batch(window: dict, rows_from: int, rows_count: int | None,
+               cols_count: int | None = None) -> str:
+    """A block of rows for the scrolling page, as `<tr>` HTML.
+
+    With `cols_count`, each row is cut to its first that many cells — the
+    columns the page has loaded, so a batch of rows arriving under a column
+    window is exactly as wide as the rows already there. Without it, whole rows.
+    """
+    start = max(0, int(rows_from))
+    count = max(1, min(int(rows_count or 200), 1000))
+    if cols_count is None:
+        return "".join(window["rows"][start:start + count])
+    width = max(1, int(cols_count))
+    cells = window_cells(window)
+    return "".join("<tr>" + "".join(r[:width]) + "</tr>"
+                   for r in cells[start:start + count])
+
+
+def cols_batch(window: dict, cols_from: int, cols_count: int | None,
+               rows_count: int | None) -> dict:
+    """A block of columns for the rows the page has loaded.
+
+    Returns the `<col>` elements of those columns and, for each of the first
+    `rows_count` rows, the cells of those columns as one HTML fragment, which
+    the page appends to the row it already holds. Columns are 0-based like
+    rows_from; `rows_count` is the number of rows on the page, so the fragments
+    line up with its `<tr>`s one to one.
+    """
+    cells = window_cells(window)
+    start = max(0, int(cols_from))
+    count = max(1, min(int(cols_count or MAX_INITIAL_COLS), 2000))
+    nrows = max(1, min(int(rows_count or len(cells)), len(cells))) if cells else 0
+    return {
+        "colgroup": "".join(window_cols(window)[start:start + count]),
+        "rows": ["".join(r[start:start + count]) for r in cells[:nrows]],
+    }
+
+
 def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
                  download_href: str | None = None,
-                 full_href: str | None = None) -> str:
+                 full_href: str | None = None,
+                 initial_cols: int | None = None) -> str:
     """Build the preview page from a rendered window.
 
-    Only the first `initial_rows` rows are inlined; the rest are fetched by the
-    page as it is scrolled. A 1,000 x 1,000 window is a million cells — fine to
-    hold on the server, far too much to hand a browser in one document.
+    Only the first `initial_rows` rows and the first `initial_cols` columns
+    (initial_cols_for(initial_rows) by default) are inlined; the rest are
+    fetched by the page as it is scrolled down or right. A 1,000 x 1,000
+    window is a million cells — fine to hold on the server, far too much to
+    hand a browser in one document.
 
     ``download_href``/``full_href`` are RELATIVE URLs (query-only) built by the
     endpoint, so they re-enter the same route through any proxy prefix. See
     download_link() for why these are real anchors rather than JS navigation.
     """
     rows = window["rows"]
-    head = "".join(rows[:initial_rows])
+    cells = window_cells(window)
+    n_head = min(initial_rows, len(rows))
+    if initial_cols is None:
+        initial_cols = initial_cols_for(max(1, n_head))
+    initial_cols = max(1, int(initial_cols))
+    available_cols = max((len(r) for r in cells), default=0)
+    loaded_cols = min(initial_cols, available_cols)
+    head = "".join("<tr>" + "".join(r[:loaded_cols]) + "</tr>" for r in cells[:n_head])
+    colgroup = "".join(window_cols(window)[:loaded_cols])
     total_rows, total_cols = window["total_rows"], window["total_cols"]
     shown_rows, shown_cols = window["shown_rows"], window["shown_cols"]
     filt = window.get("filter")
@@ -2451,7 +2562,7 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
     if wnote:
         notice += f'<div class="xlsx-filter xlsx-filter-warn">{wnote}</div>'
 
-    table_html = (f'<table class="xlsx" id="xlsxTable"><colgroup>{window["colgroup"]}'
+    table_html = (f'<table class="xlsx" id="xlsxTable"><colgroup>{colgroup}'
                   f'</colgroup><tbody id="xlsxBody">{head}</tbody></table>')
     # The download follows the view. Saying so on the link is half the fix: the
     # complaint that started this was "the download does not work", and what had
@@ -2470,8 +2581,10 @@ def compose_page(window: dict, initial_rows: int = DEFAULT_INITIAL_ROWS,
         notice=notice,
         style_css=window["style_css"],
         table=table_html,
-        loaded=len(rows[:initial_rows]),
+        loaded=n_head,
         available=len(rows),
+        loaded_cols=loaded_cols,
+        available_cols=available_cols,
         project=html.escape(window["project"], quote=True),
         # json.dumps does NOT escape "<", so a cell value containing the literal
         # "</script>" ended the block early and everything after it was parsed as
@@ -2718,6 +2831,8 @@ def xlsx_to_html(
         table=table_html,
         loaded=0,
         available=0,
+        loaded_cols=0,
+        available_cols=0,
         project=html.escape(project or "", quote=True),
         loci_json=json.dumps(loci_map),
         samples_json=json.dumps(samples_list),
@@ -3075,7 +3190,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   var LOCI = {loci_json};        // column index (1-based) -> "contig:pos"
   var SAMPLES = {samples_json};  // row index (0-based, incl. header) -> stem
   var PROJECT = "{project}";
-  var loaded = {loaded}, available = {available};
+  var loaded = {loaded}, available = {available};                 // rows
+  var loadedCols = {loaded_cols}, availableCols = {available_cols};  // columns
   var body = document.getElementById("xlsxBody");
   var more = document.getElementById("xlsxMore");
   var table = document.getElementById("xlsxTable");
@@ -3170,21 +3286,21 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     }}
   }});
 
-  // The clickable name/header cells say so on hover. Applied to rows as they
-  // arrive — markTargets() starts where the previous call stopped.
-  var markedTo = 0;
+  // The clickable name/header cells say so on hover. Applied to rows and
+  // header cells as they arrive — markTargets() starts where the previous
+  // call stopped, in both directions.
+  var markedTo = 0, markedCols = 0;
   function markTargets() {{
     var rows = body.rows;
     if (!rows.length) return;
-    if (markedTo === 0) {{
-      var hdr = rows[0].cells;
-      for (var c = 0; c < hdr.length; c++) {{
-        if (LOCI[String(c + 1)]) {{
-          hdr[c].classList.add("xlsx-hl-target");
-          hdr[c].title = "Click to colour this position";
-        }}
+    var hdr = rows[0].cells;
+    for (var c = markedCols; c < hdr.length; c++) {{
+      if (LOCI[String(c + 1)]) {{
+        hdr[c].classList.add("xlsx-hl-target");
+        hdr[c].title = "Click to colour this position";
       }}
     }}
+    markedCols = hdr.length;
     for (var r = Math.max(markedTo, 1); r < rows.length; r++) {{
       if (SAMPLES[r] && rows[r].cells.length) {{
         rows[r].cells[0].classList.add("xlsx-hl-target");
@@ -3204,7 +3320,11 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   var invNote = document.getElementById("xlsxInvariantNote");
   var invColsMemo = null;   // computed once; see the note at the toggle
   var colgroupEl = table.querySelector("colgroup");
+  // Every <col> the page has received, in column order, whether or not it is
+  // in the colgroup right now (setHiddenCols takes hidden ones out); column
+  // batches push theirs on as they arrive.
   var allCols = colgroupEl ? Array.prototype.slice.call(colgroupEl.children) : [];
+  var hiddenCols = [];
   var hideStyle = document.createElement("style");
   document.head.appendChild(hideStyle);
 
@@ -3233,6 +3353,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     // hiding only the cells would shift every column onto its neighbour's
     // width. The cells themselves hide by nth-child rule — those count DOM
     // position, so nothing renumbers and the IGV click mapping stays right.
+    hiddenCols = cols;
     var hidden = {{}};
     cols.forEach(function(c) {{ hidden[c] = true; }});
     while (colgroupEl.firstChild) colgroupEl.removeChild(colgroupEl.firstChild);
@@ -3256,9 +3377,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       }}
       // Memoized after the first computation: the answer walks every sample
       // cell of every row (~1M textContent reads near the full-view bound),
-      // and it cannot change afterwards — loadAllRows() has fetched the whole
-      // window and row text is static (colour marks are CSS classes, not text
-      // edits). Re-ticking the box is instant instead of a multi-second walk.
+      // and it cannot change afterwards — loadAll() has fetched the whole
+      // window, rows and columns, and row text is static (colour marks are
+      // CSS classes, not text edits). Re-ticking the box is instant instead
+      // of a multi-second walk.
       if (invColsMemo !== null) {{
         setHiddenCols(invColsMemo);
         invNote.textContent = invColsMemo.length
@@ -3266,8 +3388,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
           : "no position is identical across the shown samples";
         return;
       }}
-      invNote.textContent = "checking every row…";
-      loadAllRows().then(function() {{
+      invNote.textContent = "loading every row and column…";
+      loadAll().then(function() {{
         var cols = identicalCols();
         invColsMemo = cols;
         setHiddenCols(cols);
@@ -3276,67 +3398,159 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
           : "no position is identical across the shown samples";
       }}).catch(function() {{
         invBox.checked = false;
-        invNote.textContent = "could not load the remaining rows — nothing was hidden";
+        invNote.textContent = "could not load the rest of the table — nothing was hidden";
       }});
     }});
   }}
 
-  // ---- load-as-you-scroll -------------------------------------------------
-  var done = loaded >= available, inflight = null;
+  // ---- load-as-you-scroll: down for rows, right for columns ----------------
+  // The page inlines a window of the table — the first rows and the leading
+  // columns — and the rest arrives in batches: rows as the bottom comes into
+  // view, columns as the right edge does. A cascade table is wide rather than
+  // tall (72 samples by 10,001 positions on a real run), and inlining every
+  // column cost the browser about 20 s of parsing and layout for a page the
+  // server had answered in 0.1 s; a 400-column window opens in about a second.
+  //
+  // One request at a time, in order. A batch reads the other dimension's
+  // count when it RUNS, not when it was queued, so a row batch is as wide as
+  // the columns on the page and a column batch is as tall as the rows on it:
+  // the table stays square however the two kinds of scrolling interleave.
+  var rowsDone = loaded >= available, colsDone = loadedCols >= availableCols;
+  var wrap = document.getElementById("xlsxWrap");
+  var chain = Promise.resolve(), inflightRows = null, inflightCols = null;
+  function serial(task) {{
+    var p = chain.then(task, task);
+    chain = p.then(function() {{}}, function() {{}});
+    return p;
+  }}
+  function colBatch() {{
+    // About 40,000 cells a batch: 400 columns of a 72-row table, 40 of a
+    // 1,000-row one.
+    return Math.max(40, Math.min(400, Math.floor(40000 / Math.max(1, loaded))));
+  }}
   function status() {{
     if (!more) return;
-    more.innerHTML = done
-      ? ""
-      : "Showing " + loaded + " of " + available + " rows. "
-        + "<button type=\\"button\\" id=\\"xlsxMoreBtn\\">Load more</button>";
-    var b = document.getElementById("xlsxMoreBtn");
-    if (b) b.addEventListener("click", function() {{ fetchMore().catch(function() {{}}); }});
+    if (rowsDone && colsDone) {{ more.innerHTML = ""; return; }}
+    var bits = [];
+    if (!rowsDone) bits.push(loaded + " of " + available + " rows");
+    if (!colsDone) bits.push(loadedCols + " of " + availableCols + " columns");
+    var hint = (!rowsDone && !colsDone) ? "Scroll down or right for more."
+             : (!rowsDone ? "Scroll down for more." : "Scroll right for more.");
+    more.innerHTML = "Showing " + bits.join(" and ") + ". " + hint + " "
+      + (rowsDone ? "" : "<button type=\\"button\\" id=\\"xlsxMoreRows\\">Load more rows</button> ")
+      + (colsDone ? "" : "<button type=\\"button\\" id=\\"xlsxMoreCols\\">Load more columns</button>");
+    var br = document.getElementById("xlsxMoreRows");
+    if (br) br.addEventListener("click", function() {{ fetchMoreRows().catch(function() {{}}); }});
+    var bc = document.getElementById("xlsxMoreCols");
+    if (bc) bc.addEventListener("click", function() {{ fetchMoreCols().catch(function() {{}}); }});
   }}
-  function fetchMore() {{
-    if (done) return Promise.resolve();
-    if (inflight) return inflight;
-    more.textContent = "Loading rows " + (loaded + 1) + "-"
-                     + Math.min(loaded + 200, available) + "…";
-    var u = new URL(window.location.href);
-    u.searchParams.set("rows_from", loaded);
-    u.searchParams.set("rows_count", 200);
-    inflight = fetch(u.toString(), {{ headers: {{ "Accept": "text/html" }} }})
-      .then(function(r) {{ if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }})
-      .then(function(htmlText) {{
-        inflight = null;
-        if (!htmlText.trim()) {{ done = true; status(); return; }}
-        body.insertAdjacentHTML("beforeend", htmlText);
-        loaded = body.rows.length;
-        if (loaded >= available) done = true;
-        markTargets();
-        status();
-      }})
-      .catch(function(e) {{
-        inflight = null;
-        more.textContent = "Could not load more rows (" + e.message + "). ";
-        var b = document.createElement("button");
-        b.textContent = "Retry";
-        b.addEventListener("click", function() {{ more.textContent = ""; fetchMore().catch(function() {{}}); }});
-        more.appendChild(b);
-        throw e;
-      }});
-    return inflight;
+  function failed(what, e, retry) {{
+    if (!more) return;
+    more.textContent = "Could not load more " + what + " (" + e.message + "). ";
+    var b = document.createElement("button");
+    b.textContent = "Retry";
+    b.addEventListener("click", function() {{ more.textContent = ""; retry().catch(function() {{}}); }});
+    more.appendChild(b);
   }}
-  // Every window row, before the toggle answers: a claim about "all samples"
-  // must not be computed from whatever prefix happened to be scrolled in.
-  function loadAllRows() {{
-    return done ? Promise.resolve() : fetchMore().then(loadAllRows);
+  function fetchMoreRows() {{
+    if (rowsDone) return Promise.resolve();
+    if (inflightRows) return inflightRows;
+    inflightRows = serial(function() {{
+      if (rowsDone) return;
+      if (more) more.textContent = "Loading rows " + (loaded + 1) + "-"
+                                 + Math.min(loaded + 200, available) + "…";
+      var u = new URL(window.location.href);
+      u.searchParams.delete("cols_from");
+      u.searchParams.set("rows_from", loaded);
+      u.searchParams.set("rows_count", 200);
+      u.searchParams.set("cols_count", loadedCols);
+      return fetch(u.toString(), {{ headers: {{ "Accept": "text/html" }} }})
+        .then(function(r) {{ if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }})
+        .then(function(htmlText) {{
+          if (htmlText.trim()) body.insertAdjacentHTML("beforeend", htmlText);
+          else rowsDone = true;
+          loaded = body.rows.length;
+          if (loaded >= available) rowsDone = true;
+          markTargets();
+          status();
+        }});
+    }}).then(function() {{ inflightRows = null; }},
+             function(e) {{ inflightRows = null; failed("rows", e, fetchMoreRows); throw e; }});
+    return inflightRows;
+  }}
+  function fetchMoreCols() {{
+    if (colsDone) return Promise.resolve();
+    if (inflightCols) return inflightCols;
+    inflightCols = serial(function() {{
+      if (colsDone) return;
+      var count = colBatch();
+      if (more) more.textContent = "Loading columns " + (loadedCols + 1) + "-"
+                                 + Math.min(loadedCols + count, availableCols) + "…";
+      var u = new URL(window.location.href);
+      u.searchParams.delete("rows_from");
+      u.searchParams.set("cols_from", loadedCols);
+      u.searchParams.set("cols_count", count);
+      u.searchParams.set("rows_count", loaded);
+      return fetch(u.toString(), {{ headers: {{ "Accept": "application/json" }} }})
+        .then(function(r) {{ if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }})
+        .then(function(data) {{
+          var frags = data.rows || [];
+          var rows = body.rows;
+          var n = Math.min(frags.length, rows.length);
+          for (var i = 0; i < n; i++) {{
+            if (frags[i]) rows[i].insertAdjacentHTML("beforeend", frags[i]);
+          }}
+          if (colgroupEl && data.colgroup) {{
+            var tpl = document.createElement("template");
+            tpl.innerHTML = "<table><colgroup>" + data.colgroup + "</colgroup></table>";
+            var cols = tpl.content.querySelectorAll("col");
+            for (var j = 0; j < cols.length; j++) {{
+              allCols.push(cols[j]);
+              colgroupEl.appendChild(cols[j]);
+            }}
+            if (hiddenCols.length) setHiddenCols(hiddenCols);
+          }}
+          loadedCols = rows.length ? rows[0].cells.length : loadedCols;
+          if (!frags.length || loadedCols >= availableCols) colsDone = true;
+          markTargets();
+          status();
+        }});
+    }}).then(function() {{ inflightCols = null; }},
+             function(e) {{ inflightCols = null; failed("columns", e, fetchMoreCols); throw e; }});
+    return inflightCols;
+  }}
+  // The whole window, before the identical-position toggle answers: a claim
+  // about "all samples" must not be computed from whatever part happened to
+  // be scrolled in.
+  function loadAll() {{
+    if (rowsDone && colsDone) return Promise.resolve();
+    return (rowsDone ? fetchMoreCols() : fetchMoreRows()).then(loadAll);
   }}
 
-  if (done) {{ if (more) more.remove(); return; }}
-  // Load the next batch as the bottom of the table comes into view, and keep
-  // the button as the manual fallback (and for browsers without the observer).
+  if (rowsDone && colsDone) {{ if (more) more.remove(); return; }}
   status();
+  // Rows: the next batch as the bottom of the table comes into view, with the
+  // buttons above as the manual fallback (and for browsers without the
+  // observer).
   if (window.IntersectionObserver) {{
     new IntersectionObserver(function(entries) {{
-      if (entries.some(function(e) {{ return e.isIntersecting; }})) fetchMore().catch(function() {{}});
+      if (entries.some(function(e) {{ return e.isIntersecting; }})) fetchMoreRows().catch(function() {{}});
     }}, {{ rootMargin: "600px" }}).observe(more);
   }}
+  // Columns: the next batch while the right edge of what is loaded is within
+  // two screens of view — which includes the case where the loaded columns do
+  // not yet fill the window at all.
+  function nearRightEdge() {{
+    if (!wrap) return false;
+    return wrap.scrollLeft + wrap.clientWidth >= wrap.scrollWidth - 2 * wrap.clientWidth;
+  }}
+  function maybeCols() {{
+    if (colsDone || !nearRightEdge()) return;
+    fetchMoreCols().then(maybeCols).catch(function() {{}});
+  }}
+  if (wrap) wrap.addEventListener("scroll", maybeCols, {{ passive: true }});
+  window.addEventListener("resize", maybeCols);
+  maybeCols();
 }})();
 </script>
 </body>

@@ -9835,7 +9835,10 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "16"  # 16: windows record the rows drawn without reads; sample sets left the key
+_XLSX_RENDER_VERSION = "17"  # 17: the page inlines a column window; batches take cols_from / cols_count
+#                                  (the windows themselves did not change — the ETag had to, so a
+#                                  browser holding the old page does not keep it on a 304)
+#                              16: windows record the rows drawn without reads; sample sets left the key
 #                              14: escape cell text in <script>, sanitize font names
 
 # Preview cache budget, in MB. This lives in the user's HOME by default, and a
@@ -10454,10 +10457,17 @@ def _preview_etag(cached: Path, window: Dict[str, Any]) -> str:
 @app.get("/api/projects/{project}/preview-xlsx", response_class=HTMLResponse)
 def preview_xlsx(request: Request, project: str, path: str = Query(...), download: int = 0,
                  rows_from: Optional[int] = None, rows_count: int = 200,
+                 cols_from: Optional[int] = None, cols_count: Optional[int] = None,
                  selection: Optional[str] = None):
     """Render an xlsx file as a self-contained HTML page (formatting preserved
     via openpyxl). With ?download=1, returns the raw xlsx (for the "Download
-    xlsx" link inside the preview page)."""
+    xlsx" link inside the preview page).
+
+    The page starts as a window of the table and asks for the rest as it is
+    scrolled: `rows_from` (+ `rows_count`, and `cols_count` for the columns it
+    holds) for a block of rows, or `cols_from` (+ `cols_count`, and
+    `rows_count` for the rows it holds) for a block of columns — see
+    xlsx_html.rows_batch and cols_batch."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     target = Path(path).resolve()
@@ -10687,7 +10697,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
             try:
                 cached.parent.mkdir(parents=True, exist_ok=True)
                 tmp = cached.with_suffix(".part")
-                tmp.write_text(json.dumps(window), encoding="utf-8")
+                tmp.write_text(json.dumps(xlsx_html.persistable(window)), encoding="utf-8")
                 os.replace(tmp, cached)
                 # Keep the cache inside its budget. Done after the write so the
                 # entry just produced is the newest and survives.
@@ -10769,14 +10779,18 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
         if etag else None
     )
 
-    # A scroll request: return just the requested <tr> block. The window is
-    # rendered once and cached, so paging through a big table costs one parse in
-    # total rather than one per batch.
+    # A scroll request: a block of rows (as wide as the page's columns), or a
+    # block of columns (as tall as the page's rows). The window is rendered once
+    # and cached, so paging through a big table in either direction costs one
+    # parse in total rather than one per batch.
+    if cols_from is not None:
+        return JSONResponse(
+            content=xlsx_html.cols_batch(window, int(cols_from), cols_count, rows_count),
+            headers=resp_headers)
     if rows_from is not None:
-        start = max(0, int(rows_from))
-        count = max(1, min(int(rows_count or 200), 1000))
-        return HTMLResponse(content="".join(window["rows"][start:start + count]),
-                            headers=resp_headers)
+        return HTMLResponse(
+            content=xlsx_html.rows_batch(window, int(rows_from), rows_count, cols_count),
+            headers=resp_headers)
 
     return HTMLResponse(content=xlsx_html.compose_page(
         window, download_href=download_href, full_href=full_table_href,

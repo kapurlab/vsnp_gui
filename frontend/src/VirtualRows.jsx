@@ -63,6 +63,15 @@ export default function VirtualRows({
   // scroller's view (negative while the list starts lower down), and the
   // height of that view.
   const [band, setBand] = useState({ top: 0, h: 0 });
+  // The band last handed to setBand. A read is compared with this, never with
+  // the state an updater is given: while an earlier update still waits (a
+  // resize arrives through the ResizeObserver at a lower priority than the
+  // read after every render), React applies each new updater to the state
+  // from before that update. Such an updater saw the old band every time,
+  // reported a change every time, and the read after the next render asked
+  // again, with no end: resizing the window blanked the whole page with
+  // "Maximum update depth exceeded" (backend/perf/resize_probe.mjs).
+  const bandAsked = useRef({ top: 0, h: 0 });
   // key -> {h, open}: every row drawn so far, at the current width.
   const measured = useRef(new Map());
   // The first closed row's height at this width: the guess for closed rows.
@@ -80,7 +89,10 @@ export default function VirtualRows({
     const viewTop = page ? 0 : sc.getBoundingClientRect().top + sc.clientTop;
     const h = page ? window.innerHeight : sc.clientHeight;
     const top = viewTop - r.top;
-    setBand((b) => (Math.abs(b.top - top) < 0.5 && Math.abs(b.h - h) < 0.5 ? b : { top, h }));
+    const was = bandAsked.current;
+    if (Math.abs(was.top - top) < 0.5 && Math.abs(was.h - h) < 0.5) return;
+    bandAsked.current = { top, h };
+    setBand(bandAsked.current);
   };
 
   // The height the list is given: 320 px on the page, most of the window

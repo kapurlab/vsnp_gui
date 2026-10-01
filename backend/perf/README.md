@@ -72,6 +72,21 @@ the window, not the contig's block of reads. That path is a samtools process
 plus two requests per view and is not modelled here; `igv_bench.py` replays
 the byte-range path, which remains the fallback.
 
+`resize_probe.mjs` opens a project (which expands its samples in the
+Projects panel), resizes the window through the given steps and back, and
+reports whether the page survived, over several runs; it exits 1 if any run
+blanked:
+
+    node resize_probe.mjs http://127.0.0.1:8771 owl 1000x900 6
+
+v0.4.114 to v0.4.118 could blank the whole app this way: the Projects
+panel's VirtualRows read the view after every render, and while a resize's
+own update waited, each read asked React for a new band, until React gave up
+("Maximum update depth exceeded"). This probe blanked v0.4.118 in 8 of 8
+runs on both the owl fixture and mtbc0_test01, and the fix in 0 of 30 over
+five resize patterns. Never screenshot with `captureBeyondViewport`: it
+resizes the page too.
+
 `endpoint_calls.py` counts calls per endpoint in-process (cold and warm);
 `dump_endpoints.py` writes every endpoint's JSON so two trees can be diffed
 on one fixture (`awkward_extras.py` makes the fixture awkward first:

@@ -56,21 +56,40 @@ case "$url" in
     n=$(ls "$REPLIES" | sort | head -1)
     [ -n "$n" ] || exit 0
     cat "$REPLIES/$n"; rm -f "$REPLIES/$n";;
+  *_1.fastq.gz)
+    if [ -n "${FAIL_R1:-}" ]; then echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; fi
+    echo "$url" >> "$FETCHED"; echo fastq > "$out";;
   *)
     echo "$url" >> "$FETCHED"; echo fastq > "$out";;
 esac
 """
 
 
-def method3_source() -> str:
+def function_source(name: str) -> str:
     script = sra.build_download_script(Path("/nonexistent"), [ACC], allow_insecure_https=False)
-    m = re.search(r"^method3\(\) \{\n.*?^\}\n", script, re.S | re.M)
+    m = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", script, re.S | re.M)
     if not m:
-        raise AssertionError("method3() not found in the generated script")
+        raise AssertionError(f"{name}() not found in the generated script")
     return m.group(0)
 
 
-def run_method3(replies: list[str]) -> tuple[int, str, list[str], list[str]]:
+def method3_source() -> str:
+    return function_source("method3")
+
+
+def already_have(files: list[str]) -> int:
+    """already_have's exit status with these files present in download/."""
+    tmp = Path(tempfile.mkdtemp(prefix="have-"))
+    try:
+        for f in files:
+            (tmp / f).write_text("x")
+        harness = "set -u\n" + function_source("already_have") + f'\nalready_have "{ACC}"\n'
+        return subprocess.run(["bash", "-c", harness], cwd=tmp, timeout=30).returncode
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run_method3(replies: list[str], fail_r1: bool = False) -> tuple[int, str, list[str], list[str]]:
     tmp = Path(tempfile.mkdtemp(prefix="ena3-"))
     try:
         (tmp / "bin").mkdir()
@@ -88,6 +107,8 @@ def run_method3(replies: list[str]) -> tuple[int, str, list[str], list[str]]:
         )
         env = dict(os.environ, PATH=f"{tmp/'bin'}:{os.environ['PATH']}",
                    REPLIES=str(tmp / "replies"), FETCHED=str(tmp / "fetched"))
+        if fail_r1:
+            env["FAIL_R1"] = "1"
         p = subprocess.run(["bash", "-c", harness], cwd=work, env=env,
                            capture_output=True, text=True, timeout=60)
         fetched = (tmp / "fetched").read_text().split() if (tmp / "fetched").exists() else []
@@ -132,6 +153,24 @@ def main() -> int:
     rc, out, files, fetched = run_method3([other, TABLE])
     check(rc == 0 and len(files) == 2 and all(ACC in u for u in fetched),
           "only this accession's row is used")
+
+    print("\n[one mate refused: nothing is left behind, so Download again re-fetches the pair]")
+    rc, out, files, fetched = run_method3([TABLE], fail_r1=True)
+    check(rc == 1, "method3 reports the accession as failed")
+    check(files == [], f"no lone mate left in download/ ({files})")
+
+    print("\n[already_have: a pair needs both mates]")
+    check(already_have([f"{ACC}_1.fastq.gz", f"{ACC}_2.fastq.gz"]) == 0, "both mates: have")
+    check(already_have([f"{ACC}_2.fastq.gz"]) == 1, "only mate 2: NOT have (re-download)")
+    check(already_have([f"{ACC}_1.fastq.gz"]) == 1, "only mate 1: NOT have (re-download)")
+    check(already_have([f"{ACC}.fastq.gz"]) == 0, "single-end file: have")
+    check(already_have([]) == 1, "nothing: not have")
+
+    print("\n[the generated script is valid bash, with and without -k]")
+    for insecure in (False, True):
+        script = sra.build_download_script(Path("/x"), [ACC, "SRR1"], allow_insecure_https=insecure)
+        r = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        check(r.returncode == 0, f"bash -n passes (insecure={insecure}) {r.stderr.strip()}")
 
     print("\nall ENA fallback checks passed")
     return 0

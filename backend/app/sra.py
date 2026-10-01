@@ -238,6 +238,14 @@ if command -v curl >/dev/null 2>&1; then
 else
   echo "[MISSING] curl — Method 3 (ENA HTTPS/FTP) will be skipped"
 fi
+# ENA answers some file requests with 403 under load, and plain --retry does
+# not retry an HTTP error. --retry-all-errors does, where this curl has it
+# (7.71+; an older curl rejects the option outright, so it is only added
+# when the help text lists it).
+CURL_RETRY="--retry 3 --retry-delay 5"
+if [ "$HAS_CURL" -eq 1 ] && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+  CURL_RETRY="$CURL_RETRY --retry-all-errors"
+fi
 
 if command -v pigz >/dev/null 2>&1; then
   HAS_PIGZ=1; echo "[OK] pigz found (fast compression)"
@@ -262,9 +270,15 @@ echo ""
 
 already_have() {{
   local acc="$1"
-  # Check for paired-end files
-  if ls "${{acc}}"_1.fastq.gz "${{acc}}"_2.fastq.gz 2>/dev/null | head -1 | grep -q .; then
+  # A pair counts only when BOTH mates are here. ENA can serve one mate and
+  # refuse the other, and a lone mate used to count as "have": pressing
+  # Download again then skipped the sample, and it went on to Step 1 as half
+  # of a pair.
+  if [ -f "${{acc}}_1.fastq.gz" ] && [ -f "${{acc}}_2.fastq.gz" ]; then
     return 0
+  fi
+  if [ -f "${{acc}}_1.fastq.gz" ] || [ -f "${{acc}}_2.fastq.gz" ]; then
+    return 1
   fi
   # Check for single-end file
   if [ -f "${{acc}}.fastq.gz" ]; then
@@ -402,11 +416,11 @@ method3() {{
     local filename
     filename=$(basename "$url")
     echo "  Downloading $filename"
-    # Try HTTPS first, then FTP. --retry covers the transient 5xx/timeouts a
-    # 26-sample batch reliably meets somewhere.
-    if curl -f --retry 3 --retry-delay 5 {curl_insecure} "https://$url" -o "$filename" 2>&1; then
+    # Try HTTPS first, then FTP. The retries cover the transient errors a
+    # 26-sample batch reliably meets somewhere (CURL_RETRY, set above).
+    if curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "https://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via HTTPS"
-    elif curl -f --retry 3 --retry-delay 5 {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
+    elif curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via FTP"
     else
       echo "  [FAILED] Could not download $filename"
@@ -415,7 +429,12 @@ method3() {{
     fi
   done
 
-  if [ "$all_ok" -eq 0 ]; then return 1; fi
+  if [ "$all_ok" -eq 0 ]; then
+    # Never leave half of a pair behind: a lone mate is staged by Grab and
+    # aligned as if it were the whole sample.
+    for url in "${{url_array[@]}}"; do rm -f "$(basename "$url")"; done
+    return 1
+  fi
   return 0
 }}
 
@@ -459,7 +478,7 @@ download_one() {{
 
 # xargs subshells need our functions and the HAS_*/CAN_* state.
 export -f download_one already_have already_in_step1 compress_fastqs method1 method2 method3
-export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ
+export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ CURL_RETRY
 export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
 export STEP1_DIR
 

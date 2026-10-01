@@ -125,6 +125,30 @@ def main() -> int:
         inl = min(xlsx_html.initial_cols_for(len(wf["rows"])), wf["shown_cols"])
         assert_eq(table_of(pf).count("<td"), len(wf["rows"]) * inl, "the clade page inlines its window")
 
+        print("\n[the table-size probe is remembered per file identity]")
+        opened = []
+        real_load = xlsx_html.openpyxl.load_workbook
+
+        def counting_load(path, *a, **k):
+            opened.append(str(path))
+            return real_load(path, *a, **k)
+        xlsx_html.openpyxl.load_workbook = counting_load
+        try:
+            xlsx_html._EXTENT_MEMO.clear()
+            first = xlsx_html.sheet_extent(narrow)
+            second = xlsx_html.sheet_extent(narrow)
+            assert_eq(first, second, "the same answer twice")
+            assert_eq(len(opened), 1, "the workbook was opened once for two asks")
+            make_group_table(narrow, labels[:12], 31, lambda i, c: "A")
+            import os as _os
+            st = _os.stat(narrow)
+            _os.utime(narrow, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+            third = xlsx_html.sheet_extent(narrow)
+            assert_eq(third, (16, 31), "a rewritten file is measured again")
+            assert_eq(len(opened), 2, "...by opening it once more")
+        finally:
+            xlsx_html.openpyxl.load_workbook = real_load
+
         print("\n[the served script parses]")
         node = shutil.which("node")
         scripts = re.findall(r"<script>(.*?)</script>", page, re.S)

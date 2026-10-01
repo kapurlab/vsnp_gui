@@ -40,6 +40,7 @@ import html
 import json
 import os
 import re
+import threading
 from copy import copy
 from pathlib import Path
 from urllib.parse import quote
@@ -560,20 +561,46 @@ def message_page(heading: str, body: str, filename: str = "",
     )
 
 
+_EXTENT_MEMO: dict = {}          # path -> ((size, mtime_ns), (rows, cols))
+_EXTENT_MEMO_MAX = 4096
+_EXTENT_LOCK = threading.Lock()
+
+
 def sheet_extent(xlsx_path: Path) -> tuple[int, int]:
     """(rows, cols) of the active sheet, without loading its cells.
 
     Read-only mode reads only the sheet's declared dimension, so this is
-    effectively free even on a 35 MB workbook — it is what lets the caller
-    decide between the full-fidelity and streaming renderers before paying
-    for either.
+    cheap even on a 35 MB workbook — it is what lets the caller decide between
+    the full-fidelity and streaming renderers before paying for either. Cheap
+    is still a zip open and an XML parse (about 60 ms a table), and the tree
+    viewer asks it of every table beside a tree each time the tree opens —
+    0.4 s on a group with nine tables — so the answer is kept per file
+    identity: one stat says whether it still stands.
     """
+    try:
+        st = os.stat(xlsx_path)
+        sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        sig = None
+    key = str(xlsx_path)
+    if sig is not None:
+        with _EXTENT_LOCK:
+            hit = _EXTENT_MEMO.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
     try:
         ws = wb.active
-        return int(ws.max_row or 0), int(ws.max_column or 0)
+        extent = (int(ws.max_row or 0), int(ws.max_column or 0))
     finally:
         wb.close()
+    if sig is not None:
+        with _EXTENT_LOCK:
+            if len(_EXTENT_MEMO) >= _EXTENT_MEMO_MAX:
+                for stale in list(_EXTENT_MEMO)[: _EXTENT_MEMO_MAX // 4]:
+                    _EXTENT_MEMO.pop(stale, None)
+            _EXTENT_MEMO[key] = (sig, extent)
+    return extent
 
 
 def _sheet_layout(xlsx_path: Path) -> dict:

@@ -479,6 +479,28 @@ def test_budgets(root: Path):
     check(browser.n <= 20, True, "sample browser: no call per sample")
     check(names.n <= 20, True, "sample names: no call per sample")
     check(card.n <= 20, True, "project card: no call per sample")
+    # The card on a FRESH listing — a page load, before any project is opened —
+    # takes the index as recorded instead of validating it: no stat a sample.
+    # (Validating is what every request of a project switch does; the card
+    # catches up with a read added inside a known directory when the project
+    # is opened. A directory added or removed it sees at once, below.)
+    si.invalidate(s1)
+    with Calls() as fresh_card:
+        counted = pj._scan_step1(s1, set())
+    check(fresh_card.n <= 20, True, "project card, fresh listing: no call per sample")
+    check(counted, n, "...and it counts every sample")
+    new_dir = s1 / "S_NEW"
+    touch(new_dir / "S_NEW_1.fastq.gz")
+    for p in [new_dir, new_dir / "S_NEW_1.fastq.gz"]:
+        os.utime(p, (old, old))
+    si.invalidate(s1)
+    reads: set = set()
+    with Calls() as grown:
+        counted = pj._scan_step1(s1, reads)
+    check(counted, n + 1, "a sample directory added since is counted by the next card")
+    check(any(str(r).endswith("S_NEW_1.fastq.gz") or isinstance(r, tuple) for r in reads), True,
+          "...with its read")
+    check(grown.n <= 30, True, "...for a few calls about the new directory, not one per sample")
 
 
 def old_igv_bam_set(step1_dir: Path) -> set:

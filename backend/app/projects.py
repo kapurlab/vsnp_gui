@@ -437,12 +437,21 @@ def _scan_step1(step1_dir: Path, seen: set) -> int:
     index time: a plain file's (device, inode) from the directory entry, a
     symlink's from one stat that follows it, and the path when neither could
     be read — so a download/ -> step1/ link still collapses to one file.
+
+    The index is taken as recorded, not validated (facts' validate=False):
+    validating costs one stat per sample, and the cards paid it for every
+    sample of every project on every page load — 8,171 of the page load's
+    8,720 round trips on the model, before anything could be clicked. The
+    listing still sees a sample directory added or removed at once, and a new
+    directory is indexed here; a read added inside a directory the index
+    already holds reaches the card once that project is opened, when the
+    switch's requests validate the index.
     """
     if not step1_dir.is_dir():
         return 0
     lst = step1_index.listing(step1_dir)
     samples = lst.regular()
-    fx = step1_index.facts(step1_dir, lst)
+    fx = step1_index.facts(step1_dir, lst, validate=False)
     for s in samples:
         for name, _link, dev, ino in fx.get(s.name, {}).get("fq", []):
             if not _is_read_file(name):

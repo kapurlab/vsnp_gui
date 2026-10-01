@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import igv from "igv";
+// igv.js (1.4 MB) is fetched the first time the inline IGV panel opens, not
+// with the page: see main.jsx. `igvLib` holds the module once it has arrived,
+// which is the only time there can be a browser to remove.
+let igvLib = null;
+function loadIgv() {
+  return igvLib ? Promise.resolve(igvLib) : import("igv").then((m) => { igvLib = m.default; return igvLib; });
+}
 import { APP_VERSION } from "./version";
 import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
@@ -5868,7 +5874,7 @@ export default function App() {
 
   function closeIgvPanel() {
     if (igvBrowserRef.current) {
-      try { igv.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
+      try { if (igvLib) igvLib.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
       igvBrowserRef.current = null;
     }
     setIgvPanel({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
@@ -5891,7 +5897,7 @@ export default function App() {
     igvPopoutRef.current = w;
     setIgvPopoutOpen(true);
     if (igvBrowserRef.current) {
-      try { igv.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
+      try { if (igvLib) igvLib.removeBrowser(igvBrowserRef.current); } catch (e) { /* ignore */ }
       igvBrowserRef.current = null;
     }
     setIgvPanel({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
@@ -5934,9 +5940,13 @@ export default function App() {
       };
       const target = igvContainerRef.current;
       if (!target) return;
-      igv.createBrowser(target, config).then((browser) => {
+      loadIgv().then((lib) => {
+        if (cancelled) return null;
+        return lib.createBrowser(target, config);
+      }).then((browser) => {
+        if (!browser) return;
         if (cancelled) {
-          try { igv.removeBrowser(browser); } catch (e) { /* ignore */ }
+          try { igvLib.removeBrowser(browser); } catch (e) { /* ignore */ }
           return;
         }
         igvBrowserRef.current = browser;

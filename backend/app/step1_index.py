@@ -293,23 +293,39 @@ def _save(step1_dir: Path, samples: Dict[str, list]) -> None:
                 pass
 
 
-def facts(step1_dir: Path, lst: Optional[Listing] = None) -> Dict[str, Dict[str, Any]]:
+def facts(step1_dir: Path, lst: Optional[Listing] = None,
+          validate: bool = True) -> Dict[str, Dict[str, Any]]:
     """name -> {fq, stats, edits} for every directory in the listing.
 
     Answered from the index for a directory whose mtime is the one recorded,
     listed afresh (all at once) for the rest, and written back when anything
     new was learned. A directory changed within the last two seconds is
     answered but not recorded (see _SETTLE_NS).
+
+    ``validate=False`` trusts the index for every directory it already holds
+    and stats only the directories it does not: the project cards use it.
+    Knowing whether a directory changed costs one stat per directory, and the
+    cards asked that of every sample of every project on every page load —
+    8,000 round trips a project before the first project could be clicked. A
+    sample directory added or removed is still seen at once (it is in the
+    listing, and a new one is listed and recorded here); what the cards can
+    miss is a read added INSIDE a directory they already knew, until that
+    project is opened and the switch's own requests validate the index.
     """
     lst = lst or listing(step1_dir)
     with _LOCK:
         stored = _load(step1_dir)
-        mtimes = lst.mtimes()
-        todo = [s for s in lst.samples if mtimes.get(s.name) is None or s.name not in stored
-                or stored[s.name][0] != mtimes[s.name]]
+        if validate:
+            mtimes = lst.mtimes()
+            todo = [s for s in lst.samples if mtimes.get(s.name) is None or s.name not in stored
+                    or stored[s.name][0] != mtimes[s.name]]
+        else:
+            todo = [s for s in lst.samples if s.name not in stored]
+            mtimes = lst.mtimes_for([s.name for s in todo])
+        todo_names = {s.name for s in todo}
         out: Dict[str, Dict[str, Any]] = {}
         for s in lst.samples:
-            if s not in todo:
+            if s.name not in todo_names:
                 out[s.name] = stored[s.name][1]
         if todo:
             try:

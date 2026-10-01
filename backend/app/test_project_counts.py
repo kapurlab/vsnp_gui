@@ -127,6 +127,42 @@ def main() -> int:
         assert_eq(c2["step1_samples"], 3, "new sample counted")
         assert_eq(c2["fastq_count"], 6, "new sample's read counted")
 
+        print("\n[a read added inside a KNOWN sample reaches the card once the project is opened]")
+        # The card takes the Step 1 index as recorded (no stat per sample on a
+        # page load); a project switch validates it. Record every sample first —
+        # the index only keeps directories whose mtime has settled — then drop a
+        # read into one of them.
+        import step1_index
+        import time as _time
+        step1 = proj / "step1"
+        settled = _time.time() - 60
+        for d in step1.iterdir():
+            for q in [d] + list(d.rglob("*")):
+                try:
+                    os.utime(q, (settled, settled))
+                except OSError:
+                    pass
+        step1_index.invalidate(step1)
+        step1_index.facts(step1)
+        assert_eq("A" in step1_index._load(step1), True, "sample A is recorded in the index")
+        (step1 / "A" / "A_R3.fastq.gz").write_text("r3")
+        projects._COUNTS_TTL_SECONDS = 0.0
+        try:
+            step1_index.invalidate(step1)
+            c4 = _project_counts(proj)
+            assert_eq(c4["fastq_count"], 6, "the card does not yet see a read added inside a known sample")
+            # ...and does once anything validates the index, which every
+            # request of a project switch does. The index records a directory
+            # only once its mtime has settled (two seconds, the racy-timestamp
+            # guard), so stand in for that time passing.
+            os.utime(step1 / "A", (settled + 1, settled + 1))
+            step1_index.invalidate(step1)
+            step1_index.facts(step1)
+            c5 = _project_counts(proj)
+            assert_eq(c5["fastq_count"], 7, "after the index is validated, the card counts it")
+        finally:
+            projects._COUNTS_TTL_SECONDS = original_ttl
+
         print("\n[an empty / missing project counts as zero, never an error]")
         empty = tmp / "empty"
         empty.mkdir()

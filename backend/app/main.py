@@ -4491,6 +4491,8 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
 
     edited_in_source = _edited_samples_in_dir(vcf_source_dir)
     _write_step2_edit_summary(vcf_source_dir.parent, edited_in_source)
+    if imported:
+        _prewarm_sample_groups(project_dir, cfg, "import")
 
     return {
         "imported": imported,
@@ -5826,6 +5828,10 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
             auto_added.append(sample)
 
     total = len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
+    if auto_added or force_added:
+        # The groups of the VCFs that just arrived, read now rather than when
+        # the pane first asks (see _prewarm_sample_groups).
+        _prewarm_sample_groups(project_dir, cfg, "collect")
     return {
         "auto_added": auto_added,
         "force_added": force_added,
@@ -7961,6 +7967,61 @@ def project_name_aliases_route(project: str):
     return _plain_json(project_name_aliases(project))
 
 
+_GROUP_PREWARMS: Dict[str, threading.Thread] = {}
+_GROUP_PREWARM_LOCK = threading.Lock()
+_GROUP_PREWARM_ROUND_S = 60.0
+
+
+def _prewarm_sample_groups(project_dir: Path, cfg: Dict, why: str) -> bool:
+    """Read the VCFs the defining-SNP group cache lacks, in the background.
+
+    "Show groups" reads every VCF of the database once (sample_groups.py); on
+    the Ames projects that is 24,000 files, which the pane had to sit through
+    in 20-second requests the first time anyone asked. The app knows the moment
+    VCFs arrive — a collect from Step 1, an import — so it reads them then, in
+    rounds that each save the cache (a restart loses one round at most), while
+    the user does something else. The reads run in worker processes, so this
+    thread spends its time waiting on them, not holding the GIL.
+
+    Returns whether a warm-up was started: not when the reference has no
+    defining-SNP workbook (the pane would say so too), nor when one is already
+    running for this project.
+    """
+    step2_dir = project_dir / "step2"
+    df_path, _why = sample_groups.define_filter_of(_project_reference_dir(project_dir, cfg))
+    if df_path is None:
+        return False
+    try:
+        defs = sample_groups.load_definitions(df_path)
+    except Exception:
+        return False
+    db = vcf_db_dir(step2_dir)
+    if not db.is_dir():
+        return False
+    key = str(project_dir)
+    with _GROUP_PREWARM_LOCK:
+        running = _GROUP_PREWARMS.get(key)
+        if running is not None and running.is_alive():
+            return False
+
+        def work():
+            try:
+                for _round in range(10_000):
+                    files = [(e.filename, db / e.filename) for e in db_entries(db)]
+                    out = sample_groups.sample_groups(
+                        files, defs, step2_dir / sample_groups.CACHE_BASENAME,
+                        budget_s=_GROUP_PREWARM_ROUND_S)
+                    if not out.get("pending"):
+                        break
+            except Exception:
+                logger.exception("group cache warm-up for %s (%s) stopped", project_dir.name, why)
+
+        t = threading.Thread(target=work, name=f"group-prewarm:{project_dir.name}", daemon=True)
+        _GROUP_PREWARMS[key] = t
+        t.start()
+    return True
+
+
 @app.get("/api/projects/{project}/step2/sample-groups")
 def step2_sample_groups(project: str, qual_threshold: int = sample_groups.QUAL_THRESHOLD,
                         mq_threshold: int = sample_groups.MQ_THRESHOLD, no_filters: bool = False,
@@ -7973,7 +8034,8 @@ def step2_sample_groups(project: str, qual_threshold: int = sample_groups.QUAL_T
     asked for when the pane shows groups, so a project switch never pays for
     it. The first request reads every VCF, for at most `budget_s` seconds, and
     reports how many are still `pending`; the pane asks again until none are.
-    After that a request is one stat per VCF.
+    After that a request is one stat per VCF. VCFs the app itself collected or
+    imported are usually read already: see _prewarm_sample_groups.
     """
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)

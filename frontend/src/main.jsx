@@ -1,13 +1,18 @@
 import React, { Suspense, lazy } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
-import IgvStandalone from "./IgvStandalone.jsx";
 import "./styles.css";
 
 const params = new URLSearchParams(window.location.search);
 const view = params.get("view");
 
+// The viewers load on demand. igv.js alone is 1.4 MB of the bundle, and the
+// main GUI needs it only when its own IGV panel opens (App.jsx imports it then);
+// the tree viewer never does. Keeping both out of the main chunk makes every
+// page open — the GUI, a tree, a fresh OnDemand session — about a quarter of
+// the download it was.
 const TreeStandalone = lazy(() => import("./TreeStandalone.jsx"));
+const IgvStandalone = lazy(() => import("./IgvStandalone.jsx"));
 
 const Fallback = () => (
   <div style={{ padding: "1rem", fontFamily: "system-ui" }}>Loading viewer…</div>
@@ -32,7 +37,13 @@ class ErrorBoundary extends React.Component {
 
 const root = createRoot(document.getElementById("root"));
 if (view === "igv") {
-  root.render(<IgvStandalone />);
+  root.render(
+    <ErrorBoundary label="IGV viewer">
+      <Suspense fallback={<Fallback />}>
+        <IgvStandalone />
+      </Suspense>
+    </ErrorBoundary>
+  );
 } else if (view === "tree") {
   root.render(
     <ErrorBoundary label="Tree viewer">

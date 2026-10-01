@@ -37,6 +37,15 @@ threshold (AC=2, single bases, both values present) — so a later request costs
 one stat per VCF, and a changed -w or -y is re-applied without a read.
 The cache is stamped with the defining positions; edit those and every VCF is
 read again. Correctness never depends on it.
+
+The reads are CPU: splitting and parsing 4-5 MB of text per VCF, about 40 ms
+each on one core, and 24,000 VCFs on the Ames projects. Threads cannot share
+that work (the GIL), so a batch of eight or more files is read in worker
+PROCESSES (VSNP_GUI_VCF_WORKERS wide; one fewer than the cores, at most 8),
+started fresh ("spawn") rather than forked from the multi-threaded server.
+What a worker returns is exactly what a thread returned; the cache is written
+by this process, as before. Smaller batches, and a backend where a pool
+cannot start, read in threads as they always did.
 """
 from __future__ import annotations
 
@@ -44,11 +53,13 @@ import gzip
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import re
 import tempfile
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
@@ -405,6 +416,55 @@ class GroupCache:
                     pass
 
 
+# --- Reading in worker processes ---------------------------------------------
+
+# Fewer files than this are read in threads: a pool costs a few hundred
+# milliseconds to start, which a handful of reads does not earn back.
+POOL_MIN_FILES = 8
+_POOL_DEFS: Optional[Definitions] = None    # set once per worker by _pool_init
+
+
+def pool_width() -> int:
+    """How many worker processes read at once: VSNP_GUI_VCF_WORKERS, or one
+    fewer than the cores so the backend keeps answering, at most 8 — these run
+    on a shared login or OnDemand node, not a batch allocation."""
+    try:
+        forced = int(os.environ.get("VSNP_GUI_VCF_WORKERS", "") or 0)
+    except ValueError:
+        forced = 0
+    if forced > 0:
+        return forced
+    return max(1, min(8, (os.cpu_count() or 2) - 1))
+
+
+def _pool_init(defs: Definitions) -> None:
+    global _POOL_DEFS
+    _POOL_DEFS = defs
+
+
+def _read_in_worker(item: Tuple[str, str, Sig]) -> Tuple[str, Sig, Optional[Dict], Optional[Dict]]:
+    """read_records for one file, in a worker: (name, sig, records, best), the
+    last two None when the file could not be read — the same answer the thread
+    path gives, carried back as plain dicts and lists."""
+    name, path, sig = item
+    try:
+        records, best = read_records(Path(path), _POOL_DEFS)
+    except (OSError, EOFError, ValueError, UnicodeError):
+        return name, sig, None, None
+    return name, sig, records, best
+
+
+def _start_pool(defs: Definitions, workers: int) -> Optional[ProcessPoolExecutor]:
+    """A spawn-started pool, or None where one cannot be had (a restricted
+    environment, no spawn support): the caller then reads in threads."""
+    try:
+        return ProcessPoolExecutor(max_workers=workers,
+                                   mp_context=multiprocessing.get_context("spawn"),
+                                   initializer=_pool_init, initargs=(defs,))
+    except Exception:
+        return None
+
+
 def sample_groups(files: List[Tuple[str, Path]], defs: Definitions, cache_path: Optional[Path],
                   qual_threshold: int = QUAL_THRESHOLD, mq_threshold: int = MQ_THRESHOLD,
                   no_filters: bool = False, budget_s: float = 20.0) -> Dict:
@@ -414,6 +474,9 @@ def sample_groups(files: List[Tuple[str, Path]], defs: Definitions, cache_path: 
     answer before a proxy gives up on it — and what was read is saved, so the
     next request carries on from there. `pending` counts the files still to be
     read; the caller asks again until it is 0.
+
+    A batch of POOL_MIN_FILES or more is read in worker processes (see the
+    module docstring); fewer, or a pool that cannot start or breaks, in threads.
     """
     started = time.monotonic()
     cache = GroupCache(cache_path, defs.digest)
@@ -430,19 +493,51 @@ def sample_groups(files: List[Tuple[str, Path]], defs: Definitions, cache_path: 
         cache.put(name, sig, records, best)
         return name
 
+    def read_chunk_in_pool(pool, chunk) -> List[Optional[str]]:
+        out: List[Optional[str]] = []
+        items = [(name, str(path), sig) for name, path, sig in chunk]
+        for name, sig, records, best in pool.map(_read_in_worker, items, chunksize=4):
+            if records is None:
+                out.append(None)
+                continue
+            cache.put(name, sig, records, best)
+            out.append(name)
+        return out
+
     read = 0
     unreadable = 0
     batch = 256
     i = 0
-    # At least one batch per request, however long the stats took: otherwise
-    # storage slow enough to spend the budget on stats alone would leave every
-    # request with nothing read, and the pane polling forever.
-    while i < len(todo) and (i == 0 or time.monotonic() - started < budget_s):
-        chunk = todo[i:i + batch]
-        done = fan_out(read_one, chunk)
-        read += sum(1 for d in done if d)
-        unreadable += sum(1 for d in done if not d)
-        i += len(chunk)
+    width = pool_width()
+    pool = None
+    if len(todo) >= POOL_MIN_FILES and width > 1:
+        pool = _start_pool(defs, min(width, len(todo)))
+    try:
+        # At least one batch per request, however long the stats took: otherwise
+        # storage slow enough to spend the budget on stats alone would leave every
+        # request with nothing read, and the pane polling forever.
+        while i < len(todo) and (i == 0 or time.monotonic() - started < budget_s):
+            chunk = todo[i:i + batch]
+            if pool is not None:
+                try:
+                    done = read_chunk_in_pool(pool, chunk)
+                except Exception:
+                    # A worker died or the pool broke: finish this and every
+                    # later batch in threads rather than answer nothing.
+                    try:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+                    pool = None
+                    done = fan_out(read_one, chunk)
+            else:
+                done = fan_out(read_one, chunk)
+            read += sum(1 for d in done if d)
+            unreadable += sum(1 for d in done if not d)
+            i += len(chunk)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     cache.save()
 
     groups: Dict[str, List[str]] = {}

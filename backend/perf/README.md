@@ -146,3 +146,21 @@ in headless Chrome on the same cached 72 x 10,001 table: load event at 0.23 s
 with 28,800 cells (was 20 s with 720,000), the page 1.3 MB instead of 25.7 MB,
 each scroll to the right edge adding 400 columns in one request, and a click
 on a variant cell in column 2,800 opening the right sample at the right locus.
+
+v0.4.127 took the remaining items of the same assessment. The page load
+(`/api/projects`) stopped validating the Step 1 index for the cards — one
+stat per sample of every project — and takes it as recorded instead
+(`step1_index.facts(validate=False)`): 8,720 -> 47
+calls on the model, 0.30 s -> 0.14 s; the first switch into a project now
+makes the validating stats the page load used to (16,818 calls, 1.7 s, where
+it inherited them before), so the pair costs about 500 calls fewer. A read
+added inside a sample directory the index already holds reaches the card when
+that project is next opened (the switch validates); a directory added or
+removed is seen at once.
+The defining-SNP group reads moved to worker processes (`sample_groups.py`,
+spawn-started, `VSNP_GUI_VCF_WORKERS`) and are started in the background when
+VCFs are collected or imported (`_prewarm_sample_groups` in main.py), so
+"Show groups" is usually answered from the cache. The tree viewer's table list
+remembers each table's extent per file identity (0.46 s -> 0.002 s for nine
+tables), Source Sans 3 ships in the bundle instead of coming from Google
+Fonts, and igv.js is its own chunk (main bundle 1,859 KB -> 436 KB).

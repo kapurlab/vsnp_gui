@@ -149,6 +149,7 @@ from app import step1_staging
 from app import ref_contigs
 from app import sample_groups
 from app import step1_index
+from app import stats_workbooks
 from app.fanout import fan_out
 from app.step2_staging import removals_that_bite, stage_step2_vcfs, vsnp3_would_remove
 from app.step2_inventory import (
@@ -8554,7 +8555,10 @@ def step1_files(project: str, sample: str = Query(...)):
 
 def _latest_step1_stats(project: str, sample: str) -> Path:
     """Discover the latest *_stats.xlsx for a sample. Shared by the download
-    and preview endpoints so they stay in sync on the resolution rules."""
+    and preview endpoints so they stay in sync on the resolution rules.
+    A sample aligned by vSNP v1 has none, so its own workbook is shown instead
+    (stats_workbooks.V1_STATS_GLOB). That second look only happens when the
+    first finds nothing."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     step1_dir = project_dir / "step1"
@@ -8562,6 +8566,12 @@ def _latest_step1_stats(project: str, sample: str) -> Path:
     if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
+    if not stats_files:
+        stats_files = sorted(
+            (p for p in sample_dir.glob(f"{sample}_*.xlsx")
+             if fnmatch.fnmatchcase(p.name, stats_workbooks.V1_STATS_GLOB)),
+            key=lambda p: p.stat().st_mtime,
+        )
     if not stats_files:
         raise HTTPException(status_code=404, detail="Stats file not found")
     return stats_files[-1]

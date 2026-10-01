@@ -42,17 +42,20 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:  # imported as app.step1_index by the backend, as a top-level module by tests
     from app.fanout import fan_out
+    from app.stats_workbooks import is_stats_workbook
 except ImportError:
     from fanout import fan_out
+    from stats_workbooks import is_stats_workbook
 
 INDEX_BASENAME = ".sample_index.json"
-_INDEX_VERSION = 1
+# 2: stats workbooks include vSNP v1's (see stats_workbooks, and _load for
+# what an index written by version 1 is still trusted with).
+_INDEX_VERSION = 2
 # How long one listing serves the requests of one click. Long enough that a
 # switch's dozen requests, and the ones they trigger, share it; short enough
 # that a change made from a shell is seen almost at once. The project cards
@@ -219,7 +222,7 @@ def _compute(sample: Sample, step1_dev: Optional[int]) -> Dict[str, Any]:
                             fq.append([n, False, st.st_dev, st.st_ino])
                     except OSError:
                         fq.append([n, link, None, None])
-                elif not n.startswith(".") and fnmatchcase(n, "*_stats.xlsx"):
+                elif not n.startswith(".") and is_stats_workbook(n):
                     try:
                         st = os.stat(e.path)
                         stats[n] = [st.st_mtime_ns, st.st_size]
@@ -243,9 +246,19 @@ def _load(step1_dir: Path) -> Dict[str, list]:
     stored: Dict[str, list] = {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("version") == _INDEX_VERSION and isinstance(data.get("samples"), dict):
+        version = data.get("version")
+        if version in (1, _INDEX_VERSION) and isinstance(data.get("samples"), dict):
             stored = {k: v for k, v in data["samples"].items()
                       if isinstance(v, list) and len(v) == 2 and isinstance(v[0], int) and isinstance(v[1], dict)}
+            if version == 1:
+                # Version 1 looked for vsnp3's *_stats.xlsx only, so it could
+                # not see a vSNP v1 workbook. Only a directory shaped like a v1
+                # sample is listed again: no workbook found and no reads at its
+                # top level (v1 moved them into zips/). On a vsnp3 project that
+                # is the _provenance/ scaffold folder and nothing else, because
+                # its samples have reads or a workbook: one listing, once.
+                # Every other answer stands as recorded.
+                stored = {k: v for k, v in stored.items() if v[1].get("stats") or v[1].get("fq")}
     except Exception:
         stored = {}
     _FACTS_MEMO[str(step1_dir)] = (sig, stored)
@@ -320,9 +333,9 @@ def facts(step1_dir: Path, lst: Optional[Listing] = None) -> Dict[str, Dict[str,
 
 
 def stats_sigs(step1_dir: Path) -> Dict[str, list]:
-    """{workbook path: [mtime_ns, size]} for the Results scan: every
-    *_stats.xlsx directly inside a non-dot directory of step1/, as
-    qc_scan._stats_files discovered them."""
+    """{workbook path: [mtime_ns, size]} for the Results scan: every stats
+    workbook (stats_workbooks.is_stats_workbook) directly inside a non-dot
+    directory of step1/, as qc_scan._stats_files discovered them."""
     lst = listing(step1_dir)
     fx = facts(step1_dir, lst)
     out: Dict[str, list] = {}

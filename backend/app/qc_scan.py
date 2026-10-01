@@ -2,9 +2,10 @@
 
 Reads every ``<sample>/*_stats.xlsx`` under a step1 directory and emits one
 row dict per sample (newest run wins), exactly the shape the old embedded
-pandas scan produced. Two properties make it usable on 8000+ sample projects
-where the old scan took 15+ minutes per request and re-parsed everything on
-every visit:
+pandas scan produced. vSNP v1's per-sample workbooks are read too, and shown
+under vsnp3's column names (see _V1_COLUMNS). Two properties make it usable
+on 8000+ sample projects where the old scan took 15+ minutes per request and
+re-parsed everything on every visit:
 
   * **A persistent per-file cache** (``<step1>/.qc_stats_cache.json``), keyed
     by relative path + (mtime_ns, size). A revisit parses only new/changed
@@ -29,7 +30,6 @@ NaN, which json-encoded as the invalid token NaN).
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import glob
 import gzip
 import json
@@ -42,8 +42,10 @@ from concurrent.futures import ProcessPoolExecutor
 
 try:  # run as a script from app/ (the backend's subprocess), or imported as app.qc_scan
     from fanout import fan_out
+    from stats_workbooks import is_stats_workbook
 except ImportError:
     from app.fanout import fan_out
+    from app.stats_workbooks import is_stats_workbook
 
 # openpyxl warns about vsnp3's workbooks ("no default style", …) — once per
 # file, thousands of times per project. Silence them in this process and in
@@ -52,6 +54,65 @@ warnings.filterwarnings("ignore")
 
 CACHE_BASENAME = ".qc_stats_cache.json"
 _CACHE_VERSION = 2
+
+# The v1 columns that measure what a vsnp3 column measures, shown under the
+# vsnp3 name so the Results table and the QC verdict read them. Checked
+# against v1's functions.py: ave_coverage, genome_coverage and good_snp_count
+# (single-base, QUAL > 150) are computed as vsnp3 computes Average Depth,
+# Genome with Coverage and Quality SNPs, and v1 took its read length from R1
+# alone. The rest keep v1's names for the exports. allbam_mapped_reads and
+# unmapped_reads each count one contig (lines one and two of samtools
+# idxstats), and Q30_R1 is the share of reads whose MEAN quality reaches 30, so
+# none of them is the vsnp3 column it sounds like. species and
+# reference_sequence_name are v1's reference option and the BAM's first
+# contig. They are not a vsnp3 reference name, so they stay out of Reference,
+# which the GUI reads to lock the project's reference. sample_name has to
+# become sample: the browser never sees _sample, because FastAPI's encoder
+# drops every key that starts with "_sa", so the table names rows by sample.
+_V1_COLUMNS = {
+    "sample_name": "sample",
+    "ave_coverage": "Average Depth",
+    "genome_coverage": "Genome with Coverage",
+    "good_snp_count": "Quality SNPs",
+    "ave_read_length": "R1 Ave Length",
+}
+# Header cells only v1 wrote. A row with sample_name and two of these is v1's,
+# whatever the file is called: a v1 workbook someone renamed to *_stats.xlsx
+# is read the same way.
+_V1_SIGNATURE = ("reference_sequence_name", "allbam_mapped_reads", "ave_coverage",
+                 "genome_coverage", "good_snp_count", "unmapped_assembled_contigs")
+
+
+def _is_v1_row(row: dict) -> bool:
+    return "sample_name" in row and sum(k in row for k in _V1_SIGNATURE) >= 2
+
+
+def _as_shown(path: str, row: dict):
+    """The row the Results pane shows for one parsed workbook.
+
+    A vsnp3 row is returned as it is. A vSNP v1 row is returned under the
+    vsnp3 names. None means the workbook is named like v1's but is not one.
+    That covers any other timestamped workbook in a sample folder, and v1's
+    run summary (stat_alignment_summary_<stamp>.xlsx, one row per sample),
+    which a post-hoc scan of a step1 folder would otherwise read as its first
+    sample. Applied after the cache, so cached rows and fresh ones get the same
+    answer, and a change to the mapping needs no cache rebuild."""
+    name = os.path.basename(path)
+    if not _is_v1_row(row):
+        return row if name.endswith("_stats.xlsx") else None
+    if name.startswith("stat_alignment_"):
+        return None
+    out = {}
+    for key, value in row.items():
+        key = _V1_COLUMNS.get(key, key)
+        if key == "Quality SNPs" and isinstance(value, int) and not isinstance(value, bool):
+            value = f"{value:,}"  # as vsnp3 writes it: a string, and 0 shows as 0
+        out[key] = value
+    sample = str(out.get("sample") or "").strip()
+    if sample:
+        out["_sample"] = sample
+    out["_stats_format"] = "vSNP v1"
+    return out
 
 
 def _read_stats_row(path: str):
@@ -231,7 +292,8 @@ def _save_cache(path: str, files: dict) -> None:
 def _stats_files(step1_dir: str, include_direct: bool) -> dict:
     """{path: [mtime_ns, size]} for every workbook the scan reads.
 
-    What ``glob.glob("<step1>/*/*_stats.xlsx")`` finds — glob's own rules: no
+    What ``glob.glob("<step1>/*/*_stats.xlsx")`` finds, plus vSNP v1's
+    workbooks (is_stats_workbook) — glob's own rules: no
     dotfiles at either level, case-sensitive, a sample entry that is not a
     directory contributes nothing — together with the stat the cache check
     needs. glob listed the sample dirs one after another and the cache check
@@ -258,7 +320,7 @@ def _stats_files(step1_dir: str, include_direct: bool) -> dict:
         try:
             with os.scandir(path) as it:
                 for e in it:
-                    if e.name.startswith(".") or not fnmatch.fnmatchcase(e.name, "*_stats.xlsx"):
+                    if e.name.startswith(".") or not is_stats_workbook(e.name):
                         continue
                     sig = _stat(e.path)
                     if sig is not None:
@@ -270,7 +332,7 @@ def _stats_files(step1_dir: str, include_direct: bool) -> dict:
     found = {}
     if include_direct:
         for name, path in top:
-            if fnmatch.fnmatchcase(name, "*_stats.xlsx"):
+            if is_stats_workbook(name):
                 sig = _stat(path)
                 if sig is not None:
                     found[path] = sig
@@ -332,7 +394,10 @@ def scan(step1_dir: str, cache_path: str, workers: int, include_direct: bool = F
 
     # Newest run per sample, same rule as always: highest _run_date wins.
     latest: dict = {}
-    for row in rows_by_file.values():
+    for f, raw in rows_by_file.items():
+        row = _as_shown(f, raw)
+        if row is None:
+            continue
         sample = row.get("_sample")
         rd = row.get("_run_date", "") or ""
         if sample not in latest or rd > (latest[sample].get("_run_date", "") or ""):
@@ -347,7 +412,7 @@ def main() -> int:
     ap.add_argument("--cache", default="", help="cache file (default <step1>/.qc_stats_cache.json; '-' disables)")
     ap.add_argument("--out", required=True, help="write the result JSON here")
     ap.add_argument("--workers", type=int, default=0)
-    ap.add_argument("--direct", action="store_true", help="also scan *_stats.xlsx directly in step1_dir (post-hoc folders)")
+    ap.add_argument("--direct", action="store_true", help="also scan stats workbooks directly in step1_dir (post-hoc folders)")
     ap.add_argument("--index", default="", help="JSON of {workbook path: [mtime_ns, size]}: scan exactly these, discovering nothing")
     args = ap.parse_args()
 

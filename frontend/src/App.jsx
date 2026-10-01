@@ -2647,8 +2647,14 @@ export default function App() {
           setSraStatus(`Download ${status}`);
         }
         // Either way, refresh the persistent outcome report (a failed job can
-        // still have skipped/succeeded some accessions before failing).
-        if (selectedProject) loadSraReport(selectedProject);
+        // still have skipped/succeeded some accessions before failing), and
+        // the "Ready to run" list the downloaded reads now sit in. loadAll()
+        // reloads projects, not that list, so a finished download used to say
+        // "Download complete" beside "No files yet" until Refresh was pressed.
+        if (selectedProject) {
+          loadSraReport(selectedProject);
+          loadInputs(selectedProject);
+        }
       }
       // Update genome download status if this was a genome download job
       if (genomeJobId && jobId === genomeJobId) {

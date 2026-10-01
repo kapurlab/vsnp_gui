@@ -372,10 +372,26 @@ method3() {{
 
   echo "  [Method 3] ENA curl"
   local api_url="https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${{acc}}&result=read_run&fields=fastq_ftp"
-  local urls
-  urls=$(curl -s {curl_insecure} "$api_url" | tail -n1 | cut -f2)
+  # This is the only method a laptop has (no sra-tools there), so one bad
+  # answer must not cost the sample. The portal sometimes replies with an error
+  # line instead of the table ("ERROR occurred. Not all results may have been
+  # written."), and taking the last line as the file list turned that message
+  # into a "URL" and failed the accession. Read only this run's row, and ask
+  # again before giving up.
+  local urls="" attempt
+  for attempt in 1 2 3 4; do
+    urls=$(curl -s {curl_insecure} "$api_url" | awk -F'\\t' -v a="$acc" '$1 == a {{print $2; exit}}')
+    case "$urls" in
+      *fastq*) break ;;
+    esac
+    urls=""
+    if [ "$attempt" -lt 4 ]; then
+      echo "  [Method 3] ENA gave no file list for $acc (try $attempt of 4) — asking again"
+      sleep $((attempt * 5))
+    fi
+  done
 
-  if [ -z "$urls" ] || [ "$urls" = "fastq_ftp" ]; then
+  if [ -z "$urls" ]; then
     echo "  [Method 3] ENA did not return URLs for $acc"
     return 1
   fi
@@ -386,10 +402,11 @@ method3() {{
     local filename
     filename=$(basename "$url")
     echo "  Downloading $filename"
-    # Try HTTPS first, then FTP
-    if curl -f {curl_insecure} "https://$url" -o "$filename" 2>&1; then
+    # Try HTTPS first, then FTP. --retry covers the transient 5xx/timeouts a
+    # 26-sample batch reliably meets somewhere.
+    if curl -f --retry 3 --retry-delay 5 {curl_insecure} "https://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via HTTPS"
-    elif curl -f {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
+    elif curl -f --retry 3 --retry-delay 5 {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
       echo "  [OK] $filename downloaded via FTP"
     else
       echo "  [FAILED] Could not download $filename"

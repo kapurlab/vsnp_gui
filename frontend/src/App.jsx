@@ -1123,6 +1123,10 @@ export default function App() {
 
   const sampleKey = (row) => row?._sample || row?.sample || (row?._file ? row._file.split("/").pop() : "");
   const excludeKey = (row) => row?._file || sampleKey(row);
+  // Whether a Results row has an alignment for IGV to show. vsnp3 records the
+  // reference it aligned to. A vSNP v1 row records none under that name, but
+  // v1 wrote its stats workbook only after the BAM, so every v1 row has one.
+  const hasAlignment = (row) => Boolean(row?.Reference) || row?._stats_format === "vSNP v1";
   // Run date as YYYY-MM-DD. _run_date is the backend's authoritative run
   // timestamp (run_metadata.json started_at, falling back to the stats date /
   // filename / mtime). Both ISO (2026-05-16T..) and filename (2026-05-16_09..)
@@ -8272,14 +8276,15 @@ export default function App() {
                                       Open Folder
                                     </button>
                                     {/* Same rule as the other Files panel: a row
-                                        with no Reference was never aligned, so
-                                        there is no BAM and IGV can only error.
-                                        There are TWO of these panels and the
-                                        first fix patched only the other one. */}
+                                        with no alignment (hasAlignment) was
+                                        never aligned, so there is no BAM and
+                                        IGV can only error. There are TWO of
+                                        these panels and the first fix patched
+                                        only the other one. */}
                                     <button
                                       onClick={() => openSampleInIgv(selectedProject, sampleKey(row))}
-                                      disabled={!sampleKey(row) || !row.Reference}
-                                      title={row.Reference
+                                      disabled={!sampleKey(row) || !hasAlignment(row)}
+                                      title={hasAlignment(row)
                                         ? "Open this sample's reads in IGV"
                                         : "No alignment for this sample yet — Step 1 has not aligned it, so there is no BAM to show."}
                                     >
@@ -8475,8 +8480,8 @@ export default function App() {
                                     Open Folder
                                   </button>
                                   {/* Offered only when this sample HAS an
-                                      alignment. A sample with no Reference was
-                                      never aligned — it has reads and nothing
+                                      alignment (hasAlignment). A sample without
+                                      one was never aligned — it has reads and nothing
                                       else — so IGV has no BAM to show and the
                                       button could only ever produce an error.
                                       Offering it anyway is how "IGV is broken"
@@ -8484,8 +8489,8 @@ export default function App() {
                                       part-way through Step 1. */}
                                   <button
                                     onClick={() => openSampleInIgv(row._project || "", row._sample || row.sample || "")}
-                                    disabled={!(row._project && (row._sample || row.sample)) || !row.Reference}
-                                    title={row.Reference
+                                    disabled={!(row._project && (row._sample || row.sample)) || !hasAlignment(row)}
+                                    title={hasAlignment(row)
                                       ? "Open this sample's reads in IGV"
                                       : "No alignment for this sample yet — Step 1 has not aligned it, so there is no BAM to show."}
                                   >

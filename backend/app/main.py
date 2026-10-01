@@ -8506,9 +8506,9 @@ def step1_files(project: str, sample: str = Query(...)):
         raise HTTPException(status_code=404, detail="no_step1")
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
-    bam_files = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
-    bam_path = str(bam_files[-1]) if bam_files else ""
-    align_dir = str(bam_files[-1].parent) if bam_files else ""
+    bam = _step1_bam(sample_dir, sample)
+    bam_path = str(bam) if bam else ""
+    align_dir = str(bam.parent) if bam else ""
     ref_fasta = ""
     ref_gff = ""
     annotated_vcf = ""
@@ -10309,6 +10309,8 @@ def _igv_bam_stems(step1_dir: Path):
     always made, `<name>_nodup.bam` under the folder's alignment_*/ (or the
     legacy alignment/), but only when a row's label reaches it. The candidates
     cost one listing, the one every request of a project switch shares.
+    A folder without one is asked about vSNP v1's `<name>-nodup.bam` too, which
+    _AlignListing answers from the listings it already made (see _step1_bam).
     """
     from app import xlsx_html
     names = [s.name for s in step1_index.listing(step1_dir).regular()] if step1_dir.is_dir() else []
@@ -10320,11 +10322,14 @@ def _igv_bam_stems(step1_dir: Path):
             if prefix:
                 by_prefix.setdefault(prefix, []).append(n)
 
+    def has_bam(folder: str, name: str) -> bool:
+        listing = _AlignListing(step1_dir / folder)
+        return bool(listing.glob(f"{name}_nodup.bam") or listing.glob(f"{name}-nodup.bam"))
+
     def confirm(name: str) -> bool:
-        if name in name_set and _AlignListing(step1_dir / name).glob(f"{name}_nodup.bam"):
+        if name in name_set and has_bam(name, name):
             return True
-        return any(_AlignListing(step1_dir / d).glob(f"{name}_nodup.bam")
-                   for d in by_prefix.get(name, ()))
+        return any(has_bam(d, name) for d in by_prefix.get(name, ()))
 
     return xlsx_html.LazyStems(name_set | set(by_prefix), confirm)
 
@@ -10992,14 +10997,31 @@ def _resolve_samtools(cfg: Dict) -> str:
     return found
 
 
+def _step1_bam(sample_dir: Path, sample: str) -> Optional[Path]:
+    """A Step 1 sample's de-duplicated BAM: vsnp3's newest <sample>_nodup.bam,
+    else the <sample>-nodup.bam that vSNP v1 (2017-2019) left in its plain
+    alignment/, indexed beside it as <sample>-nodup.bam.bai.
+
+    One walk of the sample folder finds both. It lists the same directories
+    the `**/<sample>_nodup.bam` glob always did, at the same cost under the
+    shared-storage model, so v1 support costs nothing. A separate look for the
+    v1 file was one more stat on every sample with no vsnp3 BAM."""
+    vsnp3, v1 = f"{sample}_nodup.bam", f"{sample}-nodup.bam"
+    found = [p for p in sample_dir.glob("**/*nodup.bam") if p.name in (vsnp3, v1)]
+    bams = sorted((p for p in found if p.name == vsnp3), key=lambda p: p.stat().st_mtime)
+    if bams:
+        return bams[-1]
+    legacy = sample_dir / "alignment" / v1
+    return legacy if legacy in found else None
+
+
 def _sample_bam(project_dir: Path, sample: str) -> Optional[Path]:
     """The sample's de-duplicated BAM, the one step1_files hands the viewer."""
     step1_dir = project_dir / "step1"
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
         return None
-    bams = sorted(sample_dir.glob(f"**/{sample}_nodup.bam"), key=lambda p: p.stat().st_mtime)
-    return bams[-1] if bams else None
+    return _step1_bam(sample_dir, sample)
 
 
 def _htsget_error(status: int, code: str, message: str):

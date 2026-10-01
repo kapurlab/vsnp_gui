@@ -1,11 +1,13 @@
-"""Step 1 Results shows samples aligned by vSNP v1.
+"""Step 1 Results and IGV work for samples aligned by vSNP v1.
 
 vSNP v1 (2017-2019) wrote each sample's stats as <sample>_<YYYY-MM-DD_HH-MM-SS>.xlsx,
-with its own column names (sample_name, ave_coverage, good_snp_count, ...), and
-parked the reads in zips/. The Results scan read vsnp3's *_stats.xlsx only, so
-a project aligned back then (the Ames brucella/suis2 project, 2018) listed
-every sample as Complete in Step 1 and showed "No stats loaded yet." in Step 1
-Results.
+with its own column names (sample_name, ave_coverage, good_snp_count, ...),
+parked the reads in zips/, and left its BAM in a plain alignment/ as
+<sample>-nodup.bam. The Results scan read vsnp3's *_stats.xlsx only, so a
+project aligned back then (the Ames brucella/suis2 project, 2018) listed every
+sample as Complete in Step 1 and showed "No stats loaded yet." in Step 1
+Results. IGV looked for vsnp3's <sample>_nodup.bam only, so it had no reads to
+show for any of them.
 
 These tests pin what the scan now does with those workbooks, and what it does
 not do:
@@ -17,7 +19,10 @@ not do:
     rewrite project.json;
   * a vsnp3 row is exactly what it was, and a timestamped workbook that is not
     v1's is ignored rather than read as the newest run;
-  * an index written before this change re-lists only v1-shaped folders.
+  * an index written before this change re-lists only v1-shaped folders;
+  * IGV opens a v1 sample's BAM, a vsnp3 BAM still wins wherever there is one,
+    and deciding which table rows get reads costs no more filesystem calls
+    than it did, on any shape of folder.
 
 Run from anywhere with the checkout's python:
 
@@ -80,15 +85,27 @@ def v1_values(sample: str, stamp: str, depth: str = "85.3", snps: int = 1234) ->
             "N/A", "N/A", "N/A", "N/A"]
 
 
-def v1_sample(s1: Path, name: str, stamp: str, *, filename: str = "", **kw) -> Path:
-    """A sample folder as v1 left it: reads in zips/, outputs in alignment/."""
+V1_REF = "NC_010169-NC_010167"
+
+
+def v1_sample(s1: Path, name: str, stamp: str, *, filename: str = "", bam: bool = True, **kw) -> Path:
+    """A sample folder as v1 left it: reads in zips/, and in alignment/ what
+    functions.py moved there: both BAMs with their indexes, the VCFs, and the
+    reference FASTA it aligned to with its .fai."""
     d = s1 / name
     (d / "zips").mkdir(parents=True)
     (d / "zips" / f"{name}_S1_L001_R1_001.fastq.gz").write_bytes(b"\x1f\x8b")
     (d / "zips" / f"{name}_S1_L001_R2_001.fastq.gz").write_bytes(b"\x1f\x8b")
-    (d / "alignment").mkdir()
-    (d / "alignment" / f"{name}_zc.vcf").write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
-    (d / "alignment" / f"{name}-nodup.bam").write_bytes(b"BAM\x01")
+    a = d / "alignment"
+    a.mkdir()
+    (a / f"{name}_zc.vcf").write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+    (a / f"{name}-hapall.vcf").write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+    if bam:
+        for b in ("nodup", "sorted"):
+            (a / f"{name}-{b}.bam").write_bytes(b"BAM\x01")
+            (a / f"{name}-{b}.bam.bai").write_bytes(b"BAI\x01")
+    (a / f"{V1_REF}.fasta").write_text(">NC_010169.1\nACGT\n>NC_010167.1\nACGT\n", encoding="utf-8")
+    (a / f"{V1_REF}.fasta.fai").write_text("NC_010169.1\t4\t13\t4\t5\nNC_010167.1\t4\t31\t4\t5\n", encoding="utf-8")
     (d / "unmapped").mkdir()
     for f in ("best_reference.txt", "mlst.txt", "version_capture.txt"):
         (d / f).write_text("x\n", encoding="utf-8")
@@ -283,6 +300,104 @@ def test_index_migration(root: Path):
     check(seen.paths, [], "after which nothing is listed again")
 
 
+class Calls:
+    """os.stat / lstat / scandir / listdir calls, in every thread."""
+
+    def __init__(self):
+        self.n = 0
+        self._lock = threading.Lock()
+        self._saved = {}
+
+    def __enter__(self):
+        for name in ("stat", "lstat", "scandir", "listdir"):
+            real = getattr(os, name)
+            self._saved[name] = real
+
+            def counted(*a, _real=real, **k):
+                with self._lock:
+                    self.n += 1
+                return _real(*a, **k)
+            setattr(os, name, counted)
+        return self
+
+    def __exit__(self, *exc):
+        for name, real in self._saved.items():
+            setattr(os, name, real)
+
+
+def old_confirm(step1_dir: Path, name: str, name_set: set, by_prefix: dict) -> bool:
+    """_igv_bam_stems' confirm before v1 BAMs counted, verbatim."""
+    if name in name_set and m._AlignListing(step1_dir / name).glob(f"{name}_nodup.bam"):
+        return True
+    return any(m._AlignListing(step1_dir / d).glob(f"{name}_nodup.bam")
+               for d in by_prefix.get(name, ()))
+
+
+def vsnp3_alignment(d: Path, name: str, *, bam: bool = True) -> Path:
+    a = d / "alignment_Brucella_suis2"
+    a.mkdir(parents=True)
+    (a / f"{name}_zc.vcf").write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+    if bam:
+        (a / f"{name}_nodup.bam").write_bytes(b"BAM\x01")
+        (a / f"{name}_nodup.bam.bai").write_bytes(b"BAI\x01")
+    (a / "Brucella_suis2.fasta").write_text(">NC_010169.1\nACGT\n", encoding="utf-8")
+    (a / "Brucella_suis2.fasta.fai").write_text("NC_010169.1\t4\t13\t4\t5\n", encoding="utf-8")
+    return a
+
+
+def test_igv(root: Path):
+    print("IGV")
+    proj = root / "igv"
+    s1 = proj / "step1"
+    v1_sample(s1, "V1", "2018-04-18_17-47-14")
+    v1_sample(s1, "V1NOBAM", "2018-04-18_17-49-02", bam=False)
+    vsnp3_alignment(vsnp3_sample(s1, "V3"), "V3")
+    vsnp3_alignment(v1_sample(s1, "BOTH", "2018-04-18_17-05-24"), "BOTH")   # re-run with vsnp3
+    vsnp3_alignment(vsnp3_sample(s1, "FAILED"), "FAILED", bam=False)
+    vsnp3_alignment(vsnp3_sample(s1, "S9_S4_L001"), "S9")                    # lane-suffixed folder
+    (proj / "project.json").write_text(json.dumps({"name": "igv", "reference": "Brucella_suis2"}))
+    cfg = {"projects_root": str(root), "vsnp3_path": str(root / "no_refs")}
+    m.load_config = lambda: cfg
+    m._project_dir_for = lambda c, p: proj
+
+    f = m.step1_files("igv", sample="V1")
+    check({k: f[k].replace(str(s1) + "/", "") for k in ("bam", "alignment_dir", "reference_fasta", "source_vcf")},
+          {"bam": "V1/alignment/V1-nodup.bam", "alignment_dir": "V1/alignment",
+           "reference_fasta": f"V1/alignment/{V1_REF}.fasta", "source_vcf": "V1/alignment/V1_zc.vcf"},
+          "IGV opens a v1 sample's BAM, with the reference it was aligned to and its calls")
+    check(str(m._sample_bam(proj, "V1")), f["bam"], "and the reads window serves the same BAM")
+    check(m.step1_files("igv", sample="V3")["bam"].replace(str(s1) + "/", ""),
+          "V3/alignment_Brucella_suis2/V3_nodup.bam", "a vsnp3 sample opens its BAM as before")
+    check(m.step1_files("igv", sample="BOTH")["bam"].replace(str(s1) + "/", ""),
+          "BOTH/alignment_Brucella_suis2/BOTH_nodup.bam", "a v1 sample re-run with vsnp3 opens the vsnp3 BAM")
+    check((m.step1_files("igv", sample="V1NOBAM")["bam"], m._sample_bam(proj, "V1NOBAM")), ("", None),
+          "a v1 folder without a BAM still has none")
+
+    si.invalidate(s1)
+    stems = m._igv_bam_stems(s1)
+    names = ["V1", "V1NOBAM", "V3", "BOTH", "FAILED", "S9", "S9_S4_L001", "NOT_A_FOLDER"]
+    check({n: n in stems for n in names},
+          {"V1": True, "V1NOBAM": False, "V3": True, "BOTH": True, "FAILED": False, "S9": True,
+           "S9_S4_L001": False, "NOT_A_FOLDER": False},
+          "Step 2 table rows get reads for v1 samples, and the same answers as before for the rest")
+    regular = [s.name for s in si.listing(s1).regular()]
+    by_prefix: dict = {}
+    for n in regular:
+        if "_" in n:
+            by_prefix.setdefault(n.split("_")[0], []).append(n)
+    old_calls, new_calls, old_answers = {}, {}, {}
+    for n in names:
+        with Calls() as c:
+            old_answers[n] = old_confirm(s1, n, set(regular), by_prefix)
+        old_calls[n] = c.n
+        with Calls() as c:
+            stems._confirm(n)
+        new_calls[n] = c.n
+    check({n: a for n, a in old_answers.items() if n != "V1"}, {n: n in stems for n in names if n != "V1"},
+          "only the v1 sample's answer changed")
+    check(new_calls, old_calls, f"and every row costs the filesystem calls it did ({sum(new_calls.values())} in all)")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="vsnp1_results_"))
     try:
@@ -291,6 +406,7 @@ def main():
         test_reference_lock(tmp, proj)
         test_stats_button(proj)
         test_index_migration(tmp)
+        test_igv(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

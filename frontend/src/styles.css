@@ -1946,6 +1946,18 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
 .sd-copy.is-done { color: var(--success); border-color: var(--success); }
 .sd-copy svg, .group-chip-copy svg { width: 12px; height: 12px; }
 
+/* A comparison folder's full path and its Copy button: beside Run for the one
+   running, under the Comparison list for the one selected. A path is a single
+   long word, so it may break anywhere rather than run out of the panel. */
+.s2-folder-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.s2-folder .sd-copy { vertical-align: middle; margin-left: 2px; }
+.note.s2-folder-selected { margin-top: 0; margin-bottom: 0.5rem; }
+
 .group-chip {
   display: inline-flex;
   align-items: stretch;

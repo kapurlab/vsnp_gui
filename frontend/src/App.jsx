@@ -851,7 +851,6 @@ export default function App() {
   const [s2DensityThreshold, setS2DensityThreshold] = useState("");
   const [s2DensityWindow, setS2DensityWindow] = useState("");
   const [s2Bootstrap, setS2Bootstrap] = useState("");
-  const [step2RunId, setStep2RunId] = useState("");
   const [step2BuiltAt, setStep2BuiltAt] = useState("");
   const [step2VcfCount, setStep2VcfCount] = useState(0);
   // Comparison breakdown of the Step 2 set (total = comparison + excluded).
@@ -1015,6 +1014,11 @@ export default function App() {
   // Same idea for Step 2: the job's own started_at (queued_at while it waits
   // for a slot), so the counter survives a reload mid-build.
   const [step2JobStartedAt, setStep2JobStartedAt] = useState("");
+  // The dated folder the running comparison writes into, as the server named
+  // it (step2/run's answer, or step2/active after a reload). Shown with a Copy
+  // button beside Run, so the exact location can be passed on mid-run. Empty
+  // until the server has named it: during staging it is not known here.
+  const [step2RunDir, setStep2RunDir] = useState("");
   // False only for a run orphaned by a backend restart (alive server-side but
   // not stoppable via the API) — hides the Stop button in that case.
   const [step2Controllable, setStep2Controllable] = useState(true);
@@ -2712,6 +2716,7 @@ export default function App() {
     setStep2Stopping(false);
     setStep2JobStatus("");
     setStep2JobStartedAt("");
+    setStep2RunDir("");
     setStep2Controllable(true);
     setStep2JobId("");
     // No direct loadStep2Outputs() here: loadStep2Runs(true) settles the run
@@ -2724,7 +2729,6 @@ export default function App() {
     loadVcfSourceSamples();
     loadInputs(selectedProject);
     loadSraReport(selectedProject);
-    setStep2RunId("");
     setStep2BuiltAt("");
     setStep2VcfCount(0);
     setStep2Composition([]);
@@ -4884,7 +4888,6 @@ export default function App() {
     setStep2Outputs([]);
     setStep2Groups([]);
     setStep2OutputsError("");
-    setStep2RunId("");
     let res;
     try {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
@@ -5185,6 +5188,8 @@ export default function App() {
     // a starting message BEFORE the async POST so the click clearly registers.
     setStep2Running(true);
     setStep2SetupMsg("Starting Step 2…");
+    // The last run's folder must not stand in for this one's while it stages.
+    setStep2RunDir("");
     const effectiveRef = reference || projectReference || null;
     // Authoritative exclusion set = whatever the UI currently shows excluded
     // (build-list ∪ Step 1 QC). Sent in the request so the run can't silently
@@ -5356,6 +5361,9 @@ export default function App() {
     // Follow the folder that is now running, so a resumed comparison fills in
     // under the user's eyes instead of leaving them on the one they came from.
     if (data.run_id) setStep2SelectedRun(data.run_id);
+    // Where it is being written, as the server named it, for the Run area to
+    // show and copy. Never stamped onto a project the user has since moved to.
+    if (selectedProjectRef.current === dispatchProject) setStep2RunDir(data.run_dir || "");
     // May come back "queued" if the global concurrency cap is full — it will
     // start automatically when a slot frees.
     setStep2JobStatus(data.status || "running");
@@ -5375,7 +5383,10 @@ export default function App() {
         ? "Step 2 queued — will start when a run slot is free…"
         : "Step 2 running…") + countSuffix + provWarn
     );
-    setStep2RunId(new Date().toISOString());
+    // List the new comparison. The selection above names a folder the list did
+    // not hold yet, so the dropdown showed the previous comparison's name over
+    // this one's pane, and had no path for this one to show and copy.
+    loadStep2Runs(false);
     setStep2AutoRefreshPending(true);
     setJobId(data.job_id);
     setStep2JobId(data.job_id);
@@ -5424,15 +5435,20 @@ export default function App() {
   // hide the Stop button while the job keeps running server-side.
   async function loadStep2Active() {
     if (!selectedProject) return;
+    // A late answer for a project the user has left must not put that
+    // project's run, or its folder path, in this one's Run area.
+    const proj = selectedProject;
     try {
-      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step2/active`);
-      if (!res.ok) return;
+      const res = await fetch(`${API_BASE}/api/projects/${proj}/step2/active`);
+      if (!res.ok || selectedProjectRef.current !== proj) return;
       const data = await res.json();
+      if (selectedProjectRef.current !== proj) return;
       if (data.job_id) {
         setStep2JobId(data.job_id);
         setStep2Running(true);
         setStep2JobStatus(data.status || "running");
         setStep2JobStartedAt(data.started_at || "");
+        setStep2RunDir(data.run_dir || "");
         setStep2Controllable(data.controllable !== false);
         if (data.controllable === false) {
           // Orphaned by a backend restart — still running on the server, but
@@ -10662,9 +10678,23 @@ export default function App() {
                 </div>
               ) : null}
               {selected ? (
-                <div className="note">
-                  Outputs will be written to: {settings.projects_root}/{selected.name}/step2
-                </div>
+                // Once the server has named the run's folder, say exactly
+                // where it is: step2/ alone sent people looking through
+                // hundreds of dated folders for the one that was running.
+                step2Running && step2RunDir ? (
+                  <div className="note s2-folder">
+                    {step2JobStatus === "queued"
+                      ? "This comparison will be written to:"
+                      : "This comparison is being written to:"}{" "}
+                    <span className="s2-folder-path">{step2RunDir}</span>{" "}
+                    <CopyValue text={step2RunDir} what="the comparison folder's path" />
+                  </div>
+                ) : (
+                  <div className="note">
+                    Outputs will be written to a new dated folder in:{" "}
+                    {selected._root || settings.projects_root}/{selected.name}/step2
+                  </div>
+                )
               ) : null}
             </div>
           </section>
@@ -10693,6 +10723,17 @@ export default function App() {
                 </select>
               </div>
             ) : null}
+            {(() => {
+              // The selected comparison's own folder, to copy and send on: the
+              // dropdown names it by its date, which is not a place to look.
+              const row = step2Runs.find((r) => r.run_id === step2SelectedRun);
+              return row && row.path ? (
+                <div className="note s2-folder s2-folder-selected">
+                  Folder: <span className="s2-folder-path">{row.path}</span>{" "}
+                  <CopyValue text={row.path} what="this comparison's folder path" />
+                </div>
+              ) : null;
+            })()}
             {step2RunsError ? (
               <div className="note warning" style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                 <span><strong>Comparison list unavailable:</strong> {step2RunsError}</span>
@@ -10713,7 +10754,6 @@ export default function App() {
               </div>
             ) : null}
             {posthocRunError ? <div className="note error">{posthocRunError}</div> : null}
-            {step2RunId ? <div className="note">Run ID: {step2RunId}</div> : null}
             {step2OutputsError ? <div className="note error">{step2OutputsError}</div> : null}
             {selectedProject && step2OutputsFor !== selectedProject && !step2OutputsError && !step2RunsError ? (
               <div className="note"><span className="pulse-dot" /> Loading Step 2 results for {selectedProject}… <Elapsed /></div>

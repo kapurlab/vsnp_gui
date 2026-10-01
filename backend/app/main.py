@@ -6700,6 +6700,10 @@ def step2_run(project: str, payload: Step2Request):
     return {
         "job_id": job_id,
         "run_id": run_ts,
+        # The folder itself, the job's working directory: what the GUI shows
+        # beside Run and copies, so the location someone is sent is exactly the
+        # comparison, not the step2/ folder it sits in.
+        "run_dir": str(run_dir),
         "status": snap.get("status", "running"),
         "excluded_count": excluded_count,
         "blocklist_count": len(ref_block),
@@ -6764,9 +6768,17 @@ def step2_active(project: str):
         except OSError:
             run_id = ""
     started_at = (job.get("started_at") or job.get("queued_at") or "") if job else ""
+    # The running comparison's folder, so a reload mid-run still shows (and can
+    # copy) where it is being written. Two stats, and only while a job is active;
+    # the listing only for a resumed pre-2026-06 folder the stats cannot name,
+    # the same fallback _resolve_step2_output_dir takes.
+    named = _step2_named_run_dir(step2_dir, run_id)
+    if named is None and run_id:
+        named = _step2_run_dirs(step2_dir).get(run_id)
     return {
         "job_id": job_id,
         "run_id": run_id,
+        "run_dir": str(named) if named is not None else "",
         "status": status,
         "controllable": controllable,
         "started_at": started_at,
@@ -7719,6 +7731,9 @@ def step2_runs_list(project: str):
                 parts = _step2_split_run_name(run_id) or {}
                 return {
                     "run_id": run_id,
+                    # Where the comparison is, for the results pane to show and
+                    # copy. Already known from the listing: no call of its own.
+                    "path": str(run_entry),
                     "started_at": meta["started_at"],
                     "status": meta["status"],
                     "reference": meta["reference"],
@@ -7740,6 +7755,7 @@ def step2_runs_list(project: str):
                 logger.exception("step2/runs: could not read run folder %s", run_entry)
                 return {
                     "run_id": run_id,
+                    "path": str(run_entry),
                     "started_at": None,
                     "status": "unknown",
                     "reference": "",
@@ -7764,6 +7780,7 @@ def step2_runs_list(project: str):
         if groups:
             results.append({
                 "run_id": "legacy",
+                "path": str(step2_dir),
                 "started_at": None,
                 "status": "ok",
                 "reference": "",
@@ -9413,6 +9430,23 @@ def step1_edits(project: str):
 
 
 
+def _step2_named_run_dir(step2_dir: Path, run_id: str) -> Optional[Path]:
+    """The comparison folder `run_id` names, in two stats and no listing.
+
+    step2/{run_id}/, else the pre-2026-06 step2/runs/{run_id}/; None when
+    neither is a folder. The two name guards reproduce exactly what membership
+    of _step2_run_dirs protects against: _STEP2_COMPARISON_RE pins the shape
+    (so "vcf_database" or "runs" cannot be addressed), and the basename check
+    stops path traversal.
+    """
+    if not (run_id and _STEP2_COMPARISON_RE.match(run_id) and Path(run_id).name == run_id):
+        return None
+    for candidate in (step2_dir / run_id, step2_dir / "runs" / run_id):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
     """Resolve which directory to read step2 outputs from.
 
@@ -9443,17 +9477,10 @@ def _resolve_step2_output_dir(step2_dir: Path, run_id: Optional[str]) -> Path:
         # stats instead of listing every run dir — which matters because the
         # run_id-scoped requests are the MANY ones (a comparison selection on
         # the 400-folder Ames project made ~65 of them, each paying a ~400-stat
-        # listing just to look up a key it already had). The two name guards
-        # reproduce exactly what map membership used to protect against:
-        # _STEP2_COMPARISON_RE pins the shape (so "vcf_database" or "runs"
-        # cannot be addressed), and the basename check stops path traversal.
-        if _STEP2_COMPARISON_RE.match(run_id) and Path(run_id).name == run_id:
-            direct = step2_dir / run_id
-            if direct.is_dir():
-                return direct
-            legacy_direct = step2_dir / "runs" / run_id
-            if legacy_direct.is_dir():
-                return legacy_direct
+        # listing just to look up a key it already had).
+        named = _step2_named_run_dir(step2_dir, run_id)
+        if named is not None:
+            return named
         run_dirs = _step2_run_dirs(step2_dir)
         if run_id in run_dirs:
             return run_dirs[run_id]

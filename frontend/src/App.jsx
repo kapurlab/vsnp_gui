@@ -2388,6 +2388,11 @@ export default function App() {
     // project, which read as "the button did nothing" even though the VCFs
     // had been copied.
     await loadStep1Status();
+    // Step 2's box 1 counts the samples in the vcf_database listing, which
+    // only reloaded on a project switch or a Build. After a Step 1 batch
+    // collected its VCFs, the Step 1 pane said "vcf_database: 26 VCFs" while
+    // box 1 said "0 of this project's 26 Step 1 samples collected".
+    await loadVcfSourceSamples();
   }
 
   async function loadAll() {

@@ -2124,6 +2124,69 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
 .s2-list-panel.is-expanded .s2-list-bar,
 .s2-list-panel.is-expanded > .note { flex-shrink: 0; }
 
+/* ---- A pane over most of the window ----------------------------------------
+   Expand on a pane's header draws that pane fixed over the page; Esc, Collapse
+   or a click outside puts it back. The same idea as the Step 2 sample list
+   above, for whole panes: Projects, Inputs, Step 1, Step 1 Results, Step 2
+   Results. The pane keeps its place in the DOM, only its box moves. */
+.pane-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pane-head h2 { flex: 1 1 auto; min-width: 0; }
+.pane-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 3px 9px;
+  font-size: 0.8em;
+}
+.pane-expand svg { width: 13px; height: 13px; }
+/* In a header that already holds buttons, at the far right. */
+.qc-actions .pane-expand { margin-left: auto; align-self: center; }
+.panel.is-expanded {
+  position: fixed;
+  inset: 16px;
+  /* Under the modals (.modal-backdrop is 50) and the IGV panel, so one opened
+     from inside the pane still comes up on top of it. */
+  z-index: 45;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
+}
+.pane-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  background: rgba(15, 23, 42, 0.35);
+}
+/* The box that scrolled inside the pane takes the room the window gives it,
+   instead of the height it had in the grid; the header above it stays put. */
+.panel.is-expanded > .list,
+.panel.is-expanded > .qc-table.scrollable,
+.panel.is-expanded > .results-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+/* Why a Step 2 run is queued, under its Queued… button. */
+.s2-queue { margin-top: 0.35rem; }
+.s2-queue-holders { margin: 6px 0 0; padding-left: 1.2em; }
+.s2-queue-holders li { margin: 2px 0; }
+.s2-queue-holders code { font-size: 0.95em; }
+.s2-queue-holders .ghost-btn { margin-left: 8px; padding: 2px 8px; font-size: 0.9em; }
+.s2-queue-dead { color: var(--muted); }
+
 /* ---- The IGV window (?view=igv) -------------------------------------------
    The bar above igv.js follows the app's theme like every other pane, and the
    appearance switch sits in it. igv.js renders inside a shadow root with its

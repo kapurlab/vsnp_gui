@@ -6788,6 +6788,59 @@ def job_status(job_id: str):
     return job
 
 
+def _step2_slots_report() -> Dict[str, Any]:
+    """Who holds the Step 2 run slots, and who waits for one.
+
+    A run showed "Queued… will start when a run slot is free" with no way to
+    learn which run held the slot, in which project, or for how long — one
+    sat queued for 2 h 45 m on the Ames HPC behind a run nobody could see from
+    its project. The holders are named here, with whether each one's process
+    group is still alive, so the GUI can say what the run waits for and offer
+    to stop it. Holders include a run whose process has exited but whose
+    finalize callback is still writing provenance (status terminal): the slot
+    is still held, so the queue still waits for it.
+    """
+    def describe(job: Dict[str, Any]) -> Dict[str, Any]:
+        cwd = job.get("cwd") or ""
+        p = Path(cwd) if cwd else None
+        run_id = p.name if p is not None else ""
+        # The run's working directory is <root>/<project>/step2/<run_id>.
+        project = p.parent.parent.name if p is not None and p.parent.name == "step2" else ""
+        pid = job.get("pid")
+        alive = None
+        if job.get("status") == "running" and pid:
+            try:
+                alive = _pgid_alive(int(pid))
+            except (TypeError, ValueError):
+                alive = None
+        return {
+            "job_id": job.get("id"),
+            "status": job.get("status"),
+            "project": project,
+            "run_id": run_id,
+            "run_dir": cwd,
+            "queued_at": job.get("queued_at") or "",
+            "started_at": job.get("started_at") or "",
+            "alive": alive,
+        }
+    holders = job_manager.slot_holders("step2")
+    queued = [j for j in job_manager.list_jobs()
+              if j.get("category") == "step2" and j.get("status") == "queued"]
+    queued.sort(key=lambda j: j.get("queued_at") or "")
+    return {
+        "max_concurrent": job_manager.slot_limit("step2") or _step2_max_concurrent(),
+        "holders": [describe(j) for j in holders],
+        "queued": [describe(j) for j in queued],
+    }
+
+
+@app.get("/api/step2/slots")
+def step2_slots():
+    """The Step 2 run slots: the cap, the runs holding one (across every
+    project this backend serves) and the runs waiting for one."""
+    return _step2_slots_report()
+
+
 @app.get("/api/projects/{project}/step2/active")
 def step2_active(project: str):
     """Return the active (running or queued) Step 2 job for this project, if any.

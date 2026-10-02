@@ -62,6 +62,11 @@ class JobManager:
         # category) are unaffected and start immediately, exactly as before.
         self._sems: Dict[str, threading.Semaphore] = {}
         self._sem_limits: Dict[str, int] = {}
+        # category -> the ids of the jobs holding one of its slots right now,
+        # in the order they took them. The semaphore counts; this names. A
+        # run that sits "queued" for hours is a question — what is it waiting
+        # for? — and the answer is here, not in the count.
+        self._holders: Dict[str, list] = {}
 
     def _get_semaphore(
         self, category: Optional[str], max_concurrent: Optional[int]
@@ -128,7 +133,7 @@ class JobManager:
             self._jobs[job_id] = job
         thread = threading.Thread(
             target=self._run,
-            args=(job_id, command, cwd, env, log_path, semaphore),
+            args=(job_id, command, cwd, env, log_path, semaphore, category),
             daemon=True,
         )
         thread.start()
@@ -149,6 +154,28 @@ class JobManager:
                 {k: v for k, v in job.items() if not k.startswith("_")}
                 for job in self._jobs.values()
             ]
+
+    def slot_limit(self, category: str) -> Optional[int]:
+        """How many jobs of this category may run at once, once the first of
+        them has been dispatched in this process; None before that."""
+        with self._lock:
+            return self._sem_limits.get(category)
+
+    def slot_holders(self, category: str) -> list:
+        """Public snapshots of the jobs holding this category's run slots, in
+        the order they took them. A job stays a holder from the moment it
+        leaves the queue until its slot is released — so one whose process has
+        exited but whose finalize callback is still writing provenance is
+        still listed (status terminal), because it is still what the next
+        queued job waits for."""
+        with self._lock:
+            ids = list(self._holders.get(category, []))
+            out = []
+            for jid in ids:
+                job = self._jobs.get(jid)
+                if job is not None:
+                    out.append({k: v for k, v in job.items() if not k.startswith("_")})
+            return out
 
     def stop_job(self, job_id: str) -> bool:
         """Request cancellation of a running OR queued job.
@@ -261,6 +288,7 @@ class JobManager:
         env: Optional[Dict[str, str]],
         log_path: Path,
         semaphore: Optional[threading.Semaphore],
+        category: Optional[str] = None,
     ) -> None:
         acquired = False
         # --- Concurrency gate -------------------------------------------------
@@ -276,6 +304,8 @@ class JobManager:
                         self._cancel_before_start(job_id)
                     return
             acquired = True
+            with self._lock:
+                self._holders.setdefault(category or "", []).append(job_id)
         try:
             # A stop may have landed between acquiring the slot and starting.
             with self._lock:
@@ -322,6 +352,9 @@ class JobManager:
                     job = self._jobs.get(job_id)
                     if job is not None:
                         job["_process"] = process
+                        # Public: the slot report checks whether the process
+                        # group (== pid, via start_new_session) is still alive.
+                        job["pid"] = process.pid
                         stop_requested = job.get("_stop_requested", False)
                 # Report the real OS pid so the caller can record a restart-proof
                 # external lock (its process group == pid, via start_new_session).
@@ -343,6 +376,10 @@ class JobManager:
             # Always release the slot so the next queued job in this category
             # can start — even if the run threw before finalize.
             if acquired and semaphore is not None:
+                with self._lock:
+                    holders = self._holders.get(category or "", [])
+                    if job_id in holders:
+                        holders.remove(job_id)
                 semaphore.release()
 
     def _record_metadata_failure(self, job_id: str, exc_info: tuple) -> None:

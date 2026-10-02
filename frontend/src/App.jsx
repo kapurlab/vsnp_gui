@@ -317,6 +317,86 @@ const CollapseIcon = () => (
   </svg>
 );
 
+// Expand on a pane's header: that pane over most of the window, and back.
+// The Step 2 sample list did this first (s2-expand); the Projects, Inputs,
+// Step 1, Step 1 Results and Step 2 Results panes do it the same way.
+function PaneExpandButton({ expanded, onToggle, what }) {
+  return (
+    <button
+      type="button"
+      className="ghost action pane-expand"
+      aria-pressed={expanded}
+      onClick={onToggle}
+      title={expanded
+        ? "Put this pane back in its place on the page (Esc)"
+        : `Show ${what} over most of the window; Esc puts it back`}
+    >
+      {expanded ? <CollapseIcon /> : <ExpandIcon />}
+      {expanded ? "Collapse" : "Expand"}
+    </button>
+  );
+}
+
+// Why a Step 2 run is queued: the run holding the slot, named, with how long
+// it has run and a Stop for it. "Will start when a run slot is free" alone
+// left a run waiting 2 h 45 m behind a run in another project that nothing on
+// this page showed.
+function Step2QueueNote({ slots, jobId, onStop, stopping }) {
+  const holders = slots.holders || [];
+  const queued = slots.queued || [];
+  const me = queued.find((q) => q.job_id === jobId);
+  const ahead = queued.filter((q) => q.job_id !== jobId
+    && (!me || (q.queued_at || "") < (me.queued_at || "")));
+  const cap = slots.max_concurrent || 1;
+  return (
+    <div className="note s2-queue">
+      {holders.length ? (
+        <>
+          <div>
+            <strong>Waiting for a run slot.</strong> Step 2 runs {cap === 1 ? "one at a time" : `${cap} at a time`} on
+            this server{cap === 1 ? "" : ` (VSNP3_STEP2_MAX_CONCURRENT=${cap})`}; the slot is held by:
+          </div>
+          <ul className="s2-queue-holders">
+            {holders.map((h) => (
+              <li key={h.job_id}>
+                Step 2 in project <strong>{h.project || "another project"}</strong>
+                {h.run_id ? <> — comparison <code>{h.run_id}</code></> : null}
+                {h.status === "running"
+                  ? <>, running <Elapsed since={h.started_at} /></>
+                  : <>, {h.status} — finishing up</>}
+                {h.alive === false ? (
+                  <span className="s2-queue-dead"> — its process is gone; the slot frees as soon as its record is written</span>
+                ) : null}
+                {h.status === "running" && onStop ? (
+                  <button
+                    type="button"
+                    className="ghost-btn danger"
+                    disabled={stopping === h.job_id}
+                    onClick={() => onStop(h)}
+                    title="Terminate that run and every process it spawned; this one then starts"
+                  >
+                    {stopping === h.job_id ? <>Stopping… <Elapsed /></> : "Stop that run"}
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {ahead.length ? (
+            <div className="muted">{ahead.length} other queued run{ahead.length === 1 ? "" : "s"} ahead of this one.</div>
+          ) : null}
+        </>
+      ) : (
+        <div>
+          <strong>Waiting for a run slot, but no run holds one.</strong> This run should start within
+          seconds. If it stays queued, the server's queue is stuck: Cancel this run, restart vsnp_gui
+          from the dashboard, then pick this comparison in the Step 2 Results list (it is marked
+          “staged, never ran”) and run it from there — its VCFs are already in place.
+        </div>
+      )}
+    </div>
+  );
+}
+
 const CheckIcon = () => (
   <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2"
     strokeLinecap="round" strokeLinejoin="round">
@@ -920,6 +1000,10 @@ export default function App() {
   // The sample list drawn over most of the window instead of in its 320 px
   // box, for reading a big set. Esc, or Collapse, puts it back.
   const [step2ListExpanded, setStep2ListExpanded] = useState(false);
+  // One pane drawn over most of the window instead of in its grid cell:
+  // "projects", "inputs", "step1", "step1-results" or "step2-results". Esc,
+  // Collapse or a click outside puts it back.
+  const [expandedPane, setExpandedPane] = useState("");
   // What the sample list is still waiting for, and what could not be read:
   // {project, since, pending: {key: n}, failed: {key: reason}, done: {key:
   // true}}. `since`
@@ -1028,6 +1112,11 @@ export default function App() {
   // False only for a run orphaned by a backend restart (alive server-side but
   // not stoppable via the API) — hides the Stop button in that case.
   const [step2Controllable, setStep2Controllable] = useState(true);
+  // While the run is queued: the slot report from /api/step2/slots — who
+  // holds the Step 2 run slot, in which project, since when.
+  const [step2Slots, setStep2Slots] = useState(null);
+  // The holder a Stop was sent to, until it leaves the holders list.
+  const [slotStopping, setSlotStopping] = useState("");
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
@@ -1698,6 +1787,38 @@ export default function App() {
   }, [step2ListExpandedShown]);
   useEffect(() => { if (!vcfSourceOpen) setStep2ListExpanded(false); }, [vcfSourceOpen]);
   useEffect(() => { setStep2ListExpanded(false); }, [selectedProject]);
+
+  // The expanded pane: Esc puts it back, the page behind it stays still. Only
+  // while its row is on the page — Hide on the row must not leave the page
+  // locked with nothing drawn. The pane keeps its place in the DOM (its
+  // state, scroll positions and inputs survive); only its box moves.
+  const expandedPaneShown = Boolean(expandedPane) && (
+    expandedPane === "projects" || expandedPane === "inputs" ? showRowProjects
+      : expandedPane === "step1" || expandedPane === "step1-results" ? showRowStep1
+        : expandedPane === "step2-results" ? showRowStep2 : false);
+  useEffect(() => {
+    if (!expandedPaneShown) return undefined;
+    const onKey = (e) => {
+      // A dialog open over the pane takes Esc first.
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      if (document.querySelector(".modal-backdrop")) return;
+      setExpandedPane("");
+    };
+    window.addEventListener("keydown", onKey);
+    const body = document.body;
+    const before = body.style.overflow;
+    body.style.overflow = "hidden";
+    return () => { window.removeEventListener("keydown", onKey); body.style.overflow = before; };
+  }, [expandedPaneShown]);
+  useEffect(() => { if (expandedPane && !expandedPaneShown) setExpandedPane(""); }, [expandedPane, expandedPaneShown]);
+  const paneClass = (base, id) => (expandedPane === id && expandedPaneShown ? `${base} is-expanded` : base);
+  const paneExpand = (id, what) => (
+    <PaneExpandButton
+      expanded={expandedPane === id && expandedPaneShown}
+      onToggle={() => setExpandedPane((x) => (x === id ? "" : id))}
+      what={what}
+    />
+  );
 
   useEffect(() => {
     // Unticked, nothing is awaited, so the next tick counts from 0s.
@@ -2858,6 +2979,21 @@ export default function App() {
         const job = await res.json();
         setStep2JobStatus(job.status || "");
         setStep2JobStartedAt(job.started_at || job.queued_at || "");
+        // Queued: say what it waits for. The slot report names the run
+        // holding the slot, its project, and whether it is still alive.
+        if (job.status === "queued") {
+          try {
+            const sr = await fetch(`${API_BASE}/api/step2/slots`);
+            if (sr.ok && !stopped) {
+              const slots = await sr.json();
+              setStep2Slots(slots);
+              // A holder that was told to stop is "stopping" until it is gone.
+              setSlotStopping((id) => (id && !(slots.holders || []).some((h) => h.job_id === id) ? "" : id));
+            }
+          } catch {}
+        } else {
+          setStep2Slots((cur) => (cur ? null : cur));
+        }
         // "cancelled" is the terminal state a user Stop produces — the whole
         // process tree (vsnp3 workers, RAxML) has actually exited by the time
         // the job reports it, so that's when we announce "all shut down".
@@ -5451,6 +5587,33 @@ export default function App() {
     }
   }
 
+  // Stop the Step 2 run (in whichever project) that holds the slot this
+  // project's queued run is waiting for. Same endpoint as Stop; the queued run
+  // then starts on its own.
+  async function stopSlotHolder(h) {
+    const ok = window.confirm(
+      `Stop the Step 2 run in project ${h.project || "(unknown)"}${h.run_id ? ` (comparison ${h.run_id})` : ""}?\n\n` +
+      "This terminates that SNP-matrix / tree build and every background process it " +
+      "spawned (vsnp3 workers, RAxML); its partial outputs are discarded. This project's " +
+      "queued run then starts."
+    );
+    if (!ok) return;
+    setSlotStopping(h.job_id);
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${h.job_id}/stop`, { method: "POST" });
+      // 409: it finished on its own between the click and the request.
+      if (!res.ok && res.status !== 409) {
+        let data = {};
+        try { data = await res.json(); } catch (_) { /* non-JSON body */ }
+        window.alert(`Could not stop that run: ${data.detail || `HTTP ${res.status}`}`);
+        setSlotStopping("");
+      }
+    } catch (e) {
+      window.alert(`Could not stop that run: ${e.message || "network error"}`);
+      setSlotStopping("");
+    }
+  }
+
   // Rehydrate the Run/Stop UI from the server after a page reload: the Step 2
   // job id otherwise lives only in browser state, so a refresh mid-run would
   // hide the Stop button while the job keeps running server-side.
@@ -6439,8 +6602,11 @@ export default function App() {
 
         {showRowProjects ? (
           <div className="row-grid">
-          <section className="panel">
-            <h2>Projects</h2>
+          <section className={paneClass("panel", "projects")}>
+            <div className="pane-head">
+              <h2>Projects</h2>
+              {paneExpand("projects", "the project list")}
+            </div>
             <div className="row">
               <input
                 placeholder="New project name (e.g. LSDV_India)"
@@ -6684,8 +6850,11 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel">
-            <h2>Inputs</h2>
+          <section className={paneClass("panel", "inputs")}>
+            <div className="pane-head">
+              <h2>Inputs</h2>
+              {paneExpand("inputs", "the Inputs pane")}
+            </div>
             <div className="input-columns">
               <div className="input-column">
                 <h3>Add local FASTQ</h3>
@@ -7672,8 +7841,11 @@ export default function App() {
 
         {showRowStep1 ? (
           <div className="row-grid row-grid-split">
-          <section className="panel run-panel">
-            <h2>Step 1</h2>
+          <section className={paneClass("panel run-panel", "step1")}>
+            <div className="pane-head">
+              <h2>Step 1</h2>
+              {paneExpand("step1", "the Step 1 pane")}
+            </div>
             <div className="block">
               <h3>Reference</h3>
               {projectReference ? (
@@ -8060,7 +8232,7 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel qc-panel">
+          <section className={paneClass("panel qc-panel", "step1-results")}>
             <div className="qc-header">
               <h2>Step 1 Results</h2>
               <div className="qc-actions">
@@ -8130,6 +8302,7 @@ export default function App() {
                     ) : null}
                   </>
                 )}
+                {paneExpand("step1-results", "Step 1 Results")}
               </div>
             </div>
             {step1ResultsTab === "results" ? (
@@ -8564,6 +8737,10 @@ export default function App() {
             )}
           </section>
         </div>
+        ) : null}
+
+        {expandedPaneShown ? (
+          <div className="pane-backdrop" onClick={() => setExpandedPane("")} />
         ) : null}
 
         {igvPanel.open ? (
@@ -10632,6 +10809,9 @@ export default function App() {
                   {step2Stopping ? (<>Shutting down… <Elapsed /></>) : (step2JobStatus === "queued" ? "Cancel" : "Stop")}
                 </button>
               ) : null}
+              {step2Running && step2JobStatus === "queued" && step2Slots ? (
+                <Step2QueueNote slots={step2Slots} jobId={step2JobId} onStop={stopSlotHolder} stopping={slotStopping} />
+              ) : null}
               {step2SetupMsg ? (
                 <div className="note muted" style={{ fontSize: "0.85em" }}>
                   Last Build — {step2SetupMsg}
@@ -10725,11 +10905,12 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel results-panel">
+          <section className={paneClass("panel results-panel", "step2-results")}>
             <div className="qc-header">
               <h2>Step 2 Results</h2>
               <div className="qc-actions">
                 <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
+                {paneExpand("step2-results", "Step 2 Results")}
               </div>
             </div>
             {step2Runs.length > 0 ? (
@@ -11105,7 +11286,9 @@ export default function App() {
                   if (l.includes("[MISSING]") || l.includes("[DEPENDENCY_ERROR]") || l.includes("[FAILED]")) cls = "log-error";
                   else if (l.includes("[OK]")) cls = "log-success";
                   return <div key={i} className={cls}>{l}</div>;
-                }) : <div>Waiting for output… <Elapsed /></div>
+                }) : (jobId === step2JobId && step2JobStatus === "queued"
+                  ? <div>Queued — waiting for a Step 2 run slot; the Run area above says which run holds it… <Elapsed since={step2JobStartedAt} /></div>
+                  : <div>Waiting for output… <Elapsed /></div>)
               ) : (
                 <div>No job running</div>
               )}

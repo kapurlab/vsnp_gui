@@ -752,7 +752,9 @@ export default function App() {
   const posthocBatchSupportRef = useRef(null);
   // Supersede sequence for loadStep2Outputs (same pattern as qcLoadSeq).
   const step2OutSeqRef = useRef(0);
-  // "<project>\n<run id>" of the newest loadStep2Outputs started.
+  // "<project>\n<run id>" of the newest loadStep2Outputs started, or of a
+  // selection whose load is already owned by another call (a project switch's
+  // run reset). The [step2SelectedRun] effect skips that selection.
   const step2OutStartedRef = useRef("");
   // Live mirrors of the current selection, for async callbacks whose render
   // closures go stale across awaits (same pattern as qcRowsRef). A completion
@@ -2514,7 +2516,7 @@ export default function App() {
     const data = await res.json();
     setVcfsCollectResult(data);
     await loadVcfsFolder(selectedProject);
-    await refreshProjects(selectedProject);
+    await refreshProjects();
     // The "N samples not in vcf_database" list is derived from step1Status,
     // whose poll only runs while a Step 1 batch is running. Without this
     // refresh the list stayed frozen at its pre-collect value on an idle
@@ -2756,7 +2758,7 @@ export default function App() {
         }
         loadAll();
         loadStep1Status();
-        refreshProjects(selectedProject);
+        refreshProjects();
         loadGrabState();   // overwrites the line above with the job's own summary
       }
       // Step 1 job reached a terminal state: refresh sample statuses, QC
@@ -2766,7 +2768,7 @@ export default function App() {
       if (step1JobId && jobId === step1JobId && (status === "succeeded" || status === "failed" || status === "cancelled")) {
         loadStep1Status();
         loadQC({ refresh: true });
-        refreshProjects(selectedProject);
+        refreshProjects();
         collectVcfs([]);
       }
       // Step 2 job completed: refresh run list (auto-selects newest → triggers
@@ -2774,7 +2776,7 @@ export default function App() {
       if (step2JobId && jobId === step2JobId && (status === "succeeded" || status === "failed")) {
         setStep2Running(false);
         loadStep2Runs(true);
-        refreshProjects(selectedProject);
+        refreshProjects();
       }
       // Update SRA status if this was an SRA job
       if (sraJobId && jobId === sraJobId) {
@@ -2853,6 +2855,11 @@ export default function App() {
     loadGrabState({ attach: true });
     setStep2Runs([]);
     setStep2SelectedRun(null);
+    // That reset is not a selection to load. loadStep2Runs(true) below picks
+    // this project's comparison and loads it once; without this mark the
+    // [step2SelectedRun] effect saw the null first and read every group with
+    // no run id, then read them all again for the pick.
+    step2OutStartedRef.current = `${selectedProject}\n`;
     // Reset the run/stop UI, then ask the server whether a Step 2 job is still
     // running for this project. loadStep2Active re-sets these if so — so the
     // Stop button survives a page reload and can't leak across a project switch.
@@ -2962,7 +2969,7 @@ export default function App() {
     step1JobStatusRef.current = step1JobStatus;
     if (prev === "running" && step1JobStatus !== "running" && step1JobStatus !== "") {
       loadQC({ refresh: true });
-      refreshProjects(selectedProject);
+      refreshProjects();
     }
   }, [step1JobStatus]);
 
@@ -3017,7 +3024,7 @@ export default function App() {
             setStep2SetupMsg("Step 2 complete.");
           }
           loadStep2Runs(true);
-          refreshProjects(selectedProject);
+          refreshProjects();
         }
       } catch {}
     };
@@ -3093,10 +3100,16 @@ export default function App() {
     setReference(ref);
   }
 
-  async function refreshProjects(nextSelected = selectedProject) {
+  // Re-list the projects, keeping the selection if it is still listed. The
+  // selection is read LIVE (the ref) when the list lands, not from the
+  // caller's render: a call made before a click — at startup, or from a job
+  // callback captured at job start — used to hold an empty or older selection
+  // and replace the project just clicked with the first one listed.
+  async function refreshProjects() {
     const proj = await fetch(`${API_BASE}/api/projects`).then((r) => r.json());
     setProjects(proj);
-    if (nextSelected && proj.find((p) => p.name === nextSelected)) {
+    const current = selectedProjectRef.current;
+    if (current && proj.find((p) => p.name === current)) {
       return;
     }
     setSelectedProject(proj[0]?.name || "");
@@ -3105,7 +3118,8 @@ export default function App() {
   async function archiveProject(name) {
     if (!window.confirm(`Archive project "${name}" to projects_archive?`)) return;
     await fetch(`${API_BASE}/api/projects/${name}/archive`, { method: "POST" });
-    await refreshProjects(selectedProject === name ? "" : selectedProject);
+    // An archived selection is no longer listed, so the first project is selected.
+    await refreshProjects();
   }
 
   // deleteProject() deliberately does not exist. Archiving is the reversible
@@ -3641,10 +3655,13 @@ export default function App() {
         // Compared against the LIVE selection (the ref), not this closure's
         // render-time value: a completion callback holds the selection as of
         // job start, and comparing against that could skip a needed load or
-        // silently swap the pane's contents under an unchanged dropdown.
+        // silently swap the pane's contents under an unchanged dropdown. The
+        // pick is passed, not left to loadStep2Outputs' default: that default
+        // is this closure's run too, which on a switch to a zero-runs project
+        // was the PREVIOUS project's comparison.
         const pick = runs.length > 0 ? pickDefaultRun(runs) : null;
         if (pick === step2SelectedRunRef.current) {
-          loadStep2Outputs();
+          loadStep2Outputs(pick);
         } else {
           setStep2SelectedRun(pick);
         }
@@ -4991,7 +5008,7 @@ export default function App() {
     setImportStatus(parts.join(" | "));
     setImportProjectLock(selectedProject);
     setStep2BuiltAt(new Date().toISOString());
-    await refreshProjects(selectedProject);
+    await refreshProjects();
     await loadVcfSourceSamples();
     // Build only refreshes step2VcfCount (via loadVcfSourceSamples). The
     // excluded / comparison counts shown in the "Step 2 comparison set" note

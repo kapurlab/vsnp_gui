@@ -752,6 +752,8 @@ export default function App() {
   const posthocBatchSupportRef = useRef(null);
   // Supersede sequence for loadStep2Outputs (same pattern as qcLoadSeq).
   const step2OutSeqRef = useRef(0);
+  // "<project>\n<run id>" of the newest loadStep2Outputs started.
+  const step2OutStartedRef = useRef("");
   // Live mirrors of the current selection, for async callbacks whose render
   // closures go stale across awaits (same pattern as qcRowsRef). A completion
   // callback captured at job start compares against THESE, not its closure,
@@ -3028,6 +3030,9 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedProject) return;
+    // Refresh starts this selection's load itself, before the render that
+    // brings it here; a second one would read every group again for nothing.
+    if (step2OutStartedRef.current === `${selectedProject}\n${step2SelectedRun || ""}`) return;
     loadStep2Outputs();
   }, [step2SelectedRun]);
 
@@ -3644,6 +3649,7 @@ export default function App() {
           setStep2SelectedRun(pick);
         }
       }
+      return runs;
     } catch {
       if (stale()) return;
       // A timeout lands here, and silence was the bug: on a project with
@@ -3656,7 +3662,35 @@ export default function App() {
     }
   }
 
-  async function loadStep2Outputs() {
+  // The Step 2 Results Refresh button. It re-lists the comparisons, not only
+  // the selected one's files: a comparison run from the command line since the
+  // list was read reached the dropdown only on a project switch, so Refresh
+  // after running one showed the old list. A comparison that appeared since
+  // the last listing is selected (newest first) — that is what the click is
+  // for; otherwise the selection stays and its files are read again. Awaits
+  // the outputs load itself so the button's counter runs until the pane is
+  // filled; the [step2SelectedRun] effect sees that load and skips its own.
+  async function refreshStep2Results() {
+    if (!selectedProject) return;
+    const proj = selectedProject;
+    const known = new Set(step2Runs.map((r) => r.run_id));
+    const runs = await loadStep2Runs(false);
+    if (!runs || selectedProjectRef.current !== proj) return;
+    const current = step2SelectedRunRef.current;
+    const added = known.size > 0 ? runs.find((r) => !known.has(r.run_id)) : null;
+    let pick = current;
+    if (added) {
+      pick = added.run_id;
+    } else if (!runs.some((r) => r.run_id === current)) {
+      // The selected comparison is gone (removed on disk), or nothing was
+      // listed before: the same pick a project switch makes.
+      pick = runs.length > 0 ? pickDefaultRun(runs) : null;
+    }
+    if (pick !== current) setStep2SelectedRun(pick);
+    await loadStep2Outputs(pick);
+  }
+
+  async function loadStep2Outputs(runId = step2SelectedRun) {
     if (!selectedProject) return;
     // Supersede guard (same pattern as qcLoadSeq): a slower older call must
     // never write its response over a newer one's. Checked after every await.
@@ -3665,10 +3699,11 @@ export default function App() {
     // project takes a NEWER sequence number and would otherwise win.
     const proj = selectedProject;
     const mySeq = ++step2OutSeqRef.current;
+    step2OutStartedRef.current = `${proj}\n${runId || ""}`;
     const superseded = () =>
       step2OutSeqRef.current !== mySeq || selectedProjectRef.current !== proj;
     setStep2OutputsError("");
-    const runParam = step2SelectedRun ? `?run_id=${encodeURIComponent(step2SelectedRun)}` : "";
+    const runParam = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
     const res = await fetch(`${API_BASE}/api/projects/${proj}/step2_outputs${runParam}`);
     if (superseded()) return;
     if (!res.ok) {
@@ -10909,7 +10944,15 @@ export default function App() {
             <div className="qc-header">
               <h2>Step 2 Results</h2>
               <div className="qc-actions">
-                <button onClick={loadStep2Outputs} disabled={!selectedProject}>Refresh</button>
+                <BusyButton
+                  onClick={refreshStep2Results}
+                  disabled={!selectedProject}
+                  busyLabel="Refreshing…"
+                  onError={(e) => setStep2OutputsError(`Refresh did not complete: ${e?.message || e}`)}
+                  title="List this project's comparisons again — including any run from the command line — and re-read the selected one's results"
+                >
+                  Refresh
+                </BusyButton>
                 {paneExpand("step2-results", "Step 2 Results")}
               </div>
             </div>

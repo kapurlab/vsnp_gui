@@ -1085,6 +1085,14 @@ export default function App() {
   const [refLocations, setRefLocations] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
   const [refPathInput, setRefPathInput] = useState("");
+  // The location list lives inside the shared vsnp3 install; an account the
+  // site has not let write it gets read-only controls and the backend's reason
+  // up front, instead of an error after typing a path and clicking Add.
+  const [refPathsWritable, setRefPathsWritable] = useState(true);
+  const [refPathsReadOnlyReason, setRefPathsReadOnlyReason] = useState("");
+  // Set when the list itself could not be read (the backend's reason), so the
+  // panel says so instead of "No reference locations configured."
+  const [refPathsLoadError, setRefPathsLoadError] = useState("");
   // Item 3: Genome download
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
   const [genomeAccession, setGenomeAccession] = useState("");
@@ -2078,11 +2086,47 @@ export default function App() {
     setRefPaths(data.paths || []);
     setRefLocations(data.locations || []);
     if (data.references) setReferences(data.references);
+    _applyRefPathsAccess(data);
+    setRefPathsLoadError("");
+  }
+
+  function _applyRefPathsAccess(data) {
+    setRefPathsWritable(data.writable !== false);
+    setRefPathsReadOnlyReason(data.read_only_reason || "");
+  }
+
+  // A list that could not be read is not an empty list: clear the rows and
+  // keep the reason, so the panel shows that instead of "none configured".
+  function _applyRefPathsLoadError(detail) {
+    setRefPaths([]);
+    setRefLocations([]);
+    setRefPathsLoadError(detail);
+    _applyRefPathsAccess({ writable: false, read_only_reason: detail });
+  }
+
+  async function _refPathsLoadErrorFrom(res) {
+    const err = await res.json().catch(() => ({}));
+    return err.detail || `Could not read the reference locations (HTTP ${res.status})`;
   }
 
   async function loadRefPaths() {
     const res = await fetch(`${API_BASE}/api/references/paths`);
     if (res.ok) _applyRefPathsPayload(await res.json());
+    else _applyRefPathsLoadError(await _refPathsLoadErrorFrom(res));
+  }
+
+  // A 403 is the filesystem refusing this account the change. Re-read the
+  // list's state, so an unreadable list is shown as that. Then keep the controls
+  // read-only with the backend's explanation, even where the last read said a
+  // change could work (an ACL deny, a mount gone read-only).
+  async function _refPathChangeFailed(res, fallback) {
+    const err = await res.json().catch(() => ({}));
+    const detail = err.detail || `${fallback} (HTTP ${res.status})`;
+    if (res.status === 403) {
+      await loadRefPaths();
+      _applyRefPathsAccess({ writable: false, read_only_reason: detail });
+    }
+    window.alert(detail);
   }
 
   async function addRefPath(dirPath) {
@@ -2093,10 +2137,10 @@ export default function App() {
     });
     if (res.ok) {
       _applyRefPathsPayload(await res.json());
-    } else {
-      const err = await res.json().catch(() => ({}));
-      window.alert(err.detail || `Could not add reference location (HTTP ${res.status})`);
+      return true;
     }
+    await _refPathChangeFailed(res, "Could not add reference location");
+    return false;
   }
 
   async function removeRefPath(dirPath) {
@@ -2108,8 +2152,7 @@ export default function App() {
     if (res.ok) {
       _applyRefPathsPayload(await res.json());
     } else {
-      const err = await res.json().catch(() => ({}));
-      window.alert(err.detail || `Could not remove reference location (HTTP ${res.status})`);
+      await _refPathChangeFailed(res, "Could not remove reference location");
     }
   }
 
@@ -2580,10 +2623,18 @@ export default function App() {
         fetch(`${API_BASE}/api/references`).then((r) => (r.ok ? r.json() : [])),
         fetch(`${API_BASE}/api/vcf-db-folders`).then((r) => r.json()).catch(() => []),
         fetch(`${API_BASE}/api/posthoc/tools`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
-        fetch(`${API_BASE}/api/references/paths`).then((r) => (r.ok ? r.json() : { paths: [] })).catch(() => ({ paths: [] }))
+        fetch(`${API_BASE}/api/references/paths`)
+          .then(async (r) => (r.ok ? r.json() : { load_error: await _refPathsLoadErrorFrom(r) }))
+          .catch(() => ({ paths: [] }))
       ]);
-      setRefPaths(paths.paths || []);
-      setRefLocations(paths.locations || []);
+      if (paths.load_error) {
+        _applyRefPathsLoadError(paths.load_error);
+      } else {
+        setRefPaths(paths.paths || []);
+        setRefLocations(paths.locations || []);
+        _applyRefPathsAccess(paths);
+        setRefPathsLoadError("");
+      }
       setProjects(proj);
       setReferences(refs);
       setVcfDbFolders(dbFolders || []);
@@ -7299,8 +7350,23 @@ export default function App() {
               <h2>Reference Selection</h2>
               <div className="block">
                 <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
-                  <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em"}}>Reference Locations</summary>
+                  <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em"}}>
+                    Reference Locations
+                    {refPathsLoadError ? <span className="muted"> (cannot be read)</span>
+                      : !refPathsWritable ? <span className="muted"> (read-only)</span> : null}
+                  </summary>
                   <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
+                    {refPathsLoadError ? (
+                      <div className="note warning" style={{marginBottom:"0.5em"}}>
+                        <strong>The site's reference location list cannot be read.</strong>{" "}
+                        {refPathsLoadError}
+                      </div>
+                    ) : !refPathsWritable ? (
+                      <div className="note warning" style={{marginBottom:"0.5em"}}>
+                        <strong>This account cannot change the reference locations.</strong>{" "}
+                        {refPathsReadOnlyReason}
+                      </div>
+                    ) : null}
                     {(refLocations.length ? refLocations : refPaths.map((p) => ({ path: p, exists: true }))).map((loc) => {
                       // What does this location actually contribute? Spell it
                       // out so removing a redundant one is an informed act.
@@ -7326,34 +7392,50 @@ export default function App() {
                             </div>
                           </div>
                           {!loc.implicit ? (
-                            <button className="ghost-btn danger" style={{fontSize:"0.8em"}} title="Remove this location from the reference registry (no files are deleted)" onClick={() => removeRefPath(loc.path)}>x</button>
+                            <button
+                              className="ghost-btn danger"
+                              style={{fontSize:"0.8em"}}
+                              disabled={!refPathsWritable}
+                              title={refPathsWritable ? "Remove this location from the reference registry (no files are deleted)" : refPathsReadOnlyReason}
+                              onClick={() => removeRefPath(loc.path)}
+                            >x</button>
                           ) : null}
                         </div>
                       );
                     })}
-                    {!refLocations.length && !refPaths.length ? <div className="muted">No reference locations configured.</div> : null}
+                    {!refLocations.length && !refPaths.length && !refPathsLoadError ? <div className="muted">No reference locations configured.</div> : null}
                     <div style={{display:"flex", gap:"0.3em", marginTop:"0.3em"}}>
                       <input
-                        placeholder="/path/to/reference_root"
+                        placeholder={refPathsWritable ? "/path/to/reference_root" : "read-only for this account"}
                         value={refPathInput}
                         onChange={(e) => setRefPathInput(e.target.value)}
+                        disabled={!refPathsWritable}
+                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
                         style={{flex:1}}
                       />
                       <button
                         className="ghost action"
                         style={{fontSize:"0.85em"}}
-                        onClick={() => {
+                        disabled={!refPathsWritable}
+                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
+                        onClick={async () => {
                           const trimmed = refPathInput.trim();
                           if (!trimmed) return;
-                          addRefPath(trimmed);
-                          setRefPathInput("");
+                          // Keep what was typed when the add is refused.
+                          if (await addRefPath(trimmed)) setRefPathInput("");
                         }}
                       >
                         Add
                       </button>
                     </div>
                     {canPickPath ? (
-                      <button className="ghost action" style={{fontSize:"0.85em", marginTop:"0.3em"}} onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}>
+                      <button
+                        className="ghost action"
+                        style={{fontSize:"0.85em", marginTop:"0.3em"}}
+                        disabled={!refPathsWritable}
+                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
+                        onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}
+                      >
                         Add Location
                       </button>
                     ) : null}
@@ -7389,9 +7471,21 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
+                    {refPathsLoadError ? (
+                      <div className="muted" style={{marginTop:"0.3em"}}>
+                        The site's reference location list cannot be read, so a download cannot be
+                        placed in it (see Reference Locations).
+                      </div>
+                    ) : !refPathsWritable ? (
+                      <div className="muted" style={{marginTop:"0.3em"}}>
+                        This account cannot add reference locations, so the output directory must
+                        already be one of them (see Reference Locations).
+                      </div>
+                    ) : null}
                     <button
                       onClick={downloadGenome}
-                      disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady}
+                      disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady || !!refPathsLoadError}
+                      title={refPathsLoadError || undefined}
                       style={{marginTop:"0.3em"}}
                     >
                       Download

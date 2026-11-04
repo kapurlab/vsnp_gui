@@ -13,6 +13,7 @@ import fnmatch
 import io
 import socket
 import json
+import errno
 import os
 import time
 from stat import S_ISREG
@@ -179,6 +180,9 @@ from app.refs import (
     reference_roots,
     find_gff_for_fasta,
     sanitize_upstream_paths,
+    registry_write_access,
+    RegistryUnreadable,
+    SHARED_LIST_NOTE,
 )
 from app.sra import (expand_accessions, expand_accessions_with_mapping, build_download_script,
                      SRAExpansionError, write_crosswalk_tsv,
@@ -2200,12 +2204,64 @@ def _reference_paths_payload(vsnp3_path: Path) -> Dict:
     """One consistent answer for every registry read/mutation: the raw paths,
     per-location stats, and the (deduped) reference list — so the location
     rows and the reference dropdowns can never disagree about what a change
-    did."""
+    did. `writable` says whether this account may change the list at all, so
+    the UI can show read-only controls before anyone types a path. A list this
+    account cannot read raises RegistryUnreadable (a 403, below) instead of
+    answering with an empty one."""
+    access = registry_write_access(vsnp3_path)
     return {
         "paths": get_reference_paths(vsnp3_path),
         "locations": reference_locations(vsnp3_path),
         "references": list_references(vsnp3_path),
+        "writable": access["writable"],
+        "read_only_reason": access["reason"],
     }
+
+
+# Every endpoint that reads the reference-location list (the location rows, the
+# reference dropdowns, a reference's files, Step 1/2 reference lookups) fails
+# the same way when this account cannot read it: a 403 naming the file, its
+# owner and mode, and who can change that. `registry` lets the UI tell this
+# apart from a refused change.
+@app.exception_handler(RegistryUnreadable)
+async def _registry_unreadable(_request: Request, exc: RegistryUnreadable):
+    return JSONResponse(status_code=403, content={
+        "detail": exc.reason, "registry": "unreadable", "file": str(exc.file)})
+
+
+# A registry change the filesystem refuses. The list lives inside the vsnp3
+# install, so on a shared deployment the usual cause is an account that may not
+# write that install, or a node that mounts it read-only — and both reached the
+# browser as a bare HTTP 500 (USDA SciComp, 2026-11-04). 403, not 409: 409 says
+# the request clashes with the list's current state and a changed request could
+# succeed, but nothing this account can resubmit gets past this; the server is
+# refusing it the change, and whether it should is the site admins' call.
+_REFUSED_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+def _registry_change_error(vsnp3_path: Path, what: str, exc: OSError) -> HTTPException:
+    access = registry_write_access(vsnp3_path)
+    refused = isinstance(exc, PermissionError) or exc.errno in _REFUSED_ERRNOS
+    where = f"{access['folder']} (owner: {access['folder_owner']})"
+    if isinstance(exc, RegistryUnreadable):
+        # A change reads the list first, so this is the list being unreadable,
+        # not dependencies/ being unwritable. Those have different fixes.
+        reason = exc.reason
+    elif access["reason"]:
+        reason = access["reason"]
+    elif refused:
+        # os.access said yes and the write was refused anyway (an ACL deny, a
+        # sticky folder, a mount that changed since): still name who and where.
+        reason = (f"Account {access['account']} was refused saving "
+                  f"{access['file']}; a change needs write access to {where}. "
+                  f"{SHARED_LIST_NOTE}")
+    else:
+        reason = f"Account {access['account']} could not save {access['file']} in {where}."
+    os_error = (exc.strerror or str(exc)) + (f": {exc.filename}" if exc.filename else "")
+    return HTTPException(
+        status_code=403 if refused else 500,
+        detail=f"Could not {what}. {reason} (OS error: {os_error})",
+    )
 
 
 @app.get("/api/references/paths")
@@ -2236,6 +2292,9 @@ def ref_path_add(payload: RefPathRequest):
                 f"contains bin/vsnp3_step2.py, then add the location again. ({exc})"
             ),
         ) from exc
+    except OSError as exc:
+        raise _registry_change_error(
+            vsnp3_path, f"add {p} to the reference locations", exc) from exc
     return _reference_paths_payload(vsnp3_path)
 
 
@@ -2243,7 +2302,11 @@ def ref_path_add(payload: RefPathRequest):
 def ref_path_remove(payload: RefPathRequest):
     cfg = load_config()
     vsnp3_path = Path(cfg["vsnp3_path"])
-    remove_reference_path(vsnp3_path, payload.path)
+    try:
+        remove_reference_path(vsnp3_path, payload.path)
+    except OSError as exc:
+        raise _registry_change_error(
+            vsnp3_path, f"remove {payload.path} from the reference locations", exc) from exc
     return _reference_paths_payload(vsnp3_path)
 
 
@@ -2292,6 +2355,21 @@ def ref_download(payload: RefDownloadRequest):
     # since subdir_name defaults to it).
     accession = _require_ref_token(accession, "accession")
     output_dir = Path(payload.output_dir).expanduser().resolve()
+    # A download into a folder that is not yet a reference location adds it to
+    # the list, so an account that may not change the list hears so now, before
+    # any folder or script is created, not after the job has been set up.
+    registered = {str(Path(x).resolve()) for x in get_reference_paths(vsnp3_path)}
+    if str(output_dir) not in registered:
+        access = registry_write_access(vsnp3_path)
+        if not access["writable"]:
+            raise HTTPException(
+                status_code=403 if access["installed"] else 400,
+                detail=(
+                    f"{output_dir} is not one of the reference locations, and "
+                    f"downloading there would add it. {access['reason']} Choose "
+                    f"an output directory that is already a reference location."
+                ),
+            )
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -2357,7 +2435,11 @@ def ref_download(payload: RefDownloadRequest):
     script_path.write_text(script_content, encoding="utf-8")
     script_path.chmod(0o755)
     # Add parent dir to reference paths
-    add_reference_path(vsnp3_path, str(output_dir))
+    try:
+        add_reference_path(vsnp3_path, str(output_dir))
+    except OSError as exc:
+        raise _registry_change_error(
+            vsnp3_path, f"add {output_dir} to the reference locations", exc) from exc
     job_id = job_manager.start_job(
         name="ref_download",
         command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
@@ -11161,7 +11243,12 @@ def _serve_roots(project: str) -> List[set]:
         return hit[1]
     cfg = load_config()
     roots = [_project_dir_for(cfg, project)]
-    roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
+    try:
+        roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
+    except RegistryUnreadable:
+        # The project's own files are still this account's to open (a BAM in
+        # igv.js); only files under the unreadable list's roots are refused.
+        pass
     # The configured reference root is where the UI gets its GFF paths from
     # (find_gff_for_fasta walks it), so this endpoint must be willing to serve
     # from it. It is NOT always listed in reference_options_paths.txt: a local

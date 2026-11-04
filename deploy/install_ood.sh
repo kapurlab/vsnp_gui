@@ -113,6 +113,37 @@ run() {
   fi
 }
 
+# _rop_keep_perms OLD NEW: give NEW, a fresh mktemp copy (mode 0600), the
+# permissions of OLD, the reference-location list it is about to replace. That
+# way registering a path never takes away access the site granted, and never
+# widens it. The owner and group are kept where this account may set them, and
+# then the mode and, with GNU cp, the ACLs. NFSv4 sites such as Ames grant access
+# through the ACL; the mode alone reads 0600+ there. With no OLD, NEW gets 0644
+# less the umask. GNU tools are tried first, with BSD/macOS fallbacks (bash 3.2).
+_rop_keep_perms() {
+  local old="$1" new="$2" mode
+  if [[ ! -e "${old}" ]]; then
+    chmod "$(printf '%o' $(( 0644 & ~$(umask) )))" "${new}"
+    return
+  fi
+  # Owner and group first: a chown may clear mode bits, so the mode comes after.
+  chown --reference="${old}" "${new}" 2>/dev/null \
+    || chown "$(stat -c '%u:%g' "${old}" 2>/dev/null || stat -f '%u:%g' "${old}")" "${new}" 2>/dev/null \
+    || chgrp --reference="${old}" "${new}" 2>/dev/null \
+    || chgrp "$(stat -c '%g' "${old}" 2>/dev/null || stat -f '%g' "${old}")" "${new}" 2>/dev/null \
+    || true
+  # GNU cp: mode with its ACL, plus xattrs (NFSv4 ACLs). The contents of NEW
+  # are left alone.
+  if cp --attributes-only --preserve=mode,xattr "${old}" "${new}" 2>/dev/null; then
+    return 0
+  fi
+  if chmod --reference="${old}" "${new}" 2>/dev/null; then
+    return 0
+  fi
+  mode="$(stat -c '%a' "${old}" 2>/dev/null || stat -f '%Lp' "${old}")" || return 1
+  chmod "${mode}" "${new}"
+}
+
 need_root() {
   [[ ${DRY_RUN} -eq 1 ]] && return 0
   [[ "$(id -u)" -eq 0 ]] || die "phase '$1' mutates the system; run under sudo"
@@ -317,8 +348,19 @@ phase_toolchain() {
       # tmp+mv, NOT >>: in a conda env this file is a hardlink into the
       # package cache, and an in-place append would seed every future vsnp3
       # env on this machine with this install's paths.
+      # mktemp makes the copy 0600, so the copy takes the old list's mode,
+      # ACL and group before it replaces it (see _rop_keep_perms). Otherwise
+      # every user but the installer loses access to the list.
       _roptmp="$(mktemp "${rop}.XXXXXX")"
-      { [[ -f "${rop}" ]] && cat "${rop}"; echo "${REFS_DIR}"; } > "${_roptmp}"
+      if [[ -f "${rop}" ]] && ! cat "${rop}" > "${_roptmp}"; then
+        rm -f "${_roptmp}"
+        die "cannot read ${rop}, so ${REFS_DIR} cannot be added without losing the locations already in it ($(ls -ld "${rop}"))"
+      fi
+      echo "${REFS_DIR}" >> "${_roptmp}"
+      if ! _rop_keep_perms "${rop}" "${_roptmp}"; then
+        rm -f "${_roptmp}"
+        die "could not give the new ${rop##*/} the permissions of the old one; ${rop} is unchanged"
+      fi
       mv -f "${_roptmp}" "${rop}"
       ok "registered ${REFS_DIR} in ${rop##*/}"
     fi

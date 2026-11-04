@@ -1,8 +1,17 @@
+import getpass
 import logging
 import os
+import shutil
+import socket
+import stat as _stat
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
+
+try:
+    import pwd
+except ImportError:  # not POSIX
+    pwd = None
 
 # Paths the upstream vsnp3 author ships inside the package/source tree
 # (dependencies/reference_options_paths.txt). They are his own machines' paths
@@ -46,10 +55,15 @@ def _write_paths_file(deps_file: Path, paths: List[str]) -> None:
             f"one by writing {deps_file.name}"
         )
     deps_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        old = deps_file.stat()
+    except FileNotFoundError:
+        old = None
     fd, tmp = tempfile.mkstemp(dir=str(deps_file.parent), prefix=".rop-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("\n".join(paths) + "\n" if paths else "\n")
+        _keep_permissions(deps_file, old, tmp)
         os.replace(tmp, deps_file)
     except OSError:
         try:
@@ -57,6 +71,217 @@ def _write_paths_file(deps_file: Path, paths: List[str]) -> None:
         except OSError:
             pass
         raise
+
+
+def _keep_permissions(deps_file: Path, old: Optional[os.stat_result], tmp: str) -> None:
+    """Give the replacement list the permissions of the list it replaces.
+
+    mkstemp makes the temp file 0600 and the rename puts it in place, so every
+    save used to turn a list the site had shared (0664 in a setgid group folder,
+    or an ACL) into one only the saver could read. On USDA SciComp, 2026-11-04,
+    the list was -rw------- and every other account was refused it. Sites decide
+    who may read and edit this list, so a save keeps exactly what was there and
+    never widens it.
+
+    copystat carries the mode and, on Linux, the extended attributes that hold
+    POSIX and NFSv4 ACLs. On Ames (/project is NFSv4) the mode reads 0600+ even
+    on files every user can read; the ACL is what grants that access, so copying
+    the mode alone would drop it. The owner can only be kept by root. The group
+    is kept when this account may set it, and a setgid folder usually sees to it
+    anyway. A first list gets 0644 less the umask.
+    """
+    if old is None:
+        os.chmod(tmp, 0o644 & ~_current_umask())
+        return
+    shutil.copystat(str(deps_file), tmp)
+    os.utime(tmp, None)  # copystat copied the old mtime; this is a new edit
+    for uid in (old.st_uid, -1):
+        try:
+            os.chown(tmp, uid, old.st_gid)
+            break
+        except PermissionError:
+            continue
+
+
+def _current_umask() -> int:
+    """The process umask, read without changing it where Linux allows. Other
+    systems can only set and restore it, and the mask is briefly made STRICTER,
+    so a file another thread creates in that moment can only come out narrower."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    mask = os.umask(0o077)
+    os.umask(mask)
+    return mask
+
+
+# Said with every refusal. The registry lives inside the vsnp3 install, so on
+# a shared deployment it is one list for everyone who runs vSNP there; which
+# accounts may change it is the site's call, and the GUI neither widens access
+# nor keeps a private per-user list to route around it.
+SHARED_LIST_NOTE = (
+    "This list is shared by every user of this vSNP install, so who may "
+    "change it is the site admins' decision."
+)
+
+
+def _uid_name(uid: int) -> str:
+    try:
+        return pwd.getpwuid(uid).pw_name if pwd else f"uid {uid}"
+    except KeyError:  # an account the name service does not know (HPC LDAP)
+        return f"uid {uid}"
+
+
+def _account() -> str:
+    """The account the backend runs as (one OS user per OnDemand session)."""
+    if hasattr(os, "geteuid"):
+        name = _uid_name(os.geteuid())
+        if not name.startswith("uid "):
+            return name
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001
+        return "this account"
+
+
+def _owner(p: Path) -> str:
+    try:
+        return _uid_name(p.stat().st_uid)
+    except OSError:
+        return "unknown"
+
+
+def _mounted_read_only(p: Path) -> bool:
+    try:
+        return bool(os.statvfs(p).f_flag & os.ST_RDONLY)
+    except (OSError, AttributeError):
+        return False
+
+
+def registry_unreadable_reason(deps_file: Path) -> str:
+    """Why this account cannot read the registry: the file with its owner and
+    mode, or, when even the folder holding it cannot be entered, that folder."""
+    blocked, what = deps_file, "the site's reference location list"
+    try:
+        st = deps_file.stat()
+    except OSError:
+        blocked = deps_file.parent
+        what = f"the folder that holds the site's reference location list ({deps_file.name})"
+        try:
+            st = blocked.stat()
+        except OSError:
+            st = None
+    owner = _uid_name(st.st_uid) if st else "unknown"
+    mode = f"{_stat.S_IMODE(st.st_mode):04o}" if st else "unknown"
+    who = owner if st else "its owner"
+    kind = "file" if blocked == deps_file else "folder"
+    return (
+        f"Account {_account()} cannot read {what}, {blocked} (owner: {owner}, "
+        f"mode {mode}), so vSNP cannot show this site's reference locations or "
+        f"the references in them. Only {who} or root can change that {kind} or "
+        f"who may read it. {SHARED_LIST_NOTE}"
+    )
+
+
+class RegistryUnreadable(PermissionError):
+    """The registry is there but this account may not read it.
+
+    Raised instead of the bare PermissionError so that every caller's failure
+    carries the reason, and main.py turns it into a 403 that says so. On USDA
+    SciComp, 2026-11-04, Add, the location list and the reference dropdowns all
+    failed with a bare HTTP 500 because the list was unreadable to the account.
+    The Reference Locations panel then said "No reference locations configured."
+    """
+
+    def __init__(self, deps_file: Path, exc: OSError):
+        super().__init__(exc.errno, exc.strerror, str(deps_file))
+        self.file = deps_file
+        self.reason = registry_unreadable_reason(deps_file)
+
+
+def _read_registry(deps_file: Path) -> Optional[List[str]]:
+    """The registry's non-blank lines, or None when there is no registry file."""
+    try:
+        text = deps_file.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except PermissionError as exc:
+        raise RegistryUnreadable(deps_file, exc) from exc
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _registry_readable(deps_file: Path) -> bool:
+    """True when the registry can be read, or when there is none yet to read."""
+    try:
+        deps_file.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:  # the folder holding it cannot be entered
+        return False
+    return os.access(deps_file, os.R_OK)
+
+
+def registry_write_access(vsnp3_path: Path) -> Dict:
+    """Can THIS account change the reference-location registry — asked before
+    anyone types a path, so a shared install that this account may not edit
+    shows read-only controls instead of failing after the click (USDA SciComp,
+    2026-11-04: Add reported a bare HTTP 500).
+
+    A save is mkstemp in dependencies/ plus os.replace over the file, so it is
+    the FOLDER that must be writable, not the file; with no dependencies/ yet,
+    the save creates it inside the install. The current list is read first, so
+    the file must be readable too. An unreadable list is reported as such, not
+    as an unwritable folder: they have different owners to ask. Returns
+    {"writable", "readable", "reason", "installed", "account", "folder",
+    "folder_owner", "file"}; reason is None when writable."""
+    deps_dir = vsnp3_path / "dependencies"
+    deps_file = deps_dir / "reference_options_paths.txt"
+    folder = deps_dir if deps_dir.is_dir() else vsnp3_path
+    account = _account()
+    out = {
+        "writable": False,
+        "readable": True,
+        "reason": None,
+        "installed": folder.is_dir(),
+        "account": account,
+        "folder": str(folder),
+        "folder_owner": _owner(folder),
+        "file": str(deps_file),
+    }
+    if not out["installed"]:
+        out["reason"] = (
+            f"There is no vsnp3 install at {vsnp3_path}. Set vsnp3_path in "
+            f"Settings to a directory that contains bin/vsnp3_step2.py."
+        )
+        return out
+    if not _registry_readable(deps_file):
+        out["readable"] = False
+        out["reason"] = registry_unreadable_reason(deps_file)
+        return out
+    if folder == deps_dir:
+        where = (f"{folder} (owner: {out['folder_owner']}), the folder that "
+                 f"holds {deps_file.name}")
+    else:
+        where = (f"{folder} (owner: {out['folder_owner']}), where a change "
+                 f"would create dependencies/{deps_file.name}")
+    if _mounted_read_only(folder):
+        out["reason"] = (
+            f"{where}, is on a file system mounted read-only on "
+            f"{socket.gethostname()}, so account {account} cannot change the "
+            f"reference locations from here. {SHARED_LIST_NOTE}"
+        )
+    elif not os.access(folder, os.W_OK | os.X_OK):
+        out["reason"] = (
+            f"Account {account} cannot write {where}, so it cannot change the "
+            f"reference locations. {SHARED_LIST_NOTE}"
+        )
+    else:
+        out["writable"] = True
+    return out
 
 
 def sanitize_upstream_paths(vsnp3_path: Path) -> List[str]:
@@ -247,29 +472,21 @@ def reference_locations(vsnp3_path: Path) -> List[Dict]:
     return out
 
 
+# Both readers raise RegistryUnreadable rather than a bare PermissionError when
+# the list is there but this account cannot read it. Answering "no locations"
+# instead would send vSNP looking for references in the wrong place, silently.
 def _load_reference_paths(vsnp3_path: Path) -> List[Path]:
     deps_file = vsnp3_path / "dependencies" / "reference_options_paths.txt"
-    if deps_file.exists():
-        paths = []
-        for line in deps_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                paths.append(Path(line))
-        return paths
+    lines = _read_registry(deps_file)
+    if lines is not None:
+        return [Path(line) for line in lines]
     fallback = vsnp3_path / "dependencies"
     return [fallback] if fallback.exists() else []
 
 
 def get_reference_paths(vsnp3_path: Path) -> List[str]:
     deps_file = vsnp3_path / "dependencies" / "reference_options_paths.txt"
-    if not deps_file.exists():
-        return []
-    paths = []
-    for line in deps_file.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            paths.append(line)
-    return paths
+    return _read_registry(deps_file) or []
 
 
 def add_reference_path(vsnp3_path: Path, new_path: str) -> List[str]:

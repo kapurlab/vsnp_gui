@@ -179,6 +179,35 @@ def check_saves_keep_permissions(tmp: Path, vsnp3: Path, deps: Path, rop: Path,
         check("...and the new path is in the list", str(root_b) in rop.read_text())
         remove(root_b)
 
+        print("[a filesystem that refuses permission changes still saves]")
+        os.chmod(rop, 0o664)
+        real_copystat, real_chmod = shutil.copystat, os.chmod
+
+        def refuse_copystat(src, dst, **kw):
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), dst)
+
+        def refuse_chmod(path, mode, *a, **kw):
+            if Path(str(path)).name.startswith(".rop-"):
+                raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))
+            return real_chmod(path, mode, *a, **kw)
+
+        shutil.copystat = refuse_copystat
+        try:
+            res, err = add(root_b)
+        finally:
+            shutil.copystat = real_copystat
+        check("copystat refused (an SMB mount): the save goes through, mode kept",
+              err is None and str(root_b) in rop.read_text() and mode_of(rop) == 0o664)
+        remove(root_b)
+        shutil.copystat, os.chmod = refuse_copystat, refuse_chmod
+        try:
+            res, err = add(root_b)
+        finally:
+            shutil.copystat, os.chmod = real_copystat, real_chmod
+        check("...and with chmod refused too, it is a plain save, not an error",
+              err is None and str(root_b) in rop.read_text())
+        remove(root_b)
+
         print("[a first list gets 0644 less the umask]")
         rop.unlink()
         add(root_b)

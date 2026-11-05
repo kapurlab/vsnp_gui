@@ -89,17 +89,35 @@ def _keep_permissions(deps_file: Path, old: Optional[os.stat_result], tmp: str) 
     the mode alone would drop it. The owner can only be kept by root. The group
     is kept when this account may set it, and a setgid folder usually sees to it
     anyway. A first list gets 0644 less the umask.
+
+    Keeping permissions must never cost the save itself. A filesystem that
+    refuses permission changes (some SMB/CIFS mounts fix every file's mode at
+    mount time) falls back to the mode bits alone, and then to a plain save:
+    there the mount, not this file, decides who can read it.
     """
     if old is None:
-        os.chmod(tmp, 0o644 & ~_current_umask())
+        try:
+            os.chmod(tmp, 0o644 & ~_current_umask())
+        except OSError as exc:
+            logger.warning("reference locations: saved without setting permissions (%s)", exc)
         return
-    shutil.copystat(str(deps_file), tmp)
-    os.utime(tmp, None)  # copystat copied the old mtime; this is a new edit
+    try:
+        shutil.copystat(str(deps_file), tmp)
+    except OSError as exc:
+        try:
+            os.chmod(tmp, _stat.S_IMODE(old.st_mode))
+            logger.warning("reference locations: kept the mode but not the ACL (%s)", exc)
+        except OSError as exc2:
+            logger.warning("reference locations: saved without keeping permissions (%s)", exc2)
+    try:
+        os.utime(tmp, None)  # copystat copied the old mtime; this is a new edit
+    except OSError:
+        pass
     for uid in (old.st_uid, -1):
         try:
             os.chown(tmp, uid, old.st_gid)
             break
-        except PermissionError:
+        except OSError:
             continue
 
 

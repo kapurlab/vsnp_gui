@@ -175,13 +175,14 @@ conda install vsnp3 -c conda-forge -c bioconda
 **Symptoms:** Reference dropdown is empty or missing expected references
 
 **Solution:**
-1. Check vSNP3 path points to correct directory
-2. Verify `dependencies/` folder exists in vSNP3 path
-3. Check for `reference_options_paths.txt`:
-   ```bash
-   cat /path/to/vsnp3/dependencies/reference_options_paths.txt
-   ```
-4. Ensure reference folders exist at paths listed in file
+1. Open Reference Editor > Reference Locations. Each location says which list
+   it is on (site or personal), how many references it provides, and, for one
+   this account cannot open, why.
+2. The site list is `<SITE_ROOT>/refs/vsnp3/locations/reference_locations.txt`;
+   your own additions are `reference_locations` in
+   `~/.config/vsnp_gui/config.json`.
+3. Ensure reference folders exist at the listed paths and that your account
+   can open them.
 
 ---
 

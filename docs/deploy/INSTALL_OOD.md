@@ -169,6 +169,33 @@ rsync -aAX --info=progress2 \
 you. The demo in §5 only needs one small reference, so you can defer the full
 pull.)
 
+### The site's reference location list
+
+vSNP GUI keeps the list of reference locations (the folders whose subfolders
+are reference types) as site data, in
+`${SITE_ROOT}/refs/vsnp3/locations/reference_locations.txt`, not inside the
+vsnp3 install. Each user can also keep personal locations, which only they see.
+Runs hand vsnp3 the chosen reference folder, so vsnp3's own
+`dependencies/reference_options_paths.txt` is no longer edited or needed for
+runs (only for Step 1's "Auto-detect", which vsnp3 does itself). At its first
+start the GUI copies that file's entries into the site list once.
+
+**One admin step**, done by the `storage` phase on an `install_ood.sh` site:
+let lab members edit the site list, the same way as the projects folder.
+
+```bash
+mkdir -p ${SITE_ROOT}/refs/vsnp3/locations
+chgrp ${SITE_NAME}-members ${SITE_ROOT}/refs/vsnp3/locations
+chmod 2775 ${SITE_ROOT}/refs/vsnp3/locations
+# once the list exists (the GUI or the toolchain phase creates it):
+chgrp ${SITE_NAME}-members ${SITE_ROOT}/refs/vsnp3/locations/reference_locations.txt
+chmod 664 ${SITE_ROOT}/refs/vsnp3/locations/reference_locations.txt
+```
+
+Without it, a member's Add goes to their personal list and the Reference
+Editor says why. On an NFSv4 mount with ACLs, grant the group read/write on the
+folder with an inheritable ACL instead of relying on the mode bits.
+
 ---
 
 ## 5. The out-of-the-box demo (sample bundle)

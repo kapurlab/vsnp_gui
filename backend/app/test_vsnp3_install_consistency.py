@@ -1,12 +1,11 @@
 """One vsnp3 install is read AND run, or the app says why not.
 
 Every consumer of ``vsnp3_path`` falls into one of two camps: those that read
-``<prefix>/dependencies/reference_options_paths.txt`` (the Reference Editor,
-refs.list_references) and those that execute ``<prefix>/bin/vsnp3_*.py``. When a
-prefix satisfies the first and not the second, the app lists and edits the
-references of one install while Step 2 runs a different vsnp3 found on PATH —
-with its own registry. The analysis then succeeds against reference data the user
-never edited, and nothing anywhere says so.
+``<prefix>/dependencies/`` and those that execute ``<prefix>/bin/vsnp3_*.py``.
+When a prefix satisfies the first and not the second, the app reads one install
+while Step 2 runs a different vsnp3 found on PATH. The analysis then succeeds
+against an install the user never chose, and nothing anywhere says so. (The
+reference locations themselves no longer live in the install: see refs.py.)
 
 That is not hypothetical. On a bdtools sandbox deployment (Kapur Lab, 2026-09-11)
 TOOLS_ROOT/vsnp3 does not exist, because vsnp3 ships INSIDE the vsnp_gui env. The
@@ -44,44 +43,52 @@ def make_vsnp3(prefix: Path, *, with_bin: bool = True) -> Path:
     return prefix
 
 
-class RegistryNeverFabricatesAnInstall(unittest.TestCase):
+class NothingIsWrittenIntoTheInstall(unittest.TestCase):
+    """Reference locations live in the site list and the personal list; the
+    install is never written, real or not.
+
+    The old registry inside the install was written by every Add, and its
+    mkdir(parents=True) once invented ~/miniforge3/envs/vsnp3 out of nothing.
+    Now an Add goes to the site list (or the personal one), so an install that
+    is real, absent, or missing its dependencies/ is left exactly as it was.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        (self.root / "site" / "refs" / "vsnp3").mkdir(parents=True)
+        self.site_list = self.root / "site" / "refs" / "vsnp3" / "locations" / "reference_locations.txt"
+        self.location = self.root / "refs"
+        self.location.mkdir()
+        self.saved = []
 
-    def test_writing_into_a_real_install_still_works(self):
-        """The registry records the path it was given.
+    def cfg(self, prefix: Path) -> dict:
+        return {"vsnp3_path": str(prefix), "reference_locations_file": str(self.site_list),
+                "reference_locations": []}
 
-        add_reference_path stores the RESOLVED path, so compare resolved forms
-        on both sides — otherwise this fails on macOS, where tempfile hands back
-        /var/... and /var is a symlink to /private/var.
-        """
+    def test_an_add_goes_to_the_site_list_and_leaves_the_install_alone(self):
         prefix = make_vsnp3(self.root / "env")
-        refs.add_reference_path(prefix, str(self.root))
-        self.assertIn(
-            str(self.root.resolve()),
-            [str(Path(p).resolve()) for p in refs.get_reference_paths(prefix)])
+        rop = prefix / "dependencies" / "reference_options_paths.txt"
+        rop.write_text("/somewhere/else\n")
+        before = (rop.read_bytes(), rop.stat().st_mtime_ns)
+        got = refs.add_reference_location(self.cfg(prefix), str(self.location), self.saved.append)
+        self.assertEqual(got["list"], "site")
+        self.assertIn(str(self.location.resolve()), self.site_list.read_text().split("\n"))
+        self.assertEqual((rop.read_bytes(), rop.stat().st_mtime_ns), before)
 
-    def test_a_prefix_with_nothing_at_it_is_refused(self):
-        """mkdir(parents=True) here invents ~/miniforge3/envs/vsnp3 out of nothing.
-
-        The phantom then satisfies every "is it configured?" check while having
-        no bin/ to run, which is precisely the split this module exists to stop.
-        """
+    def test_a_prefix_with_nothing_at_it_is_never_created(self):
         ghost = self.root / "miniforge3" / "envs" / "vsnp3"
-        with self.assertRaises(FileNotFoundError):
-            refs.add_reference_path(ghost, str(self.root))
+        refs.add_reference_location(self.cfg(ghost), str(self.location), self.saved.append)
         self.assertFalse(ghost.exists(), "a vsnp3 install was fabricated")
         self.assertFalse((self.root / "miniforge3").exists(),
                          "parent directories were fabricated")
 
-    def test_an_existing_prefix_may_gain_its_dependencies_dir(self):
-        """A real env that has never had a registry is not a phantom."""
+    def test_an_install_without_dependencies_gains_none(self):
         prefix = self.root / "env"
         (prefix / "bin").mkdir(parents=True)
-        refs.add_reference_path(prefix, str(self.root))
-        self.assertTrue((prefix / "dependencies").is_dir())
+        refs.add_reference_location(self.cfg(prefix), str(self.location), self.saved.append)
+        self.assertFalse((prefix / "dependencies").exists())
 
 
 class DefaultPathMustBeRunnable(unittest.TestCase):

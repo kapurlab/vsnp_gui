@@ -110,6 +110,25 @@ function shortenPath(p) {
   return p.length > 52 ? `${p.slice(0, 20)}…${p.slice(-30)}` : p;
 }
 
+// vsnp3 is handed the reference FOLDER (-t <folder>), so a Step 1 stats
+// Reference cell can read "/refs/vsnp3/reference_options/Mycobacterium_AF2122
+// Forced". The folder's last component is the reference name; a FASTA path or
+// a plain name is left as it is (the backend's _stats_reference_name).
+function referenceFolderName(value) {
+  const v = String(value || "").trim();
+  if (!/[\\/]/.test(v) || /\.(fasta|fa|fna|fas)$/i.test(v)) return v;
+  const parts = v.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || v;
+}
+
+// The Reference cell as shown in the Step 1 Results table: the name plus
+// vsnp3's " Forced" / " by Best Reference", not the whole folder path.
+function referenceCellLabel(value) {
+  const v = String(value || "");
+  const m = v.match(/^(.*?)( Forced| by Best Reference)?$/);
+  return referenceFolderName(m[1]) + (m[2] || "");
+}
+
 // One <option> per unique reference name. The backend has already collapsed
 // same-name duplicates to the single copy vsnp3 actually resolves (first
 // registered location wins), so this list never shows one name twice. When
@@ -454,6 +473,48 @@ function CopyValue({ text, what, caption = "Copy" }) {
       {done ? <CheckIcon /> : <CopyIcon />}
       {done ? "Copied" : caption}
     </button>
+  );
+}
+
+// Commands an admin pastes as they are: one block, one Copy button.
+function FixCommands({ lines, what }) {
+  const text = (lines || []).join("\n");
+  return (
+    <div style={{display:"flex", gap:"0.3em", alignItems:"flex-start", margin:"0.3em 0"}}>
+      <pre style={{flex:1, minWidth:0, margin:0, padding:"0.4em 0.5em", overflowX:"auto",
+        whiteSpace:"pre", fontSize:"0.9em", background:"var(--panel-2)",
+        border:"1px solid var(--border)", borderRadius:"4px"}}>{text}</pre>
+      <CopyValue text={text} what={what} />
+    </div>
+  );
+}
+
+// What is wrong with a reference list's or folder's permissions and what an
+// admin runs to fix it (refs.site_list_fix / refs.location_fix), visible in
+// the panel rather than in a tooltip. Paths, account, owner, group and mode
+// are filled in by the backend; on NFSv4 the nfs4_setfacl form comes too.
+function RefFixBox({ fix, personal }) {
+  if (!fix) return null;
+  const nfs4 = (fix.nfs4_commands || []).length > 0;
+  return (
+    <div className="note warning" style={{margin:"0.3em 0 0.5em"}}>
+      <strong>{fix.problem}</strong>
+      <div style={{marginTop:"0.3em"}}>Ask an admin to run:</div>
+      <FixCommands lines={fix.commands} what="the commands" />
+      {nfs4 ? (
+        <>
+          <div>This is an NFSv4 file system, where chmod can rewrite the ACL. To grant access with an ACL instead:</div>
+          <FixCommands lines={fix.nfs4_commands} what="the NFSv4 ACL commands" />
+        </>
+      ) : null}
+      {(fix.notes || []).map((n) => <div key={n} className="muted">{n}</div>)}
+      {(fix.recheck || []).length ? (
+        <div style={{marginTop:"0.2em"}}>
+          To check afterwards: <code>{fix.recheck.join("; ")}</code>, then reopen Reference Locations.
+        </div>
+      ) : null}
+      {personal ? <div style={{marginTop:"0.2em"}}>Until then, locations you add go to your personal list.</div> : null}
+    </div>
   );
 }
 
@@ -1085,13 +1146,22 @@ export default function App() {
   const [refLocations, setRefLocations] = useState([]);
   const [showRefPaths, setShowRefPaths] = useState(false);
   const [refPathInput, setRefPathInput] = useState("");
-  // The location list lives inside the shared vsnp3 install; an account the
-  // site has not let write it gets read-only controls and the backend's reason
-  // up front, instead of an error after typing a path and clicking Add.
-  const [refPathsWritable, setRefPathsWritable] = useState(true);
-  const [refPathsReadOnlyReason, setRefPathsReadOnlyReason] = useState("");
-  // Set when the list itself could not be read (the backend's reason), so the
-  // panel says so instead of "No reference locations configured."
+  // The locations come from the site list (shared, beside the site's reference
+  // data) and this user's personal list. Add goes to the site list when this
+  // account can write it, else to the personal list: refAddTo says which up
+  // front, with the backend's reason, and refActionNote reports what the last
+  // Add/Remove did ("added to your personal list because ...").
+  const [refAddTo, setRefAddTo] = useState("site");
+  const [refSiteReason, setRefSiteReason] = useState("");
+  const [refActionNote, setRefActionNote] = useState("");
+  // Lists that could not be read (the site list, vSNP's own list), reported by
+  // the backend without failing the request.
+  const [refListNotes, setRefListNotes] = useState([]);
+  // What an admin runs when the site list's permissions are not right (null
+  // when they are), shown as a box with the commands.
+  const [refSiteFix, setRefSiteFix] = useState(null);
+  // Set when the request itself failed (the backend's reason), so the panel
+  // says so instead of "No reference locations configured."
   const [refPathsLoadError, setRefPathsLoadError] = useState("");
   // Item 3: Genome download
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
@@ -2083,16 +2153,18 @@ export default function App() {
   // the location rows and every reference dropdown move together — a removed
   // location can never leave a stale dropdown behind.
   function _applyRefPathsPayload(data) {
-    setRefPaths(data.paths || []);
-    setRefLocations(data.locations || []);
     if (data.references) setReferences(data.references);
-    _applyRefPathsAccess(data);
-    setRefPathsLoadError("");
+    _applyRefPathsState(data);
   }
 
-  function _applyRefPathsAccess(data) {
-    setRefPathsWritable(data.writable !== false);
-    setRefPathsReadOnlyReason(data.read_only_reason || "");
+  function _applyRefPathsState(data) {
+    setRefPaths(data.paths || []);
+    setRefLocations(data.locations || []);
+    setRefAddTo(data.add_to === "personal" ? "personal" : "site");
+    setRefSiteReason((data.site && data.site.reason) || "");
+    setRefListNotes(data.notes || []);
+    setRefSiteFix(data.site_fix || null);
+    setRefPathsLoadError("");
   }
 
   // A list that could not be read is not an empty list: clear the rows and
@@ -2100,8 +2172,9 @@ export default function App() {
   function _applyRefPathsLoadError(detail) {
     setRefPaths([]);
     setRefLocations([]);
+    setRefListNotes([]);
+    setRefSiteFix(null);
     setRefPathsLoadError(detail);
-    _applyRefPathsAccess({ writable: false, read_only_reason: detail });
   }
 
   async function _refPathsLoadErrorFrom(res) {
@@ -2115,17 +2188,13 @@ export default function App() {
     else _applyRefPathsLoadError(await _refPathsLoadErrorFrom(res));
   }
 
-  // A 403 is the filesystem refusing this account the change. Re-read the
-  // list's state, so an unreadable list is shown as that. Then keep the controls
-  // read-only with the backend's explanation, even where the last read said a
-  // change could work (an ACL deny, a mount gone read-only).
+  // A 403 is the filesystem refusing this account a change only the site list
+  // could make (removing a site location). Re-read the lists, so the rows show
+  // what can be removed, and say why.
   async function _refPathChangeFailed(res, fallback) {
     const err = await res.json().catch(() => ({}));
     const detail = err.detail || `${fallback} (HTTP ${res.status})`;
-    if (res.status === 403) {
-      await loadRefPaths();
-      _applyRefPathsAccess({ writable: false, read_only_reason: detail });
-    }
+    if (res.status === 403) await loadRefPaths();
     window.alert(detail);
   }
 
@@ -2136,7 +2205,9 @@ export default function App() {
       body: JSON.stringify({ path: dirPath })
     });
     if (res.ok) {
-      _applyRefPathsPayload(await res.json());
+      const data = await res.json();
+      _applyRefPathsPayload(data);
+      setRefActionNote(data.note || "");
       return true;
     }
     await _refPathChangeFailed(res, "Could not add reference location");
@@ -2150,7 +2221,9 @@ export default function App() {
       body: JSON.stringify({ path: dirPath })
     });
     if (res.ok) {
-      _applyRefPathsPayload(await res.json());
+      const data = await res.json();
+      _applyRefPathsPayload(data);
+      setRefActionNote(data.note || "");
     } else {
       await _refPathChangeFailed(res, "Could not remove reference location");
     }
@@ -2239,6 +2312,10 @@ export default function App() {
     setGenomeJobId(data.job_id);
     setGenomeDownloadStatus(`Downloading ${data.accession}...`);
     setJobId(data.job_id);
+    // The output folder became a reference location; on the personal list when
+    // this account cannot write the site list, which the note says.
+    if (data.note) setRefActionNote(data.note);
+    loadRefPaths();
   }
 
   // Item 6: Reference Editor
@@ -2630,10 +2707,7 @@ export default function App() {
       if (paths.load_error) {
         _applyRefPathsLoadError(paths.load_error);
       } else {
-        setRefPaths(paths.paths || []);
-        setRefLocations(paths.locations || []);
-        _applyRefPathsAccess(paths);
-        setRefPathsLoadError("");
+        _applyRefPathsState(paths);
       }
       setProjects(proj);
       setReferences(refs);
@@ -3485,10 +3559,11 @@ export default function App() {
 
   function normalizeReferenceName(ref) {
     if (!ref) return "";
-    return String(ref)
+    const name = String(ref)
       .replace(" Forced", "")
       .replace(" by Best Reference", "")
       .trim();
+    return referenceFolderName(name);
   }
 
   // Load the Step 1 Results rows. The server scans in the background and this
@@ -7352,26 +7427,26 @@ export default function App() {
                 <details open={showRefPaths} onToggle={(e) => { setShowRefPaths(e.target.open); if (e.target.open) loadRefPaths(); }}>
                   <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em"}}>
                     Reference Locations
-                    {refPathsLoadError ? <span className="muted"> (cannot be read)</span>
-                      : !refPathsWritable ? <span className="muted"> (read-only)</span> : null}
+                    {refPathsLoadError ? <span className="muted"> (cannot be read)</span> : null}
                   </summary>
                   <div className="ref-paths-list" style={{fontSize:"0.85em", marginTop:"0.3em"}}>
                     {refPathsLoadError ? (
                       <div className="note warning" style={{marginBottom:"0.5em"}}>
-                        <strong>The site's reference location list cannot be read.</strong>{" "}
+                        <strong>The reference locations cannot be read.</strong>{" "}
                         {refPathsLoadError}
                       </div>
-                    ) : !refPathsWritable ? (
-                      <div className="note warning" style={{marginBottom:"0.5em"}}>
-                        <strong>This account cannot change the reference locations.</strong>{" "}
-                        {refPathsReadOnlyReason}
-                      </div>
                     ) : null}
-                    {(refLocations.length ? refLocations : refPaths.map((p) => ({ path: p, exists: true }))).map((loc) => {
+                    {refListNotes.map((n) => (
+                      <div key={n} className="note warning" style={{marginBottom:"0.5em"}}>{n}</div>
+                    ))}
+                    <RefFixBox fix={refSiteFix} personal={refAddTo === "personal"} />
+                    {refLocations.map((loc) => {
                       // What does this location actually contribute? Spell it
                       // out so removing a redundant one is an informed act.
                       let stat = null;
-                      if (!loc.exists) {
+                      if (loc.status === "cannot_open") {
+                        stat = <span style={{color:"var(--warning, #b26a00)"}}>{loc.reason || "cannot open"} — contributes nothing</span>;
+                      } else if (!loc.exists) {
                         stat = <span style={{color:"var(--warning, #b26a00)"}}>path not found — contributes nothing</span>;
                       } else if (loc.provides > 0 && loc.shadowed > 0) {
                         stat = <span className="muted">provides {loc.provides} reference{loc.provides === 1 ? "" : "s"}; {loc.shadowed} more here {loc.shadowed === 1 ? "is a duplicate" : "are duplicates"} of an earlier location</span>;
@@ -7382,42 +7457,54 @@ export default function App() {
                       } else {
                         stat = <span className="muted">no references found here</span>;
                       }
+                      const source = loc.source === "personal"
+                        ? { label: "personal", title: "On your personal list: only you see it" }
+                        : loc.source === "install"
+                          ? { label: "vSNP install", title: "From the list inside the vSNP install, shown until the site list is set up" }
+                          : { label: "site", title: "On the site list: every vSNP user here sees it" };
                       return (
                         <div key={loc.path} className="ref-path-item" style={{display:"flex", alignItems:"flex-start", gap:"0.3em", marginBottom:"0.35em"}}>
                           <div style={{flex:1, minWidth:0}}>
                             <div className="muted" style={{wordBreak:"break-all"}} title={loc.path}>{loc.path}</div>
                             <div style={{fontSize:"0.9em"}}>
+                              <span className="muted" title={source.title}>[{source.label}]</span>{" "}
                               {stat}
-                              {loc.implicit ? <span className="muted"> (built-in fallback — vSNP3's own dependencies folder)</span> : null}
                             </div>
+                            <RefFixBox fix={loc.fix} personal={false} />
                           </div>
-                          {!loc.implicit ? (
-                            <button
-                              className="ghost-btn danger"
-                              style={{fontSize:"0.8em"}}
-                              disabled={!refPathsWritable}
-                              title={refPathsWritable ? "Remove this location from the reference registry (no files are deleted)" : refPathsReadOnlyReason}
-                              onClick={() => removeRefPath(loc.path)}
-                            >x</button>
-                          ) : null}
+                          <button
+                            className="ghost-btn danger"
+                            style={{fontSize:"0.8em"}}
+                            disabled={loc.removable === false}
+                            title={loc.removable === false
+                              ? `This location is on the site list, which this account cannot change. ${refSiteReason}`
+                              : "Remove this location from the list (no files are deleted)"}
+                            onClick={() => removeRefPath(loc.path)}
+                          >x</button>
                         </div>
                       );
                     })}
-                    {!refLocations.length && !refPaths.length && !refPathsLoadError ? <div className="muted">No reference locations configured.</div> : null}
+                    {!refLocations.length && !refPathsLoadError ? <div className="muted">No reference locations configured.</div> : null}
+                    {refAddTo === "personal" && !refSiteFix ? (
+                      <div className="muted" style={{marginTop:"0.3em"}}>
+                        This account cannot change the site list, so a location you add goes to your personal list (only you see it).{" "}
+                        <details style={{display:"inline"}}>
+                          <summary style={{display:"inline", cursor:"pointer", textDecoration:"underline"}}>Why</summary>
+                          {" "}{refSiteReason}
+                        </details>
+                      </div>
+                    ) : null}
                     <div style={{display:"flex", gap:"0.3em", marginTop:"0.3em"}}>
                       <input
-                        placeholder={refPathsWritable ? "/path/to/reference_root" : "read-only for this account"}
+                        placeholder="/path/to/reference_root"
                         value={refPathInput}
                         onChange={(e) => setRefPathInput(e.target.value)}
-                        disabled={!refPathsWritable}
-                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
                         style={{flex:1}}
                       />
                       <button
                         className="ghost action"
                         style={{fontSize:"0.85em"}}
-                        disabled={!refPathsWritable}
-                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
+                        title={refAddTo === "personal" ? "Adds to your personal list" : "Adds to the site list"}
                         onClick={async () => {
                           const trimmed = refPathInput.trim();
                           if (!trimmed) return;
@@ -7432,12 +7519,14 @@ export default function App() {
                       <button
                         className="ghost action"
                         style={{fontSize:"0.85em", marginTop:"0.3em"}}
-                        disabled={!refPathsWritable}
-                        title={refPathsWritable ? undefined : refPathsReadOnlyReason}
+                        title={refAddTo === "personal" ? "Adds to your personal list" : "Adds to the site list"}
                         onClick={() => pickPath("directory", "Add reference location", "", (dir) => addRefPath(dir))}
                       >
                         Add Location
                       </button>
+                    ) : null}
+                    {refActionNote ? (
+                      <div className="note" style={{marginTop:"0.4em"}}>{refActionNote}</div>
                     ) : null}
                   </div>
                 </details>
@@ -7471,21 +7560,15 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
-                    {refPathsLoadError ? (
+                    {refAddTo === "personal" ? (
                       <div className="muted" style={{marginTop:"0.3em"}}>
-                        The site's reference location list cannot be read, so a download cannot be
-                        placed in it (see Reference Locations).
-                      </div>
-                    ) : !refPathsWritable ? (
-                      <div className="muted" style={{marginTop:"0.3em"}}>
-                        This account cannot add reference locations, so the output directory must
-                        already be one of them (see Reference Locations).
+                        An output directory that is not yet a reference location is added to your
+                        personal list (see Reference Locations).
                       </div>
                     ) : null}
                     <button
                       onClick={downloadGenome}
-                      disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady || !!refPathsLoadError}
-                      title={refPathsLoadError || undefined}
+                      disabled={!genomeAccession.trim() || !genomeOutputDir.trim() || !settingsReady}
                       style={{marginTop:"0.3em"}}
                     >
                       Download
@@ -8654,7 +8737,7 @@ export default function App() {
                                   </div>
                                 </details>
                               </td>
-                              <td>{row.Reference || "-"}</td>
+                              <td title={row.Reference || undefined}>{row.Reference ? referenceCellLabel(row.Reference) : "-"}</td>
                               <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                               <td>{row["Average Depth"] || "-"}</td>
                               <td>{fmtPercent1(qcMappingRate(row))}</td>
@@ -8859,7 +8942,7 @@ export default function App() {
                                 </div>
                               </details>
                             </td>
-                            <td>{row.Reference || "-"}</td>
+                            <td title={row.Reference || undefined}>{row.Reference ? referenceCellLabel(row.Reference) : "-"}</td>
                             <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                             <td>{row["Average Depth"] || "-"}</td>
                             <td>{fmtPercent1(qcMappingRate(row))}</td>

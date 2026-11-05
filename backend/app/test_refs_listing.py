@@ -50,7 +50,13 @@ def main() -> int:
         vsnp3 = tmp / "vsnp3"
         deps = vsnp3 / "dependencies"
         deps.mkdir(parents=True)
-        rop = deps / "reference_options_paths.txt"
+        # The site's reference location list (refs.py), already seeded, so
+        # vsnp3's own list inside the install is not consulted.
+        site = tmp / "site" / "refs" / "vsnp3" / "locations"
+        site.mkdir(parents=True)
+        rop = site / "reference_locations.txt"
+        (site / ".reference_locations.txt.seeded").write_text("test\n")
+        cfg = {"vsnp3_path": str(vsnp3), "reference_locations_file": str(rop)}
 
         root_a = tmp / "downloaded_set"     # e.g. the install-time clone
         root_b = tmp / "user_set"           # e.g. a pre-existing local copy
@@ -73,7 +79,7 @@ def main() -> int:
         rop.write_text(f"{root_a}\n{root_b}\n", encoding="utf-8")
 
         print("\n[filtering + dedupe]")
-        listed = refs.list_references(vsnp3)
+        listed = refs.list_references(cfg)
         names = [r["name"] for r in listed]
         assert_eq(names, ["Brucella_suis3", "Mycobacterium_H37", "mtbc0_v1.1"],
                   "unique names, vsnp3 resolution order, no .git/junk")
@@ -91,15 +97,15 @@ def main() -> int:
         link_root = tmp / "link_root"
         link_root.symlink_to(root_b)
         rop.write_text(f"{root_a}\n{root_b}\n{link_root}\n", encoding="utf-8")
-        listed = refs.list_references(vsnp3)
+        listed = refs.list_references(cfg)
         mtbc = next(r for r in listed if r["name"] == "mtbc0_v1.1")
         assert_eq(mtbc["shadowed"], [],
                   "same dir via symlinked root not counted as a copy")
 
         print("\n[reference_locations stats]")
         rop.write_text(f"{root_a}\n{root_b}\n{tmp / 'gone'}\n", encoding="utf-8")
-        locs = refs.reference_locations(vsnp3)
-        assert_eq(len(locs), 3, "one row per registry line")
+        locs = refs.reference_locations(cfg)
+        assert_eq(len(locs), 3, "one row per list line")
         row_a = next(l for l in locs if l["path"] == str(root_a))
         row_b = next(l for l in locs if l["path"] == str(root_b))
         row_gone = next(l for l in locs if l["path"] == str(tmp / "gone"))
@@ -109,18 +115,17 @@ def main() -> int:
                   "second root provides its unique ref, one shadowed")
         assert_eq((row_gone["exists"], row_gone["provides"]), (False, 0),
                   "missing path flagged, contributes nothing")
-        assert_true(all(not l["implicit"] for l in locs),
-                    "registry-file rows are not implicit")
+        assert_true(all(not l["implicit"] and l["source"] == "site" for l in locs),
+                    "every row comes from the site list, none implicit")
+        assert_eq((row_gone["status"], row_a["status"]), ("missing", "ok"),
+                  "each row says whether it can be opened")
 
-        print("\n[fallback root shown as implicit when no registry file]")
+        print("\n[no list at all: no locations, and vsnp3's dependencies/ is not one]")
         rop.unlink()
         make_ref(deps, "Fallback_ref")
-        locs = refs.reference_locations(vsnp3)
-        assert_eq(len(locs), 1, "fallback produces one location row")
-        assert_true(locs[0]["implicit"], "fallback row marked implicit")
-        assert_eq(locs[0]["provides"], 1, "fallback contributes its reference")
-        assert_eq([r["name"] for r in refs.list_references(vsnp3)],
-                  ["Fallback_ref"], "fallback references listed")
+        assert_eq(refs.reference_locations(cfg), [], "no rows without a list")
+        assert_eq(refs.list_references(cfg), [],
+                  "vsnp3 never searches its dependencies/ either, so neither does the list")
 
         print("\nAll refs listing tests passed.")
         return 0

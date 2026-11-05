@@ -58,7 +58,13 @@ def stub_config(root: Path):
     vsnp3 = root / "vsnp3"
     (vsnp3 / "bin").mkdir(parents=True, exist_ok=True)
     (vsnp3 / "bin" / "vsnp3_step2.py").write_text("#!/usr/bin/env python\n", encoding="utf-8")
-    m.load_config = lambda: {"projects_root": str(root), "vsnp3_path": str(vsnp3)}
+    # vsnp3 is handed the reference FOLDER, found through the reference
+    # locations, so the reference has to be somewhere they list.
+    refs = root / "refs"
+    (refs / "AF2122").mkdir(parents=True, exist_ok=True)
+    (refs / "AF2122" / "AF2122.fasta").write_text(">c\nACGT\n", encoding="utf-8")
+    m.load_config = lambda: {"projects_root": str(root), "vsnp3_path": str(vsnp3),
+                             "reference_locations": [str(refs)]}
 
 
 def dispatch(project: Path):

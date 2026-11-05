@@ -139,7 +139,7 @@ def _step1_status_from_disk(stored: Any, dir_mtime: Optional[int]) -> Optional[D
     return {k: fields[k] for k in _STEP1_STATUS_FIELDS}
 
 from app.config import (
-    load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT,
+    load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT, CONFIG_PATH,
     apply_site_paths, set_path_override, site_path_defaults,
 )
 from app.jobs import JobManager
@@ -173,16 +173,18 @@ from app.projects import (
 )
 from app.refs import (
     list_references,
-    get_reference_paths,
-    add_reference_path,
-    remove_reference_path,
-    reference_locations,
     reference_roots,
     find_gff_for_fasta,
-    sanitize_upstream_paths,
-    registry_write_access,
-    RegistryUnreadable,
-    SHARED_LIST_NOTE,
+    seed_site_list,
+    survey as reference_survey,
+    site_list_status,
+    add_reference_location,
+    remove_reference_location,
+    unresolved_reference_message,
+    install_list_file,
+    os_error_text,
+    SiteListRefused,
+    PERSONAL as REF_PERSONAL,
 )
 from app.sra import (expand_accessions, expand_accessions_with_mapping, build_download_script,
                      SRAExpansionError, write_crosswalk_tsv,
@@ -205,17 +207,16 @@ projects_root = Path(cfg["projects_root"])
 projects_root.mkdir(parents=True, exist_ok=True)
 job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
 
-# One-time per vsnp3 install: drop the upstream author's shipped reference
-# locations (/Users/todstuber/..., /home/tstuber/...) from
-# dependencies/reference_options_paths.txt — a fresh deployment must start
-# with an empty Reference Locations list, not another machine's.
+# Once per site: carry vsnp3's own reference list (inside its install) into the
+# site's reference location list, which is where the locations live from then
+# on (see refs.py). Only an account that can write the site list does it; the
+# upstream author's shipped paths are left out when they do not exist here.
 try:
-    _removed_upstream = sanitize_upstream_paths(Path(cfg["vsnp3_path"]))
-    if _removed_upstream:
-        logger.info("Removed upstream-shipped reference locations: %s",
-                    ", ".join(_removed_upstream))
-except Exception as _exc:  # never block startup on registry hygiene
-    logger.warning("reference locations sanitize skipped: %s", _exc)
+    _seeded = seed_site_list(cfg)
+    if not _seeded["seeded"] and _seeded["reason"]:
+        logger.info("reference locations: site list not seeded yet: %s", _seeded["reason"])
+except Exception as _exc:  # never block startup on the reference list
+    logger.warning("reference locations: site list seeding skipped: %s", _exc)
 
 
 def _resolve_app_version() -> str:
@@ -308,28 +309,19 @@ def _project_reference_dir(project_dir: Path, cfg: Dict) -> Optional[Path]:
     table preview path where a locked reference name needs one is_dir() per
     root, not a survey of the shared reference tree.
     """
-    ref_name = _project_reference(project_dir)
-    if not ref_name:
-        return None
-    for root in reference_roots(Path(cfg.get("vsnp3_path", ""))):
-        ref_dir = root / ref_name
-        try:
-            if ref_dir.is_dir():
-                return ref_dir
-        except OSError:
-            continue
-    return None
+    return _reference_dir_named(cfg, _project_reference(project_dir))
 
 
 def _reference_dir_named(cfg: Dict, ref_name: str) -> Optional[Path]:
     """The reference directory vsnp3 would resolve `ref_name` to, or None.
 
     The same first-hit-wins walk as _project_reference_dir, for a reference that
-    is named by a request rather than recorded in project.json.
+    is named by a request rather than recorded in project.json. This is also the
+    folder Step 1 and Step 2 hand vsnp3 (`-t <folder>`, see _vsnp3_reference_arg).
     """
     if not ref_name:
         return None
-    for root in reference_roots(Path(cfg.get("vsnp3_path", ""))):
+    for root in reference_roots(cfg):
         ref_dir = root / ref_name
         try:
             if ref_dir.is_dir():
@@ -337,6 +329,55 @@ def _reference_dir_named(cfg: Dict, ref_name: str) -> Optional[Path]:
         except OSError:
             continue
     return None
+
+
+def _vsnp3_reference_arg(cfg: Dict, ref_name: str) -> str:
+    """`-t <reference folder>` for a vsnp3 run, or 400 when no reference
+    location has a folder of that name.
+
+    vsnp3's -t takes a name OR a folder: Ref_Options checks os.path.isdir()
+    first and, for a folder, reads its files with metadata_gather(), the same
+    function a name match calls on the folder it finds. So handing it the
+    folder this app resolved (first location with that name, vsnp3's own rule)
+    gets exactly the files `-t <name>` gets, from the same folder, while vsnp3
+    never consults the list inside its install. That list broke on shared
+    installs (unwritable, reset by conda, 0600 after a save), and a run that
+    resolved there could use a different folder than the one this app showed.
+
+    Not `-r <fasta> -b <gbk>` instead: given -r, vsnp3_step1.py ignores -t
+    entirely and sets reference_type to None, so the Groups column (defining-SNP
+    group calls) is never filled and the stats lose their Reference cell. Not
+    explicit -s/-m/-remove_by_name in Step 2 either: the file choice is
+    vsnp3's (3.37 changed it to match on file names rather than whole paths),
+    and with the folder it applies its own rule. One visible difference: the
+    stats' Reference cell and Step 2's summary name the folder, not just the
+    name, which reference_lock and the UI read back to the name.
+    """
+    if not ref_name:
+        return ""
+    ref_dir = _reference_dir_named(cfg, ref_name)
+    if ref_dir is None:
+        raise HTTPException(status_code=400, detail=unresolved_reference_message(cfg, ref_name))
+    return f"-t {shlex.quote(str(ref_dir))}"
+
+
+def _auto_detect_preflight(cfg: Dict) -> str:
+    """Step 1 with no reference ("Auto-detect"): vsnp3 picks one with sourmash,
+    from the list and ref_db.sbt.zip inside its install, and this app has no
+    folder to hand it. So that list must be readable; vsnp3 3.36/3.37 open it
+    unguarded and every sample would stop on a traceback. Returns "" (no -t)."""
+    rop = install_list_file(cfg)
+    try:
+        with open(rop, encoding="utf-8", errors="replace"):
+            pass
+    except OSError as exc:
+        why = ("does not exist" if isinstance(exc, FileNotFoundError)
+               else f"cannot be read by this account ({os_error_text(exc)})")
+        raise HTTPException(status_code=400, detail=(
+            f"Auto-detect is done by vSNP itself, from the reference list inside "
+            f"its install, {rop}, which {why}. Choose a reference instead; those "
+            f"are found through this app's reference locations."))
+    return ""
 
 
 def _contig_matcher(cfg: Dict, project_dir: Path,
@@ -536,7 +577,6 @@ def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str,
     Returns ("", "") when neither strategy finds a fasta — caller should
     surface that as a friendly error rather than a partial IGV view.
     """
-    vsnp3_path = Path(cfg.get("vsnp3_path", ""))
     step1_dir = project_dir / "step1"
     if step1_dir.is_dir():
         for d in sorted(step1_dir.iterdir()):
@@ -544,17 +584,17 @@ def _project_reference_fasta_and_gff(project_dir: Path, cfg: Dict) -> tuple[str,
                 continue
             fastas = _align_glob(d, "*.fasta")
             if fastas:
-                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                gff = find_gff_for_fasta(fastas[0], cfg)
                 return str(fastas[0]), (str(gff) if gff else "")
     ref_name = _project_reference(project_dir)
     if ref_name:
-        for root in reference_roots(vsnp3_path):
+        for root in reference_roots(cfg):
             ref_dir = root / ref_name
             if not ref_dir.is_dir():
                 continue
             fastas = sorted(ref_dir.glob("*.fasta"))
             if fastas:
-                gff = find_gff_for_fasta(fastas[0], vsnp3_path)
+                gff = find_gff_for_fasta(fastas[0], cfg)
                 return str(fastas[0]), (str(gff) if gff else "")
     return "", ""
 
@@ -677,8 +717,8 @@ def _require_vsnp3_script(cfg: Dict, script: str) -> Path:
     if on_path:
         detail += (
             f" A different vsnp3 is on PATH ({on_path}); it is NOT being used, "
-            "because it has its own reference registry and would analyse against "
-            "references other than the ones this app reads and edits. "
+            "because it is not the install chosen here, and a run must not "
+            "silently fall through to another one. "
             f"Set vsnp3_path to {Path(on_path).resolve().parent.parent} in Settings "
             "if that is the install you want."
         )
@@ -2195,119 +2235,88 @@ class RefDownloadRequest(BaseModel):
 
 @app.get("/api/references")
 def references():
-    cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    return list_references(vsnp3_path)
+    return list_references(load_config())
 
 
-def _reference_paths_payload(vsnp3_path: Path) -> Dict:
-    """One consistent answer for every registry read/mutation: the raw paths,
-    per-location stats, and the (deduped) reference list — so the location
-    rows and the reference dropdowns can never disagree about what a change
-    did. `writable` says whether this account may change the list at all, so
-    the UI can show read-only controls before anyone types a path. A list this
-    account cannot read raises RegistryUnreadable (a 403, below) instead of
-    answering with an empty one."""
-    access = registry_write_access(vsnp3_path)
+def _reference_paths_payload(cfg: Dict, note: Optional[str] = None) -> Dict:
+    """One consistent answer for every reference-location read and change: the
+    effective paths, per-location rows (which list each came from, what it
+    provides, whether it can be opened), and the deduped reference list, so the
+    location rows and the reference dropdowns can never disagree about what a
+    change did.
+
+    Add always works (the site list when this account can write it, else the
+    personal list), so `writable` is always true; `add_to` and `site` say where
+    an Add goes and why. `notes` carries lists that could not be read, which
+    are reported here and never fail the request. `note` reports the change
+    just made, e.g. that it went to the personal list."""
+    s = reference_survey(cfg)
+    site = s["site"]
     return {
-        "paths": get_reference_paths(vsnp3_path),
-        "locations": reference_locations(vsnp3_path),
-        "references": list_references(vsnp3_path),
-        "writable": access["writable"],
-        "read_only_reason": access["reason"],
+        "paths": [e["path"] for e in s["entries"]],
+        "locations": s["locations"],
+        "references": s["references"],
+        "writable": True,
+        "add_to": "site" if site["writable"] else REF_PERSONAL,
+        "site": site,
+        "personal_file": str(CONFIG_PATH),
+        "notes": s["notes"],
+        # What an admin runs when the site list's permissions are not right
+        # (refs.site_list_fix): the problem, the commands with this site's
+        # paths filled in, and how to re-check. None when they are right.
+        "site_fix": s["site_fix"],
+        "note": note,
     }
 
 
-# Every endpoint that reads the reference-location list (the location rows, the
-# reference dropdowns, a reference's files, Step 1/2 reference lookups) fails
-# the same way when this account cannot read it: a 403 naming the file, its
-# owner and mode, and who can change that. `registry` lets the UI tell this
-# apart from a refused change.
-@app.exception_handler(RegistryUnreadable)
-async def _registry_unreadable(_request: Request, exc: RegistryUnreadable):
-    return JSONResponse(status_code=403, content={
-        "detail": exc.reason, "registry": "unreadable", "file": str(exc.file)})
-
-
-# A registry change the filesystem refuses. The list lives inside the vsnp3
-# install, so on a shared deployment the usual cause is an account that may not
-# write that install, or a node that mounts it read-only — and both reached the
-# browser as a bare HTTP 500 (USDA SciComp, 2026-11-04). 403, not 409: 409 says
-# the request clashes with the list's current state and a changed request could
-# succeed, but nothing this account can resubmit gets past this; the server is
-# refusing it the change, and whether it should is the site admins' call.
-_REFUSED_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
-
-
-def _registry_change_error(vsnp3_path: Path, what: str, exc: OSError) -> HTTPException:
-    access = registry_write_access(vsnp3_path)
-    refused = isinstance(exc, PermissionError) or exc.errno in _REFUSED_ERRNOS
-    where = f"{access['folder']} (owner: {access['folder_owner']})"
-    if isinstance(exc, RegistryUnreadable):
-        # A change reads the list first, so this is the list being unreadable,
-        # not dependencies/ being unwritable. Those have different fixes.
-        reason = exc.reason
-    elif access["reason"]:
-        reason = access["reason"]
-    elif refused:
-        # os.access said yes and the write was refused anyway (an ACL deny, a
-        # sticky folder, a mount that changed since): still name who and where.
-        reason = (f"Account {access['account']} was refused saving "
-                  f"{access['file']}; a change needs write access to {where}. "
-                  f"{SHARED_LIST_NOTE}")
-    else:
-        reason = f"Account {access['account']} could not save {access['file']} in {where}."
-    os_error = (exc.strerror or str(exc)) + (f": {exc.filename}" if exc.filename else "")
+def _site_list_change_error(cfg: Dict, what: str, exc: OSError) -> HTTPException:
+    """A change to the site list that failed with something other than a plain
+    refusal (those fall back to the personal list, or are SiteListRefused)."""
+    status = site_list_status(cfg)
+    if isinstance(exc, SiteListRefused):
+        return HTTPException(status_code=403, detail=f"Could not {what}. {exc.reason}")
+    refused = isinstance(exc, PermissionError) or exc.errno in {errno.EACCES, errno.EPERM, errno.EROFS}
     return HTTPException(
         status_code=403 if refused else 500,
-        detail=f"Could not {what}. {reason} (OS error: {os_error})",
+        detail=(f"Could not {what}. Account {status['account']} could not save the site "
+                f"list {status['file']} (OS error: {os_error_text(exc)})"),
     )
 
 
 @app.get("/api/references/paths")
 def ref_paths():
-    cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    return _reference_paths_payload(vsnp3_path)
+    return _reference_paths_payload(load_config())
 
 
 @app.post("/api/references/paths")
 def ref_path_add(payload: RefPathRequest):
     p = Path(payload.path).expanduser().resolve()
-    if not p.is_dir():
+    if not _is_dir_quiet(p):
         raise HTTPException(status_code=400, detail=f"Directory not found: {p}")
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
     try:
-        add_reference_path(vsnp3_path, str(p))
-    except FileNotFoundError as exc:
-        # The registry lives inside the vsnp3 install. Refusing to create one is
-        # deliberate (see refs._write_paths_file), but the raw error reaches the
-        # browser as a bare 500 — say which setting is wrong and what to do.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Cannot save reference locations: there is no vsnp3 install at "
-                f"{vsnp3_path}. Set vsnp3_path in Settings to a directory that "
-                f"contains bin/vsnp3_step2.py, then add the location again. ({exc})"
-            ),
-        ) from exc
+        result = add_reference_location(cfg, str(p), save_config)
     except OSError as exc:
-        raise _registry_change_error(
-            vsnp3_path, f"add {p} to the reference locations", exc) from exc
-    return _reference_paths_payload(vsnp3_path)
+        raise _site_list_change_error(cfg, f"add {p} to the reference locations", exc) from exc
+    return _reference_paths_payload(load_config(), result["note"])
 
 
 @app.delete("/api/references/paths")
 def ref_path_remove(payload: RefPathRequest):
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
     try:
-        remove_reference_path(vsnp3_path, payload.path)
+        result = remove_reference_location(cfg, payload.path, save_config)
     except OSError as exc:
-        raise _registry_change_error(
-            vsnp3_path, f"remove {payload.path} from the reference locations", exc) from exc
-    return _reference_paths_payload(vsnp3_path)
+        raise _site_list_change_error(
+            cfg, f"remove {payload.path} from the reference locations", exc) from exc
+    return _reference_paths_payload(load_config(), result["note"])
+
+
+def _is_dir_quiet(p: Path) -> bool:
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
 
 
 _REF_DISPLAY_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -2326,10 +2335,10 @@ def _require_ref_token(value: str, field: str) -> str:
     These values reach generated shell scripts. Rather than rely only on
     quoting at each of the several interpolation sites, the value is refused at
     the door if it is not shaped like a reference name — a whitelist, so a
-    future call site that forgets to quote cannot be exploited either. vsnp3
-    keeps ownership of "no such reference": a well-formed but unknown name
-    passes here and fails downstream with vsnp3's own message, so a renamed or
-    removed reference still reports the way it always did.
+    future call site that forgets to quote cannot be exploited either. A
+    well-formed but unknown reference passes here; Step 1 and Step 2 then
+    refuse it when no reference location has a folder of that name
+    (_vsnp3_reference_arg), saying where to add one.
     """
     v = (value or "").strip()
     if not v:
@@ -2355,21 +2364,9 @@ def ref_download(payload: RefDownloadRequest):
     # since subdir_name defaults to it).
     accession = _require_ref_token(accession, "accession")
     output_dir = Path(payload.output_dir).expanduser().resolve()
-    # A download into a folder that is not yet a reference location adds it to
-    # the list, so an account that may not change the list hears so now, before
-    # any folder or script is created, not after the job has been set up.
-    registered = {str(Path(x).resolve()) for x in get_reference_paths(vsnp3_path)}
-    if str(output_dir) not in registered:
-        access = registry_write_access(vsnp3_path)
-        if not access["writable"]:
-            raise HTTPException(
-                status_code=403 if access["installed"] else 400,
-                detail=(
-                    f"{output_dir} is not one of the reference locations, and "
-                    f"downloading there would add it. {access['reason']} Choose "
-                    f"an output directory that is already a reference location."
-                ),
-            )
+    # A download into a folder that is not yet a reference location adds it:
+    # to the site list when this account can write it, else to the personal
+    # list (said in the response's `note`), so no account is refused here.
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -2397,7 +2394,7 @@ def ref_download(payload: RefDownloadRequest):
     # same selection to vsnp3 (`-t` resolves by name) — downloading another
     # copy would only create a shadowed duplicate.
     existing = next(
-        (r for r in list_references(vsnp3_path) if r["name"] == subdir_name), None
+        (r for r in list_references(cfg) if r["name"] == subdir_name), None
     )
     if existing:
         raise HTTPException(
@@ -2434,26 +2431,26 @@ def ref_download(payload: RefDownloadRequest):
     script_path = acc_dir / "download_ref.sh"
     script_path.write_text(script_content, encoding="utf-8")
     script_path.chmod(0o755)
-    # Add parent dir to reference paths
+    # Add parent dir to the reference locations
     try:
-        add_reference_path(vsnp3_path, str(output_dir))
+        added = add_reference_location(cfg, str(output_dir), save_config)
     except OSError as exc:
-        raise _registry_change_error(
-            vsnp3_path, f"add {output_dir} to the reference locations", exc) from exc
+        raise _site_list_change_error(
+            cfg, f"add {output_dir} to the reference locations", exc) from exc
     job_id = job_manager.start_job(
         name="ref_download",
         command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=acc_dir,
         env=build_env(cfg)
     )
-    return {"job_id": job_id, "accession": accession, "target_dir": str(acc_dir)}
+    return {"job_id": job_id, "accession": accession, "target_dir": str(acc_dir),
+            "note": added["note"] if added["list"] == REF_PERSONAL else None}
 
 
 @app.get("/api/references/{ref_name}/files")
 def ref_files(ref_name: str):
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
+    refs = list_references(cfg)
     ref = next((r for r in refs if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
@@ -2679,8 +2676,7 @@ def _read_metadata_xlsx(cfg: Dict, meta_path: Path) -> List[Dict[str, str]]:
 @app.get("/api/references/{ref_name}/metadata")
 def ref_get_metadata(ref_name: str):
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
+    refs = list_references(cfg)
     ref = next((r for r in refs if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
@@ -2781,8 +2777,7 @@ class MetadataAddRequest(BaseModel):
 @app.post("/api/references/{ref_name}/metadata/add-rows")
 def ref_add_metadata_rows(ref_name: str, payload: MetadataAddRequest):
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
+    refs = list_references(cfg)
     ref = next((r for r in refs if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
@@ -3049,7 +3044,7 @@ def _references_sharing(master: Path, exclude_dir: Path) -> List[str]:
     """
     names: List[str] = []
     try:
-        refs = list_references(Path(load_config()["vsnp3_path"]))
+        refs = list_references(load_config())
     except Exception:  # noqa: BLE001 — a sharing list is never worth a 500
         return names
     for r in refs:
@@ -3170,8 +3165,7 @@ def _current_os_user() -> str:
 
 def _ref_dir_or_404(ref_name: str) -> Path:
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    ref = next((r for r in list_references(vsnp3_path) if r["name"] == ref_name), None)
+    ref = next((r for r in list_references(cfg) if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
     return Path(ref["path"]).resolve()
@@ -3616,8 +3610,7 @@ class RefCreateFileRequest(BaseModel):
 @app.post("/api/references/{ref_name}/create-file")
 def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    refs = list_references(vsnp3_path)
+    refs = list_references(cfg)
     ref = next((r for r in refs if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
@@ -3653,8 +3646,7 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
 def _ref_entry(ref_name: str) -> Dict:
     """The list_references entry for `ref_name`, or 404."""
     cfg = load_config()
-    vsnp3_path = Path(cfg["vsnp3_path"])
-    ref = next((r for r in list_references(vsnp3_path) if r["name"] == ref_name), None)
+    ref = next((r for r in list_references(cfg) if r["name"] == ref_name), None)
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
     return ref
@@ -4264,7 +4256,7 @@ def project_import_vcfs(project: str, payload: ImportVcfRequest):
     if len(vcfs) > 500 and not payload.confirm_large:
         raise HTTPException(status_code=400, detail=f"Large import ({len(vcfs)} VCFs). Confirm to continue.")
 
-    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    alias_map = _reference_alias_map(cfg)
     # Every header, read once and all at once. The detection pass that used to
     # read them all a first time only matters when no reference was given.
     vcf_refs = dict(zip(vcfs, fan_out(lambda v: _detect_vcf_reference(v, alias_map), vcfs)))
@@ -5101,7 +5093,12 @@ def _step1_dispatch(
     # input too. Quoted as well as validated — the value lands inside a bash
     # string that is later re-parsed.
     payload.reference = _require_ref_token(payload.reference, "reference")
-    ref_arg = f"-t {shlex.quote(payload.reference)}" if payload.reference else ""
+    # vsnp3 is handed the reference FOLDER, resolved from this app's reference
+    # locations, never a name for it to look up in its own install's list (see
+    # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
+    # does that itself from its install (_auto_detect_preflight).
+    ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
+               else _auto_detect_preflight(cfg))
     if payload.reference:
         update_project_meta(project_dir, {
             "reference": payload.reference,
@@ -5946,7 +5943,7 @@ def step2_setup(project: str):
     # tier B (Step 1 exclusions). Both are always filtered out of the comparison
     # at run time. Tier C (build-list) is per-run and shown live in the UI.
     project_reference = _project_reference(project_dir)
-    ref_aliases = _reference_alias_map(Path(cfg["vsnp3_path"])) if project_reference else {}
+    ref_aliases = _reference_alias_map(cfg) if project_reference else {}
     # Kept apart so the count can say WHERE an exclusion came from. One number
     # labelled "excluded above" sent the user hunting through Step 1 Results
     # for 27 ticks, 25 of which were not there: tier A is a file in the
@@ -6295,6 +6292,9 @@ def step2_run(project: str, payload: Step2Request):
             raise HTTPException(status_code=400, detail="Reference type is required for Step 2")
     if len(refs) == 1 and payload.reference != refs[0]:
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
+    # The folder vsnp3 will be handed, resolved now so an unknown reference is
+    # refused before anything is staged.
+    ref_arg = _vsnp3_reference_arg(cfg, _require_ref_token(payload.reference, "reference"))
     # Store the resolved reference back into project.json
     update_project_meta(project_dir, {"reference": payload.reference})
 
@@ -6664,15 +6664,13 @@ def step2_run(project: str, payload: Step2Request):
             ),
         )
 
-    safe_reference = _require_ref_token(payload.reference, "reference")
-    # Run the vsnp3 we READ from, by absolute path. A bare "vsnp3_step2.py"
-    # resolves through PATH, which need not be the install whose
-    # reference_options_paths.txt the Reference Editor just edited — and when the
-    # two differ nothing says so: the run succeeds, against a same-named
-    # reference from another registry. (Step 1 has always used an absolute
-    # <vsnp3_path>/bin path; Step 2 had not.)
+    # Run the vsnp3 configured in Settings, by absolute path. A bare
+    # "vsnp3_step2.py" resolves through PATH, which need not be that install,
+    # and when the two differ nothing says so. (Step 1 has always used an
+    # absolute <vsnp3_path>/bin path; Step 2 had not.) ref_arg is `-t <folder>`,
+    # resolved above from this app's reference locations.
     step2_exe = _require_vsnp3_script(cfg, "vsnp3_step2.py")
-    cmd = f"{shlex.quote(str(step2_exe))} -wd {shlex.quote(str(run_dir))} {flags_str} -t {shlex.quote(safe_reference)}{remove_arg}"
+    cmd = f"{shlex.quote(str(step2_exe))} -wd {shlex.quote(str(run_dir))} {flags_str} {ref_arg}{remove_arg}"
     label_style = payload.label_style or "short"
     label_script = _build_tree_label_script(run_dir, cfg, label_style)
     if label_script:
@@ -7723,19 +7721,17 @@ def reference_lock(project: str):
         ref = ref.replace(" Forced", "").replace(" by Best Reference", "").strip()
         if ref:
             raw_refs.setdefault(ref, []).append(row.get("_sample"))
-    # The stats sheet records whatever `-r` the run was given. A GUI run records
-    # the reference NAME, but a command-line run imported into the project may
-    # have recorded a full FASTA path from another machine — which then surfaced
-    # verbatim in "Mixed references detected" as a path that doesn't exist here.
-    # Normalize path-like values to the reference they actually are (same alias
-    # machinery the VCF importer uses: NC_006932-NC_006933.fasta →
-    # Brucella_abortus1); a plain name passes through untouched.
-    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    # The stats sheet records whatever `-t` the run was given: the reference
+    # NAME for older GUI runs, its FOLDER since the GUI passes one (see
+    # _vsnp3_reference_arg), and a command-line run imported into the project
+    # may have recorded a full FASTA path from another machine — which then
+    # surfaced verbatim in "Mixed references detected" as a path that doesn't
+    # exist here. All of them are reduced to the reference they name (see
+    # _stats_reference_name); a plain name passes through untouched.
+    alias_map = _reference_alias_map(cfg)
     by_ref: Dict[str, List[str]] = {}
     for raw, samples in raw_refs.items():
-        looks_pathy = ("/" in raw or "\\" in raw
-                       or raw.lower().endswith((".fasta", ".fa", ".fna", ".fas")))
-        name = _normalize_reference(raw, alias_map) if looks_pathy else raw
+        name = _stats_reference_name(raw, alias_map)
         by_ref.setdefault(name or raw, []).extend(s for s in samples if s)
     refs = sorted(by_ref)
     if len(refs) == 1:
@@ -8330,13 +8326,13 @@ def _reference_blocklist_sources(cfg: Dict, reference: Optional[str]) -> List[Di
     # root: a reference can live in any of them (e.g. a shared /srv set the user
     # registered while the GUI's primary root holds only supplemental refs). The
     # configured root is included first; reference_roots() adds the rest from
-    # reference_options_paths.txt. De-duped by resolved path.
+    # the site and personal lists (refs.py). De-duped by resolved path.
     roots: List[Tuple[Path, str]] = []
     seen_roots: set = set()
     registered_keys: List[str] = []   # reference_roots(), resolved, in vsnp3's order
     configured = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
     candidates = ([(Path(configured), False)] if configured else []) + [
-        (r, True) for r in reference_roots(Path(str(cfg.get("vsnp3_path", "") or "")))
+        (r, True) for r in reference_roots(cfg)
     ]
     for r, registered in candidates:
         try:
@@ -8779,8 +8775,7 @@ def step1_files(project: str, sample: str = Query(...)):
         if fasta_files:
             ref_fasta = str(fasta_files[0])
             # GFF lives in the reference options dir, not the alignment dir.
-            vsnp3_path = Path(cfg.get("vsnp3_path", ""))
-            gff_path = find_gff_for_fasta(fasta_files[0], vsnp3_path)
+            gff_path = find_gff_for_fasta(fasta_files[0], cfg)
             if gff_path:
                 ref_gff = str(gff_path)
         # The *_filtered_hapall_annotated.vcf holds per-variant annotation
@@ -11243,15 +11238,12 @@ def _serve_roots(project: str) -> List[set]:
         return hit[1]
     cfg = load_config()
     roots = [_project_dir_for(cfg, project)]
-    try:
-        roots.extend(reference_roots(Path(cfg.get("vsnp3_path", ""))))
-    except RegistryUnreadable:
-        # The project's own files are still this account's to open (a BAM in
-        # igv.js); only files under the unreadable list's roots are refused.
-        pass
+    # An unreadable site list contributes no roots (refs never raises for it),
+    # so the project's own files are still served (a BAM in igv.js).
+    roots.extend(reference_roots(cfg))
     # The configured reference root is where the UI gets its GFF paths from
     # (find_gff_for_fasta walks it), so this endpoint must be willing to serve
-    # from it. It is NOT always listed in reference_options_paths.txt: a local
+    # from it. It is NOT always one of the reference locations: a local
     # install that finds every reference already available elsewhere deliberately
     # drops its own managed dir from that file.
     configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
@@ -12161,6 +12153,23 @@ def _detect_vcf_reference(vcf: Path, alias_map: Dict[str, str]) -> str:
     return ""
 
 
+_FASTA_SUFFIXES = (".fasta", ".fa", ".fna", ".fas")
+
+
+def _stats_reference_name(raw: str, alias_map: Dict[str, str]) -> str:
+    """The reference a Step 1 stats Reference cell names, with " Forced" /
+    " by Best Reference" already stripped. A folder path (what the GUI hands
+    vsnp3 as -t) is its last component: the folder IS the reference, and its
+    name may hold dots (mtbc0_v1.1) that a stem would cut. A FASTA path goes
+    through the alias machinery the VCF importer uses (NC_006932-NC_006933.fasta
+    -> Brucella_abortus1). A plain name is returned as it is."""
+    if "/" not in raw and "\\" not in raw and not raw.lower().endswith(_FASTA_SUFFIXES):
+        return raw
+    if raw.lower().endswith(_FASTA_SUFFIXES):
+        return _normalize_reference(raw, alias_map)
+    return re.split(r"[\\/]", raw.replace("file://", "").strip().rstrip("/\\"))[-1]
+
+
 def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
     ref = ref.replace("file://", "").strip()
     lower_ref = ref.lower()
@@ -12180,12 +12189,12 @@ _ALIAS_MAP_TTL_S = 300.0
 _ALIAS_EXTS = (".fa", ".fasta", ".fna", ".fas")
 
 
-def _reference_roots_signature(vsnp3_path: Path) -> tuple:
-    """The registered roots and their mtimes: a reference added, removed or
+def _reference_roots_signature(cfg: Dict) -> tuple:
+    """The reference locations and their mtimes: a reference added, removed or
     renamed changes its root's mtime, and a root added or dropped changes the
     list itself."""
     out = []
-    for r in reference_roots(vsnp3_path):
+    for r in reference_roots(cfg):
         try:
             out.append((str(r), r.stat().st_mtime_ns))
         except OSError:
@@ -12193,7 +12202,7 @@ def _reference_roots_signature(vsnp3_path: Path) -> tuple:
     return tuple(out)
 
 
-def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
+def _reference_alias_map(cfg: Dict) -> Dict[str, str]:
     """_build_reference_alias_map, reused while the reference roots are unchanged.
 
     Building it walks every reference directory recursively, and a project
@@ -12203,13 +12212,13 @@ def _reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
     which bounds how long a FASTA renamed deep inside an existing reference
     directory can go unnoticed.
     """
-    key = str(vsnp3_path)
-    sig = _reference_roots_signature(vsnp3_path)
+    sig = _reference_roots_signature(cfg)
+    key = str(tuple(root for root, _mtime in sig))
     now = time.monotonic()
     hit = _ALIAS_MAP_MEMO.get(key)
     if hit is not None and hit[1] == sig and now - hit[0] < _ALIAS_MAP_TTL_S:
         return dict(hit[2])
-    aliases = _build_reference_alias_map(vsnp3_path)
+    aliases = _build_reference_alias_map(cfg)
     _ALIAS_MAP_MEMO[key] = (now, sig, aliases)
     return dict(aliases)
 
@@ -12229,7 +12238,7 @@ def _fasta_like_by_ext(base: Path) -> Dict[str, List[Path]]:
     return found
 
 
-def _build_reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
+def _build_reference_alias_map(cfg: Dict) -> Dict[str, str]:
     """Map every plausible FASTA stem -> reference directory name.
 
     vsnp3_step1.py copies the reference FASTA into each sample's alignment
@@ -12257,7 +12266,7 @@ def _build_reference_alias_map(vsnp3_path: Path) -> Dict[str, str]:
 
     refs = [
         (ref.get("name"), Path(ref.get("path", "")))
-        for ref in list_references(vsnp3_path)
+        for ref in list_references(cfg)
         if ref.get("name")
     ]
     # The walks are independent, so they run at once; the rules below depend
@@ -12802,7 +12811,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
             "unusable": [], "ignored": [], "unknown": 0, "renamed": [],
         }
 
-    alias_map = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    alias_map = _reference_alias_map(cfg)
     # For VCFs whose name says another reference: same contigs, same reference.
     matcher = _contig_matcher(cfg, project_dir)
     same_memo: Dict[Tuple[str, str], bool] = {}
@@ -13113,7 +13122,7 @@ def step2_reference_audit_fix(project: str, payload: ReferenceAuditFix):
     wanted = set(payload.samples) if payload.samples else set(allowed)
     step1_dir = project_dir / "step1"
     step2_dir = vcf_db_dir(project_dir / "step2")
-    fix_aliases = _reference_alias_map(Path(cfg["vsnp3_path"]))
+    fix_aliases = _reference_alias_map(cfg)
     fix_matcher = _contig_matcher(cfg, project_dir)
 
     recollected, dropped, skipped = [], [], []

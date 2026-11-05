@@ -819,30 +819,34 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
     references can in principle be updated; using mtime as a soft refresh
     signal is cheaper than always re-hashing. Service restart force-refreshes.
     """
-    # Resolve the reference across EVERY registered reference location — the
-    # same roots the Reference Locations editor shows (reference_options_paths.txt,
-    # falling back to <vsnp3>/dependencies when no registry file exists), plus
-    # the configured root. Previously this looked only in
+    # Resolve the reference across EVERY reference location — the same roots
+    # the Reference Locations editor shows (the site list, then the personal
+    # one; see refs.py), which is also how the folder handed to vsnp3 as -t is
+    # found — plus the configured root. Previously this looked only in
     # vsnp3_reference_options_root, so a reference that lives in an added
     # location could never dispatch ("reference folder not found").
     roots: list = []
-    vsnp3_path = cfg.get("vsnp3_path")
-    if vsnp3_path:
-        try:
-            from app import refs as _refs
-        except Exception:  # pragma: no cover - when app/ is the import root
-            import refs as _refs
-        try:
-            roots = list(_refs.reference_roots(Path(vsnp3_path)))
-        except Exception:
-            roots = []
+    try:
+        from app import refs as _refs
+    except Exception:  # pragma: no cover - when app/ is the import root
+        import refs as _refs
+    try:
+        roots = list(_refs.reference_roots(cfg))
+    except Exception:
+        roots = []
     cfg_root_val = _cfg_path(cfg, "vsnp3_reference_options_root")
     if cfg_root_val:
         cfg_root = Path(cfg_root_val)
         if cfg_root not in roots:
             roots.append(cfg_root)
+    def _is_dir(p: Path) -> bool:
+        try:
+            return p.is_dir()
+        except OSError:
+            return False
+
     folder = next((r / reference_name for r in roots
-                   if (r / reference_name).is_dir()), None)
+                   if _is_dir(r / reference_name)), None)
     if folder is None:
         # Not being able to HASH the reference must not decide whether the
         # run happens — vsnp3 resolves -t on its own, and a registry that is
@@ -851,7 +855,7 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
         # an honest degraded block instead; annotate which searched roots
         # don't even exist on this machine so the message diagnoses itself.
         searched = [
-            str(r) if r.is_dir() else f"{r} (does not exist on this machine)"
+            str(r) if _is_dir(r) else f"{r} (does not exist on this machine)"
             for r in roots
         ] or ["(no reference locations registered)"]
         return {
@@ -1051,17 +1055,21 @@ def _build_step1_per_sample_cli(
     sample: str,
     reference_name: str,
     sample_dir: Path,
+    reference_folder: str | None = None,
 ) -> dict[str, Any]:
-    """Reconstruct the per-sample vsnp3_step1.py invocation."""
+    """Reconstruct the per-sample vsnp3_step1.py invocation. The GUI hands
+    vsnp3 the reference FOLDER as -t (main._vsnp3_reference_arg), so that is
+    what is recorded when it is known; the name otherwise."""
     vsnp3_path = Path(_cfg_path(cfg, "vsnp3_path"))
+    t_value = reference_folder or reference_name
     cmd = (
         f"{vsnp3_path}/bin/vsnp3_step1.py "
         f"-r1 {sample}_R1.fastq.gz -r2 {sample}_R2.fastq.gz "
-        f"-t {reference_name}"
+        f"-t {t_value}"
     )
     return {
         "command": cmd,
-        "flags": ["-t", reference_name],
+        "flags": ["-t", t_value],
         "env_vars": _capture_env_vars_allowlisted(),
         "env_capture_policy": "allowlist_v1",
     }
@@ -1244,7 +1252,8 @@ def dispatch_step1_batch(
         provenance_dir = sample_dir / "_provenance"
         env_for_sample = copy_env_snapshot_into_run(env_shared, provenance_dir)
 
-        cli = _build_step1_per_sample_cli(cfg, sample, reference_name, sample_dir)
+        cli = _build_step1_per_sample_cli(cfg, sample, reference_name, sample_dir,
+                                          reference.get("path"))
 
         dispatch_state = _build_dispatch_state(
             actor=actor,

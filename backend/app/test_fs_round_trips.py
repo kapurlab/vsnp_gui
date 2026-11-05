@@ -112,7 +112,7 @@ def old_edits(step1_dir: Path):
     return edits
 
 
-def old_alias_map(vsnp3_path: Path):
+def old_alias_map(cfg):
     import re
     aliases = {}
 
@@ -127,7 +127,7 @@ def old_alias_map(vsnp3_path: Path):
         if key_lc in name.lower() and key_lc not in existing.lower():
             aliases[key] = name
 
-    for ref in m.list_references(vsnp3_path):
+    for ref in m.list_references(cfg):
         name = ref.get("name")
         base = Path(ref.get("path", ""))
         if not name or not base.exists():
@@ -424,12 +424,13 @@ def test_alias_map(root: Path):
     os.symlink(refs / "shared", refs / "mtbc0_v1.1" / "linked")          # not descended, as rglob
     vsnp3 = root / "vsnp3"
     touch(vsnp3 / "dependencies" / "reference_options_paths.txt", f"{refs}\n".encode())
-    check(m._build_reference_alias_map(vsnp3), old_alias_map(vsnp3), "the map is the one rglob built")
-    first = m._reference_alias_map(vsnp3)
+    rcfg = {"vsnp3_path": str(vsnp3)}   # no site list: vsnp3's own list is read
+    check(m._build_reference_alias_map(rcfg), old_alias_map(rcfg), "the map is the one rglob built")
+    first = m._reference_alias_map(rcfg)
     check("NZ_CP007682" in first, True, "the memoised map is complete")
     time.sleep(0.01)
     touch(refs / "new_ref" / "NEW.fasta", b">c\nA\n")                    # changes the root's mtime
-    check("NEW" in m._reference_alias_map(vsnp3), True, "a new reference is seen at once")
+    check("NEW" in m._reference_alias_map(rcfg), True, "a new reference is seen at once")
 
 
 def test_budgets(root: Path):

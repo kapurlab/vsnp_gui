@@ -91,7 +91,13 @@ def dispatch(root: Path, project: Path, **overrides):
     _vsnp3 = root / "vsnp3"
     (_vsnp3 / "bin").mkdir(parents=True, exist_ok=True)
     (_vsnp3 / "bin" / "vsnp3_step2.py").write_text("#!/usr/bin/env python\n", encoding="utf-8")
-    m.load_config = lambda: {"projects_root": str(root), "vsnp3_path": str(_vsnp3)}
+    # vsnp3 is handed the reference FOLDER, found through the reference
+    # locations, so the reference has to be somewhere they list.
+    _refs = root / "refs"
+    (_refs / "AF2122").mkdir(parents=True, exist_ok=True)
+    (_refs / "AF2122" / "AF2122.fasta").write_text(">c\nACGT\n", encoding="utf-8")
+    m.load_config = lambda: {"projects_root": str(root), "vsnp3_path": str(_vsnp3),
+                             "reference_locations": [str(_refs)]}
     m.reference_lock = lambda p: {"references": ["AF2122"]}
     m._step2_reference_audit = lambda cfg, pd_: {
         "project_reference": "", "recoverable": [], "removable": [], "orphans": [], "mixed": False}

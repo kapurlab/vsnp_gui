@@ -134,7 +134,7 @@ def samples(entries):
 def test_reference_matching(cfg):
     """Name-level matching, the layer everything else rests on."""
     print("_same_reference")
-    am = m._reference_alias_map(Path(cfg["vsnp3_path"]))
+    am = m._reference_alias_map(cfg)
     for name, want, why in [
         ("MTBC0_v1", True, "vsnp3's truncated alignment-dir name"),
         ("MTBC0_v1.1", True, "the untruncated FASTA stem"),

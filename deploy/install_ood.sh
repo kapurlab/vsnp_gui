@@ -85,6 +85,11 @@ fi
 TOOLS_DIR="${SITE_ROOT}/tools"
 REFS_DIR="${SITE_ROOT}/refs/vsnp3/reference_options"
 VCF_DB_DIR="${SITE_ROOT}/refs/vsnp3/vcf_db_folders"
+# The site's list of reference locations (vsnp_gui backend/app/refs.py). In a
+# folder of its own so members can be let write the list without being able
+# to rename reference_options/ or vcf_db_folders/ beside it.
+REF_LOCATIONS_DIR="${SITE_ROOT}/refs/vsnp3/locations"
+REF_LOCATIONS="${REF_LOCATIONS_DIR}/reference_locations.txt"
 PROJECTS_DIR="${SITE_ROOT}/projects"
 AUDIT_DIR="${SITE_ROOT}/audit"
 BACKUP_DIR="${SITE_ROOT}/backup"
@@ -113,17 +118,22 @@ run() {
   fi
 }
 
-# _rop_keep_perms OLD NEW: give NEW, a fresh mktemp copy (mode 0600), the
+# _list_keep_perms OLD NEW: give NEW, a fresh mktemp copy (mode 0600), the
 # permissions of OLD, the reference-location list it is about to replace. That
 # way registering a path never takes away access the site granted, and never
 # widens it. The owner and group are kept where this account may set them, and
 # then the mode and, with GNU cp, the ACLs. NFSv4 sites such as Ames grant access
-# through the ACL; the mode alone reads 0600+ there. With no OLD, NEW gets 0644
-# less the umask. GNU tools are tried first, with BSD/macOS fallbacks (bash 3.2).
-_rop_keep_perms() {
-  local old="$1" new="$2" mode
+# through the ACL; the mode alone reads 0600+ there. With no OLD, NEW gets 0664
+# less the umask in a group-writable folder (the members may edit it), else
+# 0644 less the umask: what the backend gives a first list (refs._new_list_mode).
+# GNU tools are tried first, with BSD/macOS fallbacks (bash 3.2).
+_list_keep_perms() {
+  local old="$1" new="$2" mode base=0644
   if [[ ! -e "${old}" ]]; then
-    chmod "$(printf '%o' $(( 0644 & ~$(umask) )))" "${new}"
+    if [[ -n "$(find "$(dirname "${new}")" -maxdepth 0 -perm -020 2>/dev/null)" ]]; then
+      base=0664
+    fi
+    chmod "$(printf '%o' $(( base & ~$(umask) )))" "${new}"
     return
   fi
   # Owner and group first: a chown may clear mode bits, so the mode comes after.
@@ -273,6 +283,7 @@ phase_storage() {
   mkdir_grp "${SITE_ROOT}/refs"            "${ADMINS_GROUP}"  2775
   mkdir_grp "${SITE_ROOT}/refs/vsnp3"      "${ADMINS_GROUP}"  2775
   mkdir_grp "${REFS_DIR}"                  "${ADMINS_GROUP}"  2775
+  mkdir_grp "${REF_LOCATIONS_DIR}"         "${MEMBERS_GROUP}" 2775
   mkdir_grp "${VCF_DB_DIR}"                "${ADMINS_GROUP}"  2775
   mkdir_grp "${PROJECTS_DIR}"              "${MEMBERS_GROUP}" 2775
   mkdir_grp "${AUDIT_DIR}"                 "${ADMINS_GROUP}"  2775
@@ -336,33 +347,35 @@ phase_toolchain() {
     run "${REPO_DIR}/deploy/vsnp3-patches/apply.sh" "${VSNP3_PREFIX}"
   fi
 
-  # 4. register the reference-options path vsnp3 reads at runtime
-  local rop="${VSNP3_PREFIX}/dependencies/reference_options_paths.txt"
+  # 4. register the site's reference folder in the site's reference location
+  #    list. vsnp_gui keeps the list there, beside the reference data, and
+  #    hands vsnp3 the reference folder for each run, so nothing is written
+  #    inside the vsnp3 install: that copy was unwritable for users, reset by
+  #    every conda update, and 0600 after a save. The GUI carries the install's
+  #    own entries into this list once, at its first start (refs.seed_site_list).
   if [[ ${DRY_RUN} -eq 1 ]]; then
-    info "[dry-run] write ${REFS_DIR} -> ${rop}"
+    info "[dry-run] register ${REFS_DIR} in ${REF_LOCATIONS}"
   else
-    run mkdir -p "${VSNP3_PREFIX}/dependencies"
-    if grep -qxF "${REFS_DIR}" "${rop}" 2>/dev/null; then
-      ok "reference path already registered"
+    [[ -d "${REF_LOCATIONS_DIR}" ]] || mkdir_grp "${REF_LOCATIONS_DIR}" "${MEMBERS_GROUP}" 2775
+    if grep -qxF "${REFS_DIR}" "${REF_LOCATIONS}" 2>/dev/null; then
+      ok "reference path already in the site list"
     else
-      # tmp+mv, NOT >>: in a conda env this file is a hardlink into the
-      # package cache, and an in-place append would seed every future vsnp3
-      # env on this machine with this install's paths.
-      # mktemp makes the copy 0600, so the copy takes the old list's mode,
-      # ACL and group before it replaces it (see _rop_keep_perms). Otherwise
-      # every user but the installer loses access to the list.
-      _roptmp="$(mktemp "${rop}.XXXXXX")"
-      if [[ -f "${rop}" ]] && ! cat "${rop}" > "${_roptmp}"; then
-        rm -f "${_roptmp}"
-        die "cannot read ${rop}, so ${REFS_DIR} cannot be added without losing the locations already in it ($(ls -ld "${rop}"))"
+      # tmp+mv, so a reader never sees half a list. mktemp makes the copy 0600,
+      # so it takes the old list's mode, ACL and group before it replaces it
+      # (see _list_keep_perms). Otherwise every user but the installer loses
+      # access to the list.
+      _loctmp="$(mktemp "${REF_LOCATIONS_DIR}/.reference_locations.txt.XXXXXX")"
+      if [[ -f "${REF_LOCATIONS}" ]] && ! cat "${REF_LOCATIONS}" > "${_loctmp}"; then
+        rm -f "${_loctmp}"
+        die "cannot read ${REF_LOCATIONS}, so ${REFS_DIR} cannot be added without losing the locations already in it ($(ls -ld "${REF_LOCATIONS}"))"
       fi
-      echo "${REFS_DIR}" >> "${_roptmp}"
-      if ! _rop_keep_perms "${rop}" "${_roptmp}"; then
-        rm -f "${_roptmp}"
-        die "could not give the new ${rop##*/} the permissions of the old one; ${rop} is unchanged"
+      echo "${REFS_DIR}" >> "${_loctmp}"
+      if ! _list_keep_perms "${REF_LOCATIONS}" "${_loctmp}"; then
+        rm -f "${_loctmp}"
+        die "could not give the new ${REF_LOCATIONS##*/} the permissions of the old one; ${REF_LOCATIONS} is unchanged"
       fi
-      mv -f "${_roptmp}" "${rop}"
-      ok "registered ${REFS_DIR} in ${rop##*/}"
+      mv -f "${_loctmp}" "${REF_LOCATIONS}"
+      ok "registered ${REFS_DIR} in ${REF_LOCATIONS}"
     fi
   fi
 

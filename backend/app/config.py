@@ -99,13 +99,13 @@ def _looks_like_vsnp3(prefix: Path) -> bool:
     """A vsnp3 install is one we can actually RUN, not merely a directory.
 
     Every consumer of vsnp3_path divides into two camps: those that read
-    ``<prefix>/dependencies/reference_options_paths.txt`` (the Reference Editor,
-    refs.list_references) and those that execute ``<prefix>/bin/vsnp3_*.py``.
-    A prefix that satisfies the first and not the second is the worst case: the
-    GUI lists and edits references from it while the run silently falls through
-    to some other vsnp3 on PATH, with its own registry — so an analysis succeeds
-    against reference data the user never edited. Requiring the executable keeps
-    both camps pointed at one install.
+    ``<prefix>/dependencies/`` (the reference templates, and the list that
+    seeds the site's reference locations once, see refs.seed_site_list) and
+    those that execute ``<prefix>/bin/vsnp3_*.py``. A prefix that satisfies the
+    first and not the second is the worst case: the GUI reads from it while the
+    run silently falls through to some other vsnp3 on PATH — so an analysis
+    succeeds against an install the user never chose. Requiring the executable
+    keeps both camps pointed at one install.
     """
     return (prefix / "bin" / "vsnp3_step2.py").is_file()
 
@@ -183,6 +183,7 @@ SITE_DERIVED_KEYS = (
     "vsnp_gui_deploy_path",
     "audit_root",
     "vsnp3_reference_options_root",
+    "reference_locations_file",
 )
 
 
@@ -198,6 +199,11 @@ def site_path_defaults(vsnp3_effective: str = "") -> Dict[str, str]:
         "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
         "audit_root": str(_SITE_ROOT / "audit"),
         "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
+        # The site's list of reference locations (refs.py). In a folder of its
+        # own, so a site can let its members write the list without letting
+        # them rename reference_options/ or vcf_db_folders/ beside it.
+        "reference_locations_file": str(_SITE_ROOT / "refs" / "vsnp3" / "locations"
+                                        / "reference_locations.txt"),
     }
     base = (vsnp3_effective or "").strip() or d["vsnp3_path"]
     d["bcftools_path"] = str(Path(base) / "bin" / "bcftools")
@@ -255,6 +261,9 @@ DEFAULTS: Dict[str, Any] = {
     # Same idea for the vSNP3 install path (Settings: jump between installs;
     # the site default is always offered first and needs no bookmark).
     "saved_vsnp3_paths": [],
+    # This user's own reference locations, searched after the site list's
+    # (refs.py). Where an Add goes when this account cannot write the site list.
+    "reference_locations": [],
     # Explicit user choices for SITE_DERIVED_KEYS — the ONLY path state that
     # persists. Everything else is re-derived from the launch context.
     "path_overrides": {},

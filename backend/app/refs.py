@@ -280,11 +280,89 @@ def site_list_status(cfg: Dict) -> Dict:
     return out
 
 
+# --------------------------------------------------------------------------
+# Home folders: never on the site list, never shown to anyone else
+# --------------------------------------------------------------------------
+#
+# Ames, 2026-11-06: the one-time seed copied /home/tstuber/git/gitlab/
+# tb_rd_regions from vSNP's own list into the site list, so every other user's
+# pane showed it as "cannot open" with a fix box proposing an ACL on
+# /home/tstuber. The user: "I don't like that my home directory is being
+# reference. Of course other users shouldn't see that." So a path in a home
+# folder (under the folder that holds home folders, the parent of this
+# account's home, or under this account's own home) stays on its owner's
+# personal list: Add puts it there, seeding moves it there, an existing site
+# entry moves there when its owner starts vSNP, and every other account never
+# sees, counts, resolves through, or is told to open one. Decided from this
+# account's home alone, no pwd.getpwall(): on AD/SSSD sites that enumerates
+# nothing or everything.
+#
+# A site list that itself lives in a home folder (a laptop's bdtools site in
+# ~/.local/share) is exempt: that site is one user's, and its home paths are it.
+
+def _path_forms(p: str) -> List[str]:
+    out = {os.path.normpath(p)}
+    try:
+        out.add(os.path.realpath(p))
+    except OSError:
+        pass
+    return sorted(f for f in out if f and f != os.sep)
+
+
+def _home_dirs() -> Tuple[List[str], List[str]]:
+    """(this account's home, the folder holding home folders), each spelled as
+    given and as resolved: /home/tstuber and /home on Ames, /Users/x and /Users
+    on macOS. Empty when there is no usable home."""
+    home = os.path.expanduser("~")
+    if not home or not os.path.isabs(home):
+        return [], []
+    home = os.path.normpath(home)
+    return _path_forms(home), _path_forms(os.path.dirname(home))
+
+
+def _under(p: str, roots: List[str]) -> bool:
+    n = _norm(p)
+    return any(n == r or n.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+
+
+def in_home_folder(p: str) -> bool:
+    """Is `p` in a home folder: under the folder holding homes, or this
+    account's own home?"""
+    own, homes = _home_dirs()
+    return _under(p, own) or _under(p, homes)
+
+
+def in_own_home(p: str) -> bool:
+    return _under(p, _home_dirs()[0])
+
+
+def _site_in_home(cfg: Dict) -> bool:
+    f = site_list_file(cfg)
+    return bool(f) and in_home_folder(str(f))
+
+
+def _shared_entry_visible(cfg: Dict, p: str) -> bool:
+    """May this account see `p` as a site (or vSNP install) entry? Not when it
+    is in someone else's home folder."""
+    return not in_home_folder(p) or in_own_home(p) or _site_in_home(cfg)
+
+
+_HOME_NOTE = ("Paths in a home folder stay on your personal list, because other "
+              "users cannot open them.")
+
+# Set when this backend moved its account's home-folder entries off the site
+# list (move_own_home_entries); shown once in the pane. One process per user.
+_moved_note: Optional[str] = None
+
+
 def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
     """The effective list, in resolution order: site, then (until the site list
     is seeded) the install's entries, then personal. A location listed twice is
     kept where it first appears. Returns (entries, notes); entries are
     {path, source}. Never raises on an unreadable list: it becomes a note.
+
+    Site and install entries in another account's home folder are left out
+    (see _shared_entry_visible): not shown, not counted, not resolved through.
 
     Costs one stat (the seed marker) and one read (the site list), plus one
     read of the install's list until the site list is seeded."""
@@ -302,14 +380,15 @@ def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
     site_lines, why = _read_list(site_list_file(cfg), "the site's reference location list")
     if why:
         notes.append(f"The site list cannot be read, so its locations are not shown. {why}")
-    _take(site_lines or [], SITE)
+    _take([p for p in site_lines or [] if _shared_entry_visible(cfg, p)], SITE)
     if not _seeded(cfg):
         lines, why = _read_list(install_list_file(cfg),
                                 "vSNP's own reference list inside its install")
         if why:
             notes.append("vSNP's own list (shown until the site list is set up) "
                          f"cannot be read. {why}")
-        _take(_install_candidates(lines or [])[0], INSTALL)
+        _take([p for p in _install_candidates(lines or [])[0]
+               if _shared_entry_visible(cfg, p)], INSTALL)
     _take(personal_locations(cfg), PERSONAL)
     return out, notes
 
@@ -453,7 +532,7 @@ def _current_umask() -> int:
 # Seeding the site list from vsnp3's own list (once)
 # --------------------------------------------------------------------------
 
-def seed_site_list(cfg: Dict) -> Dict:
+def seed_site_list(cfg: Dict, save: Optional[Callable[[Dict], None]] = None) -> Dict:
     """Carry the install's reference locations into the site list, once.
 
     Runs at backend start and before the first change to the site list. Only
@@ -464,9 +543,13 @@ def seed_site_list(cfg: Dict) -> Dict:
     an admin removes later is never re-added, and nothing reads the install's
     list again. The install's list is never written.
 
-    Returns {"seeded", "added", "left_out", "reason"}.
+    Paths in a home folder never go to the site list: one under this account's
+    own home goes to its personal list (`save` persists that), any other is
+    left out.
+
+    Returns {"seeded", "added", "left_out", "to_personal", "reason"}.
     """
-    out = {"seeded": False, "added": [], "left_out": [], "reason": None}
+    out = {"seeded": False, "added": [], "left_out": [], "to_personal": [], "reason": None}
     f = site_list_file(cfg)
     if f is None or _seeded(cfg):
         return out
@@ -482,6 +565,11 @@ def seed_site_list(cfg: Dict) -> Dict:
         out["reason"] = why
         return out
     candidates, left_out = _install_candidates(lines or [])
+    own_home, other_home = [], []
+    if not _site_in_home(cfg):
+        for c in [c for c in candidates if in_home_folder(c)]:
+            candidates.remove(c)
+            (own_home if in_own_home(c) and save else other_home).append(c)
     current, why = _read_list(f, "the site's reference location list")
     if why:
         out["reason"] = why
@@ -491,11 +579,18 @@ def seed_site_list(cfg: Dict) -> Dict:
     added = [p for p in candidates if _key(p) not in have]
     if added or not status["exists"]:
         _write_list_file(f, current + added)
+    if own_home:
+        have_p = {_key(p) for p in personal_locations(cfg)}
+        cfg[PERSONAL_KEY] = personal_locations(cfg) + [p for p in own_home if _key(p) not in have_p]
+        save(cfg)
     marker_text = (
         f"Seeded from {inst} by {_account()}.\n"
         f"added: {', '.join(added) if added else '(none)'}\n"
         f"left out (upstream author paths not on this machine): "
         f"{', '.join(left_out) if left_out else '(none)'}\n"
+        f"to {_account()}'s personal list (in their home folder): "
+        f"{', '.join(own_home) if own_home else '(none)'}\n"
+        f"left out (in a home folder): {', '.join(other_home) if other_home else '(none)'}\n"
         f"From now on {f.name} is the site's list; {inst.name} inside the vSNP "
         f"install is not read for it again.\n"
     )
@@ -503,10 +598,36 @@ def seed_site_list(cfg: Dict) -> Dict:
         _seed_marker(f).write_text(marker_text, encoding="utf-8")
     except OSError as exc:
         logger.warning("reference locations: seeded %s but could not write its marker (%s)", f, exc)
-    out.update(seeded=True, added=added, left_out=left_out)
+    out.update(seeded=True, added=added, left_out=left_out + other_home, to_personal=own_home)
     if added:
         logger.info("Reference locations: site list %s seeded from %s: %s", f, inst, ", ".join(added))
     return out
+
+
+def move_own_home_entries(cfg: Dict, save: Callable[[Dict], None]) -> List[str]:
+    """Move this account's home-folder entries from the site list to its
+    personal list, when it can write the site list. Runs at backend start, so
+    an entry that an earlier version (or the seed) put on the site list leaves
+    it the next time its owner starts vSNP; nobody else can see it meanwhile.
+    The personal list is saved first, so a failed site write leaves the entry
+    in both lists, never in neither. Returns the paths moved."""
+    global _moved_note
+    if _site_in_home(cfg) or not site_list_status(cfg)["writable"]:
+        return []
+    f = site_list_file(cfg)
+    lines, why = _read_list(f, "the site's reference location list")
+    mine = [p for p in lines or [] if in_own_home(p)]
+    if why or not mine:
+        return []
+    have = {_key(p) for p in personal_locations(cfg)}
+    cfg[PERSONAL_KEY] = personal_locations(cfg) + [p for p in mine if _key(p) not in have]
+    save(cfg)
+    _write_list_file(f, [p for p in lines if p not in mine])
+    _moved_note = (f"Moved {', '.join(mine)} from the site list to your personal list. "
+                   f"{_HOME_NOTE}")
+    logger.info("Reference locations: moved %s from the site list to %s's personal list",
+                ", ".join(mine), _account())
+    return mine
 
 
 # --------------------------------------------------------------------------
@@ -532,10 +653,11 @@ def os_error_text(exc: OSError) -> str:
     return (exc.strerror or str(exc)) + (f": {exc.filename}" if exc.filename else "")
 
 
-def _site_write(cfg: Dict, change: Callable[[List[str]], List[str]]) -> None:
+def _site_write(cfg: Dict, change: Callable[[List[str]], List[str]],
+                save: Optional[Callable[[Dict], None]] = None) -> None:
     """Apply `change` to the site list's lines and save them, seeding first."""
     f = site_list_file(cfg)
-    seed_site_list(cfg)
+    seed_site_list(cfg, save)
     lines, why = _read_list(f, "the site's reference location list")
     if why:
         raise SiteListRefused(why)
@@ -549,7 +671,8 @@ _WHERE = {SITE: "the site list", PERSONAL: "your personal list",
 def add_reference_location(cfg: Dict, new_path: str,
                            save: Callable[[Dict], None]) -> Dict:
     """Add a location: to the site list when this account can write it, else to
-    the personal list. Returns {"list": "site"|"personal"|None, "path", "note"};
+    the personal list. A path in a home folder always goes to the personal list
+    (see in_home_folder). Returns {"list": "site"|"personal"|None, "path", "note"};
     list is None when the location was already there. `save` persists cfg (the
     personal list lives in config.json). An OSError from the site list other
     than a refusal is raised for the caller to explain."""
@@ -560,11 +683,16 @@ def add_reference_location(cfg: Dict, new_path: str,
         if _norm(e["path"]) == _norm(resolved) or _key(e["path"]) == k:
             return {"list": None, "path": resolved,
                     "note": f"{resolved} is already a reference location, on {_WHERE[e['source']]}."}
+    if not _site_in_home(cfg) and (in_home_folder(resolved) or in_home_folder(new_path)):
+        cfg[PERSONAL_KEY] = personal_locations(cfg) + [resolved]
+        save(cfg)
+        return {"list": PERSONAL, "path": resolved,
+                "note": f"Added {resolved} to your personal list. {_HOME_NOTE}"}
     status = site_list_status(cfg)
     reason = status["reason"]
     if status["writable"]:
         try:
-            _site_write(cfg, lambda lines: lines + [resolved])
+            _site_write(cfg, lambda lines: lines + [resolved], save)
             return {"list": SITE, "path": resolved, "note": None}
         except SiteListRefused as exc:
             reason = exc.reason
@@ -607,7 +735,7 @@ def remove_reference_location(cfg: Dict, path: str,
         status = site_list_status(cfg)
         if status["writable"]:
             try:
-                _site_write(cfg, lambda lines: [p for p in lines if not same(p)])
+                _site_write(cfg, lambda lines: [p for p in lines if not same(p)], save)
                 removed.append(SITE)
             except OSError as exc:
                 if not (removed and _refused(exc)):
@@ -799,7 +927,8 @@ def site_list_fix(cfg: Dict) -> Optional[Dict]:
     read; the list is narrower than its folder (0600 in a group-shared folder),
     so other users cannot read it although this account can."""
     f = site_list_file(cfg)
-    if f is None:
+    if f is None or _site_in_home(cfg):
+        # Never a permission change inside a home folder (a laptop's own site).
         return None
     folder = f.parent
     ctx = _FixContext(cfg, folder)
@@ -894,7 +1023,11 @@ def site_list_fix(cfg: Dict) -> Optional[Dict]:
 def location_fix(cfg: Dict, root: Path) -> Optional[Dict]:
     """For a listed folder this account cannot open: who owns what, and the
     chmod or ACL that lets the site's users open it. None when the cause is
-    not permissions (a dangling link, a file, a missing path)."""
+    not permissions (a dangling link, a file, a missing path), and None for
+    anything in a home folder: nobody is told to open someone's home, and
+    another account's home entries are not even listed (_entries)."""
+    if in_home_folder(str(root)):
+        return None
     blocker, whole_tree = None, True
     try:
         root.stat()
@@ -910,7 +1043,7 @@ def location_fix(cfg: Dict, root: Path) -> Optional[Dict]:
                 break
     except OSError:
         return None
-    if blocker is None:
+    if blocker is None or in_home_folder(str(blocker)):
         return None
     site = site_list_file(cfg)
     ctx = _FixContext(cfg, site.parent if site else blocker)
@@ -1079,7 +1212,8 @@ def survey(cfg: Dict) -> Dict:
             "fix": location_fix(cfg, Path(e["path"])) if state == "cannot_open" else None,
         })
     return {"entries": entries, "references": refs, "locations": locations,
-            "site": status, "notes": notes, "site_fix": site_list_fix(cfg)}
+            "site": status, "notes": notes, "site_fix": site_list_fix(cfg),
+            "moved_note": _moved_note}
 
 
 def list_references(cfg: Dict) -> List[Dict]:

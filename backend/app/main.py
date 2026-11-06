@@ -176,6 +176,7 @@ from app.refs import (
     reference_roots,
     find_gff_for_fasta,
     seed_site_list,
+    move_own_home_entries,
     survey as reference_survey,
     site_list_status,
     add_reference_location,
@@ -211,13 +212,20 @@ job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
 # Once per site: carry vsnp3's own reference list (inside its install) into the
 # site's reference location list, which is where the locations live from then
 # on (see refs.py). Only an account that can write the site list does it; the
-# upstream author's shipped paths are left out when they do not exist here.
+# upstream author's shipped paths are left out when they do not exist here, and
+# a path in this account's home folder goes to its personal list instead. Then,
+# every start: this account's home-folder entries already on the site list move
+# to its personal list (other users never see them; see refs.in_home_folder).
 try:
-    _seeded = seed_site_list(cfg)
+    _seeded = seed_site_list(cfg, save_config)
     if not _seeded["seeded"] and _seeded["reason"]:
         logger.info("reference locations: site list not seeded yet: %s", _seeded["reason"])
 except Exception as _exc:  # never block startup on the reference list
     logger.warning("reference locations: site list seeding skipped: %s", _exc)
+try:
+    move_own_home_entries(cfg, save_config)
+except Exception as _exc:  # never block startup on the reference list
+    logger.warning("reference locations: home-folder entries not moved: %s", _exc)
 
 
 def _resolve_app_version() -> str:
@@ -2270,6 +2278,9 @@ def _reference_paths_payload(cfg: Dict, note: Optional[str] = None) -> Dict:
         # (refs.site_list_fix): the problem, the commands with this site's
         # paths filled in, and how to re-check. None when they are right.
         "site_fix": s["site_fix"],
+        # Set once this backend moved this account's home-folder entries from
+        # the site list to its personal list (refs.move_own_home_entries).
+        "moved_note": s["moved_note"],
         "note": note,
     }
 

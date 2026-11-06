@@ -1220,6 +1220,9 @@ export default function App() {
   const [refSiteFix, setRefSiteFix] = useState(null);
   // Where the lists live (paths + the site list's state), for "Stored in".
   const [refStoredIn, setRefStoredIn] = useState(null);
+  // Set when this session moved the user's home-folder locations off the site
+  // list onto their personal list (other users cannot open them).
+  const [refMovedNote, setRefMovedNote] = useState("");
   // Set when the request itself failed (the backend's reason), so the panel
   // says so instead of "No reference locations configured."
   const [refPathsLoadError, setRefPathsLoadError] = useState("");
@@ -2225,6 +2228,7 @@ export default function App() {
     setRefListNotes(data.notes || []);
     setRefSiteFix(data.site_fix || null);
     setRefStoredIn(data.stored_in || null);
+    setRefMovedNote(data.moved_note || "");
     setRefPathsLoadError("");
   }
 
@@ -7503,6 +7507,7 @@ export default function App() {
                     ))}
                     <RefFixBox fix={refSiteFix} personal={refAddTo === "personal"} />
                     <StoredInBlock storedIn={refStoredIn} />
+                    {refMovedNote ? <div className="note" style={{marginBottom:"0.5em"}}>{refMovedNote}</div> : null}
                     {refLocations.map((loc) => {
                       // What does this location actually contribute? Spell it
                       // out so removing a redundant one is an informed act.

@@ -328,6 +328,59 @@ def test_cannot_open(tmp: Path) -> None:
         os.chmod(site.site_list, 0o644)
 
 
+def test_stored_in(tmp: Path) -> None:
+    print("[the payload says where the locations are stored]")
+    site = Site(tmp / "si")
+    loc = (tmp / "si" / "loc").resolve()
+    make_ref(loc, "Brucella_suis3")
+    site.install_list.write_text(f"{loc}\n")
+
+    def stored():
+        return M._reference_paths_payload(site.load())
+
+    os.chmod(site.site_list.parent.parent, 0o555)   # refs/vsnp3: locations/ cannot be made yet
+    try:
+        got = stored()
+        si = got["stored_in"]
+        check("before seeding: the site list's path, 'not created yet'",
+              si["site"] == {"file": str(site.site_list), "state": "not created yet"})
+        check("...this user's config.json and its key",
+              si["personal"] == {"file": str(M.CONFIG_PATH), "key": "reference_locations"})
+        check("...and vSNP's own list, whose entries are the ones shown",
+              si["install"] == {"file": str(site.install_list), "exists": True}
+              and [r["source"] for r in got["locations"]] == ["install"])
+    finally:
+        os.chmod(site.site_list.parent.parent, 0o755)
+
+    refs.seed_site_list(site.load())
+    got = stored()
+    check("after seeding: 'editable', and vSNP's own list is no longer named",
+          got["stored_in"]["site"]["state"] == "editable" and got["stored_in"]["install"] is None
+          and [r["source"] for r in got["locations"]] == ["site"])
+    os.chmod(site.site_list.parent, 0o555)
+    try:
+        check("a folder this account cannot write: 'read-only for you'",
+              stored()["stored_in"]["site"]["state"] == "read-only for you")
+    finally:
+        os.chmod(site.site_list.parent, 0o755)
+    os.chmod(site.site_list, 0)
+    try:
+        check("a list this account cannot read: 'not readable for you'",
+              stored()["stored_in"]["site"]["state"] == "not readable for you")
+    finally:
+        os.chmod(site.site_list, 0o644)
+    site.personal = [str(loc.parent)]
+    got = stored()
+    blocks = {k for k, v in got["stored_in"].items() if v and (k != "site" or v["file"])}
+    check("every row's tag names a list the block shows",
+          {r["source"] for r in got["locations"]} <= blocks)
+
+    cfg = {"vsnp3_path": str(site.vsnp3), "reference_locations": []}
+    out = refs.stored_in(cfg, refs.site_list_status(cfg), "/home/u/.config/vsnp_gui/config.json")
+    check("no site list configured: 'none', and vSNP's own list is named",
+          out["site"] == {"file": None, "state": "none"} and out["install"]["file"] == str(site.install_list))
+
+
 def main() -> int:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         print("SKIP: running as root — permission bits do not refuse root")
@@ -338,6 +391,7 @@ def main() -> int:
         test_seeding(tmp)
         test_site_and_personal(tmp)
         test_cannot_open(tmp)
+        test_stored_in(tmp)
     finally:
         M.load_config, M.save_config = saved
         for d, _dirs, _files in os.walk(tmp):

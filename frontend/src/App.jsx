@@ -476,6 +476,64 @@ function CopyValue({ text, what, caption = "Copy" }) {
   );
 }
 
+// The names of the three lists, shared by the "Stored in" block and the tag on
+// each location row, so a row's tag always names a list the block shows.
+const REF_LIST_LABELS = {
+  site: "site list",
+  personal: "personal list",
+  install: "vSNP's own list",
+};
+
+// One stored-in path: selectable, wraps instead of widening the pane, the full
+// path on hover, and a Copy button.
+function StoredPath({ path, what, suffix }) {
+  return (
+    <div style={{display:"flex", gap:"0.3em", alignItems:"flex-start", minWidth:0}}>
+      <span className="sd-mono" title={path}
+        style={{flex:1, minWidth:0, overflowWrap:"anywhere", wordBreak:"break-all", userSelect:"text",
+          fontFamily:"ui-monospace, SFMono-Regular, Menlo, monospace", fontSize:"0.95em"}}>
+        {path}{suffix || ""}
+      </span>
+      <CopyValue text={path} what={what} />
+    </div>
+  );
+}
+
+// Where the Reference Locations come from (the backend's `stored_in`): the
+// site list and its state for this account, this user's config.json and its
+// key, and vSNP's own list while it is still shown (until the site list is set
+// up). Always visible, so nobody has to guess where a location was saved.
+function StoredInBlock({ storedIn }) {
+  if (!storedIn) return null;
+  const site = storedIn.site || {};
+  const personal = storedIn.personal || {};
+  const install = storedIn.install;
+  const label = (key) => REF_LIST_LABELS[key].charAt(0).toUpperCase() + REF_LIST_LABELS[key].slice(1);
+  return (
+    <div style={{border:"1px solid var(--border)", borderRadius:"4px", padding:"0.35em 0.5em",
+      marginBottom:"0.5em", background:"var(--panel-2)"}}>
+      <div style={{fontWeight:600, marginBottom:"0.2em"}}>Stored in</div>
+      <div style={{marginBottom:"0.25em"}}>
+        <div>{label("site")} <span className="muted">— {site.file ? site.state : "none at this site"}</span></div>
+        {site.file ? <StoredPath path={site.file} what="the site list's path" /> : null}
+      </div>
+      <div style={{marginBottom: install ? "0.25em" : 0}}>
+        <div>{label("personal")} <span className="muted">— yours only</span></div>
+        {personal.file ? (
+          <StoredPath path={personal.file} what="your config file's path"
+            suffix={personal.key ? `, key "${personal.key}"` : ""} />
+        ) : null}
+      </div>
+      {install ? (
+        <div>
+          <div>{label("install")} <span className="muted">— read-only, shown until the site list is set up{install.exists ? "" : " (not found)"}</span></div>
+          <StoredPath path={install.file} what="vSNP's own list's path" />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // Commands an admin pastes as they are: one block, one Copy button.
 function FixCommands({ lines, what }) {
   const text = (lines || []).join("\n");
@@ -497,7 +555,7 @@ function RefFixBox({ fix, personal }) {
   if (!fix) return null;
   const nfs4 = (fix.nfs4_commands || []).length > 0;
   return (
-    <div className="note warning" style={{margin:"0.3em 0 0.5em"}}>
+    <div className="note warning" style={{margin:"0.3em 0 0.5em", minWidth:0, overflowWrap:"anywhere"}}>
       <strong>{fix.problem}</strong>
       <div style={{marginTop:"0.3em"}}>Ask an admin to run:</div>
       <FixCommands lines={fix.commands} what="the commands" />
@@ -510,7 +568,7 @@ function RefFixBox({ fix, personal }) {
       {(fix.notes || []).map((n) => <div key={n} className="muted">{n}</div>)}
       {(fix.recheck || []).length ? (
         <div style={{marginTop:"0.2em"}}>
-          To check afterwards: <code>{fix.recheck.join("; ")}</code>, then reopen Reference Locations.
+          To check afterwards: <code style={{overflowWrap:"anywhere", wordBreak:"break-all"}}>{fix.recheck.join("; ")}</code>, then reopen Reference Locations.
         </div>
       ) : null}
       {personal ? <div style={{marginTop:"0.2em"}}>Until then, locations you add go to your personal list.</div> : null}
@@ -1160,6 +1218,8 @@ export default function App() {
   // What an admin runs when the site list's permissions are not right (null
   // when they are), shown as a box with the commands.
   const [refSiteFix, setRefSiteFix] = useState(null);
+  // Where the lists live (paths + the site list's state), for "Stored in".
+  const [refStoredIn, setRefStoredIn] = useState(null);
   // Set when the request itself failed (the backend's reason), so the panel
   // says so instead of "No reference locations configured."
   const [refPathsLoadError, setRefPathsLoadError] = useState("");
@@ -2164,6 +2224,7 @@ export default function App() {
     setRefSiteReason((data.site && data.site.reason) || "");
     setRefListNotes(data.notes || []);
     setRefSiteFix(data.site_fix || null);
+    setRefStoredIn(data.stored_in || null);
     setRefPathsLoadError("");
   }
 
@@ -2174,6 +2235,7 @@ export default function App() {
     setRefLocations([]);
     setRefListNotes([]);
     setRefSiteFix(null);
+    setRefStoredIn(null);
     setRefPathsLoadError(detail);
   }
 
@@ -7440,6 +7502,7 @@ export default function App() {
                       <div key={n} className="note warning" style={{marginBottom:"0.5em"}}>{n}</div>
                     ))}
                     <RefFixBox fix={refSiteFix} personal={refAddTo === "personal"} />
+                    <StoredInBlock storedIn={refStoredIn} />
                     {refLocations.map((loc) => {
                       // What does this location actually contribute? Spell it
                       // out so removing a redundant one is an informed act.
@@ -7458,10 +7521,10 @@ export default function App() {
                         stat = <span className="muted">no references found here</span>;
                       }
                       const source = loc.source === "personal"
-                        ? { label: "personal", title: "On your personal list: only you see it" }
+                        ? { label: REF_LIST_LABELS.personal, title: "On your personal list (see Stored in): only you see it" }
                         : loc.source === "install"
-                          ? { label: "vSNP install", title: "From the list inside the vSNP install, shown until the site list is set up" }
-                          : { label: "site", title: "On the site list: every vSNP user here sees it" };
+                          ? { label: REF_LIST_LABELS.install, title: "On vSNP's own list inside its install (see Stored in), shown until the site list is set up" }
+                          : { label: REF_LIST_LABELS.site, title: "On the site list (see Stored in): every vSNP user here sees it" };
                       return (
                         <div key={loc.path} className="ref-path-item" style={{display:"flex", alignItems:"flex-start", gap:"0.3em", marginBottom:"0.35em"}}>
                           <div style={{flex:1, minWidth:0}}>

@@ -182,6 +182,7 @@ from app.refs import (
     remove_reference_location,
     unresolved_reference_message,
     install_list_file,
+    stored_in as reference_lists_stored_in,
     os_error_text,
     SiteListRefused,
     PERSONAL as REF_PERSONAL,
@@ -2260,6 +2261,10 @@ def _reference_paths_payload(cfg: Dict, note: Optional[str] = None) -> Dict:
         "add_to": "site" if site["writable"] else REF_PERSONAL,
         "site": site,
         "personal_file": str(CONFIG_PATH),
+        # Where the locations come from, shown always in the pane's "Stored
+        # in" block: the site list's path and state, this user's config.json
+        # and its key, and vSNP's own list until the site list is seeded.
+        "stored_in": reference_lists_stored_in(cfg, site, str(CONFIG_PATH)),
         "notes": s["notes"],
         # What an admin runs when the site list's permissions are not right
         # (refs.site_list_fix): the problem, the commands with this site's

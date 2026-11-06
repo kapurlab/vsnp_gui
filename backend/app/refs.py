@@ -314,6 +314,34 @@ def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
     return out, notes
 
 
+def site_list_state(status: Dict) -> str:
+    """One word (or three) for the site list, as the Reference Locations pane
+    shows it: "editable", "read-only for you", "not readable for you", "not
+    created yet", or "none" when this vSNP has no site list at all. Read off
+    site_list_status, so it never disagrees with where an Add goes."""
+    if not status.get("file"):
+        return "none"
+    if not status.get("readable", True):
+        return "not readable for you"
+    if not status.get("exists"):
+        return "not created yet"
+    return "editable" if status.get("writable") else "read-only for you"
+
+
+def stored_in(cfg: Dict, status: Dict, personal_file: str) -> Dict:
+    """Where the locations shown come from, for the pane's "Stored in" block:
+    {"site": {file, state}, "personal": {file, key}, "install": {file, exists}
+    or None}. The install's list is included only until the site list is
+    seeded, which is exactly when its entries are shown (source "install")."""
+    inst = install_list_file(cfg)
+    return {
+        "site": {"file": status.get("file"), "state": site_list_state(status)},
+        "personal": {"file": personal_file, "key": PERSONAL_KEY},
+        "install": (None if status.get("seeded")
+                    else {"file": str(inst), "exists": bool(_exists(inst))}),
+    }
+
+
 def reference_roots(cfg: Dict) -> List[Path]:
     """The effective reference locations, in resolution order. Cheap: reads the
     lists, opens no reference folder."""

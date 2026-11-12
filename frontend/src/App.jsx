@@ -1682,14 +1682,6 @@ export default function App() {
     [step2SetSamples, step2ProjectSamples, step2PanelSampleSet]
   );
 
-  // Samples carried by more than one file in vcf_database. The backend flags
-  // these per row; a run cannot proceed while any exist, because choosing
-  // between two files would decide the science by directory order.
-  const step2AmbiguousSamples = useMemo(
-    () => [...new Set(vcfSourceSamples.filter((s) => s.ambiguous).map((s) => s.sample))],
-    [vcfSourceSamples]
-  );
-
   // Sample-name matching for the "compare a list" tab.
   //
   // ONE RULE: the part of a name that identifies the sample is everything LEFT
@@ -1864,6 +1856,18 @@ export default function App() {
     }),
     [step2RunSelection, step2Blocked, step2BuildExcluded, step2QcExcluded, step2PanelAccessions]
   );
+
+  // Samples carried by more than one file in vcf_database that this run would
+  // compare. The backend flags these per row; choosing between two files would
+  // decide the science by directory order, so dispatch refuses them — but only
+  // the ones it stages. A duplicate the user has ticked out (or that any tier
+  // excludes) never reaches vsnp3, so it must not hold the Run button.
+  const step2AmbiguousSamples = useMemo(() => {
+    const compared = new Set(step2ComparisonSamples);
+    return [...new Set(vcfSourceSamples
+      .filter((s) => s.ambiguous && compared.has(s.sample))
+      .map((s) => s.sample))];
+  }, [vcfSourceSamples, step2ComparisonSamples]);
 
   // Unclaimed VCFs that this run actually compares. The raw unclaimed set is
   // not the right number to put on screen: once the user acts on the warning
@@ -2106,7 +2110,7 @@ export default function App() {
       const shown = step2AmbiguousSamples.slice(0, 3).join(", ");
       const more = step2AmbiguousSamples.length > 3 ? `, +${step2AmbiguousSamples.length - 3} more` : "";
       return `${step2AmbiguousSamples.length} sample${step2AmbiguousSamples.length === 1 ? " has" : "s have"} two VCFs in `
-        + `${vcfsFolderName || "vcf_database"} (${shown}${more}) — they hold different calls, so remove the one you do not want.`;
+        + `${vcfsFolderName || "vcf_database"} (${shown}${more}) — they hold different calls, so remove the one you do not want, or tick the sample to leave it out of this run.`;
     }
     // Sources are ticked but every sample they name is excluded (Step 1 Results,
     // the build list, or the reference blocklist). vsnp3 would be handed an
@@ -10419,7 +10423,7 @@ export default function App() {
                             ) : null}
                             {s.ambiguous ? (
                               <span
-                                title="Two files in vcf_database claim this sample. They hold different calls, so a run refuses rather than letting directory order choose. Delete or rename the one you do not want."
+                                title="Two files in vcf_database claim this sample. They hold different calls, so a run that compares this sample refuses rather than letting directory order choose. Delete or rename the one you do not want, or tick the sample to leave it out of this run."
                                 style={{color:"var(--danger, #a94442)", fontFamily:"sans-serif", fontStyle:"italic", fontWeight:600}}
                               > — two files for this sample</span>
                             ) : null}

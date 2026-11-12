@@ -149,6 +149,7 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app import ref_contigs
+from app import igv_annotation
 from app import sample_groups
 from app import step1_index
 from app import stats_workbooks
@@ -11443,6 +11444,27 @@ def serve_project_file(project: str, request: Request, path: str = Query(...)):
     suffix = target.suffix.lower()
     media_type = _IGV_SERVE_MEDIA_TYPES.get(suffix, "application/octet-stream")
     return _range_response(target, request, media_type, file_size=st.st_size)
+
+
+@app.get("/api/projects/{project}/igv_annotation")
+def igv_annotation_file(project: str, path: str = Query(...)):
+    """The reference GFF as the IGV window draws it: declared GFF3, each CDS
+    folded into its gene, every gene labelled with its name (igv_annotation.py).
+    The same paths as /serve may be asked for."""
+    requested = Path(path)
+    try:
+        target = requested.resolve()
+    except OSError:
+        target = None
+    if not _serve_path_allowed_forms(requested, _serve_roots(project), resolved=target):
+        raise HTTPException(status_code=400, detail="Path not allowed")
+    if target is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        body = igv_annotation.igv_gff3_bytes(target)
+    except (FileNotFoundError, NotADirectoryError):
+        raise HTTPException(status_code=404, detail="File not found")
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @app.post("/api/projects/{project}/vcf_edit")

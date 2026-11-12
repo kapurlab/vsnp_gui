@@ -12,6 +12,12 @@ function serveUrl(project, absPath) {
   return `${API_BASE}/api/projects/${encodeURIComponent(project)}/serve?path=${encodeURIComponent(absPath)}`;
 }
 
+// The reference GFF rewritten for igv.js (igv_annotation.py): declared GFF3,
+// each CDS folded into its gene, every gene labelled with its name.
+function annotationUrl(project, absPath) {
+  return `${API_BASE}/api/projects/${encodeURIComponent(project)}/igv_annotation?path=${encodeURIComponent(absPath)}`;
+}
+
 // The reads track for one sample. When the backend has samtools, igv.js is
 // pointed at the reads-window endpoint (its "htsget" source) and fetches only
 // the reads overlapping what is on screen; otherwise it reads the BAM by byte
@@ -66,7 +72,7 @@ function describeServeUrl(url) {
       const header = u.searchParams.get("class") === "header";
       return { name: header ? `${sample} header` : `${sample} ${u.searchParams.get("referenceName") || ""}:${u.searchParams.get("start") || 0}-${u.searchParams.get("end") || ""}`, kind: header ? "reads header" : "reads in view" };
     }
-    if (!/\/serve$/.test(u.pathname)) return null;
+    if (!/\/(serve|igv_annotation)$/.test(u.pathname)) return null;
     const name = (u.searchParams.get("path") || "").split("/").pop();
     const lower = name.toLowerCase();
     const kind = lower.endsWith(".bai") || lower.endsWith(".csi") ? "reads index"
@@ -452,12 +458,15 @@ export default function IgvStandalone() {
       // unreachable GFF used to leave the user with no viewer at all, just
       // "IGV failed to load: Error accessing resource … status: 400". The reads
       // and the calls are what they came for; the annotation is an extra.
+      // Always GFF3: the reference GFFs carry no "##gff-version 3" line, and
+      // told "gff" igv.js read their key=value attributes as GFF2, so no gene
+      // had a name. The rewrite it reads now declares GFF3 itself.
       const annotationConfig = referenceGffPath
         ? {
             type: "annotation",
-            format: referenceGffPath.toLowerCase().endsWith(".gff3") ? "gff3" : "gff",
+            format: "gff3",
             name: "Reference annotation",
-            url: serveUrl(refProject, referenceGffPath),
+            url: annotationUrl(refProject, referenceGffPath),
             displayMode: "EXPANDED",
             visibilityWindow: -1,
           }

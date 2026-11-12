@@ -1191,6 +1191,9 @@ export default function App() {
   const [preflight, setPreflight] = useState(null);
   const [preflightError, setPreflightError] = useState("");
   const [pathValidation, setPathValidation] = useState({});
+  // Why the last Settings save was refused (the backend names the folder and
+  // the reason), shown beside Save until the next save attempt.
+  const [settingsSaveError, setSettingsSaveError] = useState("");
   const [showSetup, setShowSetup] = useState(true);
   const [showRowProjects, setShowRowProjects] = useState(true);
   const [showRowStep1, setShowRowStep1] = useState(true);
@@ -3342,6 +3345,7 @@ export default function App() {
         entries: d.entries,
         files: d.files || [],
         disk: d.disk || null,
+        writable: d.writable !== false,
         loading: false
       })))
       .catch((err) => setFolderBrowser((s) => ({ ...s, loading: false, error: err.message, files: [], disk: null })));
@@ -3395,8 +3399,17 @@ export default function App() {
     }
   }
 
+  // A refused save (a Projects root this account cannot write) saves nothing;
+  // say why. The detail names the folder and the reason.
+  async function _configSaveRefusal(res) {
+    if (res.ok) return "";
+    const body = await res.json().catch(() => ({}));
+    return typeof body.detail === "string" ? body.detail : `Settings not saved (HTTP ${res.status}).`;
+  }
+
   async function saveSettings() {
-    await fetch(`${API_BASE}/api/config`, {
+    setSettingsSaveError("");
+    const res = await fetch(`${API_BASE}/api/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3409,6 +3422,12 @@ export default function App() {
         sra: { allow_insecure_https: settings.sra_allow_insecure_https }
       })
     });
+    const refused = await _configSaveRefusal(res);
+    if (refused) {
+      // Keep what was typed, so the one bad field can be corrected.
+      setSettingsSaveError(refused);
+      return;
+    }
     await loadAll();
   }
 
@@ -3417,7 +3436,8 @@ export default function App() {
   async function persistProjectRoots(next) {
     const merged = { ...settings, ...next };
     setSettings(merged);
-    await fetch(`${API_BASE}/api/config`, {
+    setSettingsSaveError("");
+    const res = await fetch(`${API_BASE}/api/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3425,6 +3445,8 @@ export default function App() {
         saved_project_roots: merged.saved_project_roots
       })
     });
+    // Refused: nothing was saved, and the reload below puts the saved values back.
+    setSettingsSaveError(await _configSaveRefusal(res));
     await loadAll();
   }
   function saveCurrentLocation() {
@@ -6607,6 +6629,16 @@ export default function App() {
             <strong>Setup required:</strong> Set vSNP3 path, projects root, and conda env in Settings,
             then click Save &amp; Refresh + Preflight.
           </div>
+        ) : config?.projects_root_problem ? (
+          <div className="panel alert-banner">
+            <strong>Projects root cannot be used:</strong> {config.projects_root_problem}{" "}
+            No project can be created or run there. Choose a folder you can write as the
+            Projects root in Settings, then click Save &amp; Refresh.
+            {config.jobs_dir ? <> Until then job logs are written to <code>{config.jobs_dir}</code>.</> : null}
+            {!showSetup ? (
+              <>{" "}<button className="ghost action" onClick={() => setShowSetup(true)}>Show Settings</button></>
+            ) : null}
+          </div>
         ) : null}
         <section className="status-strip">
           <div className="status-item">
@@ -6765,6 +6797,15 @@ export default function App() {
                     <DiskSpace disk={projectsRootDisk} />
                   </span>
                 </div>
+                {config?.projects_root_problem && settings.projects_root === config.projects_root ? (
+                  <div className="settings-row">
+                    <span />
+                    <span style={{color:"var(--danger)", fontSize:"13px"}}>
+                      {config.projects_root_problem} Choose a folder you can write.
+                    </span>
+                    <span />
+                  </div>
+                ) : null}
                 <div className="settings-row">
                   <label className="label">Saved locations</label>
                   <span style={{display:"flex", alignItems:"center", gap:"6px", flexWrap:"wrap", minWidth:0}}>
@@ -6830,7 +6871,10 @@ export default function App() {
                 </label>
               </div>
             </div>
-            <div style={{display:"flex", justifyContent:"flex-end", marginTop:"12px"}}>
+            <div style={{display:"flex", justifyContent:"flex-end", alignItems:"center", gap:"12px", marginTop:"12px"}}>
+              {settingsSaveError ? (
+                <span role="alert" style={{color:"var(--danger)", fontSize:"13px", flex:"1 1 auto"}}>{settingsSaveError}</span>
+              ) : null}
               <button onClick={saveSettings} title="Save these settings and reload the app with them — a new path only takes effect once this is clicked">Save &amp; Refresh</button>
             </div>
             </section>
@@ -11673,6 +11717,11 @@ export default function App() {
                 </>
               )}
             </div>
+            {folderBrowser.mode !== "files" && !folderBrowser.loading && !folderBrowser.error && folderBrowser.writable === false ? (
+              <div style={{ padding: "6px 16px", fontSize: "13px", color: "var(--danger, #c00)" }}>
+                You cannot write this folder, so no project can be created here. Choose a folder you can write.
+              </div>
+            ) : null}
             {folderBrowser.mode === "files" && (folderBrowser.files || []).length ? (
               <div style={{ padding: "6px 16px", display: "flex", gap: 8, alignItems: "center", fontSize: "12px" }}>
                 <button

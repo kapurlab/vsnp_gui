@@ -167,6 +167,7 @@ from app.projects import (
     # delete_project is deliberately NOT imported — see the note where the
     # delete route used to be. Nothing served over HTTP may remove a project.
     update_project_meta,
+    projects_root_problem,
     resolve_project_dir,
     vcf_db_dir,
     SCOPE_PERSONAL,
@@ -206,9 +207,46 @@ logger = logging.getLogger("uvicorn.error")
 install_request_safety(app)
 
 cfg = load_config()
-projects_root = Path(cfg["projects_root"])
-projects_root.mkdir(parents=True, exist_ok=True)
-job_manager = JobManager(Path(cfg["projects_root"]) / ".jobs")
+
+# Job logs go to <projects_root>/.jobs when this account can write the Projects
+# root, and otherwise to a folder of this user's own beside config.json, so a
+# root it cannot write never stops the app from starting. Every start died on
+# USDA SciComp making /project/<group>/.../.jobs after a read-only group folder
+# was saved as the root, and the only way out was editing config.json by hand.
+# Settings shows the problem (GET /api/config "projects_root_problem").
+FALLBACK_JOBS_DIR = CONFIG_PATH.parent / "jobs"
+
+
+def _jobs_dir_for(cfg_in: Dict) -> Tuple[str, Path]:
+    """(why the Projects root cannot be used or "", where job logs go). Creates
+    the root when it is missing and this account can create it, as startup
+    always has."""
+    problem = projects_root_problem(cfg_in.get("projects_root", ""))
+    if not problem:
+        root = Path(str(cfg_in["projects_root"]).strip())
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            return "", root / ".jobs"
+        except OSError as exc:
+            problem = f"{root} could not be created ({os_error_text(exc)})."
+    return problem, FALLBACK_JOBS_DIR
+
+
+def _place_jobs(cfg_in: Dict) -> str:
+    """Point new job logs where a restart would, and return why the Projects
+    root cannot be used ("" when it can). Called on every Settings read and
+    save, so the logs follow a new root at once, and a root made writable
+    outside the app (a chmod, a new group) is used without a restart."""
+    problem, jobs_dir = _jobs_dir_for(cfg_in)
+    job_manager.use_jobs_dir(jobs_dir)
+    return problem
+
+
+_problem, _jobs_dir = _jobs_dir_for(cfg)
+if _problem:
+    logger.warning("projects root: %s Job logs go to %s until another root is chosen "
+                   "in Settings.", _problem, _jobs_dir)
+job_manager = JobManager(_jobs_dir)
 
 # Once per site: carry vsnp3's own reference list (inside its install) into the
 # site's reference location list, which is where the locations live from then
@@ -2025,10 +2063,14 @@ def get_config():
     cfg["path_defaults"] = site_path_defaults(
         (cfg.get("path_overrides") or {}).get("vsnp3_path", "")
     )
+    # Why the Projects root cannot be used ("" when it can), and where job logs
+    # are going meanwhile; the app shows both until another root is chosen.
+    cfg["projects_root_problem"] = _place_jobs(cfg)
+    cfg["jobs_dir"] = str(job_manager.jobs_dir)
     shared_root = cfg.get("shared_projects_root", "").strip()
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
-        "projects_root": Path(cfg.get("projects_root", "")).is_dir() if cfg.get("projects_root", "").strip() else False,
+        "projects_root": not cfg["projects_root_problem"] and Path(str(cfg["projects_root"]).strip()).is_dir(),
         "shared_projects_root": Path(shared_root).is_dir() if shared_root else None,
         "bcftools_path": _path_is_executable(cfg.get("bcftools_path", "")) if cfg.get("bcftools_path", "").strip() else None,
     }
@@ -2050,6 +2092,23 @@ def _cleaned_path_list(paths: List[str]) -> List[str]:
 @app.post("/api/config")
 def update_config(update: ConfigUpdate):
     cfg = load_config()
+    # A new Projects root this account cannot write is refused before anything
+    # is saved: once saved, every start used to die making <root>/.jobs. The
+    # root already saved is not re-judged, so a Save of other settings is never
+    # held hostage to it; the app reports that one instead (get_config).
+    new_root = None
+    if update.projects_root is not None:
+        new_root = update.projects_root.strip()
+        if new_root.startswith("~"):
+            new_root = str(Path(new_root).expanduser())
+        if new_root != (cfg.get("projects_root") or "").strip():
+            problem = projects_root_problem(new_root)
+            if problem:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Projects root not saved: {problem} Nothing was changed; "
+                           "choose a folder this account can write.",
+                )
     # Site-derived paths: an explicit value is stored as a per-user override;
     # empty — or exactly the site default — clears it, so the setting follows
     # the launch context again (set_path_override in config.py).
@@ -2059,8 +2118,8 @@ def update_config(update: ConfigUpdate):
         set_path_override(cfg, "bcftools_path", update.bcftools_path)
     if update.shared_projects_root is not None:
         set_path_override(cfg, "shared_projects_root", update.shared_projects_root)
-    if update.projects_root is not None:
-        cfg["projects_root"] = update.projects_root
+    if new_root is not None:
+        cfg["projects_root"] = new_root
     if update.saved_project_roots is not None:
         cfg["saved_project_roots"] = _cleaned_path_list(update.saved_project_roots)
     if update.saved_vsnp3_paths is not None:
@@ -2073,6 +2132,9 @@ def update_config(update: ConfigUpdate):
     # the response reflects what the next run will actually use.
     apply_site_paths(cfg)
     save_config(cfg)
+    # New job logs follow the root now, as they would after a restart.
+    cfg["projects_root_problem"] = _place_jobs(cfg)
+    cfg["jobs_dir"] = str(job_manager.jobs_dir)
     return cfg
 
 
@@ -2145,6 +2207,10 @@ def browse_dirs(path: str = "", include_files: bool = False, exts: str = ""):
         "entries": entries,
         "files": files,
         "disk": _disk_usage_for(p),
+        # A hint for the Projects-root picker, from permission bits: one call,
+        # nothing written while browsing. Saving the root makes the real check
+        # (projects_root_problem), which writes.
+        "writable": os.access(p, os.W_OK | os.X_OK),
     }
 
 
@@ -4020,6 +4086,8 @@ def project_create(payload: ProjectCreate):
         project_dir = create_project(_project_roots(cfg), payload.name, scope=scope, reference=reference)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:  # a root this account cannot write: say so, not HTTP 500
+        raise HTTPException(status_code=403, detail=f"Project not created: {os_error_text(e)}")
     # Return the actual (normalized) directory name so the frontend can
     # update its state if the name differs from what the user typed.
     return {"path": str(project_dir), "name": project_dir.name, "scope": scope, "reference": reference}

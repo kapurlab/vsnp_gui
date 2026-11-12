@@ -52,7 +52,12 @@ class JobManager:
 
     def __init__(self, jobs_dir: Path):
         self.jobs_dir = jobs_dir
-        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Never stop the app from starting over a log folder: each job
+            # makes it again before it writes its log (see _run).
+            logger.warning("job log folder %s not created: %s", jobs_dir, exc)
         self._lock = threading.Lock()
         self._jobs: Dict[str, Dict] = {}
         # Per-category concurrency gates. A job dispatched with a category +
@@ -67,6 +72,12 @@ class JobManager:
         # run that sits "queued" for hours is a question — what is it waiting
         # for? — and the answer is here, not in the count.
         self._holders: Dict[str, list] = {}
+
+    def use_jobs_dir(self, jobs_dir: Path) -> None:
+        """Write the logs of jobs started from now on under `jobs_dir`. A job
+        already started keeps its log where it is: its log_path is fixed when
+        it starts, so one run's log is never split across two folders."""
+        self.jobs_dir = jobs_dir
 
     def _get_semaphore(
         self, category: Optional[str], max_concurrent: Optional[int]

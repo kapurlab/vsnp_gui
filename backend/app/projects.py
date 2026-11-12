@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import shutil
+import stat
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -74,6 +76,63 @@ def _normalize_roots(roots: RootsLike) -> List[Root]:
         if p.exists():
             out.append((scope, p))
     return out
+
+
+def _account_name() -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except Exception:
+        return os.environ.get("USER", "") or "this account"
+
+
+def projects_root_problem(root: str) -> str:
+    """Why this account cannot keep projects under `root`; "" when it can.
+
+    Answered by writing, not by reading permission bits: a scratch file is
+    created and removed in `root`, or, when `root` does not exist yet, in the
+    nearest folder above it that does, which is where creating it would write.
+    Mode bits and os.access() miss ACLs, root-squashed NFS, read-only mounts
+    and quotas; an attempt meets all of them. Nothing is left behind, and
+    `root` itself is not created here.
+
+    On USDA SciComp a Projects root of a group folder the account could only
+    read was saved from Settings, and every start after that died making
+    <root>/.jobs; the only way out was editing config.json by hand.
+    """
+    text = str(root or "").strip()
+    if not text:
+        return "No Projects root is set."
+    path = Path(text)
+    if not path.is_absolute():
+        return f"{text} is not a full path; it must start with /."
+    probe = path
+    while True:
+        try:
+            st = probe.stat()
+            break
+        except (FileNotFoundError, NotADirectoryError):
+            if probe.parent == probe:
+                return f"{path} cannot be created: nothing above it exists."
+            probe = probe.parent
+        except OSError as exc:
+            return f"{path} cannot be opened by {_account_name()} ({exc.strerror or exc})."
+    if not stat.S_ISDIR(st.st_mode):
+        return f"{probe} is a file, not a folder."
+    try:
+        fd, scratch = tempfile.mkstemp(prefix=".vsnp_gui_write_check.", dir=str(probe))
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        if probe == path:
+            return f"{path} is not writable by {_account_name()} ({reason})."
+        return (f"{path} does not exist, and {_account_name()} cannot create it: "
+                f"{probe} is not writable ({reason}).")
+    os.close(fd)
+    try:
+        os.unlink(scratch)
+    except OSError:
+        pass
+    return ""
 
 
 def vcf_db_dir(step2_dir: Path) -> Path:

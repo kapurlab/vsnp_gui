@@ -190,9 +190,55 @@ async function describeStep1FilesError(res) {
   try {
     const body = await res.json();
     if (body && body.detail === "imported_vcf") return "imported VCF — no BAM to load";
-    if (body && body.detail === "no_step1") return "no Step 1 outputs";
+    if (body && body.detail === "no_step1") return "no Step 1 folder, and no VCF for it in vcf_database";
+    if (body && body.detail === "imported_vcf_no_reference") {
+      return "no Step 1 folder, and the project has no reference to show its VCF against";
+    }
   } catch (_) { /* fall through */ }
   return `HTTP ${res.status}`;
+}
+
+// Why a sample that loads has no reads track. The viewer used to show its
+// calls track and simply nothing below it, which looks like a load that broke
+// halfway. The reason goes on the track label and in the bar. "no Step 1
+// folder" is the tag the Step 2 sample list puts on the same samples: their
+// calls are the VCF in vcf_database, and no alignment was ever made here.
+function noReadsReason(data) {
+  if (data.bam) return "";
+  return data.kind === "imported_vcf" ? "no Step 1 folder" : "no BAM in its Step 1 folder";
+}
+
+function callsTrackName(displayName, reason) {
+  return reason ? `${displayName} · calls only (${reason})` : `${displayName} · calls`;
+}
+
+// The bar's account of every loaded sample without reads, one sentence per
+// reason, with each sample's VCF path on hover.
+function NoReadsNote({ entries }) {
+  if (!entries.length) return null;
+  const byReason = new Map();
+  for (const e of entries) {
+    if (!byReason.has(e.reason)) byReason.set(e.reason, []);
+    byReason.get(e.reason).push(e);
+  }
+  const title = entries.map((e) => `${e.name}: calls from ${e.vcf || "no VCF"}`).join("\n");
+  return (
+    <span className="igv-page-note" title={title}>
+      {[...byReason.entries()].map(([reason, list]) => {
+        const names = list.map((e) => e.name).join(", ");
+        const one = list.length === 1;
+        return (
+          <span key={reason}>
+            <strong>No reads for {names}</strong>
+            {reason === "no Step 1 folder"
+              ? ` — ${one ? "it has" : "they have"} no Step 1 folder in this project, so there is no alignment to show. `
+                + `${one ? "The calls track is its VCF" : "The calls tracks are their VCFs"} from vcf_database. `
+              : ` — ${one ? "its Step 1 folder holds" : "their Step 1 folders hold"} no BAM file. `}
+          </span>
+        );
+      })}
+    </span>
+  );
 }
 
 export default function IgvStandalone() {
@@ -228,6 +274,8 @@ export default function IgvStandalone() {
 
   const [status, setStatus] = useState(initialTracks.length ? "Loading…" : "No samples specified.");
   const [meta, setMeta] = useState({ reference: "", trackCount: 0 });
+  // Loaded samples that have calls but no reads: { name, reason, vcf }.
+  const [noReads, setNoReads] = useState([]);
   const browserRef = useRef(null);
   const containerRef = useRef(null);
   const projectRef = useRef(initialTracks[0] ? initialTracks[0].project : "");
@@ -272,12 +320,13 @@ export default function IgvStandalone() {
       }
       const displayName = reqProject !== projectRef.current ? `${reqProject}/${sample}` : sample;
       const callsVcf = data.annotated_vcf || data.source_vcf || "";
+      const reason = noReadsReason(data);
       if (callsVcf) {
         try {
           await browserRef.current.loadTrack({
             type: "variant",
             format: "vcf",
-            name: `${displayName} · calls`,
+            name: callsTrackName(displayName, reason),
             url: serveUrl(reqProject, callsVcf),
             indexed: false,
             displayMode: "EXPANDED",
@@ -286,6 +335,7 @@ export default function IgvStandalone() {
         } catch (_) { /* non-fatal: drop the calls track, keep the BAM */ }
       }
       if (data.bam) await browserRef.current.loadTrack(readsTrack(reqProject, sample, `${displayName} · reads`, data));
+      if (reason) setNoReads((prev) => [...prev, { name: displayName, reason, vcf: callsVcf }]);
       loadedRef.current.add(trackKey);
       setMeta((prev) => ({ ...prev, trackCount: loadedRef.current.size }));
       setStatus("");
@@ -477,15 +527,18 @@ export default function IgvStandalone() {
       // bare source_vcf (imports — variant positions still visible, fewer
       // fields on hover). The BAM (reads) is skipped for imported-VCF
       // samples that don't have one.
+      const noReadsNow = [];
       const sampleTracks = tracks.flatMap((t) => {
         const displayName = t.project !== refProject ? `${t.project}/${t.sample}` : t.sample;
         const out = [];
         const callsVcf = t.annotatedVcfPath || t.sourceVcfPath;
+        const reason = noReadsReason(t.files);
+        if (reason) noReadsNow.push({ name: displayName, reason, vcf: callsVcf });
         if (callsVcf) {
           out.push({
             type: "variant",
             format: "vcf",
-            name: `${displayName} · calls`,
+            name: callsTrackName(displayName, reason),
             url: serveUrl(t.project, callsVcf),
             indexed: false,
             displayMode: "EXPANDED",
@@ -540,6 +593,7 @@ export default function IgvStandalone() {
         projectRef.current = refProject;
         for (const t of tracks) loadedRef.current.add(`${t.project}:${t.sample}`);
         setMeta({ reference: refName, trackCount: tracks.length });
+        setNoReads(noReadsNow);
         // The annotation track, now that a failure can only cost the annotation.
         const notes = skipped.length ? [`skipped: ${skipped.join("; ")}`] : [];
         if (annotationConfig) {
@@ -603,6 +657,7 @@ export default function IgvStandalone() {
             {status.endsWith("…") ? <> <Elapsed /></> : null}
           </span>
         ) : null}
+        <NoReadsNote entries={noReads} />
         <IgvTransfers loading={status.endsWith("…")} />
         <ThemeToggle />
       </div>

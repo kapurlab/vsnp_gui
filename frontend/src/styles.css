@@ -2196,6 +2196,7 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
 .igv-page-bar { display:flex; align-items:center; flex-wrap:wrap; gap:.8rem; padding:.5rem .8rem; border-bottom:1px solid var(--border); background:var(--panel); }
 .igv-page-bar .igv-page-meta { color:var(--muted); font-size:.9em; }
 .igv-page-bar .igv-page-status { color:var(--danger); font-size:.9em; }
+.igv-page-bar .igv-page-note { color:var(--text); font-size:.9em; padding:.1rem .55rem; border-left:3px solid var(--warning); }
 .igv-page-bar .igv-page-transfers { display:flex; flex-wrap:wrap; gap:.25rem .9rem; color:var(--muted); font-size:.85em; }
 .igv-page-bar .igv-page-transfer code { font-size:.95em; color:var(--text); }
 .igv-page-bar .theme-switch { margin-left:auto; }

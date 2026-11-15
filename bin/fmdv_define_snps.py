@@ -156,6 +156,21 @@ def signature(members: List[str], pool: List[str], alt: Dict[str, Set[int]],
     return chosen, len(captured_set)
 
 
+def group_name(serotype: str, topotype: str) -> str:
+    """The group label vsnp3 will accept for one topotype.
+
+    vsnp3 makes a directory named after each group and writes that group's
+    FASTA and tree into it, so a group name is a path component. FMDV
+    topotypes carry slashes outside the SAT serotypes, ASIA/G-IX and
+    ME-SA/PanAsia-2 among them, and vsnp3 then tries to open
+    "ASIA1-ASIA/G-IX/ASIA1-ASIA/G-IX-<stamp>.fasta" in a directory that does
+    not exist and the whole Step 2 run dies after the trees are built. Slashes
+    become dashes here; the topotype is still readable and the label is still
+    unique.
+    """
+    return f"{serotype}-{topotype}".replace("/", "-")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lib", required=True)
@@ -230,12 +245,12 @@ def main() -> int:
             # topotype: a sample close to the reference carries no SNP that
             # others lack, and a signature from the other genomes of the
             # topotype would leave such a sample out of its own group.
-            print(f"{ref_sero}-{topo} is the reference's own topotype ({len(by_topo[topo])} other genomes): no group; "
+            print(f"{group_name(ref_sero, topo)} is the reference's own topotype ({len(by_topo[topo])} other genomes): no group; "
                   f"it shows in the all-samples tree")
             continue
         members = by_topo[topo]
         sig, captured = signature(members, pool_labelled, alt, cov, a.max_positions)
-        groups.append((f"{ref_sero}-{topo}", sig, len(members), captured))
+        groups.append((group_name(ref_sero, topo), sig, len(members), captured))
     if unlabelled:
         print(f"{len(unlabelled)} {ref_sero} genomes without a topotype label, used for the serotype tier only")
 

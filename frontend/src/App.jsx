@@ -3192,9 +3192,14 @@ export default function App() {
   // database filtering and import tagging always use the project's reference
   // without the user having to re-select it in the VCF Databases panel.
   useEffect(() => {
-    const projectRef = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    // An FMDV project has no single project reference; its Step 2 comparison
+    // reference plays that part, and it is what box 2 must filter the
+    // reference databases by when the project is reopened.
+    const projectRef = projectReference
+      || (fmdvInfo?.mode === "fmdv" ? (fmdvInfo.step2_reference || "") : "")
+      || (refLock.references.length === 1 ? refLock.references[0] : "");
     if (projectRef) setImportReference(projectRef);
-  }, [projectReference, refLock.references]);
+  }, [projectReference, refLock.references, fmdvInfo]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -9713,6 +9718,14 @@ export default function App() {
                       onChange={async (e) => {
                         const v = e.target.value;
                         setReference(v);
+                        // Box 2 filters the reference databases by
+                        // importReference, which outside FMDV mode comes from
+                        // the project's single reference. An FMDV project has
+                        // none, so without this the databases box stays on
+                        // "not set - select a reference in the Projects panel"
+                        // however the comparison reference is chosen, and the
+                        // ticking below happens where the user cannot see it.
+                        setImportReference(v);
                         // The comparison is this reference's samples: untick
                         // the rest in the build list (persisted, so the
                         // Reference check and Run read the same selection).

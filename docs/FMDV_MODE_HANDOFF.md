@@ -7,6 +7,142 @@ and the measurements. This file is the state: what the branch is, how to
 run it, what is verified, what is not, and the questions that need an
 answer before it is merged.
 
+## Background: NanoFMDV, and the problem it solves
+
+AHI's sequencing protocol is NanoFMDV (Shaw et al. 2025, BMC Genomics,
+doi 10.1186/s12864-025-11938-7; code at `github.com/rjorton/nanofmdv`):
+tiled amplicons over the FMDV genome from a 33-primer scheme, barcoded,
+sequenced on a MinION, and a per-barcode bash pipeline that turns each
+barcode's reads into one typed consensus genome. The pipeline has no SNP
+calling, no comparison between samples and no tree. Its unit of output is
+one consensus FASTA and one row of statistics per barcode.
+
+Per barcode, `nanofmdv_single_barcode.sh` runs:
+
+1. **Reference choice by VP1 vote.** minimap2 (`map-ont`) maps the reads to
+   `fmdv_vp1.fasta`, the VP1 sequences of 79 near-complete genomes drawn
+   from FMDbase at roughly one per lineage. The VP1 with the most mapped
+   reads names the reference; its full genome is pulled from `fmdv.fasta`
+   as `top_ref.fasta`. The reads are also mapped to the 79 complete genomes
+   for statistics.
+2. **Alignment to the chosen genome** with minimap2, secondary and
+   supplementary alignments dropped.
+3. **Primer clipping.** `goprime_comp.py` finds each primer's best binding
+   window on the chosen reference and `goprime_bed.py` writes a BED;
+   `samtools ampliconclip --hard-clip --both-ends --tolerance 50
+   --filter-len 50` clips the alignments, and `samtools fastq` writes the
+   clipped reads back out.
+4. **Draft consensus.** `samtools mpileup` over the clipped BAM, then
+   `VSENSUS.jar` calls a draft at a minimum depth of 10.
+5. **Polished consensus.** `medaka_variant` on the clipped reads against
+   the reference, then `medaka sequence --min_depth 10 --fill_char N`, so
+   positions under ten reads are N.
+6. **Typing.** `blastn` of the consensus against `fmdv-gbbase.fasta`, their
+   collection of 11,153 GenBank FMDV sequences whose headers carry
+   serotype, topotype, country, year and host; the top hits give the
+   serotype and topotype call.
+7. **Statistics** (`depth_charge.py`, `fmdvstats.sh`): depth, coverage,
+   read counts and the BLAST call, one CSV row per barcode.
+
+We built and ran it on 14 November 2026 before writing any code of our
+own. The published install fails in five places (an environment file named
+wrongly, no Java for VSENSUS so the typing column goes silently blank, and
+so on); with a corrected environment the pipeline reproduces the paper's
+own test dataset exactly (`SRR34371563` assembles to `PV524918` at every
+called position). That build and its fixes are documented in the lab's
+`NanoFMDV_test_report_2026-11-14.md`, outside this repository.
+
+What NanoFMDV does not do is the question AHI will ask once more than one
+sample exists: are these viruses the same, and how do they relate to each
+other and to what GenBank holds? That is a reference-mapped SNP question,
+which is what vsnp3 does. So the design is NanoFMDV's per-sample front end
+where it is right, vsnp3 for everything from alignment on, and the two
+joined by a rule vsnp3 did not need for MTBC: the reference is chosen per
+sample, before Step 1, because FMDV lineages are too far apart for one
+reference to serve (section "Why" in `FMDV_MODE.md`).
+
+## What was adopted, what was changed, what was left out
+
+| NanoFMDV stage | In FMDV mode | Why |
+|---|---|---|
+| 79 lineage genomes and their VP1 panel | adopted as the reference library, read from a NanoFMDV checkout at build time | one genome per lineage is the right granularity for a nanopore reference |
+| Reference by VP1 vote, most reads wins | adopted and tightened: first 20,000 reads, primary alignments only, MAPQ 10 or more and 100 aligned bases, the vote counted in aligned bases, a 20-read minimum, whole genomes as fallback, restricted to the project's scope | the same answer on all ten trial samples, in under 1.5 s, with a record of the runner-up, the read identity and the serotype composition |
+| (none) | added: `distant` and `mixed` flags from the vote, both review and never refusal | a sample from a lineage with no close genome must still run; crosstalk and co-infection must be visible |
+| Primer binding sites by the goprime rule, BED per sample | adopted, reimplemented; computed once per reference and primer set and cached; a primer whose best fit is under 0.8 is left out and listed | an unconditional BED clips a random stretch where a serotype-specific primer does not bind |
+| `samtools ampliconclip`, same settings | adopted; unmapped reads pass through | vsnp3's mapping rate must still describe the sample |
+| minimap2 alignment to the chosen genome | replaced by `vsnp3_step1.py -t <lineage folder>` | vsnp3's alignment and calling produce the `_zc.vcf` that Step 2, the groups and the trees need |
+| VSENSUS draft, medaka polish, depth mask 10 | replaced by a consensus built from vsnp3's own calls with a pileup check and the same depth-10 mask; no indels, coordinates stay the reference's | the consensus and the SNP calls then agree by construction; measured identical to medaka's on SAT1 and 99.8% on strains 10 to 14% from their reference. An indel-aware polish for GenBank submission is a later, separate step |
+| blastn typing of the consensus | not adopted; serotype and lineage come from the chooser's VP1 composition | typing is decided before mapping, which is what makes the mapping work. The GenBank collection is used instead for the VP1 context tree and for the same-serotype genome databases |
+| Statistics CSV | replaced by vsnp3's stats and an FMDV QC verdict (genome covered, depth, mapping rate, distant, mixed) | the stock verdict judged an FMDV field sample by bacterial-isolate rules |
+| Shell loop over barcode folders | replaced by a MinKNOW run import into vsnp_gui's one-file-per-sample layout, with a sample sheet | the barcode-to-sample step belongs in the GUI, and it is useful in stock mode too |
+| (none) | added: Step 2 per reference with lineage and GenBank genome databases, defining-SNP groups per topotype, and a VP1 tree with a GenBank context set | the between-sample questions NanoFMDV does not ask |
+
+## Schematic
+
+Per sample. NanoFMDV's pipeline on the left, FMDV mode on the right; the
+dashed line marks where NanoFMDV's part ends and vsnp3 begins.
+
+```mermaid
+flowchart LR
+  subgraph N["NanoFMDV, per barcode"]
+    direction TB
+    n1["reads of one barcode"] --> n2["minimap2 to 79 VP1s<br/>most reads wins"]
+    n2 --> n3["top_ref.fasta"]
+    n3 --> n4["minimap2 to top_ref"]
+    n4 --> n5["goprime BED on top_ref<br/>samtools ampliconclip"]
+    n5 --> n6["mpileup, VSENSUS draft"]
+    n6 --> n7["medaka_variant polish<br/>depth under 10 to N"]
+    n7 --> n8["blastn vs GenBank collection<br/>serotype and topotype"]
+    n8 --> n9["consensus FASTA<br/>stats row"]
+  end
+  subgraph F["FMDV mode, per sample"]
+    direction TB
+    f1["one FASTQ per sample<br/>from the MinKNOW import"] --> f2["fmdv_choose_reference.py<br/>minimap2 to 79 VP1s, aligned bases vote,<br/>within the project's scope"]
+    f2 --> f3["fmdv_reference.json<br/>lineage, identity, serotype share,<br/>distant and mixed flags"]
+    f2 --> f4["reference_options/&lt;lineage&gt;/<br/>made on first use"]
+    f4 --> f5["fmdv_clip_primers.py<br/>goprime rule, cached BED,<br/>samtools ampliconclip"]
+    f5 --> f6["vsnp3_step1.py -t &lt;lineage folder&gt;<br/>stock alignment and calling"]
+    f6 --> f7["sample_zc.vcf<br/>as in every vsnp3 project"]
+    f6 --> f8["fmdv_consensus.py<br/>vsnp3 calls plus pileup check,<br/>depth under 10 to N, VP1 slice"]
+    f8 --> f9["consensus FASTA, VP1 FASTA<br/>fmdv_consensus.json"]
+    f7 --> f10["QC verdict with FMDV thresholds"]
+    f3 --> f10
+  end
+  N -. "adopted: VP1 vote, primer BED rule, ampliconclip, depth mask" .-> F
+```
+
+Per project. Step 2 is stock vsnp3 run once per lineage reference; what is
+new is what sits beside the samples in the comparison, and the VP1 tree.
+
+```mermaid
+flowchart LR
+  subgraph L["Reference library, built once per site"]
+    direction TB
+    l1["NanoFMDV Refs:<br/>79 genomes, 79 VP1s,<br/>GenBank collection, primers"] --> l2["fmdv_reflib.py build<br/>lineages.json, panels, genomes"]
+    l1 --> l3["fmdv_vp1_context.py<br/>VP1 per serotype from the collection,<br/>checked and sliced"]
+    l2 --> l4["fmdv_panel_build.sh &lt;ref&gt;<br/>78 other lineage genomes<br/>as vsnp3 FASTA-mode VCFs"]
+    l1 --> l5["fmdv_genome_db.py --ref<br/>every complete genome of the serotype<br/>as vsnp3 FASTA-mode VCFs"]
+    l4 --> l6["fmdv_define_snps.py<br/>one group per topotype into<br/>define_filter.xlsx"]
+    l5 --> l6
+  end
+  subgraph P["Project"]
+    direction TB
+    p1["samples on lineage reference R<br/>sample_zc.vcf each"] --> p2["Step 2 on R: Build ticks the<br/>databases, Run is stock vsnp3"]
+    p2 --> p3["all-samples tree and matrix,<br/>one tree per topotype group"]
+    p1 --> p4["fmdv_vp1_tree.py<br/>samples' VP1 plus the panel plus<br/>a context set chosen by genetic spread"]
+    p4 --> p5["VP1 tree in the Step 2 run list"]
+    p6["samples on another reference"] --> p7["their own Step 2 on that reference"]
+  end
+  l4 --> p2
+  l5 --> p2
+  l6 --> p2
+  l3 --> p4
+  l2 --> p4
+```
+
+The lab's `FMDV_mode_workflow.html` draws the same two levels with the
+divergence scale that motivates them; it is outside this repository.
+
 ## What the branch is
 
 vsnp_gui gains a project mode, `"mode": "fmdv"` in `project.json`, in which

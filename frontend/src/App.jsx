@@ -9704,6 +9704,18 @@ export default function App() {
                           setStep2BuildExcludedMany(others, true);
                           setStep2BuildExcludedMany([...onRef], false);
                           setTimeout(() => loadStep2ReferenceAudit(), 1200);
+                          // Box 2: of the databases built on this reference,
+                          // tick the one named for its serotype (SAT1 for a
+                          // SAT1-I comparison) and untick the rest, FMDV_all
+                          // included: across serotypes only the recombining
+                          // half of the genome aligns, so that tree says
+                          // nothing about serotype (docs/FMDV_MODE.md).
+                          const sero = v.split("-")[0].toUpperCase();
+                          for (const f of vcfDbFolders.filter((f) => (f.reference || "") === v)) {
+                            const name = (f.path || "").split("/").filter(Boolean).pop() || "";
+                            const want = name.toUpperCase() === sero;
+                            if ((f.enabled !== false) !== want) await toggleVcfDbFolder(f.path);
+                          }
                         }
                         await setFmdvMode(true, undefined);
                         try {

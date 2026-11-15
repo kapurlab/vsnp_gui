@@ -13372,10 +13372,16 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
 
     matcher.prefetch([(e, (sig[0], sig[1])) for _s, e, sig, ref in named if _misnamed(ref)])
     renamed: Dict[str, int] = {}
+    fmdv_project = _project_mode(project_dir) == "fmdv"
     for sample, entry, sig, ref in named:
         if _misnamed(ref) and matcher.matches(entry, (sig[0], sig[1])):
             shown = _resolve_reference_name(ref, alias_map)
-            renamed[shown] = renamed.get(shown, 0) + 1
+            # FMDV mode: a VCF whose recorded name is another library genome
+            # but whose contigs are this reference's is a panel genome called
+            # on this reference (bin/fmdv_panel_build.sh). Expected, not a
+            # note: the page said "renamed copy" once per topotype genome.
+            if not (fmdv_project and _fmdv_is_lib_reference(cfg, shown)):
+                renamed[shown] = renamed.get(shown, 0) + 1
             ref = project_reference
         if ref:
             _note_ref(ref)

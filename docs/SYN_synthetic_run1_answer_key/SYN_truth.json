@@ -1,0 +1,605 @@
+{
+ "synthetic": true,
+ "label": "SYN",
+ "warning": "Simulated reads. Not a real outbreak and not a real sample. Do not cite as one.",
+ "seed": 20261115,
+ "scenario": "all",
+ "depths": [
+  20,
+  200,
+  2000
+ ],
+ "main_founder": {
+  "name": "SAT1-I_KM268899",
+  "length": 8156,
+  "role": "outbreak cluster"
+ },
+ "other_serotype": {
+  "name": "O-EA-2_MH053318",
+  "length": 8160,
+  "role": "barcode crosstalk at 3 percent and co-infection at 30 percent"
+ },
+ "distant_founder": {
+  "accession": "DQ989316",
+  "header": "FMDV-ASIA1-DQ989316.1 ",
+  "length": 8275,
+  "nearest_panel_genome": "ASIA1-NA_MF372126",
+  "identity": {
+   "aligned_identity": 0.8421,
+   "aligned_divergence": 0.1579,
+   "global_identity": 0.8411,
+   "edit_distance": 1315,
+   "matches": 6984,
+   "mismatches": 1262,
+   "internal_indels": 48,
+   "aligned_bases": 8294
+  },
+  "selection_rule": "aligned-base identity (matches / aligned bases), terminal gaps ignored. Global identity is reported and was not the rule. A candidate was kept only if the nearest of the 79 panel genomes was 15 to 20 percent away."
+ },
+ "primers": {
+  "set": "nanofmdv_L.fasta",
+  "min_fit": 0.8,
+  "placed_on_main": 25,
+  "below_fit_on_main": [
+   "L1a-reverse-universal-1-UNI_Rev_2.3",
+   "L3b-forward-A-2-A_UNI_For_6.1",
+   "L3b-forward-Asia1-2-As1_UNI_For_6",
+   "L3b-forward-SAT1-2-SAT1_UNI_For_6A",
+   "L1b-reverse-Asia1-3-As1_UNI_Rev_5.2",
+   "L1b-reverse-O/A-3-O_A_UNI_Rev_5",
+   "L4-reverse-universal-3-UNI_Rev_14A",
+   "L6b-reverse-universal-3-FMD_UNI_RT"
+  ],
+  "amplicons_on_main": [
+   {
+    "pool": "S",
+    "forward": "S-forward-universal-1-SFrag_F.1",
+    "reverse": "S-reverse-universal-1-SFrag_R.1",
+    "start": 0,
+    "end": 327,
+    "length": 327,
+    "forward_fit": 1.0,
+    "reverse_fit": 1.0
+   },
+   {
+    "pool": "L1a",
+    "forward": "L1a-forward-universal-1-UNI_For_1.1",
+    "reverse": "L1a-reverse-universal-1-UNI_Rev_2.4",
+    "start": 314,
+    "end": 1373,
+    "length": 1059,
+    "forward_fit": 0.895,
+    "reverse_fit": 0.9
+   },
+   {
+    "pool": "L1b",
+    "forward": "L1b-forward-universal-3-UNI_For_2",
+    "reverse": "L1b-reverse-SAT1/SAT3-3-SAT1_UNI_Rev_5A",
+    "start": 764,
+    "end": 2576,
+    "length": 1812,
+    "forward_fit": 0.95,
+    "reverse_fit": 1.0
+   },
+   {
+    "pool": "L3b",
+    "forward": "L3b-forward-SAT1-2-SAT1_UNI_For_6B",
+    "reverse": "L3b-reverse-universal-2-O_UNI_Rev_11.1",
+    "start": 2290,
+    "end": 4886,
+    "length": 2596,
+    "forward_fit": 1.0,
+    "reverse_fit": 0.966
+   },
+   {
+    "pool": "L4",
+    "forward": "L4-forward-universal-3-UNI_For_10",
+    "reverse": "L4-reverse-universal-3-UNI_Rev_10",
+    "start": 3877,
+    "end": 4445,
+    "length": 568,
+    "forward_fit": 0.955,
+    "reverse_fit": 1.0
+   },
+   {
+    "pool": "L4",
+    "forward": "L4-forward-universal-3-UNI_For_10",
+    "reverse": "L4-reverse-universal-3-UNI_Rev_14B",
+    "start": 3877,
+    "end": 6068,
+    "length": 2191,
+    "forward_fit": 0.955,
+    "reverse_fit": 0.957
+   },
+   {
+    "pool": "L5",
+    "forward": "L5-forward-universal-2-O_UNI_For_13.4",
+    "reverse": "L5-reverse-universal-2-UNI_Rev_17",
+    "start": 5158,
+    "end": 7292,
+    "length": 2134,
+    "forward_fit": 1.0,
+    "reverse_fit": 0.957
+   }
+  ],
+  "scheme_uncovered_1based": [
+   [
+    7293,
+    8156
+   ]
+  ],
+  "scheme_note": "The 3' RT primer does not meet min_fit on these GenBank records (no polyA tail), so the terminal stretch is uncovered on every sample. That gap is the scheme, not the dropout scenario."
+ },
+ "transmission_tree": {
+  "parent": {
+   "SYN-02": "SYN-01",
+   "SYN-03": "SYN-02",
+   "SYN-04": "SYN-02",
+   "SYN-05": "SYN-04"
+  },
+  "edges_substitutions": {
+   "SYN-01->SYN-02": 3,
+   "SYN-02->SYN-03": 0,
+   "SYN-02->SYN-04": 3,
+   "SYN-04->SYN-05": 3
+  },
+  "identical_pair": [
+   "SYN-02",
+   "SYN-03"
+  ],
+  "deletion": {
+   "sample": "SYN-05",
+   "pos1": 1019,
+   "length": 3,
+   "bases": "GCT",
+   "note": "3 nucleotides removed from an insert, not under a primer. The consensus caller is substitution-only, so this deletion is expected to be absent from the consensus."
+  },
+  "cumulative_snps_founder_coordinates": {
+   "SYN-01": [],
+   "SYN-02": [
+    {
+     "pos0": 1762,
+     "pos1": 1763,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 3730,
+     "pos1": 3731,
+     "ref": "G",
+     "alt": "A"
+    },
+    {
+     "pos0": 4620,
+     "pos1": 4621,
+     "ref": "G",
+     "alt": "C"
+    }
+   ],
+   "SYN-03": [
+    {
+     "pos0": 1762,
+     "pos1": 1763,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 3730,
+     "pos1": 3731,
+     "ref": "G",
+     "alt": "A"
+    },
+    {
+     "pos0": 4620,
+     "pos1": 4621,
+     "ref": "G",
+     "alt": "C"
+    }
+   ],
+   "SYN-04": [
+    {
+     "pos0": 1762,
+     "pos1": 1763,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 3730,
+     "pos1": 3731,
+     "ref": "G",
+     "alt": "A"
+    },
+    {
+     "pos0": 4620,
+     "pos1": 4621,
+     "ref": "G",
+     "alt": "C"
+    },
+    {
+     "pos0": 1198,
+     "pos1": 1199,
+     "ref": "T",
+     "alt": "A"
+    },
+    {
+     "pos0": 3607,
+     "pos1": 3608,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 6936,
+     "pos1": 6937,
+     "ref": "G",
+     "alt": "A"
+    }
+   ],
+   "SYN-05": [
+    {
+     "pos0": 1762,
+     "pos1": 1763,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 3730,
+     "pos1": 3731,
+     "ref": "G",
+     "alt": "A"
+    },
+    {
+     "pos0": 4620,
+     "pos1": 4621,
+     "ref": "G",
+     "alt": "C"
+    },
+    {
+     "pos0": 1198,
+     "pos1": 1199,
+     "ref": "T",
+     "alt": "A"
+    },
+    {
+     "pos0": 3607,
+     "pos1": 3608,
+     "ref": "C",
+     "alt": "A"
+    },
+    {
+     "pos0": 6936,
+     "pos1": 6937,
+     "ref": "G",
+     "alt": "A"
+    },
+    {
+     "pos0": 2683,
+     "pos1": 2684,
+     "ref": "T",
+     "alt": "G"
+    },
+    {
+     "pos0": 3628,
+     "pos1": 3629,
+     "ref": "A",
+     "alt": "C"
+    },
+    {
+     "pos0": 6986,
+     "pos1": 6987,
+     "ref": "G",
+     "alt": "C"
+    }
+   ]
+  },
+  "note": "Substitutions are in the insert, not under a primer, so they survive clipping. One substitution on each edge is inside VP1 (3178-3834 on the founder)."
+ },
+ "dropout": {
+  "rule": "Drop the L3b and L4 amplicons. On the main founder that opens a middle gap of about a third of the genome. The scheme's uncovered 3' end is extra and is present on every sample.",
+  "amplicons_dropped": [
+   "L3b:2291-4886",
+   "L4:3878-4445",
+   "L4:3878-6068"
+  ],
+  "intentional_gap_1based_inclusive": [
+   [
+    2577,
+    5158
+   ]
+  ],
+  "intentional_gap_bases": 2582,
+  "intentional_gap_fraction": 0.3166,
+  "uncovered_1based_inclusive": [
+   [
+    2577,
+    5158
+   ],
+   [
+    7293,
+    8156
+   ]
+  ],
+  "uncovered_bases": 3446,
+  "uncovered_fraction": 0.4225
+ },
+ "badread": {
+  "version_note": "Badread nanopore2023 error model and qscore model (R10.4.1).",
+  "identity": "98,99.5,1.5",
+  "length": "30000,1000 so each linear amplicon is read in full; host fragments 1500,200",
+  "adapters": "off (0,0)",
+  "junk_random_chimeras_glitches": 0,
+  "depth_definition": "per amplicon, Badread --quantity {depth}x on that amplicon alone. Overlaps are deeper. The 20x, 200x and 2000x labels are this per-amplicon depth on the clean founder. Other scenarios are 200x."
+ },
+ "host_background": {
+  "fasta": "/home/user/workspace/fmdv_sim/SYN_bovine_NC_037328.1_1000001_1100000.fasta",
+  "source": "Bos taurus chromosome 1, NC_037328.1 positions 1000001-1100000, ARS-UCD2.0. No bovine read set was in the local reference folder, so the background is simulated from this public segment.",
+  "fmdv_read_fraction_target": 0.35
+ },
+ "samples": [
+  {
+   "sample_id": "SYN-01",
+   "barcode": "barcode01",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-02",
+   "barcode": "barcode02",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-03",
+   "barcode": "barcode03",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-04",
+   "barcode": "barcode04",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-05",
+   "barcode": "barcode05",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "deletion_expected_in_consensus": false,
+   "scenario": "clean",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-06",
+   "barcode": "barcode06",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "mix_fraction": 0.03,
+   "mix_note": "under the 5 percent mixed flag, even if the read count exceeds 50",
+   "other_serotype": "O-EA-2_MH053318",
+   "scenario": "crosstalk",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-07",
+   "barcode": "barcode07",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": true,
+   "mix_fraction": 0.3,
+   "other_serotype": "O-EA-2_MH053318",
+   "scenario": "coinfection",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-08",
+   "barcode": "barcode08",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "zero_coverage_intervals_1based": [
+    [
+     2577,
+     5158
+    ],
+    [
+     7293,
+     8156
+    ]
+   ],
+   "zero_coverage_fraction": 0.4225,
+   "scenario": "dropout",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-09",
+   "barcode": "barcode09",
+   "chooser_genome_expected": "ASIA1-NA_MF372126",
+   "chooser_note": "VP1 vote, not whole-genome identity, decides the call. The nearest whole genome is recorded. Distant should be true if read identity to the chosen genome is under 0.90.",
+   "distant": true,
+   "mixed": false,
+   "scenario": "distant",
+   "depth": 200
+  },
+  {
+   "sample_id": "SYN-12",
+   "barcode": "barcode12",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean-depth",
+   "depth": 20
+  },
+  {
+   "sample_id": "SYN-13",
+   "barcode": "barcode13",
+   "chooser_genome_expected": "SAT1-I_KM268899",
+   "distant": false,
+   "mixed": false,
+   "scenario": "clean-depth",
+   "depth": 2000
+  }
+ ],
+ "cannot_test": [
+  "adapter trimming (adapters were left off)",
+  "junk, random, chimera and glitch filters (those rates were 0)",
+  "the 3-nt deletion in the consensus (the caller is substitution-only; the key expects a miss)",
+  "a real MinKNOW barcode classification error beyond the planted crosstalk fraction",
+  "live GUI scores, unless this folder is imported on the lab server"
+ ],
+ "written": "2026-11-15T16:47:54",
+ "run_counts": [
+  {
+   "sample_id": "SYN-01",
+   "barcode": "barcode01",
+   "fmdv_reads": 1408,
+   "other_serotype_reads": 0,
+   "bovine_reads": 2615,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode01_chunk000.fastq.gz",
+    "SYN_barcode01_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-02",
+   "barcode": "barcode02",
+   "fmdv_reads": 1408,
+   "other_serotype_reads": 0,
+   "bovine_reads": 2615,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode02_chunk000.fastq.gz",
+    "SYN_barcode02_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-03",
+   "barcode": "barcode03",
+   "fmdv_reads": 1408,
+   "other_serotype_reads": 0,
+   "bovine_reads": 2615,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode03_chunk000.fastq.gz",
+    "SYN_barcode03_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-04",
+   "barcode": "barcode04",
+   "fmdv_reads": 1409,
+   "other_serotype_reads": 0,
+   "bovine_reads": 2617,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode04_chunk000.fastq.gz",
+    "SYN_barcode04_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-05",
+   "barcode": "barcode05",
+   "fmdv_reads": 1408,
+   "other_serotype_reads": 0,
+   "bovine_reads": 2615,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode05_chunk000.fastq.gz",
+    "SYN_barcode05_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-06",
+   "barcode": "barcode06",
+   "fmdv_reads": 1452,
+   "other_serotype_reads": 44,
+   "bovine_reads": 2697,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode06_chunk000.fastq.gz",
+    "SYN_barcode06_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-07",
+   "barcode": "barcode07",
+   "fmdv_reads": 2011,
+   "other_serotype_reads": 603,
+   "bovine_reads": 3735,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode07_chunk000.fastq.gz",
+    "SYN_barcode07_chunk001.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-08",
+   "barcode": "barcode08",
+   "fmdv_reads": 805,
+   "other_serotype_reads": 0,
+   "bovine_reads": 1495,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode08_chunk000.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-09",
+   "barcode": "barcode09",
+   "fmdv_reads": 1005,
+   "other_serotype_reads": 0,
+   "bovine_reads": 1866,
+   "fmdv_read_fraction": 0.3501,
+   "chunks": [
+    "SYN_barcode09_chunk000.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-12",
+   "barcode": "barcode12",
+   "fmdv_reads": 147,
+   "other_serotype_reads": 0,
+   "bovine_reads": 273,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode12_chunk000.fastq.gz"
+   ]
+  },
+  {
+   "sample_id": "SYN-13",
+   "barcode": "barcode13",
+   "fmdv_reads": 14058,
+   "other_serotype_reads": 0,
+   "bovine_reads": 26108,
+   "fmdv_read_fraction": 0.35,
+   "chunks": [
+    "SYN_barcode13_chunk000.fastq.gz",
+    "SYN_barcode13_chunk001.fastq.gz",
+    "SYN_barcode13_chunk002.fastq.gz",
+    "SYN_barcode13_chunk003.fastq.gz",
+    "SYN_barcode13_chunk004.fastq.gz",
+    "SYN_barcode13_chunk005.fastq.gz",
+    "SYN_barcode13_chunk006.fastq.gz",
+    "SYN_barcode13_chunk007.fastq.gz",
+    "SYN_barcode13_chunk008.fastq.gz",
+    "SYN_barcode13_chunk009.fastq.gz",
+    "SYN_barcode13_chunk010.fastq.gz"
+   ]
+  }
+ ],
+ "run_folder": "/home/user/workspace/fmdv_sim/synthetic_run1"
+}

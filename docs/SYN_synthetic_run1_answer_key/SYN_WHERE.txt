@@ -1,0 +1,6 @@
+SYN simulated run. Not a real outbreak and not a real sample.
+
+Built 15 November 2026 with bin/fmdv_simulate.py --seed 20261115.
+This copy was written off WGS3 because that server was not reachable from the session that built it.
+Intended server path, not written by this session: ~/fmdv_run_test/synthetic_run1 on kapurlab-wgs3, with this answer key beside it.
+Do not import this into AHI_walkthrough or FMDV_test_run2.

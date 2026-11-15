@@ -263,6 +263,22 @@ parallel. Against the reference they carry 7 to 840 SNPs; MT602086.1
 7 positions genome-wide. The 1,471 genomes across serotypes mean an O
 reference would get about 900.
 
+Run through vsnp3 step2 directly (run `2026-11-15_07-36-54_SNP-SAT1-genbank`
+in the AHI walkthrough: the three SAT1 samples, the eight panel VCFs and
+the 39 GenBank VCFs, the same command the GUI issues), the 50 VCFs gave a
+51-taxon alignment of 2,707 positions in ten seconds. The samples sit 0 to
+1 SNP from MT602086.1 and 6 to 7 from the reference; the next genome is
+383 SNPs away (SAT1-XI_MH053323), then the Cameroon topotype X genomes at
+about 405. Two things the run showed. The three test samples and
+MT602086.1 are the same virus to within sequencing error, which is what a
+within-lineage comparison is for and what the nine-genome database could
+not say. And the defining SNP signatures, derived from one genome per
+topotype, caught two of the 39 GenBank genomes (OP105164.1 into SAT1-III,
+LC770123.1 into SAT1-VII) and none of the seven genomes labelled topotype
+III, so they are that one genome's private SNPs, as the Defining SNPs
+paragraph predicted. They should be rederived from the larger set before
+anyone reads a group tree.
+
 **Defining SNPs** (`bin/fmdv_define_snps.py --lib <lib> --ref <ref>`): the
 MTBC grouping mechanism carried over. vsnp3 reads row 1 of the
 define_filter workbook as a group's signature, one or more positions that

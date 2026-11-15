@@ -99,9 +99,10 @@ def _barcode_dirs(d: Path) -> Dict[str, Path]:
     return out
 
 
-def _find_fastq_pass(run_dir: Path, depth: int = 3) -> Optional[Path]:
+def _find_fastq_pass(run_dir: Path, depth: int = 4) -> Optional[Path]:
     """The first fastq_pass folder at or under run_dir, searched breadth-first
-    to `depth` levels (MinKNOW nests experiment/sample/run_id/fastq_pass)."""
+    to `depth` levels: MinKNOW writes experiment/sample/run_id/fastq_pass, so
+    from the experiment folder it sits four levels down."""
     if run_dir.name == "fastq_pass":
         return run_dir
     level = [run_dir]

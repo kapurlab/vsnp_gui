@@ -2132,7 +2132,17 @@ export default function App() {
     // different references carry different coordinates, and a matrix built
     // across them is meaningless rather than merely imperfect. An audit that
     // could not run (`error`) is NOT a veto — see loadStep2ReferenceAudit.
-    if (step2RefAudit && step2RefAudit.mixed) {
+    // FMDV mode: samples legitimately sit on several lineage references, and
+    // the question is whether THIS run's samples share one. When every sample
+    // the run would compare is on the chosen comparison reference, the set's
+    // other references are not a veto.
+    const fmdvRunOnOneRef = fmdvOn && fmdvInfo?.step2_reference
+      && step2ComparisonSamples.length > 0
+      && (() => {
+        const onRef = new Set((refLock.samples_by_reference || {})[fmdvInfo.step2_reference] || []);
+        return step2ComparisonSamples.every((s) => onRef.has(typeof s === "string" ? s : s.sample));
+      })();
+    if (step2RefAudit && step2RefAudit.mixed && !fmdvRunOnOneRef) {
       const n = (step2RefAudit.recoverable || []).length
         + (step2RefAudit.removable || []).length
         + (step2RefAudit.orphans || []).length;
@@ -2152,6 +2162,7 @@ export default function App() {
     selectedProject, settingsReady, reference, projectReference, selected,
     step2VcfCount, step2RunSelection, step2ComparisonSamples, step2Mode,
     step2RefAudit, step2RefAuditBusy, step2AmbiguousSamples, vcfsFolderName, step2Load,
+      fmdvOn, fmdvInfo, refLock,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -9683,6 +9694,17 @@ export default function App() {
                       onChange={async (e) => {
                         const v = e.target.value;
                         setReference(v);
+                        // The comparison is this reference's samples: untick
+                        // the rest in the build list (persisted, so the
+                        // Reference check and Run read the same selection).
+                        const byRef = refLock.samples_by_reference || {};
+                        const onRef = new Set(byRef[v] || []);
+                        const others = Object.entries(byRef).filter(([r]) => r !== v).flatMap(([, ss]) => ss);
+                        if (v) {
+                          setStep2BuildExcludedMany(others, true);
+                          setStep2BuildExcludedMany([...onRef], false);
+                          setTimeout(() => loadStep2ReferenceAudit(), 1200);
+                        }
                         await setFmdvMode(true, undefined);
                         try {
                           const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`, {

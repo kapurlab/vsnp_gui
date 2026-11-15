@@ -17,7 +17,8 @@ Steps, per sample:
      of clipping a random stretch of genome.
   2. minimap2 map-ont to the reference, primary alignments only.
   3. samtools ampliconclip --hard-clip --both-ends --tolerance 50
-     --filter-len 50 (NanoFMDV's settings), reads back out with
+     --filter-len 50 (NanoFMDV's settings, minus --no-excluded, which
+     would drop unmapped reads and with them the mapping rate), back out with
      samtools fastq, gzipped, into <sample dir>/fmdv_clip/.
   4. fmdv_clip.json beside them: reads in and out, primers placed, primers
      below the fit floor, the BED used.
@@ -181,7 +182,7 @@ def main() -> int:
             _err(f"clip: alignment failed, see {log}"); return 1
         subprocess.run([tools["samtools"], "index", str(bam)], stderr=lg, check=False)
         c1 = subprocess.Popen([tools["samtools"], "ampliconclip", "--hard-clip", "--both-ends", "--tolerance", "50",
-                               "--filter-len", "50", "--no-excluded", "-b", str(bed), str(bam)],
+                               "--filter-len", "50", "-b", str(bed), str(bam)],
                               stdout=subprocess.PIPE, stderr=lg)
         c2 = subprocess.run([tools["samtools"], "sort", "-@", str(a.threads), "-o", str(clipped_bam), "-"], stdin=c1.stdout, stderr=lg)
         c1.stdout.close()

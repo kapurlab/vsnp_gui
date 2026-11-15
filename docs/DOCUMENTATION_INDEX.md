@@ -21,6 +21,11 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
 - Based on official vSNP3 publication
 - Includes quality control guidelines and best practices
 
+### **For FMDV (foot-and-mouth disease virus) projects**
+👉 Start with: **[FMDV_MODE_HANDOFF.md](FMDV_MODE_HANDOFF.md)**
+- State of the `fmdv-mode` branch: setup, trial walkthrough, what is verified, what remains
+- Design and measurements: **[FMDV_MODE.md](FMDV_MODE.md)**
+
 ### **For Alpha Testers / Collaborators**
 👉 Start with: **[ALPHA_TESTING.md](ALPHA_TESTING.md)**
 - Quick setup guide for collaborators

@@ -307,3 +307,127 @@ that started it.
 at the folder holding the vsnp3 scripts. It does not select the
 interpreter those scripts run under. Those are two different things and
 only one of them is visible in the interface.
+
+## Step 6. Step 1 ran: primer clipping, alignment and consensus
+
+With the environment fixed the nine samples ran. Seven finished in 41 to
+123 seconds each; the two 3.9 million read oral swab samples took longer.
+Eight ran at once, which is the Max parallel setting.
+
+### Primer clipping
+
+The clipper finds each primer's best binding site on the reference the
+chooser picked, then removes the primer-derived bases from the ends of
+every read. It is done per sample because the tiled scheme binds
+differently on every lineage.
+
+Nearly every read survives. On SRR13498122, 3,892,000 reads went in and
+3,891,829 came out, with 27 of the 33 primers placed and 6 left out
+because their best fit on this reference fell below 0.8.
+
+**Read the "below fit" number.** A primer left out is a primer that does
+not bind this lineage well enough to trust its coordinates. Leaving it out
+is the safe choice: an unconditional clip would cut a random stretch of
+genome. But it also means those amplicon ends keep their primer bases, and
+any variant under them reads as the primer, not as the virus. Six of 33 is
+normal for a strain this far from the library genome. If you see most of
+the primers below fit, the reference is wrong for the sample, not the
+other way round.
+
+### The consensus
+
+The consensus is built from vsnp3's own calls with a pileup check, and any
+position with fewer than ten reads becomes N. The numbers go to
+`step1/<sample>/fmdv_consensus.json` and the FASTA sits beside it.
+
+| Sample | Reference | Genome called | Substitutions | VP1 called |
+|---|---|---|---|---|
+| PIR2-CC-SRR13498124 | ASIA1-ASIA-Sindh-08 | 42.4% | 79 | 100.0% |
+| PIR2-CC-SRR13498127 | A-ASIA-Sea-97 | 54.1% | 322 | 99.8% |
+| PIR2-CC-SRR13498128 | O-ME-SA-PanAsia | 56.0% | 179 | 99.8% |
+| PIR2-EPI-SRR13498118 | ASIA1-ASIA-Sindh-08 | 63.2% | 111 | 99.7% |
+| PIR2-EPI-SRR13498119 | A-ASIA-Sea-97 | 46.9% | 237 | 99.2% |
+| PIR2-EPI-SRR13498120 | O-ME-SA-PanAsia | 62.4% | 191 | 99.8% |
+| PIR2-OS-SRR13498121 | ASIA1-ASIA-Sindh-08 | 65.4% | 112 | 99.7% |
+
+**This table is the single most useful thing on the page, and it is easy
+to misread.** The genome column says 42 to 65% called. The VP1 column says
+99.2 to 100% called, in every sample. Those are not in conflict and the
+difference is the point of the design.
+
+VP1 is the capsid region that defines serotype and topotype. The reference
+was chosen by matching the sample's VP1 against 79 lineages, so by
+construction the sample sits close to its reference across the capsid, and
+the reads map there at full depth. Elsewhere in the genome, especially in
+the non-structural half, FMDV recombines: a serotype A field strain's 3'
+end can be closer to some other serotype's genome than to the A genome in
+the library. Reads from those regions do not map well to the chosen
+reference, depth falls below ten, and the consensus is masked to N.
+
+**What a user should conclude.** A genome called at 50% with VP1 called at
+100% is a usable result for typing and for a VP1 tree. It is not a
+complete genome and should not be submitted as one. If you need the whole
+genome, this reference library of one genome per lineage is not enough;
+you need a closer genome, which is what the two-level mapping idea in
+`FMDV_MODE.md` is for and which is not built.
+
+**And it is a check on the reference.** If VP1 came out at 60% called
+while the rest of the genome was high, the chooser would have given the
+sample the wrong capsid, and the typing would be worth nothing. Look at
+the VP1 column first.
+
+## Step 7. Read the QC verdict
+
+Press Refresh in Step 1 Results and the table fills.
+
+![Step 1 Results with the FMDV QC verdicts](walkthrough_img/step3_step1_results_qc.jpg)
+
+In FMDV mode the verdict uses FMDV thresholds, not the bacterial-isolate
+ones. The link "QC criteria (FMDV mode)" above the table shows them. For
+this project they are: genome covered 90% to pass and 70% to review,
+average depth 100 to pass and 20 to review, mapping rate 20% to pass, and
+the two FMDV signals, a distant reference and a mixed sample, which raise
+review and never fail.
+
+| Sample | Verdict | Genome covered | Average depth | Mapping | Quality SNPs | Reason given |
+|---|---|---|---|---|---|---|
+| PIR2-CC-SRR13498124 | review | 89.3% | 2,150 | 74.5% | 79 | genome covered under 90% |
+| PIR2-CC-SRR13498127 | review | 84.1% | 1,684 | 36.9% | 326 | genome covered under 90%, distant reference 0.86 |
+| PIR2-CC-SRR13498128 | review | 92.9% | 1,885 | 73.6% | 180 | distant reference 0.89 |
+| PIR2-EPI-SRR13498118 | **pass** | 90.8% | 1,979 | 34.9% | 114 | none |
+| PIR2-EPI-SRR13498119 | review | 75.1% | 1,096 | 30.7% | 264 | genome covered under 90%, distant 0.86, mixed |
+| PIR2-EPI-SRR13498120 | review | 92.9% | 1,118 | 26.8% | 202 | distant reference 0.89 |
+| PIR2-OS-SRR13498121 | review | 80.5% | 1,396 | 76.9% | 117 | genome covered under 90%, mixed |
+| PIR2-OS-SRR13498122 | review | 93.0% | 3,430 | 26.8% | 323 | distant 0.89, mixed |
+| PIR2-OS-SRR13498123 | review | 93.0% | 3,430 | 26.8% | 323 | distant 0.89, mixed |
+
+One pass, eight review, no failures. That is the right answer for this
+project and it is worth saying why.
+
+**Review is not a problem.** It means a human should look. Every reason
+given here is true and each one names something real: a strain far from
+the nearest library genome, or more than one serotype in the tube. None of
+them says the run failed. A site that treats review as failure will throw
+away most of its outbreak samples.
+
+**Two different coverage numbers, and they do not agree.** The table says
+"genome covered" 75 to 93%. The consensus file says 42 to 84% called. The
+first counts positions with at least one read. The second counts positions
+with at least ten, which is the depth the consensus needs before it will
+call a base. A sample can be 93% covered and 56% called. When you report
+coverage, say which one you mean.
+
+**Depth is not the limiting factor here.** Average depth runs from 1,100
+to 3,400, which is a hundred times the threshold. Nothing about these
+samples is short of reads. What limits them is that the virus is 10 to 14%
+away from the nearest genome in a library of 79.
+
+**Mapping rate of 27 to 77% is normal for a swab or an epithelium
+sample.** The rest of the reads are host, bacteria and whatever else was
+on the swab. The FMDV pass threshold is 20% for this reason. The stock
+bacterial threshold of 90% would fail every sample in this project.
+
+**What a user does next.** Take the one that passed and the ones whose
+only reason is a distant reference, and go to Step 2. Treat the two
+oral swab samples flagged mixed at 43/34/23 as unresolved, and look at
+them again on the tree before reporting anything about them.

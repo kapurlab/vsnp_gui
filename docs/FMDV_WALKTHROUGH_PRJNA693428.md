@@ -431,3 +431,181 @@ bacterial threshold of 90% would fail every sample in this project.
 only reason is a distant reference, and go to Step 2. Treat the two
 oral swab samples flagged mixed at 43/34/23 as unresolved, and look at
 them again on the tree before reporting anything about them.
+
+## Step 8. The VP1 tree: where each sample sits among known viruses
+
+The VP1 tree is the view a reference laboratory would recognise. FMDV
+serotypes, topotypes and lineages are defined on VP1, and recombination,
+which is almost all in the non-structural half of the genome, does not
+reach it. A whole-genome tree built on one reference would put samples of
+different serotypes in no clade at all.
+
+It is a command, not a button:
+
+```bash
+python bin/fmdv_vp1_tree.py --project ~/projects/FMDV_test_run2 --lib ~/fmdv_refs --serotype ASIA1
+```
+
+The tree holds the project's samples of that serotype, the library's
+lineage panel, and a selection from the GenBank context set. The selection
+is made on genetics, never on geography: identical sequences collapse to
+one, a backbone of up to twenty per topotype is chosen to span each
+topotype's genetic range, and each sample's twenty nearest sequences are
+added. `VP1_context_selection.tsv` in the output says why each sequence is
+there. The output folder appears in the Step 2 run list and opens in the
+tree viewer.
+
+### ASIA1: three materials, one virus
+
+The ASIA1 tree took about three minutes: 3 samples, 111 other sequences
+from a context set of 678 records that collapsed to 626 distinct ones.
+
+The three samples the chooser called ASIA1 sit at a patristic distance of
+zero from each other, and at zero from two GenBank sequences of the
+ASIA1/ASIA/Sindh-08 lineage, `KU365789` and `OM471664.1`. The next nearest
+sequences, two more Sindh-08 records, sit at 0.0016.
+
+| Sample | Material | Nearest neighbours at distance 0 |
+|---|---|---|
+| PIR2-CC-SRR13498124 | cell culture | the other two samples, ASIA1-ASIA-SINDH-08_KU365789, ASIA1-NA_OM471664.1 |
+| PIR2-EPI-SRR13498118 | epithelium | the other two samples, the same two GenBank records |
+| PIR2-OS-SRR13498121 | oral swab | the other two samples, the same two GenBank records |
+
+**What a user should conclude.** Cell culture, epithelium and oral swab
+from this experiment carry the same VP1, and that VP1 belongs with
+Sindh-08 sequences in GenBank. Three different materials giving one answer
+is the strongest internal check this data offers: it says the result is a
+property of the virus, not of the preparation.
+
+**The oral swab is the interesting one.** Its chooser output was flagged
+mixed, with O holding 14% of its FMDV reads. On the tree its VP1 lands
+exactly where the two clean samples land. The 14% did not move the
+consensus. That is what you want to see, and it is only visible because
+the tree was drawn.
+
+**What a user should not conclude.** A distance of zero on VP1 is not
+proof that two samples are the same virus. VP1 is about 630 nucleotides.
+The SNP distances from Step 2 use the whole mapped genome and are the
+place to look for differences between samples that share a VP1.
+
+## Step 9. Step 2: comparing samples on one reference
+
+Step 2 is stock vsnp3. It takes a folder of VCFs called on one reference
+and builds the SNP matrix and the trees. FMDV mode changes one thing: the
+project's samples are on three different references, so Step 2 runs once
+per reference.
+
+The samples split like this:
+
+| Reference | Samples |
+|---|---|
+| ASIA1-ASIA-Sindh-08_KM268898 | PIR2-CC-SRR13498124, PIR2-EPI-SRR13498118, PIR2-OS-SRR13498121 |
+| A-ASIA-Sea-97_KJ933864 | PIR2-CC-SRR13498127, PIR2-EPI-SRR13498119 |
+| O-ME-SA-PanAsia_HM008917 | PIR2-CC-SRR13498128, PIR2-EPI-SRR13498120, PIR2-OS-SRR13498122, PIR2-OS-SRR13498123 |
+
+**Decide here, and understand the limit.** Samples on different references
+cannot be compared with each other. There is no SNP distance between the
+ASIA1 sample and the O sample, and there should not be: they do not share
+a coordinate system. The tree that relates them is the VP1 tree. The SNP
+matrix relates samples that sit on the same reference.
+
+### Building the databases for a reference
+
+The trials before this one had built Step 2 databases for one SAT1
+reference only. These three had to be made, which is three commands per
+reference and about twenty minutes for all three:
+
+```bash
+bash bin/fmdv_panel_build.sh ASIA1-ASIA-Sindh-08_KM268898
+python bin/fmdv_panel_register.py ASIA1-ASIA-Sindh-08_KM268898
+python bin/fmdv_genome_db.py --source <collection> --lib ~/fmdv_refs --ref ASIA1-ASIA-Sindh-08_KM268898 --register
+python bin/fmdv_define_snps.py --lib ~/fmdv_refs --ref ASIA1-ASIA-Sindh-08_KM268898
+```
+
+That gives three databases for the ASIA1 reference: the 78 other lineage
+genomes (`FMDV_all`), the 4 other ASIA1 lineage genomes (`ASIA1`), and the
+131 complete ASIA1 genomes GenBank holds (`ASIA1_genbank`). For A it is
+78, 18 and 299; for O it is 78, 24 and 896.
+
+### What the screen shows
+
+![The Step 2 Build tab](walkthrough_img/step4_step2_build_databases.jpg)
+
+Pick the comparison reference at the top. The select lists only the
+references this project's samples landed on, with the count: "A-ASIA-Sea-97
+(2 samples)", "ASIA1-ASIA-Sindh-08 (3 samples)", "O-ME-SA-PanAsia (4
+samples)". Choosing one unticks the samples on the other references, so
+the build list holds just the three you are comparing.
+
+Box 2 then lists the databases built for that reference. Tick the
+serotype's own database and the GenBank one. Leave `FMDV_all` unticked:
+across serotypes only the recombining half of the genome aligns, so a tree
+containing all of them says nothing about serotype.
+
+Then Build, which copies the ticked VCFs into `step2/vcf_database`, and
+Run.
+
+**Check the count after Build.** The line under the Build button says what
+went in, for example "vcf_database: 9 | ASIA1_genbank: 131 | ASIA1: 4", and
+the line beside Run says "This run compares 138 of the 144 VCFs in the set
+(6 excluded in the sample list)". On this run the first press of Build
+collected only the 9 project samples, because the tick had not reached the
+server yet. Pressing Build again picked up all 144. Build only ever adds
+files, so pressing it twice is safe, and the count is the thing to read
+before pressing Run.
+
+### Three things went wrong, and all three matter for your site
+
+Step 2 failed three times before it ran. None of the failures was in the
+data. All three are worth knowing about because you will meet them.
+
+**One: no single Python had everything vsnp3 needs.** The server has two
+vsnp3 installations. One has the `svgwrite` module that Step 1 imports and
+not the `plotly` module that Step 2 imports; the other has plotly and not
+svgwrite. Step 1 ran under one and Step 2 died instantly under it. The fix
+was to install plotly into the environment that runs the GUI. Before you
+start, check both steps from a terminal in the environment you will start
+the server in.
+
+**Two: the version of pandas was too new for vsnp3.** With pandas 3,
+vsnp3 raised `KeyError: 0` while building its SNP table and the run died
+after it had built the trees. With pandas 2.3 it runs. This is a vsnp3
+limit, not an FMDV one, and it will bite any vsnp3 installation that gets
+a fresh conda environment.
+
+**Three: FMDV topotype names contain slashes, and vsnp3 uses a group name
+as a folder name.** The defining-SNP groups derived for the ASIA1
+reference were called `ASIA1-ASIA/G-IX` and `ASIA1-ASIA/SINDH-08`. vsnp3
+tried to write `ASIA1-ASIA/G-IX/ASIA1-ASIA/G-IX-<date>.fasta` into a
+folder that does not exist, and the whole run was lost after the trees had
+been built. The SAT1 trials never saw this because SAT1 topotypes are
+roman numerals with no slash in them. This was a fault in our own code and
+it is fixed: group names now use dashes.
+
+**A fourth thing is not a fault but will stop you.** With only three
+samples and small groups, vsnp3 builds no tree at all unless you ask for
+the all-samples table, and then it crashes on a missing attribute while
+writing its summary. Tick **All VCF table (-a)** under Step 2 Options.
+That is the option that produces the tree holding every sample in the
+comparison, which is the tree you want anyway.
+
+### Switching reference: clear the set first
+
+The comparison set folder is permanent and only ever grows. After the
+ASIA1 run it held 144 VCFs. Choosing the A reference and pressing Build
+added the A databases on top, giving 461, and the GUI refused to run:
+
+```
+Run is disabled: 135 VCFs in the comparison set were called against a
+different reference — fix them in Reference check below.
+```
+
+That refusal is correct and it saved the run. Use **Clear comparison set**
+under More options, then Build again. The set came back at 319 VCFs, the
+two A samples with 18 A lineage genomes and 299 GenBank A genomes, and the
+Run line read "This run compares 319 of the 319 VCFs in the set — ready to
+Run".
+
+**For your own run.** One reference at a time, and clear the set between
+references. Read the Run line before you press it. If it says a number you
+do not expect, something is in the folder that you did not put there.

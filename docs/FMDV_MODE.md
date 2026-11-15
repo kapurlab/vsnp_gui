@@ -321,8 +321,8 @@ serotypes only the recombining half aligns.
 collects every sample's `_VP1.fasta` with at least 50% of VP1 called
 (`--min-called`), adds the 79-genome VP1 panel (restricted to the serotype
 when one is given) and, when present, `lib/vp1_context/<SEROTYPE>.fasta`,
-a GenBank comparator set that is a follow-up (634 SAT1 VP1-sized records
-exist against 70 genomes). It aligns with mafft and builds the tree with
+the GenBank comparator set for that serotype (below). It aligns with mafft
+and builds the tree with
 raxmlHPC (GTRGAMMA, 100 rapid bootstraps; the vsnp3 env has it), falling
 back to iqtree then FastTree. Output goes to
 `step2/<stamp>_VP1-tree[-SEROTYPE]/VP1/` with `VP1_input.fasta`,
@@ -341,6 +341,26 @@ seconds and placed every sample with its reference lineage: the SAT1 four
 beside SAT1-I_KM268899, the A pair under A-ASIA-Sea-97, the O pair under
 O-ME-SA-PanAsia, the Asia1 pair with ASIA1-NA and Sindh-08. The SAT1-only
 tree (four samples, nine panel genomes, 2.6 s) is the report view.
+
+The context sets come from NanoFMDV's own GenBank-derived collection
+(Shaw et al. 2025, `pipeline_exec/Refs/BLAST/fmdv-gbbase.fasta`, 11,153
+records), reformatted offline by `bin/fmdv_vp1_context.py --source <that
+file> --lib <library>`. The script keeps records of VP1 length (600 to 700
+nt), names each `<SEROTYPE>-<topotype or NA>_<accession>`, skips the 79
+accessions already in the lineage panel, and writes a `<SEROTYPE>.tsv`
+beside each FASTA with serotype, topotype, country, year, host, accession,
+length and isolate as the source header states them. Records with a plain
+GenBank header (one in six) keep their serotype and accession with
+topotype NA. The build keeps 6,353 of the 11,153 records: O 3,459, A
+1,470, Asia1 477, SAT2 428, SAT1 306, C 164, SAT3 49; 4,497 were not VP1
+length, 224 untyped, 79 in the panel. SAT1 has 13 topotypes, with 207 of
+topotype I and the three Ethiopian topotype IX sequences (FJ798154 to
+FJ798156, ETH/2007) that the panel lacks. `--max-per-lineage N` caps each
+topotype at N sequences, longest first, for a quicker O or A tree. With
+the SAT1 set in place the AHI walkthrough tree holds 318 sequences (nine
+panel genomes, 306 context sequences, three samples) and takes six minutes
+with eight threads; the three samples still sit with SAT1-I_KM268899
+(bootstrap 89), now inside topotype I rather than on a nine-genome tree.
 
 ## Primer clipping
 

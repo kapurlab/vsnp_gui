@@ -609,3 +609,141 @@ Run".
 **For your own run.** One reference at a time, and clear the set between
 references. Read the Run line before you press it. If it says a number you
 do not expect, something is in the folder that you did not put there.
+
+### What the ASIA1 comparison says
+
+The ASIA1 run compared 3 samples against 135 reference genomes and
+finished in 32 seconds. The all-samples tree put the three together, and
+their nearest known relatives are the same GenBank genomes the VP1 tree
+chose, `OM471664`, `OM471665` and `OM471676`.
+
+The SNP distances, counted over the 3,170 variable positions of the
+comparison and ignoring any position masked in either sequence:
+
+|  | CC-124 | EPI-118 | OS-121 | OM471665 |
+|---|---|---|---|---|
+| CC-SRR13498124 | 0 | 26 | 33 | 55 |
+| EPI-SRR13498118 | 26 | 0 | 10 | 35 |
+| OS-SRR13498121 | 33 | 10 | 0 | 20 |
+| ASIA1-NA_OM471665 | 55 | 35 | 20 | 0 |
+
+**Read this against the VP1 tree, because the two say different things.**
+On VP1 the three samples were identical. On the whole mapped genome they
+differ by 10 to 33 SNPs. Both are true: VP1 is 630 nucleotides and the
+comparison here uses several thousand variable positions across the
+genome.
+
+**Be careful about what those SNPs mean.** Nanopore reads sit 10 to 14%
+from this reference, the consensus calls only half the genome, and
+differences of this size can come from sequencing error as easily as from
+the virus. A difference of 10 SNPs between an epithelium sample and an
+oral swab of the same animal is not evidence of two viruses. What this
+table does establish is an upper bound: nothing here is a different
+lineage, and the three samples are closer to each other than any of them
+is to the nearest GenBank genome.
+
+**For your own run.** Use the SNP matrix to answer "are these two samples
+the same outbreak", not "are these two samples the same virus". For the
+second question you need a closer reference and a genome called at more
+than half its length.
+
+### What the A comparison says
+
+The A reference run compared the two A samples against 317 reference
+genomes and finished in under a minute. On VP1 the two samples sit at
+0.0015 from each other, their nearest GenBank sequence is `LC564922.1`,
+and the lineage genome the chooser picked, `A-ASIA/SEA-97 KF450794`, is
+close behind them.
+
+That is the shape you want: the two samples together, their own lineage
+around them, and nothing from another serotype between them and it.
+
+## Step 10. What this run adds to what was already known
+
+The November trials ran six of these samples, the cell culture and
+epithelium ones. This run added the three oral swabs, three Illumina runs
+of the same cell cultures, and the whole Step 2 and tree path on three
+references instead of one. Here is what held and what is new.
+
+**The chooser's calls held, exactly.** All six repeats gave the same
+serotype and the same lineage as before. The three new oral swabs gave
+answers consistent with the material they came from.
+
+**The read fraction and the crosstalk, measured on the first 20,000 reads
+of each sample:**
+
+| Sample | FMDV reads | Second serotype present |
+|---|---|---|
+| PIR2-CC-SRR13498124 | 69.3% | 0.2% |
+| PIR2-CC-SRR13498127 | 23.5% | 2.7% |
+| PIR2-CC-SRR13498128 | 67.4% | 0.5% |
+| PIR2-EPI-SRR13498118 | 32.8% | 3.0% |
+| PIR2-EPI-SRR13498119 | 23.1% | 10.6% |
+| PIR2-EPI-SRR13498120 | 24.9% | 6.7% |
+| PIR2-OS-SRR13498121 | 73.7% | 19.2% |
+| PIR2-OS-SRR13498122 | 36.4% | 56.5% |
+| PIR2-OS-SRR13498123 | 36.4% | 56.5% |
+
+The cell culture and epithelium samples sit where the earlier work put
+them, with crosstalk from 0.2% to 10.6%. The oral swabs are different:
+19.2% and 56.5% of their FMDV reads come from a serotype other than the
+winner. **That is the main thing this run adds.** An oral swab is not a
+cleaner or a dirtier version of an epithelium sample; it is a different
+kind of sample, and the pipeline's mixed flag earns its place on it.
+
+**The identity numbers are lower than the earlier summary suggests, and
+the reason matters.** Read identity to the chosen reference runs from
+0.864 to 0.912 on nanopore. The Illumina runs of three of the same
+samples gave 0.937 to 0.977 on the same references. The virus did not
+move. Roughly five to seven points of that gap is nanopore read error.
+So a statement like "these strains are 15% from the nearest library
+genome" should not be read off nanopore read identity; the genetic
+distance is smaller than the read identity suggests.
+
+**One sample pair is not two samples.** SRR13498122 and SRR13498123 are
+submitted as different serotypes and hold identical reads. Every number
+the pipeline produced for them matches to the last digit: the same
+lineage, f_match 0.3998 and 0.3999, 84.45% of the genome called, 250
+substitutions, 164 ambiguous positions, 14 pileup overrides. That is a
+useful demonstration that the pipeline is deterministic, and it is a
+warning about trusting a submitted label.
+
+**What the chooser says about that pair, carefully.** Their FMDV reads
+are 43.5% ASIA1, 34.0% O and 22.5% A by read count, and by aligned bases
+O leads at 41.0%. The pipeline picked the O lineage because the vote goes
+by aligned bases. It would be wrong to report these as O samples. They are
+a mixture in which no serotype holds a majority, and the honest conclusion
+is that this material cannot be typed from these reads.
+
+### The O VP1 tree, and a trap in it
+
+The O tree is the big one: a context set of 4,930 GenBank VP1 sequences
+that collapsed to 4,508 distinct ones, from which 574 backbone and 20
+neighbour sequences were chosen, giving 619 sequences beside the 4
+samples. It took about twelve minutes.
+
+All four O samples sit at a patristic distance of zero from each other and
+from O/ME-SA/PanAsia GenBank sequences `KJ831678`, `FJ542371` and
+`AJ311723`.
+
+**Here is the trap, and it is the most important thing in this
+walkthrough.** Two of those four samples are the oral swab pair whose
+reads are 43% ASIA1, 34% O and 23% A. On the VP1 tree they look like
+clean O/ME-SA/PanAsia samples, indistinguishable from the cell culture and
+the epithelium sample. The tree cannot show the mixture, because the
+consensus takes the majority base at each position and O had the plurality.
+A reviewer who looked only at this tree would report two more PanAsia
+samples and be wrong.
+
+**What protects you is the chooser's output, not the tree.** The mixed
+flag, the serotype shares and the low `f_match` of 0.40 are the only
+places the mixture appears. So the order of reading matters:
+
+1. `fmdv_reference.json` and the QC verdict first. Is this sample one
+   virus?
+2. The consensus numbers. Is there enough of it to say anything?
+3. The tree and the SNP matrix last. Where does it sit?
+
+A tree is a picture of a consensus sequence. If the consensus is a
+majority vote over a mixture, the picture is of something that was never
+in the animal.

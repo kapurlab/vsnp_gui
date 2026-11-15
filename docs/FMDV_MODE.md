@@ -297,6 +297,42 @@ and the simulation benchmark should score them. Written into
 `reference_options/<ref>/<ref>_define_filter.xlsx`; vsnp3 recognised the
 groups in both the GUI run and a direct run.
 
+Rederived on 15 November 2026 from the 78 panel VCFs plus the 39 GenBank
+SAT1 genomes (`fmdv_define_snps.py` reads both; `--panel-only` restores
+the old behaviour). Three changes came with the larger set. The passing
+rule now mirrors vsnp3's exactly (QUAL over 150, AC 2, single-base REF and
+ALT, MQ 56 or more): reads simulated from a genome sit near MQ 54 at some
+positions, and a QUAL-only rule had chosen positions vsnp3 then ignored, so
+the first rederived workbook formed no SAT1-X group although four genomes
+carried the SNP. A member uncovered at a position abstains instead of
+blocking it, since a topotype 15% from the reference loses a third of the
+genome; and a second signature position is added only when every member
+captured so far carries it, so positions sharpen a group and never shrink
+it. Genomes whose header gives no topotype are neither members nor
+counter-examples. The reference's own topotype still gets no group. Result
+for SAT1-I_KM268899, with the captured count being what vsnp3 then put in
+each group on the 50-VCF run `2026-11-15_07-51-35_SNP-SAT1-genbank-v2`:
+
+| group | labelled genomes | captured | signature |
+|---|---|---|---|
+| SAT1-II | 4 | 2 | 1390, 1207 |
+| SAT1-III | 8 | 4 | 5838 |
+| SAT1-IV | 3 | 2 | 2334 |
+| SAT1-VI | 1 | 1 | 3008, 452, 2874 |
+| SAT1-VII | 2 | 2 (+1 unlabelled) | 1813, 2788 |
+| SAT1-X | 4 | 4 (+4 unlabelled) | 1145 |
+| SAT1-XI | 1 | 1 | 3504, 3444, 3450 |
+
+The unlabelled genomes the signatures caught are informative: the four
+Nigerian 2015 genomes (MF678823 to MF678826, the panel's SAT1-NA among
+them) fell into SAT1-X with the Cameroon 2016 genomes, which is what their
+VP1 distance had suggested, and LC770123.1 fell into SAT1-VII. Half the
+genomes of topotypes II, III and IV are still in no group: those topotypes
+span 1937 to 2009 and no single SNP passing vsnp3's rule is shared by all
+of them and nothing else on this reference. Presence-based grouping on one
+reference has that limit; the all-samples tree does not. No serotype-level
+group exists, as before.
+
 ## Chooser test set
 
 `~/fmdv_run_test` on WGS3 also holds `20261114_FMDV_run2` and

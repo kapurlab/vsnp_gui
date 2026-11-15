@@ -161,22 +161,31 @@ def main() -> int:
     # non-structural region, and a serotype A strain's 3' half can sit closer
     # to an O genome than to the library's A genome. On whole genomes the
     # Pirbright A samples read as 21% "O"; on VP1 they do not.
-    def composition(table: Dict[str, Dict]):
-        n_all = sum(v["reads"] for v in table.values())
+    def composition(table: Dict[str, Dict], key: str = "reads"):
+        n_all = sum(v[key] for v in table.values())
         by_sero: Dict[str, int] = defaultdict(int)
         for k, v in table.items():
-            by_sero[serotype_of(k)] += v["reads"]
+            by_sero[serotype_of(k)] += v[key]
         ranked = sorted(by_sero.items(), key=lambda x: -x[1])
         return n_all, ranked, ({s: round(n / n_all, 4) for s, n in ranked} if n_all else {})
 
     fmdv_reads, _, share_genome = composition(gen)
     vp1_reads, ranked, share = composition(vp1)
+    share_table = vp1
     if vp1_reads < MIXED_MIN_READS:          # too few capsid reads: fall back
         vp1_reads, ranked, share = composition(gen)
+        share_table = gen
     second = ranked[1] if len(ranked) > 1 else None
     mixed = bool(second and vp1_reads and second[1] >= MIXED_MIN_READS
                  and second[1] / vp1_reads >= a.mixed_above)
+    # The same composition weighted by matching bases, which is what the vote
+    # below counts. The two can rank serotypes differently on a mixture: a
+    # serotype can bring more reads but fewer aligned bases, and then the
+    # read-weighted share names one serotype while f_match names another.
+    # Reporting both is what makes that readable instead of contradictory.
+    _, _, share_bases = composition(share_table, "match")
     result.update({"fmdv_reads": fmdv_reads, "vp1_reads": vp1_reads, "serotype_share": share,
+                   "serotype_share_bases": share_bases,
                    "serotype_share_genome": share_genome, "mixed": mixed,
                    "top_vp1": _top(vp1), "top_genome": _top(gen)})
     if mixed:

@@ -9125,7 +9125,26 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
         found = _direct(stored)
         if found is not None:
             return found
-    return _direct(sample)
+    found = _direct(sample)
+    if found is None and sample.endswith("_nanopore"):
+        # vsnp3 3.37 names an ONT sample's VCF <sample>_nanopore_zc.vcf, and
+        # every Step 2 table labels the sample by that stem. The Step 1 folder
+        # is <sample>. Without this, a click on an ONT sample in a Step 2
+        # table opened IGV with "no Step 1 folder" although Step 1 had run.
+        found = _direct(sample[: -len("_nanopore")])
+    return found
+
+
+def _step1_file_stem(sample_dir: Path, sample: str) -> str:
+    """The name Step 1's files inside ``sample_dir`` start with.
+
+    That is the sample name, except when the caller holds a Step 2 label
+    <sample>_nanopore (see _resolve_sample_dir): the stats, BAM and VCFs are
+    named after the folder, so the label would match none of them.
+    """
+    if sample.endswith("_nanopore") and sample_dir.name == sample[: -len("_nanopore")]:
+        return sample_dir.name
+    return sample
 
 
 def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
@@ -9255,6 +9274,7 @@ def step1_files(project: str, sample: str = Query(...)):
                 "kind": "imported_vcf",
             }
         raise HTTPException(status_code=404, detail="no_step1")
+    sample = _step1_file_stem(sample_dir, sample)
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
     bam = _step1_bam(sample_dir, sample)
@@ -9315,6 +9335,7 @@ def _latest_step1_stats(project: str, sample: str) -> Path:
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
+    sample = _step1_file_stem(sample_dir, sample)
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     if not stats_files:
         stats_files = sorted(
@@ -11783,6 +11804,7 @@ def _step1_bam(sample_dir: Path, sample: str) -> Optional[Path]:
     the `**/<sample>_nodup.bam` glob always did, at the same cost under the
     shared-storage model, so v1 support costs nothing. A separate look for the
     v1 file was one more stat on every sample with no vsnp3 BAM."""
+    sample = _step1_file_stem(sample_dir, sample)
     vsnp3, v1 = f"{sample}_nodup.bam", f"{sample}-nodup.bam"
     found = [p for p in sample_dir.glob("**/*nodup.bam") if p.name in (vsnp3, v1)]
     bams = sorted((p for p in found if p.name == vsnp3), key=lambda p: p.stat().st_mtime)
@@ -12623,6 +12645,7 @@ def _scan_vcf_first_record(path: Optional[Path]) -> Optional[Dict[str, object]]:
 
 
 def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
+    sample = _step1_file_stem(sample_dir, sample)
     candidates = []
     for vcf in sample_dir.glob(f"**/{sample}*zc.vcf*"):
         if vcf.suffix == ".tbi":

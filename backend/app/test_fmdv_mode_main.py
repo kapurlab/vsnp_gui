@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import HTTPException  # noqa: E402
 
 from app.step2_inventory import import_tail, sample_of  # noqa: E402
-from app.main import _fmdv_primer_set, _require_fmdv_scope  # noqa: E402
+from app.main import _fmdv_primer_set, _require_fmdv_scope, _resolve_sample_dir, _step1_file_stem  # noqa: E402
 
 FAILS = []
 
@@ -39,6 +39,24 @@ def test_ont_vcf_names_derive_the_sample():
     check(sample_of("ETH-SAT1-001_zc.vcf"), "ETH-SAT1-001", "Illumina suffix unchanged")
     check(sample_of("nanopore_zc.vcf"), "nanopore", "without the leading underscore only _zc.vcf is a suffix")
     check(import_tail("S_nanopore_zc.vcf"), ("S", "_nanopore_zc.vcf"), "import_tail keeps the full ONT suffix")
+
+
+def test_step2_label_resolves_the_step1_folder():
+    # A Step 2 table labels an ONT sample by its VCF stem, <sample>_nanopore.
+    # The IGV page and the file lists must still find step1/<sample>.
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        step1 = Path(td) / "step1"
+        (step1 / "SYN-05").mkdir(parents=True)
+        (step1 / "nanopore").mkdir()
+        check(_resolve_sample_dir(step1, "SYN-05_nanopore"), step1 / "SYN-05", "_nanopore label finds the folder")
+        check(_resolve_sample_dir(step1, "SYN-05"), step1 / "SYN-05", "plain name still exact")
+        check(_resolve_sample_dir(step1, "nanopore"), step1 / "nanopore", "a sample called nanopore is itself")
+        check(_resolve_sample_dir(step1, "SYN-99_nanopore"), None, "a missing sample is still a miss")
+        check(_step1_file_stem(step1 / "SYN-05", "SYN-05_nanopore"), "SYN-05", "files are named after the folder")
+        check(_step1_file_stem(step1 / "SYN-05", "SYN-05"), "SYN-05", "plain name unchanged")
+        check(_step1_file_stem(step1 / "X_nanopore", "X_nanopore"), "X_nanopore", "a real _nanopore folder keeps its name")
 
 
 def test_scope_grammar():

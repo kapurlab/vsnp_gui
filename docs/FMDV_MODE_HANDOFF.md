@@ -316,6 +316,10 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
   SAT1 database and the 39-genome GenBank database both run from the pane,
   with the GUI run and a direct vsnp3 run forming the same groups.
   Defining-SNP groups derived from 117 genomes are recognised by vsnp3.
+- Step 2 tables carry the annotation row and IGV the gene track, from the
+  GenBank and GFF files the library fetches once per genome; a variant of a
+  database genome opens IGV on the alignment the library build kept, with
+  a note that the reads were simulated from the genome's sequence.
 - VP1 tree: samples placed with their lineage on the panel alone and on
   panel plus context (SAT1 167 taxa in 90 s; O 621 taxa in 11 min).
 - Tests: the four new scripts pass; the 60 stock test scripts give the

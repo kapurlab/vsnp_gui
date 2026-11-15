@@ -106,13 +106,15 @@ def test_collect_samples_and_panel():
         lib = Path(td) / "lib"
         (lib / "panels").mkdir(parents=True)
         (lib / "panels" / "vp1.fasta").write_text(">SAT1-I_K\nAAAA\n>SAT1-II_M\nCCCC\n>A-NA_X\nGGGG\n")
-        seqs, sources = tree.collect_panel(lib, "SAT1")
+        # collect_panel(lib, serotype, samples_by_sero, per_topotype, neighbours, collapse)
+        seqs, sources, _rows, _sel = tree.collect_panel(lib, "SAT1", {}, 20, 20, True)
         check([s for s, _ in seqs], ["SAT1-I_K", "SAT1-II_M"], "panel restricted to the serotype")
         check(len(sources), 1, "no context file: panel only")
         (lib / "vp1_context").mkdir()
         (lib / "vp1_context" / "SAT1.fasta").write_text(">SAT1-IX_ETH1 Ethiopia\nTTTT\n")
-        seqs, sources = tree.collect_panel(lib, "SAT1")
+        seqs, sources, rows, sel = tree.collect_panel(lib, "SAT1", {}, 20, 20, True)
         check([s for s, _ in seqs][-1], "SAT1-IX_ETH1", "context set appended when present")
+        check(rows[0]["why"] if rows else "", "backbone", "and the selection file says why it is there")
         check(len(sources), 2, "and listed as a source")
 
 

@@ -358,6 +358,17 @@ of them and nothing else on this reference. Presence-based grouping on one
 reference has that limit; the all-samples tree does not. No serotype-level
 group exists, as before.
 
+**IGV for a database genome.** Clicking a variant of a reference-database
+genome in a Step 2 table opens IGV on that genome. It has no Step 1 folder
+in the project, but the library kept the alignment vsnp3 made when the
+database was built (`<lib>/panel_build/<ref>/<genome>/alignment_*/`), and
+in FMDV mode the viewer loads that BAM, labelled "reads (simulated from its
+genome)", with a note saying what it is: reads simulated from the genome's
+own GenBank sequence, uniform in depth, so the base at a variant site is
+the genome's own against the reference. The library is added to the
+viewer's serve roots for this; the windowed-reads path is not used, since
+it looks only under the project's step1 folder.
+
 ## Chooser test set
 
 `~/fmdv_run_test` on WGS3 also holds `20261114_FMDV_run2` and

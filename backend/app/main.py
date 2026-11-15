@@ -9163,6 +9163,35 @@ def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
     return None
 
 
+def _fmdv_library_alignment(cfg: Dict, project_dir: Path, sample: str) -> Optional[Dict[str, Optional[Path]]]:
+    """The FASTA-mode alignment the FMDV library kept for a reference-database
+    genome: <lib>/panel_build/<ref>/<sample>/alignment_*/<sample>_nodup.bam
+    with its index and the reference copy beside it (fmdv_panel_build.sh and
+    fmdv_genome_db.py both leave that layout). The project's reference is
+    tried first; a project with none yet is searched across every build.
+    None when the project is not in FMDV mode or nothing matches."""
+    if _project_mode(project_dir) != "fmdv":
+        return None
+    build_root = _fmdv_lib(cfg) / "panel_build"
+    if not build_root.is_dir():
+        return None
+    ref = _project_reference(project_dir) or ""
+    try:
+        refs = [build_root / ref] if ref else sorted(d for d in build_root.iterdir() if d.is_dir())
+    except OSError:
+        return None
+    for ref_dir in refs:
+        for bam in sorted((ref_dir / sample).glob(f"alignment_*/{sample}_nodup.bam")):
+            if not Path(f"{bam}.bai").is_file():
+                continue
+            fastas = sorted(bam.parent.glob("*.fasta"))
+            if not fastas:
+                continue
+            gff = _fmdv_lib(cfg) / "reference_options" / ref_dir.name / f"{ref_dir.name}.gff"
+            return {"bam": bam, "fasta": fastas[0], "gff": gff if gff.is_file() else None}
+    return None
+
+
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
@@ -9183,6 +9212,30 @@ def step1_files(project: str, sample: str = Query(...)):
                     imported_vcf = cand
                     break
         if imported_vcf is not None:
+            lib_hit = _fmdv_library_alignment(cfg, project_dir, sample)
+            if lib_hit:
+                # FMDV mode: the sample is a reference-database genome whose VCF
+                # was called by vsnp3 in FASTA mode when the library was built.
+                # That build kept the alignment, so the viewer can show it: reads
+                # simulated from the genome's own sequence, uniform in depth,
+                # which at a variant site shows the genome's base against the
+                # reference. reads_window stays off because the windowed path
+                # (reads_ticket) looks only under the project's step1/.
+                return {
+                    "stats": "",
+                    "bam": str(lib_hit["bam"]),
+                    "reads_window": False,
+                    "alignment_dir": str(lib_hit["bam"].parent),
+                    "reference_fasta": str(lib_hit["fasta"]),
+                    "reference_gff": str(lib_hit["gff"]) if lib_hit["gff"] else "",
+                    "annotated_vcf": "",
+                    "sample_dir": str(lib_hit["bam"].parent.parent),
+                    "source_vcf": str(imported_vcf),
+                    "patched_vcf": "",
+                    "edit_log": "",
+                    "edited": False,
+                    "kind": "library_genome",
+                }
             ref_fasta, ref_gff = _project_reference_fasta_and_gff(project_dir, cfg)
             if not ref_fasta:
                 # No way to anchor the VCF — surface as a clearly-distinct error.
@@ -11689,6 +11742,12 @@ def _serve_roots(project: str) -> List[set]:
     configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
     if configured_refs:
         roots.append(Path(configured_refs))
+    # FMDV mode: reference folders are made on demand inside the library, and
+    # a database genome's alignment lives in its panel_build/, neither of which
+    # is a configured reference location.
+    fmdv_lib = _fmdv_lib(cfg)
+    if fmdv_lib.is_dir():
+        roots.append(fmdv_lib)
     forms = _serve_root_forms(roots)
     if len(_SERVE_ROOTS_MEMO) > 64:
         _SERVE_ROOTS_MEMO.clear()

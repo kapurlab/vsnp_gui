@@ -379,15 +379,31 @@ of them topotype I; the three topotype IX sequences (FJ798154 to FJ798156,
 Ethiopia 2007) are 77.6% identical to their nearest panel VP1, SAT1-XI, so
 that lineage was 22% from anything in the panel. `--max-per-lineage N` caps
 each topotype at N sequences, longest first, for a quicker O or A tree.
-With the SAT1 set in place the AHI walkthrough tree holds 406 sequences
-(nine panel genomes, 394 context sequences, three samples) and takes 6.5
-minutes with eight threads. The three samples are identical on VP1 to
-SAT1-NA_MT602086.1 (TAN/27/2012, sliced from a complete genome whose header
-carries no topotype) and one difference in 657 sites from SAT1-I_KM268899,
-SAT1-I_MF592618 and SAT1-I_MF592629; the next nearest are topotype I at
-about 1%. RAxML writes the Newick unrooted, so a sample can appear as a
-child of the root; read placement from nearest neighbours or after
-rerooting, not from the root split.
+The tree does not take a context set whole. Identical sequences collapse
+to one (the TSV `VP1_context_selection.tsv` in the output lists what each
+kept sequence stands for), a backbone keeps up to `--per-topotype` (20)
+sequences per topotype with East African records ranked first and then the
+longest, and each sample's `--neighbours` (20) nearest context sequences by
+11-mer Jaccard are added from the whole set. The backbone shows the
+lineages; the neighbours keep the fine structure around the sample that the
+cap would otherwise remove. `--regional` changes the countries,
+`--no-collapse` keeps identical sequences apart, and 0 for either count
+turns that part off. The selection file says why each sequence is there
+(`backbone`, `backbone:regional`, `neighbour:<sample>:<score>`).
+
+On the AHI walkthrough with eight threads: SAT1, 394 context records, 384
+distinct, 136 backbone (44 regional) plus 20 neighbours, 164 sequences in
+all, 80 seconds; O, 4,930 records, 4,508 distinct, 574 backbone (87
+regional) plus 20 neighbours, 620 sequences, nine minutes. The three SAT1
+samples are identical on VP1 to SAT1-NA_MT602086.1 (TAN/27/2012, sliced
+from a complete genome whose header carries no topotype) and one site in
+657 from SAT1-I_KM268899, SAT1-I_MF592618 and SAT1-I_MF592629. The two O
+samples are identical to five O/ME-SA/PanAsia sequences from the United
+Kingdom, which is what a Pirbright O1 Manisa-era culture should show. RAxML
+writes the Newick unrooted, so a sample can appear as a child of the root;
+read placement from nearest neighbours or after rerooting, not from the
+root split. Before the selection the full SAT1 set (406 sequences) took 6.5
+minutes, and a full O tree would have run for hours.
 
 ## Primer clipping
 

@@ -15,8 +15,9 @@ every sample with enough of VP1 called, plus the library's VP1 panel
 lib/vp1_context/<SEROTYPE>.fasta of GenBank VP1 sequences for that
 serotype (fmdv_vp1_context.py). The context set is not used whole: identical
 sequences collapse to one, a backbone keeps up to --per-topotype per
-topotype (East African records first, then longest), and each sample's
---neighbours nearest sequences by k-mer Jaccard are added from the full set.
+topotype chosen to span the topotype's genetic range (farthest-point on
+k-mer distance, no geography), and each sample's --neighbours nearest
+sequences by k-mer Jaccard are added from the full set.
 The backbone shows the lineages, the neighbours the fine structure around
 the sample, and an O tree stays at hundreds of taxa rather than thousands.
 VP1_context_selection.tsv in the output says why each context sequence is
@@ -76,10 +77,6 @@ def tree_label(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name.split()[0])
 
 
-# Records from these countries rank first inside each topotype's cap, so the
-# region the trial works in is always represented in the backbone.
-EAST_AFRICA = ["ETHIOPIA", "KENYA", "UGANDA", "TANZANIA", "SUDAN", "SOUTH_SUDAN", "ERITREA", "SOMALIA",
-               "RWANDA", "BURUNDI", "DJIBOUTI"]
 KMER = 11
 
 
@@ -108,17 +105,43 @@ def kmers(seq: str, k: int = KMER) -> set:
     return {s[i:i + k] for i in range(len(s) - k + 1)}
 
 
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if (a or b) else 0.0
+
+
+def pick_diverse(names: List[str], kmer_of: Dict[str, set], seq_len: Dict[str, int], n: int) -> List[str]:
+    """Up to n names spread over the group's genetic range: the longest first,
+    then repeatedly the sequence farthest (k-mer distance) from everything
+    chosen so far. Geography and year play no part; the TSV keeps them for
+    the reader."""
+    if not n or len(names) <= n:
+        return list(names)
+    first = max(names, key=lambda x: (seq_len[x], x))
+    chosen = [first]
+    nearest = {x: 1.0 - jaccard(kmer_of[x], kmer_of[first]) for x in names if x != first}
+    while nearest and len(chosen) < n:
+        nxt = max(nearest, key=lambda x: (nearest[x], x))
+        chosen.append(nxt)
+        del nearest[nxt]
+        for x in nearest:
+            d = 1.0 - jaccard(kmer_of[x], kmer_of[nxt])
+            if d < nearest[x]:
+                nearest[x] = d
+    return chosen
+
+
 def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Dict[str, str]],
                    sample_seqs: List[Tuple[str, str]], per_topotype: int, neighbours: int,
-                   regional: List[str], collapse: bool) -> Tuple[List[Tuple[str, str]], List[Dict], Dict]:
+                   collapse: bool) -> Tuple[List[Tuple[str, str]], List[Dict], Dict]:
     """Backbone plus neighbourhood from one serotype's context set.
 
     Backbone: identical sequences collapsed to one, then up to per_topotype
-    per topotype, regional records first and longest first within. Then the
-    `neighbours` nearest context sequences to each sample by k-mer Jaccard,
-    from the whole (collapsed) set, so fine structure near the sample is
-    kept whatever the cap removed. Returns the chosen records, one row per
-    chosen record saying why, and counts.
+    per topotype chosen for spread (farthest-point on k-mer distance), so the
+    cap keeps the genetic range of each topotype rather than its most
+    sequenced corner. Then the `neighbours` nearest context sequences to
+    each sample by k-mer Jaccard, from the whole (collapsed) set, so fine
+    structure near the sample is kept whatever the cap removed. Returns the
+    chosen records, one row per chosen record saying why, and counts.
     """
     # Collapse identical sequences.
     by_seq: Dict[str, List[str]] = {}
@@ -138,21 +161,17 @@ def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Di
     def country(n: str) -> str:
         return meta.get(n, {}).get("country", "").upper().replace(" ", "_")
 
-    def is_regional(n: str) -> bool:
-        c = country(n)
-        return any(c == r or c.startswith(r + "_") or c.startswith(r + "(") for r in regional)
-
+    rep_kmers = {n: kmers(seq_of[n]) for n in reps}
+    seq_len = {n: len(seq_of[n]) for n in reps}
     chosen: Dict[str, List[str]] = {}
     per: Dict[str, List[str]] = {}
     for n in reps:
         per.setdefault(meta.get(n, {}).get("topotype") or topotype_of(n), []).append(n)
     for topo, names in per.items():
-        names.sort(key=lambda n: (not is_regional(n), -len(seq_of[n]), n))
-        for n in (names[:per_topotype] if per_topotype else names):
-            chosen.setdefault(n, []).append("backbone:regional" if is_regional(n) else "backbone")
+        for n in pick_diverse(sorted(names), rep_kmers, seq_len, per_topotype):
+            chosen.setdefault(n, []).append("backbone")
 
     if neighbours and sample_seqs:
-        rep_kmers = {n: kmers(seq_of[n]) for n in reps}
         for sname, sseq in sample_seqs:
             sk = kmers(sseq)
             if not sk:
@@ -166,8 +185,7 @@ def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Di
              "country": country(n), "region_source": meta.get(n, {}).get("region_source", ""),
              "why": ";".join(chosen[n]), "identical_to": ",".join(collapsed_into.get(n, []))} for n, _ in out]
     counts = {"context_total": len(records), "after_collapse": len(reps), "topotypes": len(per),
-              "backbone": sum(1 for n in chosen if any(w.startswith("backbone") for w in chosen[n])),
-              "regional": sum(1 for n in chosen if "backbone:regional" in chosen[n]),
+              "backbone": sum(1 for n in chosen if "backbone" in chosen[n]),
               "neighbours": sum(1 for n in chosen if any(w.startswith("neighbour") for w in chosen[n])),
               "selected": len(out)}
     return out, rows, counts
@@ -204,7 +222,7 @@ def collect_samples(project: Path, serotype: Optional[str], min_called: float) -
 
 
 def collect_panel(lib: Path, serotype: Optional[str], samples_by_sero: Dict[str, List[Tuple[str, str]]],
-                  per_topotype: int, neighbours: int, regional: List[str], collapse: bool
+                  per_topotype: int, neighbours: int, collapse: bool
                   ) -> Tuple[List[Tuple[str, str]], List[str], List[Dict], Dict[str, Dict]]:
     seqs: List[Tuple[str, str]] = []
     sources: List[str] = []
@@ -231,7 +249,7 @@ def collect_panel(lib: Path, serotype: Optional[str], samples_by_sero: Dict[str,
         records = [(name.split()[0], seq) for name, seq in read_fasta(ctx)]
         meta = read_context_tsv(ctx_dir / f"{s}.tsv")
         chosen, why, counts = select_context(s, records, meta, samples_by_sero.get(s, []),
-                                             per_topotype, neighbours, regional, collapse)
+                                             per_topotype, neighbours, collapse)
         seqs.extend(chosen)
         rows.extend(why)
         selection[s] = counts
@@ -283,12 +301,10 @@ def main() -> int:
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--bootstraps", type=int, default=100, help="0 for a best tree only")
     ap.add_argument("--per-topotype", type=int, default=20,
-                    help="context backbone: at most this many sequences per topotype, regional first then "
-                         "longest first (0 = all)")
+                    help="context backbone: at most this many sequences per topotype, chosen to span its "
+                         "genetic range (0 = all)")
     ap.add_argument("--neighbours", type=int, default=20,
                     help="context sequences nearest each sample (k-mer Jaccard) added whatever the cap (0 = none)")
-    ap.add_argument("--regional", action="append",
-                    help="country that ranks first inside each topotype's cap (repeatable; default East Africa)")
     ap.add_argument("--no-collapse", action="store_true", help="keep identical context sequences as separate taxa")
     ap.add_argument("--out", help="output folder (default step2/<stamp>_VP1-tree[-SEROTYPE])")
     a = ap.parse_args()
@@ -306,13 +322,11 @@ def main() -> int:
     samples_by_sero: Dict[str, List[Tuple[str, str]]] = {}
     for name, seq in samples:
         samples_by_sero.setdefault(sero_of_sample.get(name, ""), []).append((name, seq))
-    regional = [r.upper().replace(" ", "_") for r in (a.regional or EAST_AFRICA)]
     panel, sources, context_rows, selection = collect_panel(
-        lib, serotype, samples_by_sero, a.per_topotype, a.neighbours, regional, not a.no_collapse)
+        lib, serotype, samples_by_sero, a.per_topotype, a.neighbours, not a.no_collapse)
     for s_, c in selection.items():
         _err(f"vp1_tree: {s_} context {c['context_total']} records, {c['after_collapse']} distinct, "
-             f"{c['backbone']} backbone ({c['regional']} regional) + {c['neighbours']} neighbours "
-             f"= {c['selected']} used")
+             f"{c['backbone']} backbone + {c['neighbours']} neighbours = {c['selected']} used")
     if not samples:
         _err("vp1_tree: no sample has a VP1 consensus to place (run fmdv_consensus.py first, or lower --min-called)")
         return 2
@@ -365,8 +379,8 @@ def main() -> int:
         "samples_included": [s for s, _ in samples], "samples": report,
         "panel_sequences": len(panel), "panel_sources": sources,
         "context_selection": selection,
-        "context_rules": {"per_topotype": a.per_topotype, "neighbours": a.neighbours, "regional": regional,
-                          "collapse_identical": not a.no_collapse, "kmer": KMER},
+        "context_rules": {"per_topotype": a.per_topotype, "backbone_pick": "farthest-point on k-mer distance",
+                          "neighbours": a.neighbours, "collapse_identical": not a.no_collapse, "kmer": KMER},
         "aligner": "mafft --auto", "tree": method, "bootstraps": a.bootstraps,
         "alignment": str(aligned), "newick": str(tre),
     }

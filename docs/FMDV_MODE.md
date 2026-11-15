@@ -242,6 +242,27 @@ fork's config as `vcf_db_folders` entries with `reference` set:
   Serotype placement is the chooser's job (VP1 composition); Step 2 earns
   its keep within a serotype.
 
+**Same-serotype genomes from GenBank** (`bin/fmdv_genome_db.py --source
+<fmdv-gbbase.fasta> --lib <lib> --ref <ref> [--topotype I] [--register]`):
+one VCF per topotype places a sample among lineages but says nothing about
+its relatives within one. This adds the complete genomes of the reference's
+serotype from NanoFMDV's collection, taking the records that
+`fmdv_vp1_context.py` sliced VP1 from (so each passed the VP1 check and
+carries the same name as its VP1 slice in the tree), writing them to
+`<lib>/genomes_context/`, calling each against the reference with vsnp3
+step1 in FASTA mode and copying the VCFs to
+`<lib>/vcf_db_folders/<ref>/<SEROTYPE>_genbank/` with a `SOURCE.json`
+listing every genome. Simulated reads are perfect and uniform, so these
+VCFs pass every quality filter by construction and carry no mixed
+positions; the folder name and the JSON say so. `--register` appends the
+database to the fork's config disabled, for the user to tick. For
+SAT1-I_KM268899 that is 39 genomes (topotypes I 5, II 3, III 7, IV 2, VII
+1, X 3, 18 without a topotype in their header) in 25 seconds with eight in
+parallel. Against the reference they carry 7 to 840 SNPs; MT602086.1
+(TAN/27/2012), the genome the walkthrough samples match on VP1, differs at
+7 positions genome-wide. The 1,471 genomes across serotypes mean an O
+reference would get about 900.
+
 **Defining SNPs** (`bin/fmdv_define_snps.py --lib <lib> --ref <ref>`): the
 MTBC grouping mechanism carried over. vsnp3 reads row 1 of the
 define_filter workbook as a group's signature, one or more positions that
@@ -380,30 +401,34 @@ Ethiopia 2007) are 77.6% identical to their nearest panel VP1, SAT1-XI, so
 that lineage was 22% from anything in the panel. `--max-per-lineage N` caps
 each topotype at N sequences, longest first, for a quicker O or A tree.
 The tree does not take a context set whole. Identical sequences collapse
-to one (the TSV `VP1_context_selection.tsv` in the output lists what each
-kept sequence stands for), a backbone keeps up to `--per-topotype` (20)
-sequences per topotype with East African records ranked first and then the
-longest, and each sample's `--neighbours` (20) nearest context sequences by
-11-mer Jaccard are added from the whole set. The backbone shows the
-lineages; the neighbours keep the fine structure around the sample that the
-cap would otherwise remove. `--regional` changes the countries,
+to one (`VP1_context_selection.tsv` in the output lists what each kept
+sequence stands for). A backbone keeps up to `--per-topotype` (20)
+sequences per topotype, chosen to span the topotype's genetic range: the
+longest first, then repeatedly the sequence farthest by 11-mer distance
+from everything chosen so far. Country and year play no part in the choice
+and stay in the selection file for the reader. Each sample's `--neighbours`
+(20) nearest context sequences by 11-mer Jaccard are then added from the
+whole set. The backbone shows the lineages; the neighbours keep the fine
+structure around the sample that the cap would otherwise remove.
 `--no-collapse` keeps identical sequences apart, and 0 for either count
 turns that part off. The selection file says why each sequence is there
-(`backbone`, `backbone:regional`, `neighbour:<sample>:<score>`).
+(`backbone`, `neighbour:<sample>:<score>`).
 
 On the AHI walkthrough with eight threads: SAT1, 394 context records, 384
-distinct, 136 backbone (44 regional) plus 20 neighbours, 164 sequences in
-all, 80 seconds; O, 4,930 records, 4,508 distinct, 574 backbone (87
-regional) plus 20 neighbours, 620 sequences, nine minutes. The three SAT1
-samples are identical on VP1 to SAT1-NA_MT602086.1 (TAN/27/2012, sliced
-from a complete genome whose header carries no topotype) and one site in
-657 from SAT1-I_KM268899, SAT1-I_MF592618 and SAT1-I_MF592629. The two O
-samples are identical to five O/ME-SA/PanAsia sequences from the United
-Kingdom, which is what a Pirbright O1 Manisa-era culture should show. RAxML
-writes the Newick unrooted, so a sample can appear as a child of the root;
-read placement from nearest neighbours or after rerooting, not from the
-root split. Before the selection the full SAT1 set (406 sequences) took 6.5
-minutes, and a full O tree would have run for hours.
+distinct, 136 backbone plus 20 neighbours, 167 sequences in all, 90
+seconds; O, 4,930 records, 4,508 distinct, 574 backbone plus 20
+neighbours, 621 sequences, eleven minutes. The SAT1 backbone draws most on
+Zimbabwe, Nigeria and Uganda, the O backbone on India, Iran, Sri Lanka and
+Pakistan, which is where the sequenced diversity of each serotype lies.
+The three SAT1 samples are identical on VP1 to SAT1-NA_MT602086.1
+(TAN/27/2012, sliced from a complete genome whose header carries no
+topotype) and one site in 657 from SAT1-I_KM268899, SAT1-I_MF592618 and
+SAT1-I_MF592629. The two O samples are identical to several O/ME-SA/PanAsia
+sequences from the United Kingdom. RAxML writes the Newick unrooted, so a
+sample can appear as a child of the root; read placement from nearest
+neighbours or after rerooting, not from the root split. Before the
+selection the full SAT1 set (406 sequences) took 6.5 minutes, and a full O
+tree would have run for hours.
 
 ## Primer clipping
 

@@ -266,7 +266,12 @@ reference would get about 900.
 Run through vsnp3 step2 directly (run `2026-11-15_07-36-54_SNP-SAT1-genbank`
 in the AHI walkthrough: the three SAT1 samples, the eight panel VCFs and
 the 39 GenBank VCFs, the same command the GUI issues), the 50 VCFs gave a
-51-taxon alignment of 2,707 positions in ten seconds. The samples sit 0 to
+51-taxon alignment of 2,707 positions in ten seconds. Run from the GUI
+instead, with `SAT1_genbank` ticked under Reference databases, then
+Build and Run, the pane stages the same 50 VCFs and vsnp3 forms the same
+groups with the same members (run `2026-11-15_09-06-36`); the six samples
+mapped to other serotypes are left out as called against another
+reference. The samples sit 0 to
 1 SNP from MT602086.1 and 6 to 7 from the reference; the next genome is
 383 SNPs away (SAT1-XI_MH053323), then the Cameroon topotype X genomes at
 about 405. Two things the run showed. The three test samples and

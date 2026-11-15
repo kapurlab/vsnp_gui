@@ -42,6 +42,26 @@ genomes into:
 - `reference_options/<safe>/`: vsnp3 reference folders, **built lazily** the
   first time a lineage is chosen. Nobody is shown 79 folders; a single-
   serotype outbreak lab ends up with one to three.
+- `annotations/<safe>.gbk` and `.gff`: each genome's GenBank record and GFF3
+  from NCBI, fetched once by `fmdv_reflib.py annotations --lib <lib>` (set
+  `NCBI_EMAIL` or pass `--email`; NCBI asks for a contact address on
+  scripted requests) and copied into a reference folder when it is made or
+  next touched. This is what the stock reference import does for every
+  other reference, and it is what fills the annotation row of a Step 2
+  table and the gene track in IGV. One detail matters: vsnp3 keys the
+  GenBank record by its versioned identifier, `KM268899.1`, while the FASTA
+  header and every VCF carry the bare `KM268899`, so the VERSION line and
+  the GFF's first column are rewritten to the bare accession at fetch time.
+  A file copied in by hand without that change is read and never matches.
+  Every one of the 79 records annotates a single polyprotein CDS and only
+  one carries a gene name, so a SNP reads as, for example, `CTT->CAT,
+  unlisted gene:L65H, polyprotein, nonsynonymous`: the codon and residue in
+  polyprotein numbering, "unlisted gene" because the CDS has no `/gene`
+  qualifier, and a 5' UTR site as "position not annotated" (checked on a
+  five-VCF run against SAT1-I_KM268899, 15 November 2026). Eleven records
+  carry mature-peptide features, which vsnp3 does not read, so no table
+  names VP1 or 3D yet; the capsid boundaries would have to be added as
+  features, and `VP1_coords.json` already holds one of them.
 
 The library path is `fmdv_reflib` in the user config, default `~/fmdv_refs`.
 

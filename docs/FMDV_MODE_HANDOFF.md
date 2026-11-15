@@ -234,10 +234,16 @@ Build the library once (default location `~/fmdv_refs`; the config key
 python bin/fmdv_reflib.py build --refs <nanofmdv>/pipeline_exec/Refs/fmdv.fasta --lib ~/fmdv_refs --vp1 <nanofmdv>/pipeline_exec/Refs/fmdv_vp1.fasta
 mkdir -p ~/fmdv_refs/primers && cp <nanofmdv L primers>.fasta ~/fmdv_refs/primers/nanofmdv_L.fasta
 python bin/fmdv_vp1_context.py --source <nanofmdv>/pipeline_exec/Refs/BLAST/fmdv-gbbase.fasta --lib ~/fmdv_refs --threads 8
+NCBI_EMAIL=you@example.org python bin/fmdv_reflib.py annotations --lib ~/fmdv_refs
 ```
 
 The first command takes seconds, the third about four minutes with BLAST+
-on eight threads. Everything else in the library is made on demand: a
+on eight threads, and the fourth about a minute online: it fetches the 79
+GenBank records and GFF3 files that give Step 2 tables their annotation
+row and IGV its gene track, the same files the stock reference import
+downloads, with their identifiers rewritten to the bare accession so they
+match the VCFs. A site that will run offline does this step while it still
+has a connection. Everything else in the library is made on demand: a
 reference folder the first time a lineage is chosen, VP1 coordinates and
 primer BEDs the first time a reference is used.
 

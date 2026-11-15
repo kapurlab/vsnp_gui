@@ -34,6 +34,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -215,4 +216,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # The Step 1 batch reads this path with $(...), so the pipe is closed by
+    # the time the interpreter flushes stdout at exit. Without this, every
+    # sample's log ends in a BrokenPipeError that is not an error.
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    sys.exit(rc)

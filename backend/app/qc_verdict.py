@@ -15,7 +15,15 @@ Signals consulted:
   - **Contamination** — anything truthy in a future `Sourmash Contamination`
     /  `_contamination` field forces the verdict to at least `review`. vsnp3
     doesn't currently emit this — handled defensively so the verdict still
-    lands when nothing's set.
+    lands when nothing's set. vsnp_gui's FMDV mode sets `_contamination` from
+    its per-sample reference chooser (a distant reference, or a second
+    serotype in the reads), with its own wording in `_contamination_reason`.
+  - **Genome covered** — `Genome with Coverage`, e.g. "99.85%". Consulted
+    only when the thresholds carry a `genome_coverage` block, which stock
+    projects do not: for a bacterial isolate the fraction covered says little
+    that depth does not, while for an 8 kb amplicon-sequenced virus it is the
+    first thing to look at (the consensus and the SNP calls are only as good
+    as the covered fraction).
 
 Thresholds shape:
 
@@ -23,7 +31,12 @@ Thresholds shape:
       "coverage":     {"pass_min": 30.0, "review_min": 10.0},
       "mapping_rate": {"pass_min": 90.0, "review_min": 70.0},
       "contamination_review": True,
+      "genome_coverage": {"pass_min": 90.0, "review_min": 70.0},   # optional
     }
+
+A `review_min` of null in any block means that signal never fails, only
+reviews (FMDV mode uses this for mapping rate, since host reads dominate a
+field sample and a low rate describes the sample, not the result).
 
 Per-project override: callers should pass the merged thresholds (project >
 user-config > module DEFAULTS). `merge_thresholds()` handles the merge.
@@ -134,13 +147,27 @@ def compute_verdict(row: dict[str, Any], thresholds: dict[str, Any]) -> dict[str
     mr_cfg = thresholds.get("mapping_rate") or {}
     mr_pass = mr_cfg.get("pass_min")
     mr_review = mr_cfg.get("review_min")
-    if mapping_rate is not None and mr_pass is not None and mr_review is not None:
-        if mapping_rate < mr_review:
+    if mapping_rate is not None and mr_pass is not None:
+        if mr_review is not None and mapping_rate < mr_review:
             level = _max_level(level, "fail")
             reasons.append(f"mapping rate {mapping_rate:.1f}% < {mr_review:g}% fail threshold")
         elif mapping_rate < mr_pass:
             level = _max_level(level, "review")
             reasons.append(f"mapping rate {mapping_rate:.1f}% < {mr_pass:g}% pass threshold")
+
+    # Genome covered (Genome with Coverage) — only when thresholds ask for it
+    gc_cfg = thresholds.get("genome_coverage") or {}
+    genome_cov = _parse_percent(row.get("Genome with Coverage"))
+    signals["genome_coverage"] = genome_cov
+    gc_pass = gc_cfg.get("pass_min")
+    gc_review = gc_cfg.get("review_min")
+    if genome_cov is not None and gc_pass is not None:
+        if gc_review is not None and genome_cov < gc_review:
+            level = _max_level(level, "fail")
+            reasons.append(f"genome covered {genome_cov:.1f}% < {gc_review:g}% fail threshold")
+        elif genome_cov < gc_pass:
+            level = _max_level(level, "review")
+            reasons.append(f"genome covered {genome_cov:.1f}% < {gc_pass:g}% pass threshold")
 
     # Contamination (placeholder for sourmash output — vsnp3 doesn't emit
     # this field today, so it's only consulted if explicitly set on the row).
@@ -149,6 +176,6 @@ def compute_verdict(row: dict[str, Any], thresholds: dict[str, Any]) -> dict[str
     signals["contamination"] = contam_truthy if contam_flag is not None else None
     if contam_truthy and thresholds.get("contamination_review", True):
         level = _max_level(level, "review")
-        reasons.append(f"contamination flag set ({contam_flag})")
+        reasons.append(row.get("_contamination_reason") or f"contamination flag set ({contam_flag})")
 
     return {"level": level, "reasons": reasons, "signals": signals}

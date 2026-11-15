@@ -148,6 +148,7 @@ from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
+from app import ont_import
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -323,6 +324,38 @@ def _resolve_qc_thresholds(cfg: Dict, project_dir: Path | None = None) -> Dict:
             except (json.JSONDecodeError, OSError):
                 project_layer = None
     return qc_verdict.merge_thresholds(cfg.get("qc_thresholds"), project_layer)
+
+
+def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
+    """FMDV mode: the per-sample chooser's flags become the QC engine's
+    contamination signal (review, never fail). `distant` means the closest
+    available lineage genome is still far from the reads, so the consensus
+    step and a closer reference are needed before the SNPs are trusted; it is
+    not a fault of the sample. `mixed` means a second serotype holds 5% or
+    more of the VP1 reads, above the 1 to 2% of barcode crosstalk."""
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        p = step1_dir / str(row.get("sample") or "") / "fmdv_reference.json"
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        reasons = []
+        if d.get("distant"):
+            ident = d.get("identity")
+            reasons.append("distant reference" + (f", identity {ident:.2f}" if isinstance(ident, (int, float)) else ""))
+        if d.get("mixed"):
+            share = d.get("serotype_share") or {}
+            top = ", ".join(f"{k} {v:.0%}" for k, v in list(share.items())[:3])
+            reasons.append("mixed serotypes" + (f" ({top})" if top else ""))
+        if reasons:
+            row["_contamination"] = True
+            row["_contamination_reason"] = "; ".join(reasons)
+        row["fmdv_identity"] = d.get("identity")
+        row["fmdv_serotype_share"] = d.get("serotype_share")
 
 
 def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
@@ -1936,6 +1969,18 @@ class LinkLocalRequest(BaseModel):
     paths: List[str] = []
 
 
+class OntImportSample(BaseModel):
+    barcode: str
+    sample: str = ""          # empty: the barcode name is used
+
+
+class OntImportRequest(BaseModel):
+    """A MinKNOW run folder to import as one FASTQ per barcode (app.ont_import)."""
+    run_dir: str
+    samples: List[OntImportSample] = []   # commit only: the barcodes to import
+    include_unclassified: bool = False
+
+
 class ImportVcfRequest(BaseModel):
     source_paths: List[str] = []
     include_step1: bool = False
@@ -1960,6 +2005,72 @@ class Step1Request(BaseModel):
     # which is what every existing project expects.
     trim: bool = False
     trim_mb: Optional[int] = 200
+    # FMDV mode only: bounds the per-sample reference choice. "FMDV" (any
+    # lineage), a serotype such as "SAT1", a lineage such as "SAT1/I", or a
+    # pinned "genome:<safe>". Ignored unless project.json has "mode": "fmdv".
+    fmdv_scope: Optional[str] = None
+
+
+# ---- FMDV mode -------------------------------------------------------------
+# A project whose project.json carries "mode": "fmdv" chooses its reference
+# PER SAMPLE inside the Step 1 batch (bin/fmdv_choose_reference.py), because
+# FMDV topotypes within one serotype differ by up to 21% and nanopore reads
+# stop mapping past roughly 10 to 15%. Everything from -t onwards is the
+# ordinary vsnp3 path. See docs/FMDV_MODE.md.
+_FMDV_SCOPE_RE = re.compile(r"^(FMDV|[A-Za-z0-9]+(?:/[A-Za-z0-9.+-]+)?|genome:[A-Za-z0-9._-]+)$")
+
+
+def _project_mode(project_dir: Path) -> str:
+    try:
+        return str(json.loads((project_dir / "project.json").read_text()).get("mode", "") or "").strip().lower()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def _require_fmdv_scope(value: Optional[str]) -> str:
+    v = (value or "FMDV").strip()
+    if not _FMDV_SCOPE_RE.match(v):
+        raise HTTPException(status_code=400, detail=f"Invalid FMDV reference scope: {v!r}")
+    return v
+
+
+def _project_fmdv_scope(project_dir: Path) -> str:
+    """The Step 1 scope lives in its own project.json key. The ordinary
+    `reference` key keeps vsnp_gui's meaning, the reference a Step 2
+    comparison is made on, so Build's filter and Run's veto work unchanged."""
+    try:
+        return str(json.loads((project_dir / "project.json").read_text()).get("fmdv_scope", "") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def _fmdv_primer_set(lib: Path, project_dir: Path) -> str:
+    """Path of the amplicon primer FASTA for this project, or "" for none."""
+    try:
+        want = str(json.loads((project_dir / "project.json").read_text()).get("fmdv_primers", "") or "").strip()
+    except (OSError, ValueError):
+        want = ""
+    if want.lower() == "none":
+        return ""
+    pdir = lib / "primers"
+    if want:
+        cand = pdir / Path(want).name
+        return str(cand) if cand.is_file() else ""
+    sets = sorted(pdir.glob("*.fasta")) if pdir.is_dir() else []
+    default = pdir / "default.fasta"
+    if default.is_file():
+        return str(default)
+    return str(sets[0]) if len(sets) == 1 else ""
+
+
+def _fmdv_is_lib_reference(cfg: Dict, name: str) -> bool:
+    """True when `name` is a genome in the FMDV library (a safe name)."""
+    lib = Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+    try:
+        idx = json.loads((lib / "lineages.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return any(g.get("safe") == name for g in idx.get("genomes", []))
 
 
 class Step2Request(BaseModel):
@@ -4205,6 +4316,70 @@ def project_link_local(project: str, payload: LinkLocalRequest):
     }
 
 
+def _ont_run_dir(raw: str) -> Path:
+    run_dir = Path((raw or "").strip()).expanduser()
+    if not raw or not run_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Run folder not found: {raw}")
+    return run_dir
+
+
+@app.post("/api/projects/{project}/import_run/preview")
+def project_import_run_preview(project: str, payload: OntImportRequest):
+    """What importing a MinKNOW run folder would write: one row per barcode
+    with its chunk count, size and the sample name the run's sample_sheet.csv
+    proposes. Nothing is written."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    run_dir = _ont_run_dir(payload.run_dir)
+    result = ont_import.preview(run_dir, project_dir / "download")
+    if not result["rows"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No barcode folders or barcode-named FASTQs found under {run_dir}. "
+                    "Expected fastq_pass/barcodeNN/*.fastq.gz, barcodeNN/ folders, or files named *barcodeNN*.fastq.gz."),
+        )
+    return result
+
+
+@app.post("/api/projects/{project}/import_run")
+def project_import_run(project: str, payload: OntImportRequest):
+    """Concatenate each chosen barcode's chunks into download/<sample>.fastq.gz
+    as a background job. The response carries the job id and the plan."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_dirs(project_dir)
+    run_dir = _ont_run_dir(payload.run_dir)
+    if not payload.samples and not payload.include_unclassified:
+        raise HTTPException(status_code=400, detail="No barcodes selected")
+    plan, errors = ont_import.build_plan(
+        run_dir, project_dir / "download",
+        [{"barcode": s.barcode, "sample": s.sample} for s in payload.samples],
+        payload.include_unclassified,
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail="Import refused: " + "; ".join(errors))
+    plan_path = _jobs_dir / f"ont_import_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{len(plan)}.json"
+    plan_path.write_text(json.dumps(plan, indent=1))
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.ont_import", "commit", str(plan_path),
+    ])
+    job_id = job_manager.start_job(name="import_run", command=command, cwd=backend_root)
+    return {"job_id": job_id, "run_dir": str(run_dir),
+            "samples": [{"barcode": e["barcode"], "sample": e["sample"], "files": len(e["files"])} for e in plan]}
+
+
+@app.get("/api/ont/sample_sheet_template")
+def ont_sample_sheet_template():
+    """The two-column sample_sheet.csv a MinKNOW run folder can carry."""
+    return Response(ont_import.SAMPLE_SHEET_TEMPLATE, media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="sample_sheet.csv"'})
+
+
 @app.post("/api/projects/{project}/import-vcfs")
 def project_import_vcfs(project: str, payload: ImportVcfRequest):
     cfg = load_config()
@@ -5011,6 +5186,114 @@ def step1_setup_status(project: str):
     }
 
 
+# ---- FMDV mode: what the picker needs -------------------------------------
+def _fmdv_lib(cfg: Dict) -> Path:
+    return Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+
+
+@app.get("/api/fmdv/lineages")
+def fmdv_lineages():
+    """The reference hierarchy (FMDV > serotype > lineage > genome) from the
+    library's lineages.json, for the Step 1 scope picker. 404 until
+    `fmdv_reflib.py build` has been run."""
+    lib = _fmdv_lib(load_config())
+    path = lib / "lineages.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No FMDV reference library at {lib}. "
+                            f"Run bin/fmdv_reflib.py build first.")
+    try:
+        idx = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"lineages.json unreadable: {e}")
+    return {"lib": str(lib), "n_genomes": idx.get("n_genomes"), "tree": idx.get("tree", {}),
+            "genomes": [{k: g.get(k) for k in ("safe", "serotype", "lineage", "accession", "year", "isolate")}
+                        for g in idx.get("genomes", [])]}
+
+
+# QC thresholds an FMDV project gets in project.json when the mode is switched
+# on (editable there afterwards, like any project's). Rationale, and what the
+# 14 November 2026 test set reads as under them, in docs/FMDV_MODE.md: genome
+# covered is the first thing to look at for an 8 kb amplicon genome; depth on
+# amplicons is normally in the hundreds; a low mapping rate describes a field
+# sample (host reads dominate), not the result, so it reviews and never fails.
+FMDV_QC_THRESHOLDS: Dict = {
+    "genome_coverage": {"pass_min": 90.0, "review_min": 70.0},
+    "coverage": {"pass_min": 100.0, "review_min": 20.0},
+    "mapping_rate": {"pass_min": 20.0, "review_min": None},
+    "contamination_review": True,
+}
+
+
+class FmdvModePayload(BaseModel):
+    mode: Optional[str] = None             # "fmdv" to switch on, "" to switch off
+    scope: Optional[str] = None            # Step 1 scope, stored as project.json fmdv_scope
+    step2_reference: Optional[str] = None  # comparison reference, stored as project.json reference
+
+
+@app.get("/api/projects/{project}/fmdv")
+def fmdv_project_get(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    mode = _project_mode(project_dir)
+    chosen: Dict[str, Dict] = {}
+    step1 = project_dir / "step1"
+    if step1.is_dir():
+        for p in step1.glob("*/fmdv_reference.json"):
+            try:
+                d = json.loads(p.read_text())
+                c = d.get("chosen") or {}
+                chosen[p.parent.name] = {"safe": c.get("safe"), "serotype": c.get("serotype"),
+                                         "lineage": c.get("lineage"), "f_match": d.get("f_match"),
+                                         "distant": bool(d.get("distant")), "scope": d.get("scope"),
+                                         "identity": d.get("identity"), "mixed": bool(d.get("mixed")),
+                                         "serotype_share": d.get("serotype_share")}
+            except (OSError, ValueError):
+                continue
+    # Two different references in an FMDV project: the Step 1 SCOPE that
+    # bounds the per-sample choice (fmdv_scope) and the reference a Step 2
+    # comparison is made on (vsnp_gui's ordinary `reference`). Both reported.
+    return {"mode": mode,
+            "scope": (_project_fmdv_scope(project_dir) or "FMDV") if mode == "fmdv" else "",
+            "step2_reference": _project_reference(project_dir) if mode == "fmdv" else "",
+            "lib": str(_fmdv_lib(cfg)), "chosen": chosen,
+            # The thresholds this project's verdicts actually use (defaults <
+            # user config < project.json), so the criteria widget can show them.
+            "qc_thresholds": _resolve_qc_thresholds(cfg, project_dir)}
+
+
+@app.post("/api/projects/{project}/fmdv")
+def fmdv_project_set(project: str, payload: FmdvModePayload):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    updates: Dict = {}
+    if payload.mode is not None:
+        m = (payload.mode or "").strip().lower()
+        if m not in ("", "fmdv"):
+            raise HTTPException(status_code=400, detail="mode must be 'fmdv' or empty")
+        updates["mode"] = m
+        if m == "fmdv":
+            updates["qc_thresholds"] = FMDV_QC_THRESHOLDS
+        elif _project_mode(project_dir) == "fmdv":
+            updates["qc_thresholds"] = None   # back to the user's defaults
+    if payload.scope is not None:
+        updates["fmdv_scope"] = _require_fmdv_scope(payload.scope)
+    if payload.step2_reference is not None:
+        # The comparison reference: one of the lineage references samples were
+        # actually mapped to (a safe name in the library). Stored under the
+        # ordinary `reference` key so Build filters and Run vetoes on it.
+        r = _require_ref_token(payload.step2_reference, "step2_reference") if payload.step2_reference.strip() else ""
+        if r and not _fmdv_is_lib_reference(cfg, r):
+            raise HTTPException(status_code=400, detail=f"{r} is not a genome in the FMDV reference library")
+        updates["reference"] = r
+    if updates:
+        update_project_meta(project_dir, updates)
+    return fmdv_project_get(project)
+
+
 @app.post("/api/projects/{project}/step1/run")
 def step1_run(project: str, payload: Step1Request):
     cfg = load_config()
@@ -5170,20 +5453,67 @@ def _step1_dispatch(
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
-    # Auto-populate reference from project.json if not supplied in payload
-    if not payload.reference:
-        payload.reference = _project_reference(project_dir)
-    # Validated even when it came from project.json rather than the request: on a
-    # shared project that file is writable by every member, so it is untrusted
-    # input too. Quoted as well as validated — the value lands inside a bash
-    # string that is later re-parsed.
-    payload.reference = _require_ref_token(payload.reference, "reference")
-    # vsnp3 is handed the reference FOLDER, resolved from this app's reference
-    # locations, never a name for it to look up in its own install's list (see
-    # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
-    # does that itself from its install (_auto_detect_preflight).
-    ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
-               else _auto_detect_preflight(cfg))
+    fmdv_mode = _project_mode(project_dir) == "fmdv"
+    fmdv_choose_lines: List[str] = []
+    if fmdv_mode:
+        # The project-level reference token becomes a SCOPE that bounds the
+        # per-sample choice; the folder itself is decided inside the batch,
+        # one sample at a time, and passed as -t there (see fmdv_choose_lines).
+        fmdv_scope = _require_fmdv_scope(payload.fmdv_scope or _project_fmdv_scope(project_dir))
+        fmdv_lib = str(Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser())
+        chooser = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_choose_reference.py")
+        clipper = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_clip_primers.py")
+        # The primer set: project.json fmdv_primers (a file name under
+        # <lib>/primers/, or "none"), else the library's default.fasta or
+        # its only set, else "" and reads go to vsnp3 unclipped.
+        fmdv_primers = _fmdv_primer_set(Path(fmdv_lib), project_dir)
+        ref_arg = ""
+        payload.reference = None
+        update_project_meta(project_dir, {"fmdv_scope": fmdv_scope,
+                                          "display_name": f"{project}_fmdv_{fmdv_scope.replace('/', '-')}"})
+        consensus_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_consensus.py")
+        # After vsnp3_step1.py returns 0: the reference-anchored consensus and
+        # its VP1 slice, written beside the alignment. Never fails the sample.
+        fmdv_consensus_line = (
+            "    python3 " + shlex.quote(consensus_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: consensus failed for $d\" | tee -a \"$LOG\""
+        )
+        fmdv_choose_lines = [
+            "  REF_DIR=$(python3 " + shlex.quote(chooser) + " --reads \"$R1\" ${R2:+\"$R2\"}"
+            + " --lib " + shlex.quote(fmdv_lib) + " --scope " + shlex.quote(fmdv_scope)
+            + " --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
+            "  if [ -z \"$REF_DIR\" ] || [ ! -d \"$REF_DIR\" ]; then",
+            "    echo \"FMDV: no reference could be chosen for $d (see fmdv_reference.json)\" | tee -a \"$LOG\"",
+            "    cd ..",
+            "    return 0",
+            "  fi",
+            "  echo \"FMDV reference: $REF_DIR\" | tee -a \"$LOG\"",
+            # Amplicon primers, clipped from the reads before vsnp3 (after
+            # NanoFMDV): the BED is found on the chosen reference. Only when
+            # the library carries a primer set; unmapped reads drop out here.
+            "  FMDV_PRIMERS=" + shlex.quote(fmdv_primers),
+            "  if [ -n \"$FMDV_PRIMERS\" ] && [ -f \"$FMDV_PRIMERS\" ]; then",
+            "    CLIPPED=$(python3 " + shlex.quote(clipper) + " --reads \"$R1\" --ref-dir \"$REF_DIR\""
+            + " --primers \"$FMDV_PRIMERS\" --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
+            "    if [ -n \"$CLIPPED\" ] && [ -s \"$CLIPPED\" ]; then R1=\"$CLIPPED\"; echo \"FMDV primers clipped: $CLIPPED\" | tee -a \"$LOG\";",
+            "    else echo \"FMDV: primer clipping failed for $d, running on unclipped reads\" | tee -a \"$LOG\"; fi",
+            "  fi",
+        ]
+    else:
+        # Auto-populate reference from project.json if not supplied in payload
+        if not payload.reference:
+            payload.reference = _project_reference(project_dir)
+        # Validated even when it came from project.json rather than the request: on a
+        # shared project that file is writable by every member, so it is untrusted
+        # input too. Quoted as well as validated — the value lands inside a bash
+        # string that is later re-parsed.
+        payload.reference = _require_ref_token(payload.reference, "reference")
+        # vsnp3 is handed the reference FOLDER, resolved from this app's reference
+        # locations, never a name for it to look up in its own install's list (see
+        # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
+        # does that itself from its install (_auto_detect_preflight).
+        ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
+                   else _auto_detect_preflight(cfg))
     if payload.reference:
         update_project_meta(project_dir, {
             "reference": payload.reference,
@@ -5307,7 +5637,15 @@ def _step1_dispatch(
             # they are server-built option tokens that must word-split into
             # separate argv entries, and each is now validated or a fixed literal.
             "  RUN_ARGS=(vsnp3_step1.py -r1 \"$R1\")",
+            # The sample name is the folder name, not whatever vsnp3 reads off
+            # the file before its first underscore.
+            "  RUN_ARGS+=(-n \"$(basename \"$d\")\")",
             "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
+        ] + fmdv_choose_lines + [
+            # FMDV mode: -t is the per-sample folder the chooser just printed,
+            # passed as two quoted array entries. Otherwise ref_arg is the
+            # run-wide token resolved above and this line is a no-op.
+            ("  RUN_ARGS+=(-t \"$REF_DIR\")" if fmdv_mode else "  :"),
             f"  RUN_ARGS+=({ref_arg} {debug_flag} {assemble_unmap_flag} $NP)",
             "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
             "  PROV_SAMPLE=$(basename \"$d\")",
@@ -5339,6 +5677,7 @@ def _step1_dispatch(
             "    DURATION=$((END_TS-START_TS))",
             "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
             "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
+            (fmdv_consensus_line if fmdv_mode else "    :"),
             "  else",
             "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
             "    FAIL=1",
@@ -5477,7 +5816,7 @@ def step1_status(project: str):
     in_vcfs_folder: set = set()
     if vcfs_dir.exists():
         for vf in vcfs_dir.glob("*_zc.vcf*"):
-            stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            stem = sample_of(vf.name)
             in_vcfs_folder.add(stem)
 
     # One listing of step1/, shared with every other request of this switch
@@ -5879,7 +6218,7 @@ def project_vcfs_list(project: str):
     vcfs = sorted([*vcfs_dir.glob("*_zc.vcf"), *vcfs_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name)
     samples = []
     for v in vcfs:
-        stem = v.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        stem = sample_of(v.name)
         samples.append({"filename": v.name, "sample": stem})
     return {"count": len(samples), "path": str(vcfs_dir), "folder_name": vcfs_dir.name, "samples": samples}
 
@@ -6379,7 +6718,16 @@ def step2_run(project: str, payload: Step2Request):
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
     # The folder vsnp3 will be handed, resolved now so an unknown reference is
     # refused before anything is staged.
-    ref_arg = _vsnp3_reference_arg(cfg, _require_ref_token(payload.reference, "reference"))
+    if _project_mode(project_dir) == "fmdv" and _fmdv_is_lib_reference(cfg, payload.reference or ""):
+        # FMDV mode: the comparison reference is a lineage genome in the FMDV
+        # library, whose folder is made on demand and is not one of the
+        # configured reference locations. Same -t <folder> contract as below.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "bin"))
+        import fmdv_reflib  # noqa: E402
+        folder = fmdv_reflib.materialize(_fmdv_lib(cfg), _require_ref_token(payload.reference, "reference"))
+        ref_arg = f"-t {shlex.quote(str(folder))}"
+    else:
+        ref_arg = _vsnp3_reference_arg(cfg, _require_ref_token(payload.reference, "reference"))
     # Store the resolved reference back into project.json
     update_project_meta(project_dir, {"reference": payload.reference})
 
@@ -7494,6 +7842,8 @@ def qc_summary(project: str, refresh: int = 0):
     # keys its rows on `sample`.
     rows = [{k: v for k, v in r.items() if not k.startswith("_sa")}
             for r in state["rows"] or []]
+    if _project_mode(project_dir) == "fmdv":
+        _fmdv_flag_qc_rows(rows, step1_dir)
     _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
     return {
         "status": "ready",
@@ -7859,7 +8209,7 @@ def step2_vcf_count(project: str):
     comparison_stems: List[str] = []
     excluded = 0
     for name in vcf_names:
-        stem = name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
+        stem = sample_of(name)
         if stem in excluded_names:
             excluded += 1
         else:
@@ -8315,7 +8665,7 @@ def step2_panels_get(project: str):
             if not p.is_dir():
                 continue
             samples = sorted(
-                f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+                sample_of(f.name)
                 for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
             )
             panels.append({
@@ -8485,7 +8835,7 @@ def _reference_panel_accessions(cfg: Dict, reference: Optional[str]) -> set:
         if not p.is_dir():
             continue
         for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz")):
-            names.add(f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""))
+            names.add(sample_of(f.name))
     return names
 
 
@@ -8512,7 +8862,7 @@ def _reference_panels_by_name(cfg: Dict, reference: Optional[str]) -> List[tuple
         if not p.is_dir():
             continue
         accs = {
-            f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            sample_of(f.name)
             for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
         }
         if accs:
@@ -12945,6 +13295,19 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # ever being offered to the check that exists to catch it.
     entries = [step2_dir / e.filename for e in db_entries(step2_dir)]
 
+    # FMDV mode: samples are mapped to their own lineage references, so a
+    # project's database is mixed by design and a run is a per-reference
+    # subset. VCFs the run will not see (excluded in Step 1 Results, or
+    # unticked for the build) are not audited; step2_run removes exactly
+    # these before vsnp3 is handed the set. Stock projects are audited whole.
+    excluded_from_audit = 0
+    if _project_mode(project_dir) == "fmdv":
+        left_out = (set(_read_step1_exclusions(project_dir / "step2"))
+                    | set(_read_step2_build_exclusions(project_dir / "step2")))
+        kept = [e for e in entries if sample_of(e.name) not in left_out]
+        excluded_from_audit = len(entries) - len(kept)
+        entries = kept
+
     by_ref_cache: Dict[str, Dict[str, List[Path]]] = {}
 
     def alignment_refs(sample: str) -> Dict[str, List[Path]]:
@@ -12974,7 +13337,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
 
     def _resolve(entry: Path) -> Optional[Tuple[str, Path, List[int], str]]:
-        sample = entry.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        sample = sample_of(entry.name)
         try:
             st = entry.stat()
         except OSError:
@@ -13119,6 +13482,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         # set at all, more than one is all we can go on.
         "mixed": bool(wrong) or len(db_refs) > 1,
         "total": len(entries),
+        "excluded_from_audit": excluded_from_audit,
         "unknown": unknown,
         "recoverable": sorted(recoverable, key=key),
         "removable": sorted(removable, key=key),

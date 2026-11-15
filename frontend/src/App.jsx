@@ -17,6 +17,8 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          exclusionReasons, blockReason, blocklistSummary, groupFilterMatch,
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
+import FmdvScopePicker from "./FmdvScopePicker.jsx";
+import OntRunImport from "./OntRunImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -804,6 +806,14 @@ export default function App() {
   const [projects, setProjects] = useState([]);
   const [references, setReferences] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
+  // FMDV mode (project.json "mode": "fmdv"): the reference is chosen per
+  // sample inside Step 1, bounded by a scope the picker sets. fmdvInfo comes
+  // from GET /api/projects/{p}/fmdv; the lineage hierarchy from
+  // GET /api/fmdv/lineages (loaded once). See docs/FMDV_MODE.md.
+  const [fmdvInfo, setFmdvInfo] = useState(null);
+  const [fmdvLineages, setFmdvLineages] = useState(null);
+  const [fmdvScope, setFmdvScope] = useState("FMDV");
+  const fmdvOn = fmdvInfo?.mode === "fmdv";
   const [newProjectName, setNewProjectName] = useState("");
   const [settings, setSettings] = useState({
     vsnp3_path: "",
@@ -2931,6 +2941,54 @@ export default function App() {
     runPreflight();
   }, [settings.vsnp3_path]);
 
+  // FMDV mode state follows the selected project; the lineage library is
+  // fetched the first time an FMDV project is opened.
+  useEffect(() => {
+    let cancelled = false;
+    setFmdvInfo(null);
+    if (!selectedProject) return () => { cancelled = true; };
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`);
+        if (!res.ok || cancelled) return;
+        const info = await res.json();
+        if (cancelled) return;
+        setFmdvInfo(info);
+        if (info.mode === "fmdv") {
+          setFmdvScope(info.scope || "FMDV");
+          // The Step 2 comparison reference is vsnp_gui's ordinary project
+          // reference; seed the run's reference state from it.
+          if (info.step2_reference) setReference(info.step2_reference);
+          if (!fmdvLineages) {
+            const lr = await fetch(`${API_BASE}/api/fmdv/lineages`);
+            if (lr.ok && !cancelled) setFmdvLineages(await lr.json());
+          }
+        }
+      } catch { /* not an FMDV project, or no library: the panel says so */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProject]);
+
+  async function setFmdvMode(on, scope) {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: on ? "fmdv" : "", ...(scope !== undefined ? { scope } : {}) }),
+      });
+      if (!res.ok) { setStep1StatusError(`FMDV mode: ${(await res.text()).slice(0, 300)}`); return; }
+      const info = await res.json();
+      setFmdvInfo(info);
+      if (info.mode === "fmdv") {
+        setFmdvScope(info.scope || "FMDV");
+        if (!fmdvLineages) {
+          const lr = await fetch(`${API_BASE}/api/fmdv/lineages`);
+          if (lr.ok) setFmdvLineages(await lr.json());
+        }
+      }
+    } catch (e) { setStep1StatusError(`FMDV mode: ${e.message || e}`); }
+  }
+
   useEffect(() => {
     if (!jobId) return;
     setLogs([]);
@@ -3619,25 +3677,36 @@ export default function App() {
   // are not reflected here yet — surfacing the resolved-per-project view
   // would need a /api/projects/<p>/qc_thresholds endpoint we haven't built.
   function QcCriteriaWidget() {
-    const t = config?.qc_thresholds;
+    // In FMDV mode the project carries its own thresholds layer; the /fmdv
+    // route returns the resolved set, which is what the verdicts use.
+    const t = (fmdvOn && fmdvInfo?.qc_thresholds) || config?.qc_thresholds;
     if (!t) return null;
     const cov = t.coverage || {};
     const mr = t.mapping_rate || {};
+    const gc = t.genome_coverage;
+    const failPart = (c, unit) => (c.review_min == null ? " · never fails" : ` · ≥${c.review_min}${unit} review · <${c.review_min}${unit} fail`);
     return (
       <details className="qc-criteria">
-        <summary>QC criteria</summary>
+        <summary>QC criteria{fmdvOn ? " (FMDV mode)" : ""}</summary>
         <ul>
+          {gc ? (
+            <li>
+              <strong>Genome covered</strong> (Genome with Coverage):
+              {" "}≥{gc.pass_min}% pass{failPart(gc, "%")}
+            </li>
+          ) : null}
           <li>
             <strong>Coverage</strong> (Avg Depth):
-            {" "}≥{cov.pass_min}× pass · ≥{cov.review_min}× review · &lt;{cov.review_min}× fail
+            {" "}≥{cov.pass_min}× pass{failPart(cov, "×")}
           </li>
           <li>
             <strong>Mapping rate</strong> (1 − Unmapped %):
-            {" "}≥{mr.pass_min}% pass · ≥{mr.review_min}% review · &lt;{mr.review_min}% fail
+            {" "}≥{mr.pass_min}% pass{failPart(mr, "%")}
           </li>
           <li>
-            <strong>Contamination</strong> flag (sourmash, when available):
-            {" "}{t.contamination_review ? "any positive value forces review" : "ignored"}
+            <strong>{fmdvOn ? "Reference distance / mixed serotypes" : "Contamination"}</strong>
+            {fmdvOn ? " (per-sample chooser: identity < 0.90, or a second serotype ≥ 5% of VP1 reads)" : " flag (sourmash, when available)"}:
+            {" "}{t.contamination_review ? "forces review" : "ignored"}
           </li>
         </ul>
         <div className="muted">
@@ -5292,7 +5361,9 @@ export default function App() {
 
   async function step1Run() {
     const effectiveRef = reference || projectReference;
-    if (!selectedProject || !settingsReady || !effectiveRef) return;
+    // FMDV mode needs no project-wide reference: each sample chooses its own
+    // inside the batch, bounded by fmdvScope.
+    if (!selectedProject || !settingsReady || (!effectiveRef && !fmdvOn)) return;
     if (step1JobStatus === "running") {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
@@ -5320,7 +5391,7 @@ export default function App() {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun, trim: trimFastq, trim_mb: trimFastq ? mb : null })
+        body: JSON.stringify({ reference: fmdvOn ? null : refValue, fmdv_scope: fmdvOn ? fmdvScope : undefined, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun, trim: trimFastq, trim_mb: trimFastq ? mb : null })
       });
     } catch (e) {
       step1DispatchingRef.current = false;
@@ -7308,6 +7379,12 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                <OntRunImport
+                  apiBase={API_BASE}
+                  project={selectedProject}
+                  enabled={!!selectedProject && settingsReady}
+                  onImported={() => loadAll()}
+                />
                 <h3>SRA Download</h3>
                 <textarea
                   placeholder="SRR/SRX/SRS accessions (one per line)"
@@ -8193,7 +8270,23 @@ export default function App() {
             </div>
             <div className="block">
               <h3>Reference</h3>
-              {projectReference ? (
+              <label className="checkbox" style={{ marginBottom: "0.4em" }} title="FMDV topotypes within a serotype differ by up to 21%, so the lineage reference is chosen per sample. See docs/FMDV_MODE.md.">
+                <input
+                  type="checkbox"
+                  checked={fmdvOn}
+                  disabled={!selectedProject || step1JobStatus === "running"}
+                  onChange={(e) => setFmdvMode(e.target.checked, e.target.checked ? fmdvScope : undefined)}
+                />
+                FMDV mode: choose the lineage reference per sample
+              </label>
+              {fmdvOn ? (
+                <FmdvScopePicker
+                  lineages={fmdvLineages}
+                  scope={fmdvScope}
+                  disabled={step1JobStatus === "running"}
+                  onChange={(s) => { setFmdvScope(s); setFmdvMode(true, s); }}
+                />
+              ) : projectReference ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                   <span
                     style={{
@@ -8338,7 +8431,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running" || grabJobStatus === "running"}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference && !fmdvOn) || step1JobStatus === "running" || grabJobStatus === "running"}
                   title={
                     step1JobStatus === "running"
                       ? "Step 1 batch is in progress — wait for it to finish"
@@ -9578,6 +9671,40 @@ export default function App() {
 
             {step2Mode === "build" ? (
               <div className="block">
+                {fmdvOn ? (
+                  <div className="step2-src" title="In FMDV mode each sample was mapped to its own lineage reference. A comparison is made on one reference at a time; Build collects only that reference's VCFs and Run refuses a mixed set.">
+                    <div className="step2-src-head">
+                      <span className="step2-src-num">0</span>
+                      Compare on reference
+                    </div>
+                    <select
+                      value={fmdvInfo?.step2_reference || ""}
+                      disabled={step2Running}
+                      onChange={async (e) => {
+                        const v = e.target.value;
+                        setReference(v);
+                        await setFmdvMode(true, undefined);
+                        try {
+                          const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`, {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ step2_reference: v }),
+                          });
+                          if (res.ok) setFmdvInfo(await res.json());
+                          else setStep2SetupMsg(`Comparison reference: ${(await res.text()).slice(0, 300)}`);
+                        } catch (err) { setStep2SetupMsg(`Comparison reference: ${err.message || err}`); }
+                      }}
+                    >
+                      <option value="">Choose the lineage reference to compare on…</option>
+                      {Object.entries(refLock.samples_by_reference || {}).sort().map(([r, ss]) => (
+                        <option key={r} value={r}>{r} ({ss.length} sample{ss.length === 1 ? "" : "s"})</option>
+                      ))}
+                    </select>
+                    <div className="step2-src-hint">
+                      Samples mapped to other lineage references stay in Step 1 and are left out of this
+                      comparison. Run Step 2 once per reference you want a tree and SNP matrix for.
+                    </div>
+                  </div>
+                ) : null}
                 <div className="step2-src">
                   <div className="step2-src-head">
                     <span className="step2-src-num">1</span>

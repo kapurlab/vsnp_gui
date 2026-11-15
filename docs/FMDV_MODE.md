@@ -369,6 +369,15 @@ the genome's own against the reference. The library is added to the
 viewer's serve roots for this; the windowed-reads path is not used, since
 it looks only under the project's step1 folder.
 
+**The ONT label and the Step 1 folder.** vsnp3 3.37 names an ONT sample's
+VCF `<sample>_nanopore_zc.vcf`, so every Step 2 table labels the sample
+`<sample>_nanopore` while its Step 1 folder is `<sample>`. Clicking such a
+sample in a table used to open IGV saying it had no Step 1 folder. The
+sample-folder resolver now strips that suffix as a last try, and the file
+lookups inside a resolved folder use the folder's own name, so the stats
+workbook, the BAM, the reads ticket, the VCF editor and the variant lookup
+all answer for the label the tables use.
+
 ## Chooser test set
 
 `~/fmdv_run_test` on WGS3 also holds `20261114_FMDV_run2` and

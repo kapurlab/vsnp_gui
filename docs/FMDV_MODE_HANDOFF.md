@@ -319,7 +319,11 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
 - Step 2 tables carry the annotation row and IGV the gene track, from the
   GenBank and GFF files the library fetches once per genome; a variant of a
   database genome opens IGV on the alignment the library build kept, with
-  a note that the reads were simulated from the genome's sequence.
+  a note that the reads were simulated from the genome's sequence. An ONT
+  sample's own reads open too: vsnp3 3.37 labels it `<sample>_nanopore`
+  in every Step 2 table while its Step 1 folder is `<sample>`, and the
+  sample-folder resolver now closes that gap for the viewer, the file
+  lists, the stats preview, the VCF editor and the variant lookup.
 - VP1 tree: samples placed with their lineage on the panel alone and on
   panel plus context (SAT1 167 taxa in 90 s; O 621 taxa in 11 min).
 - Tests: the four new scripts pass; the 60 stock test scripts give the

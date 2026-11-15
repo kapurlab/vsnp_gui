@@ -1,0 +1,12 @@
+sample_id	barcode	scenario	depth	expected_genome	distant	mixed	notes
+SYN-01	barcode01	clean	200	SAT1-I_KM268899	False	False	
+SYN-02	barcode02	clean	200	SAT1-I_KM268899	False	False	3 SNPs from founder
+SYN-03	barcode03	clean	200	SAT1-I_KM268899	False	False	identical pair
+SYN-04	barcode04	clean	200	SAT1-I_KM268899	False	False	3 further SNPs from SYN-02
+SYN-05	barcode05	clean	200	SAT1-I_KM268899	False	False	3 further SNPs from SYN-04 plus a 3-nt deletion at founder pos 1019
+SYN-06	barcode06	crosstalk	200	SAT1-I_KM268899	False	False	3% reads from O-EA-2_MH053318
+SYN-07	barcode07	coinfection	200	SAT1-I_KM268899	False	True	30% reads from O-EA-2_MH053318
+SYN-08	barcode08	dropout	200	SAT1-I_KM268899	False	False	uncovered fraction 0.4225
+SYN-09	barcode09	distant	200	ASIA1-NA_MF372126	True	False	
+SYN-12	barcode12	clean-depth	20	SAT1-I_KM268899	False	False	
+SYN-13	barcode13	clean-depth	2000	SAT1-I_KM268899	False	False	

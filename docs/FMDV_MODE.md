@@ -561,3 +561,95 @@ they agree at 99.8% of called positions, and the disagreements split
 between them. NanoFMDV's medaka consensus carries real indels and ours
 does not, by design. Neither pipeline has been tested on amplicon reads
 with primers present, which is what AHI will produce.
+
+## Synthetic benchmark
+
+`bin/fmdv_simulate.py` builds a MinKNOW-style run with a known answer key, for FMDV mode. Every file name and every FASTQ header contains SYN. These are simulated reads. They are not a real outbreak and not a real sample, and they must not be cited as one.
+
+Regenerate with the same seed:
+
+```
+python3 bin/fmdv_simulate.py \
+  --panel <lib>/panels/genomes.fasta \
+  --primers <lib>/primers/nanofmdv_L.fasta \
+  --collection <NanoFMDV Refs/all_fmdv.fasta> \
+  --host-fasta <bovine segment FASTA> \
+  --out <run folder> --seed 20261115 --scenario all --depths 20,200,2000
+```
+
+`--scenario` is `all`, `clean`, `crosstalk`, `coinfection`, `dropout`, `distant`, or `depths`. The answer key is written beside the run folder as `SYN_truth.json`, `SYN_truth_table.tsv`, and `SYN_snp_table.tsv`.
+
+### Method
+
+Three real complete genomes, none of them invented.
+
+The outbreak founder is panel genome `SAT1-I_KM268899`. The other serotype, used for crosstalk and co-infection, is panel genome `O-EA-2_MH053318`. The distant founder is GenBank `DQ989316` (Asia 1 isolate IND 21-89, from NanoFMDV's complete-genome collection). It was not assumed. Each run aligns it to all 79 panel genomes and keeps it only if the nearest is 15 to 20 percent away. The identity used for that decision is aligned-base identity (matches divided by aligned bases), with terminal gaps ignored, so a short record is not scored as distant just because its ends are missing. Global identity is reported and is not the rule. On 15 November 2026 the nearest panel genome was `ASIA1-NA_MF372126`, at 15.79 percent aligned divergence (aligned identity 0.8421, global identity 0.8411, edit distance 1,315, 48 internal indels). Nothing in the SAT1 context set met the window: the farthest aligned divergence there was under 10 percent, and several apparent 15 percent figures were missing ends rather than substitutions.
+
+A short transmission chain is built from the founder. Each edge is 3 substitutions, inside the required 2 to 10. Positions are drawn from the seed, restricted to the amplicon insert and at least 80 bp from any placed primer, so `samtools ampliconclip --tolerance 50` does not remove them. One substitution on each edge is inside VP1 (founder coordinates 3178 to 3834). `SYN-03` is an exact copy of `SYN-02`. `SYN-05` also loses three nucleotides, `GCT` at founder position 1019, in the L1a and L1b insert.
+
+| sample | parent | substitutions from parent | VP1 site |
+|---|---|---|---|
+| SYN-01 | founder | 0 | |
+| SYN-02 | SYN-01 | 3 (1763 C>A, 3731 G>A, 4621 G>C) | 3731 |
+| SYN-03 | SYN-02 | 0, identical genome | 3731 (shared) |
+| SYN-04 | SYN-02 | 3 (1199 T>A, 3608 C>A, 6937 G>A) | 3608 |
+| SYN-05 | SYN-04 | 3 (2684 T>G, 3629 A>C, 6987 G>C) plus the deletion | 3629 |
+
+Sample ids do not name a serotype or a lineage. Underscores are not used, because import turns them into dashes.
+
+Primers are placed with the clipper's rule (`best_site` in `bin/fmdv_clip_primers.py`, minimum fit 0.8). On `SAT1-I_KM268899` that places the same 25 primers as the cached BED and leaves out the same eight. Alternative oligos at one site collapse to the best fit, so a tile is not sequenced once per oligo. The seven amplicons are S 1-327, L1a 315-1373, L1b 765-2576, L3b 2291-4886, L4 3878-4445, L4 3878-6068, and L5 5159-7292. The oligo sequence stays on the amplicon. IUPAC is resolved to the founder base where the two are compatible. The 3' RT primer (`FMD_UNI_RT`) does not meet fit 0.8 on these GenBank records, which have no polyA tail, so positions 7293-8156 are uncovered on every sample. That is the scheme, not the dropout.
+
+Reads are Badread 0.4.2 with the `nanopore2023` error model and qscore model, which is Badread's R10.4.1 model. The identity distribution is `98,99.5,1.5`. Fragment length is set above the amplicon, so Badread's linear-reference rule returns the whole amplicon and a short product is not cut in half. Adapters, junk, random reads, chimeras, and glitches are off. Depth is per amplicon (`--quantity {depth}x` on that amplicon alone). Overlaps are deeper. Badread's base target plus a few deletion-shortened reads lands a little above the label (about 201 reads for a 200x amplicon).
+
+No bovine read set was in the local reference folder. Host reads are simulated from public `Bos taurus` chromosome 1, `NC_037328.1` positions 1,000,001-1,100,000 (ARS-UCD2.0), at fragment length 1,500 bp. FMDV is 35 percent of reads, inside the requested 20 to 50 percent.
+
+The folder is a MinKNOW layout: `fastq_pass/barcodeNN/SYN_barcodeNN_chunkNNN.fastq.gz` in chunks of 4,000 reads, and `sample_sheet_SYN.csv` with `barcode` and `sample_id`. Import ignores the extra columns.
+
+### Scenarios
+
+| sample | barcode | what it is | depth |
+|---|---|---|---|
+| SYN-01 | barcode01 | clean founder | 200x |
+| SYN-02 | barcode02 | 3 substitutions from the founder | 200x |
+| SYN-03 | barcode03 | identical to SYN-02 | 200x |
+| SYN-04 | barcode04 | 3 further substitutions | 200x |
+| SYN-05 | barcode05 | 3 further substitutions and the 3-nt deletion | 200x |
+| SYN-06 | barcode06 | founder plus 3 percent of reads from O-EA-2 | 200x |
+| SYN-07 | barcode07 | 70 percent founder, 30 percent O-EA-2 | 200x |
+| SYN-08 | barcode08 | founder with L3b and L4 omitted | 200x |
+| SYN-09 | barcode09 | distant founder alone | 200x |
+| SYN-12 | barcode12 | clean founder | 20x |
+| SYN-13 | barcode13 | clean founder | 2000x |
+
+The 20x and 2000x labels are the clean founder only. The other scenarios stay at 200x. `--depths` can add or drop the depth series.
+
+SYN-08 drops the L3b and L4 products. On the founder that opens 2577-5158 (2,582 bp, 31.7 percent). Together with the scheme's uncovered 3' end the sample has 42.3 percent of the genome at zero coverage.
+
+### Expected calls
+
+These are the calls the key predicts. They are not a GUI result. This session could not reach the lab server, so project `FMDV_synthetic_1` was not imported or scored there. Do not treat the table below as a measured score.
+
+Scope `FMDV`. The chooser votes on VP1, so the distant sample's call is the panel genome whose VP1 collects the reads, which should be an Asia 1 genome, with `distant` true if read identity to that genome is under 0.90. The nearest whole genome is `ASIA1-NA_MF372126`.
+
+| sample | expected genome | distant | mixed | coverage note |
+|---|---|---|---|---|
+| SYN-01, SYN-02, SYN-03, SYN-04, SYN-05, SYN-12, SYN-13 | SAT1-I_KM268899 | no | no | about 89 percent of the reference covered, because of the 3' scheme gap, so the coverage flag is review rather than pass if the threshold is 90 percent |
+| SYN-06 | SAT1-I_KM268899 | no | no | 3 percent is under the 5 percent mixed flag, even if the other-serotype read count exceeds 50 |
+| SYN-07 | SAT1-I_KM268899 | no | yes | 30 percent O-EA-2 on VP1 |
+| SYN-08 | SAT1-I_KM268899 | no | no | 42 percent uncovered, under the 70 percent fail line |
+| SYN-09 | nearest Asia 1 genome | yes | no | reads are 15.8 percent from the nearest panel genome before sequencing error |
+
+SNP distances on the founder coordinates should follow the tree: 0 between SYN-02 and SYN-03, 3 between SYN-01 and SYN-02, 3 between SYN-02 and SYN-04, 3 between SYN-04 and SYN-05, 9 between SYN-01 and SYN-05. The VP1 tree should place SYN-02 with SYN-03, then SYN-04, then SYN-05, if Step 2 is run on `SAT1-I_KM268899` and the context includes those samples. Defining-SNP groups should follow the same edges. The 3-nt deletion is not a substitution. The consensus caller is substitution-only, so the deletion is expected to be missing from the consensus. Score that miss. Do not treat a missing deletion as a pipeline success.
+
+Depth: 200x and 2000x on covered bases should clear the depth-100 pass line. 20x sits on the depth-20 line, and partial overlap at amplicon edges can put some positions under it. Mapping rate should clear 20 percent on the SAT1 samples, because FMDV is 35 percent of reads and those reads match the chosen genome. The distant sample may fall under that line if reads stop mapping.
+
+### What it cannot test
+
+- Adapter trimming. Adapters were left off so the reads look like MinKNOW pass reads and the key stays interpretable.
+- Junk, random-read, chimera, or glitch filters. Those rates were 0.
+- A deletion in the consensus. The caller does not emit one. The key expects a miss at founder position 1019.
+- Barcode misclassification beyond the planted 3 percent and 30 percent mixtures.
+- The 3' RT amplicon. The primer does not place on a GenBank record with no polyA, which is also what the clipper does.
+- Live GUI scores, until the folder is imported on the lab server as project `FMDV_synthetic_1`. Do not touch `AHI_walkthrough` or `FMDV_test_run2`.
+
+The intended server path is `~/fmdv_run_test/synthetic_run1` on WGS3, with the answer key beside it. A copy made off the server is still simulated data and still carries SYN.

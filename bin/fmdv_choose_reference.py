@@ -10,8 +10,8 @@ reads stop mapping somewhere past 10 to 15%; measured 14 November 2026, a
 topotype 15 to 20% from the reference lost a third to half of the genome to
 zero coverage. So the closest available lineage is chosen for each sample,
 inside whatever scope the user set (FMDV, a serotype, a lineage, or one
-genome). A poor best match is flagged, not refused: an Ethiopian SAT1/IX
-sample has no close genome anywhere and must still run.
+genome). A poor best match is flagged, not refused: a sample from a lineage
+with no genome in the library has no close genome anywhere and must still run.
 
 How: competitive minimap2, after Shaw et al. 2025 (NanoFMDV, BMC Genomics
 26:770). A subsample of reads is mapped to the 79 VP1 sequences; the genome
@@ -218,7 +218,7 @@ def main() -> int:
     if result["distant"]:
         _err(f"fmdv: WARNING reads are only {ident:.1%} identical to the closest available "
              f"lineage {chosen['safe']}; expect reduced coverage in the capsid. "
-             f"This is the SAT1/IX situation if the sample is Ethiopian SAT1.")
+             f"The sample may belong to a lineage with no genome in the library.")
 
     folder = fmdv_reflib.materialize(lib, chosen["safe"])
     result["reference_folder"] = str(folder)

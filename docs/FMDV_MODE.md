@@ -99,8 +99,9 @@ five hits on each panel. Two flags, both **warnings, never refusals**:
   mixes read error with divergence: on the Pirbright R9 era reads the
   correct Asia1 lineage sits at 0.91 and lineages 10% or more away at 0.86
   to 0.89; the SAT1 reads sit at 0.98 on their own lineage. R10 reads will
-  move everything up. An Ethiopian SAT1/IX sample has no close genome
-  anywhere (GenBank holds none) and must still run.
+  move everything up. A sample from a lineage with no complete genome in
+  GenBank (SAT1 topotype IX is one such lineage) has no close genome
+  anywhere and must still run.
 - `mixed`: a second serotype holds 5% or more of the VP1 reads, with at
   least 50 reads. Barcode crosstalk in the Pirbright runs sat at 1 to 2%.
 
@@ -204,7 +205,8 @@ whole-genome SNP set, which is what a fail should mean (Vivek, 14 November
 2026, keeping 70% after seeing the test set). A low mapping rate describes
 the sample, not the result, so it reviews and never fails. The two chooser
 flags are not faults of the sample: "distant" says the consensus step and a
-closer reference are needed before the SNPs are trusted (the SAT1/IX case),
+closer reference are needed before the SNPs are trusted (a lineage with no
+genome in the library),
 "mixed" says a second serotype is present above the 1 to 2% of barcode
 crosstalk. Both reach the verdict engine through its contamination hook.
 
@@ -345,22 +347,47 @@ tree (four samples, nine panel genomes, 2.6 s) is the report view.
 The context sets come from NanoFMDV's own GenBank-derived collection
 (Shaw et al. 2025, `pipeline_exec/Refs/BLAST/fmdv-gbbase.fasta`, 11,153
 records), reformatted offline by `bin/fmdv_vp1_context.py --source <that
-file> --lib <library>`. The script keeps records of VP1 length (600 to 700
-nt), names each `<SEROTYPE>-<topotype or NA>_<accession>`, skips the 79
-accessions already in the lineage panel, and writes a `<SEROTYPE>.tsv`
-beside each FASTA with serotype, topotype, country, year, host, accession,
-length and isolate as the source header states them. Records with a plain
-GenBank header (one in six) keep their serotype and accession with
-topotype NA. The build keeps 6,353 of the 11,153 records: O 3,459, A
-1,470, Asia1 477, SAT2 428, SAT1 306, C 164, SAT3 49; 4,497 were not VP1
-length, 224 untyped, 79 in the panel. SAT1 has 13 topotypes, with 207 of
-topotype I and the three Ethiopian topotype IX sequences (FJ798154 to
-FJ798156, ETH/2007) that the panel lacks. `--max-per-lineage N` caps each
-topotype at N sequences, longest first, for a quicker O or A tree. With
-the SAT1 set in place the AHI walkthrough tree holds 318 sequences (nine
-panel genomes, 306 context sequences, three samples) and takes six minutes
-with eight threads; the three samples still sit with SAT1-I_KM268899
-(bootstrap 89), now inside topotype I rather than on a nine-genome tree.
+file> --lib <library>`. The script needs BLAST+ (blastn and makeblastdb)
+on PATH. It names each sequence `<SEROTYPE>-<topotype or NA>_<accession>`,
+skips the 79 accessions already in the lineage panel, and writes a
+`<SEROTYPE>.tsv` beside each FASTA with serotype, topotype, country, year,
+host, accession, length and isolate as the source header states them, plus
+the columns below. Records with a plain GenBank header (one in six) keep
+their serotype and accession with topotype NA.
+
+Three checks decide what goes in. First, a record of VP1 length (600 to 700
+nt) is not taken on length alone: it must align to a panel VP1 of its own
+serotype over at least 70% of itself, because the collection holds
+VP1-sized fragments from elsewhere in the genome (the SAT1 AF2834xx series
+are 609-nt pieces of the 3C region; 202 records hit no panel VP1 at all,
+31 only partly, and 2 ASIA1-labelled records matched serotype A). Second,
+VP1 is cut out of every longer record (complete genomes, P1 capsid records,
+other fragments) by its best blastn hit to the checked VP1 set of its
+serotype, extended to the template's ends and kept when VP1 length; the TSV
+column `region_source` says `vp1_record`, `sliced_from_genome`,
+`sliced_from_P1` or `sliced_from_other`, with the template, identity and
+coordinates beside it. Genome slices all start between positions 2,000 and
+3,500, P1 slices mostly at 1,576, which is where VP1 sits. Third, records
+under 600 nt stay out, since partial VP1 makes gappy alignments.
+
+The build keeps 9,098 sequences: 6,118 VP1 records and 2,980 slices (1,471
+from genomes, 927 from P1, 582 from other fragments). By serotype: O 4,930,
+A 2,247, Asia1 678, SAT2 557, SAT1 394, C 197, SAT3 95. Dropped: 1,389
+under 600 nt, 235 that failed the VP1 check, 128 long records with no
+usable VP1 hit, 224 untyped, 79 in the panel. SAT1 has 13 topotypes, 223
+of them topotype I; the three topotype IX sequences (FJ798154 to FJ798156,
+Ethiopia 2007) are 77.6% identical to their nearest panel VP1, SAT1-XI, so
+that lineage was 22% from anything in the panel. `--max-per-lineage N` caps
+each topotype at N sequences, longest first, for a quicker O or A tree.
+With the SAT1 set in place the AHI walkthrough tree holds 406 sequences
+(nine panel genomes, 394 context sequences, three samples) and takes 6.5
+minutes with eight threads. The three samples are identical on VP1 to
+SAT1-NA_MT602086.1 (TAN/27/2012, sliced from a complete genome whose header
+carries no topotype) and one difference in 657 sites from SAT1-I_KM268899,
+SAT1-I_MF592618 and SAT1-I_MF592629; the next nearest are topotype I at
+about 1%. RAxML writes the Newick unrooted, so a sample can appear as a
+child of the root; read placement from nearest neighbours or after
+rerooting, not from the root split.
 
 ## Primer clipping
 

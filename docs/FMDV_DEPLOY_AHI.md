@@ -25,6 +25,44 @@ already plans (under 100 GB in all). The 4.4 GB of library alignments are
 what IGV shows for a database genome; they can be left off a first drive
 and the feature degrades to "no reads for library genomes".
 
+## Where it runs
+
+Two jobs, two machines. Basecalling (MinKNOW, Dorado) needs the GPU and
+sits with the MinION, on the desktop that also drives the Illumina
+instrument, or a MinION laptop if one exists; which it is was still being
+confirmed on 16 November 2026. Analysis (the GUI, vsnp3, the chooser, the
+trees, the reports) is CPU work and lives on the Supermicro server, which
+Abdi is installing with Ubuntu and giving Penn State sudo on, over
+Tailscale, in the week of 16 November. Basecalled runs reach the server as
+a folder, by a share from the basecalling machine, an rsync, or a drive;
+the importer reads the MinKNOW layout wherever it lands. Projects, the
+library and the reports stay on the server. Nothing in the analysis path
+needs a GPU.
+
+The first session on the server, with Asamenew or Abdi watching:
+
+1. `lsb_release -a`, `nproc`, `free -g`, `lsblk`, `df -h`, `nvidia-smi`
+   if present: the platform, the cores, the memory, the disks and whether
+   the server has a GPU at all (it decides whether re-basecalling can run
+   there too).
+2. Tailscale up and a speed test both ways against WGS3 with a 1 GB file
+   and `rsync --partial`: the number that decides whether the install is
+   pushed over the link or waits for the drive.
+3. The accounts: `vkapur`, `tstuber`, `lli` with sudo, SSH keys, password
+   SSH off after the first login, as the setup plan says.
+4. `/srv/ahi` on the large disk, owned by a `kapurlab` group, and
+   `/data` or equivalent for runs and projects, with the sizes in mind:
+   one SUP-basecalled MinION run is 50 to 150 GB of POD5 and a few GB of
+   FASTQ.
+5. The written log of the session starts here and becomes AHI's guide.
+
+If the speed test allows it, the install goes onto the server over the
+link in the same week: bdtools from GitHub, the two envs from conda, and
+the library and test data pushed from WGS3 with `rsync --partial`; about
+10 GB in all, the library's IGV alignments left for the drive. If it does
+not, the drive image is built as below and the server waits for January,
+with reads analysed at Penn State in between.
+
 ## Decisions to take first
 
 1. **One GUI or two.** Recommended: AHI's `vsnp_gui` entry in `tools.yml`
@@ -34,15 +72,12 @@ and the feature degrades to "no reads for library genomes".
    tool named `fmdv_gui`, doubles the env and the projects root for no
    gain. Tod's merge decision changes nothing for AHI either way: AHI pins
    a tag, and later moves to a `main` tag if the mode is merged.
-2. **Phase 1 over the link, or wait for January.** The local-first note
-   planned a few gigabytes over the link now (MinKNOW, Dorado, NanoFMDV).
-   The fork's path needs the vsnp3 env and the fork env (2.2 GB) plus the
-   library without its alignments (0.6 GB), plus bdtools itself. If the
-   AHI speed test allows 5 to 10 GB with `rsync --partial`, Phase 1 can
-   carry FMDV mode; if not, Phase 1 stays MinKNOW and Dorado, raw reads
-   are analysed at Penn State over Tailscale until January, and the full
-   install comes on Asamenew's drive. The speed test decides; the plan
-   below builds the same image for both.
+2. **Over the link now, or wait for January.** With sudo on the
+   Supermicro this is the speed test's call, taken in the first session
+   above: about 10 GB over the link installs FMDV mode on the server this
+   month; otherwise the drive image below arrives with Asamenew in January
+   and reads are analysed at Penn State in between. The image is built
+   either way, as the restore copy.
 3. **Where the library lives.** `fmdv_reflib` in the GUI config names it.
    Recommended `/srv/ahi/refs/fmdv`, beside the vsnp3 references, owned by
    the site, read by every user.
@@ -117,9 +152,12 @@ drive or as a subsample.
 
 ## Open questions for AHI
 
-- The workstation's final hostname, the sudo accounts, and whether a second
-  PC on the LAN will open the GUI (decides whether the backend binds to
-  the LAN address or to localhost only).
+- Which machine the MinION is on and its operating system, and whether the
+  Supermicro has a GPU.
+- The server's hostname, the sudo accounts, and whether PCs on the LAN
+  will open the GUI (they will, since the server has no screen of its
+  own: the backend binds to the LAN address, behind the dashboard's
+  login).
 - Whether the lab wants the sample report in print by default, which sets
   the PDF as the file the dashboard opens.
 - Which serotypes beyond SAT1 to prepare Step 2 databases for before the

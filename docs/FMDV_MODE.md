@@ -577,6 +577,19 @@ it: the whole-genome Step 2 put two SAT1 samples 384 SNPs apart and 380 to
 466 from every library genome, and the VP1 tree put each beside a Kenya 2016
 GenBank record as a sister pair.
 
+The Step 2 Results pane carries the same two tabs, bound to the same
+state, so the two panes always show the same kind of run. The VP1 view
+shows one tree run at a time with sections Typing, Tree, Neighbours,
+Sites and Files. `bin/fmdv_vp1_tables.py`, run by the tree script after
+the tree, writes the neighbourhoods (per sample, every record within 3%
+of its nearest, at most 20 and at least 5, by identity over the compared
+bases of the alignment) and four site tables over the samples and the
+union of their neighbourhoods in tree order: sorted (VP1 order) and
+cascade (sites ordered by how many rows carry the minority state, as
+vsnp3's) at the nucleotide and the amino acid level. Site numbering is
+the first row's VP1, gaps removed; amino acids come from the alignment
+frame, since the panel VP1s are whole ORFs.
+
 The VP1 tree's context backbone now follows the typing: topotypes the
 samples were typed to keep the full backbone (20 per topotype or lineage
 bucket), every other topotype keeps two for orientation (`--context typed`,

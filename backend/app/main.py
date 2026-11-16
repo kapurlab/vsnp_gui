@@ -336,7 +336,20 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        p = step1_dir / str(row.get("sample") or "") / "fmdv_reference.json"
+        sample_dir = step1_dir / str(row.get("sample") or "")
+        # The consensus block's numbers: how much of the genome and of VP1
+        # was called (depth >= 10 and an unambiguous base), the two figures
+        # a reader needs before trusting a Step 2 group or a VP1 tree.
+        c = sample_dir / "fmdv_consensus.json"
+        if c.is_file():
+            try:
+                cj = json.loads(c.read_text())
+            except (OSError, ValueError):
+                cj = {}
+            row["fmdv_genome_called"] = cj.get("called_percent")
+            row["fmdv_vp1_called"] = cj.get("vp1_called_percent")
+            row["fmdv_consensus_length"] = cj.get("length")
+        p = sample_dir / "fmdv_reference.json"
         if not p.is_file():
             continue
         try:
@@ -354,6 +367,16 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
         if reasons:
             row["_contamination"] = True
             row["_contamination_reason"] = "; ".join(reasons)
+        # The chooser's own answer, for the Results table. Without these the
+        # table showed only the Illumina QC columns and nothing about which
+        # lineage reference the sample was put on or how well it fitted.
+        chosen = d.get("chosen") or {}
+        row["fmdv_serotype"] = chosen.get("serotype")
+        row["fmdv_lineage"] = chosen.get("lineage")
+        row["fmdv_chosen"] = chosen.get("safe")
+        row["fmdv_f_match"] = d.get("f_match")
+        row["fmdv_distant"] = bool(d.get("distant"))
+        row["fmdv_mixed"] = bool(d.get("mixed"))
         row["fmdv_identity"] = d.get("identity")
         row["fmdv_serotype_share"] = d.get("serotype_share")
 
@@ -5258,9 +5281,101 @@ def fmdv_project_get(project: str):
             "scope": (_project_fmdv_scope(project_dir) or "FMDV") if mode == "fmdv" else "",
             "step2_reference": _project_reference(project_dir) if mode == "fmdv" else "",
             "lib": str(_fmdv_lib(cfg)), "chosen": chosen,
+            # Whether the VP1 tree button has its tools (mafft plus a builder).
+            "vp1_tree": {k: v for k, v in _fmdv_tree_env().items() if k in ("ready", "tree_tool", "env_bin")},
             # The thresholds this project's verdicts actually use (defaults <
             # user config < project.json), so the criteria widget can show them.
             "qc_thresholds": _resolve_qc_thresholds(cfg, project_dir)}
+
+
+def _fmdv_tree_env() -> Dict[str, Any]:
+    """Where mafft and a tree builder live for the VP1 tree.
+
+    The fork's own conda env (conda_setup/environment.yml, name fmdv_gui)
+    carries mafft and iqtree; raxmlHPC ships with the vsnp3 env this backend
+    runs in. The job's PATH is that env's bin, then this interpreter's bin,
+    then the inherited PATH; bin/fmdv_vp1_tree.py takes raxmlHPC, iqtree or
+    FastTree from it in that order. FMDV_GUI_TREE_ENV names the env outright."""
+    candidates: List[Path] = []
+    want = os.environ.get("FMDV_GUI_TREE_ENV", "").strip()
+    if want:
+        candidates.append(Path(want))
+    bases: List[Path] = []
+    conda_exe = os.environ.get("CONDA_EXE", "").strip()
+    if conda_exe:
+        bases.append(Path(conda_exe).parent.parent)
+    bases += [Path.home() / b for b in ("miniforge3", "miniconda3", "anaconda3", "mambaforge")]
+    candidates += [b / "envs" / "fmdv_gui" for b in bases]
+    env_bin = next((c / "bin" for c in candidates if (c / "bin" / "mafft").exists()), None)
+    dirs = ([str(env_bin)] if env_bin else []) + [str(Path(sys.executable).parent)]
+    path = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+
+    def which(*names: str) -> str:
+        for n in names:
+            w = shutil.which(n, path=path)
+            if w:
+                return w
+        return ""
+
+    mafft = which("mafft")
+    tree_tool = which("raxmlHPC-PTHREADS-AVX2", "raxmlHPC-PTHREADS", "raxmlHPC", "iqtree2", "iqtree", "FastTree", "fasttree")
+    return {"path": path, "env_bin": str(env_bin) if env_bin else "", "mafft": mafft,
+            "tree_tool": Path(tree_tool).name if tree_tool else "", "ready": bool(mafft and tree_tool)}
+
+
+class FmdvVp1TreeRequest(BaseModel):
+    serotype: Optional[str] = None   # one serotype, or empty for every sample with VP1
+    bootstraps: int = 100
+    min_called: float = 50.0         # skip samples with less of VP1 called
+
+
+@app.post("/api/projects/{project}/fmdv/vp1_tree")
+def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
+    """Build the VP1 tree (bin/fmdv_vp1_tree.py) as a background job. The
+    tree lands under step2/<stamp>_VP1-tree[-SEROTYPE]/ where the Step 2
+    Results list and tree viewer pick it up."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    env = _fmdv_tree_env()
+    if not env["ready"]:
+        missing = [n for n, v in (("mafft", env["mafft"]), ("a tree builder (raxmlHPC, iqtree or FastTree)", env["tree_tool"])) if not v]
+        raise HTTPException(status_code=400, detail=(
+            "VP1 tree: " + " and ".join(missing) + " not found. Create the fmdv_gui conda env from "
+            "conda_setup/environment.yml, or point FMDV_GUI_TREE_ENV at an env that has them."))
+    sero = (payload.serotype or "").strip().upper()
+    if sero and not re.fullmatch(r"[A-Z0-9]+", sero):
+        raise HTTPException(status_code=400, detail="serotype must be letters and digits, e.g. SAT1")
+    min_called = max(0.0, min(100.0, float(payload.min_called)))
+    usable = 0
+    for p in (project_dir / "step1").glob("*/fmdv_consensus.json"):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        ref = str(d.get("reference") or "")
+        if sero and ref.split("-", 1)[0].split("_", 1)[0].upper() != sero:
+            continue
+        if float(d.get("vp1_called_percent") or 0.0) >= min_called:
+            usable += 1
+    if not usable:
+        raise HTTPException(status_code=400, detail=(
+            f"No {sero + ' ' if sero else ''}sample has {min_called:g}% or more of VP1 called. "
+            "Run Step 1 first; samples with little VP1 coverage are left out of the tree."))
+    script = Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_tree.py"
+    (project_dir / "step2").mkdir(parents=True, exist_ok=True)
+    parts = [sys.executable, "-u", str(script), "--project", str(project_dir), "--lib", str(_fmdv_lib(cfg)),
+             "--threads", str(max(1, min(8, os.cpu_count() or 1))),
+             "--bootstraps", str(max(0, int(payload.bootstraps))), "--min-called", f"{min_called:g}"]
+    if sero:
+        parts += ["--serotype", sero]
+    command = " ".join(shlex.quote(part) for part in parts)
+    job_id = job_manager.start_job(name="fmdv_vp1_tree", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent, env={"PATH": env["path"]})
+    return {"job_id": job_id, "serotype": sero, "samples": usable, "tree_tool": env["tree_tool"]}
 
 
 @app.post("/api/projects/{project}/fmdv")
@@ -7797,6 +7912,16 @@ def _qc_apply_filters(
     return [r for r in rows if _keep(r)]
 
 
+def _qc_rows_for_export(project_dir: Path, step1_dir: Path) -> List[Dict[str, Any]]:
+    """The finished rows for the CSV/XLSX exports, with the FMDV columns the
+    Results table shows (serotype, lineage, identity, genome and VP1 called)
+    added in FMDV mode. A copy: the cached rows stay as the scanner left them."""
+    rows = [dict(r) for r in _qc_rows_blocking(step1_dir)]
+    if _project_mode(project_dir) == "fmdv":
+        _fmdv_flag_qc_rows(rows, step1_dir)
+    return rows
+
+
 def _qc_table(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
     """Rows as a rectangular table for the CSV/XLSX exports: columns in
     first-seen order (what pandas.DataFrame produced), _file dropped,
@@ -7876,7 +8001,7 @@ def qc_summary_csv(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+    rows = _qc_apply_filters(_qc_rows_for_export(project_dir, step1_dir), start, end, q,
                              aliases=_project_aliases(project_dir, cfg))
     if not rows:
         return Response(content="", media_type="text/csv")
@@ -7901,7 +8026,7 @@ def qc_summary_xlsx(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+    rows = _qc_apply_filters(_qc_rows_for_export(project_dir, step1_dir), start, end, q,
                              aliases=_project_aliases(project_dir, cfg))
     header, data = _qc_table(rows)
     from openpyxl import Workbook  # ships with the env's pandas

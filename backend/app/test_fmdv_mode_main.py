@@ -7,13 +7,18 @@ What these pin:
   * the FMDV scope grammar: FMDV, a serotype, serotype/topotype, or
     genome:<safe name>; anything else is a 400;
   * which primer set a project gets: "none" means none, a named set must
-    exist, otherwise default.fasta, otherwise the only set, otherwise none.
+    exist, otherwise default.fasta, otherwise the only set, otherwise none;
+  * the Results rows carry the chooser's answer and the consensus numbers
+    (serotype, lineage, identity, genome and VP1 called);
+  * the VP1 tree finds mafft in the env FMDV_GUI_TREE_ENV names and reports
+    not-ready, rather than crashing, when nothing has mafft.
 
     <conda>/bin/python backend/app/test_fmdv_mode_main.py
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -23,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import HTTPException  # noqa: E402
 
 from app.step2_inventory import import_tail, sample_of  # noqa: E402
-from app.main import _fmdv_primer_set, _require_fmdv_scope, _resolve_sample_dir, _step1_file_stem  # noqa: E402
+from app.main import (_fmdv_flag_qc_rows, _fmdv_primer_set, _fmdv_tree_env, _require_fmdv_scope,  # noqa: E402
+                      _resolve_sample_dir, _step1_file_stem)
 
 FAILS = []
 
@@ -102,6 +108,55 @@ def test_primer_set_choice():
         check(_fmdv_primer_set(lib, proj), "", "none means no clipping")
         meta(fmdv_primers="missing.fasta")
         check(_fmdv_primer_set(lib, proj), "", "a named set that does not exist gives none, not a crash")
+
+
+def test_results_rows_carry_chooser_and_consensus():
+    with tempfile.TemporaryDirectory() as td:
+        step1 = Path(td)
+        a = step1 / "A"
+        a.mkdir()
+        (a / "fmdv_reference.json").write_text(json.dumps({
+            "chosen": {"safe": "SAT1-I_KM268899", "serotype": "SAT1", "lineage": "I"},
+            "f_match": 0.91, "identity": 0.985, "distant": False, "mixed": False}))
+        (a / "fmdv_consensus.json").write_text(json.dumps({"length": 8156, "called_percent": 99.67, "vp1_called_percent": 100.0}))
+        (step1 / "B").mkdir()   # Step 1 not run: no files at all
+        rows = [{"sample": "A"}, {"sample": "B"}, "not a row"]
+        _fmdv_flag_qc_rows(rows, step1)
+        check((rows[0]["fmdv_serotype"], rows[0]["fmdv_lineage"], rows[0]["fmdv_identity"]), ("SAT1", "I", 0.985), "chooser fields")
+        check((rows[0]["fmdv_genome_called"], rows[0]["fmdv_vp1_called"]), (99.67, 100.0), "consensus percentages")
+        check(rows[0].get("_contamination"), None, "a clean sample is not flagged")
+        check("fmdv_serotype" in rows[1], False, "a sample without the files gets no FMDV keys")
+        (a / "fmdv_reference.json").write_text(json.dumps({
+            "chosen": {"safe": "A-NA_X", "serotype": "A", "lineage": "NA"}, "identity": 0.86, "distant": True,
+            "mixed": True, "serotype_share": {"A": 0.9, "O": 0.1}}))
+        rows = [{"sample": "A"}]
+        _fmdv_flag_qc_rows(rows, step1)
+        check(rows[0]["_contamination"], True, "distant or mixed flags the row for review")
+        check("distant reference, identity 0.86" in rows[0]["_contamination_reason"], True, "and says why")
+
+
+def test_tree_env_discovery():
+    with tempfile.TemporaryDirectory() as td:
+        env = Path(td) / "env"
+        (env / "bin").mkdir(parents=True)
+        old = os.environ.get("FMDV_GUI_TREE_ENV")
+        try:
+            os.environ["FMDV_GUI_TREE_ENV"] = str(env)
+            got = _fmdv_tree_env()
+            check(got["env_bin"] == str(env / "bin"), False, "an env without mafft is not the tree env (a real fmdv_gui env may still be found)")
+            check(isinstance(got["ready"], bool), True, "ready is a plain flag")
+            mafft = env / "bin" / "mafft"
+            mafft.write_text("#!/bin/sh\n")
+            mafft.chmod(0o755)
+            got = _fmdv_tree_env()
+            check(got["env_bin"], str(env / "bin"), "the named env with mafft is used")
+            check(got["path"].split(os.pathsep)[0], str(env / "bin"), "and goes first on the job's PATH")
+            check(got["mafft"], str(mafft), "mafft resolved from it")
+        finally:
+            if old is None:
+                os.environ.pop("FMDV_GUI_TREE_ENV", None)
+            else:
+                os.environ["FMDV_GUI_TREE_ENV"] = old
 
 
 for fn in sorted([v for k, v in list(globals().items()) if k.startswith("test_")],

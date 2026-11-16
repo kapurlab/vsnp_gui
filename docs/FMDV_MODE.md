@@ -312,6 +312,19 @@ distant); the other five Pirbright samples fail on genome covered at 52 to
 68%, because their amplicon scheme does not reach a third of the genome,
 with distant and mixed added as reasons where they apply.
 
+In FMDV mode the Step 1 Results table has five extra columns after
+Reference, all sortable and in the CSV and XLSX exports under their
+`fmdv_` names: Serotype and Lineage (the chooser's answer, from
+`fmdv_reference.json`), Identity (reads to the chosen reference over the
+VP1 panel vote, marked when under 0.90 as distant), Genome called and VP1
+called (from `fmdv_consensus.json`: the percent of the reference genome and
+of VP1 with a called base, that is depth 10 or more and an unambiguous
+call). A mixed-serotype sample carries a mark on its serotype, with the
+shares in the tooltip. Genome called is the figure to read alongside Genome
+Cov: vsnp3's coverage counts any read, the consensus counts positions it
+would print a base for. On the Pirbright amplicon pairs the two differ by
+half the genome.
+
 ## Step 2 context: the lineage genomes as reference databases
 
 Four samples of one virus give Step 2 nothing to say. What places a sample
@@ -531,6 +544,20 @@ own `conda_setup/environment.yml` (mafft, iqtree, seqkit):
 `mamba env create -f conda_setup/environment.yml`, then put that env's
 `bin` on PATH before running the script. Without mafft the script stops
 with that instruction.
+
+In the GUI the same run is the "Build VP1 tree" button under the scope
+picker in the Step 1 pane. Its serotype list is the serotypes Step 1 placed
+samples on, with counts; one serotype per tree, since VP1 of two serotypes
+does not align in a way that means anything. `POST
+/api/projects/<p>/fmdv/vp1_tree` starts the script as a background job with
+the env's `bin` first on PATH, then the backend's own (raxmlHPC). The
+backend finds that env as `<conda base>/envs/fmdv_gui` (CONDA_EXE's base,
+then miniforge3, miniconda3, anaconda3, mambaforge under the home
+directory), or wherever `FMDV_GUI_TREE_ENV` points; `GET .../fmdv` reports
+`vp1_tree.ready` and the builder it will use, and the button says what is
+missing when it is disabled. The route refuses with a plain message when
+no sample of that serotype has 50% of VP1 called. When the job finishes the
+Step 2 Results list refreshes and the new VP1-tree comparison is in it.
 
 On Test_FMDV, all ten samples plus the 79 panel sequences took under ten
 seconds and placed every sample with its reference lineage: the SAT1 four

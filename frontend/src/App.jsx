@@ -18,6 +18,7 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
 import FmdvScopePicker from "./FmdvScopePicker.jsx";
+import FmdvVp1Tree from "./FmdvVp1Tree.jsx";
 import OntRunImport from "./OntRunImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
@@ -8315,12 +8316,21 @@ export default function App() {
                 FMDV mode: choose the lineage reference per sample
               </label>
               {fmdvOn ? (
-                <FmdvScopePicker
-                  lineages={fmdvLineages}
-                  scope={fmdvScope}
-                  disabled={step1JobStatus === "running"}
-                  onChange={(s) => { setFmdvScope(s); setFmdvMode(true, s); }}
-                />
+                <>
+                  <FmdvScopePicker
+                    lineages={fmdvLineages}
+                    scope={fmdvScope}
+                    disabled={step1JobStatus === "running"}
+                    onChange={(s) => { setFmdvScope(s); setFmdvMode(true, s); }}
+                  />
+                  <FmdvVp1Tree
+                    apiBase={API_BASE}
+                    project={selectedProject}
+                    fmdvInfo={fmdvInfo}
+                    disabled={step1JobStatus === "running"}
+                    onDone={() => refreshStep2Results()}
+                  />
+                </>
               ) : projectReference ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                   <span
@@ -8872,6 +8882,19 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="run_date">Run date</QcSortTh>
                         <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
                         <QcSortTh {...qcSortProps} sortKey="Reference">Reference</QcSortTh>
+                        {fmdvOn ? (
+                          <>
+                            {/* The FMDV chooser's answer and the consensus block's
+                                numbers: which serotype and lineage the reads were
+                                put on, how well they fit, and how much of the
+                                genome and of VP1 the consensus calls. */}
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_serotype">Serotype</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_lineage">Lineage</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_identity">Identity</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called">Genome called</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called">VP1 called</QcSortTh>
+                          </>
+                        ) : null}
                         <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
@@ -8982,6 +9005,27 @@ export default function App() {
                                 </details>
                               </td>
                               <td title={row.Reference || undefined}>{row.Reference ? referenceCellLabel(row.Reference) : "-"}</td>
+                              {fmdvOn ? (
+                                <>
+                                  <td title={row.fmdv_mixed && row.fmdv_serotype_share
+                                    ? "Mixed serotypes: " + Object.entries(row.fmdv_serotype_share).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(", ")
+                                    : "Serotype of the lineage reference the chooser put this sample on (competitive mapping to the VP1 panel)."}>
+                                    {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : ""}
+                                  </td>
+                                  <td title={row.fmdv_chosen || "Topotype or lineage of the chosen reference."}>{row.fmdv_lineage || "-"}</td>
+                                  <td title={row.fmdv_distant
+                                    ? "Distant: the closest library genome is still far from the reads (identity under 0.90)."
+                                    : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
+                                    {typeof row.fmdv_identity === "number" ? row.fmdv_identity.toFixed(3) : "-"}{row.fmdv_distant ? " ⚠" : ""}
+                                  </td>
+                                  <td title="Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous).">
+                                    {typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
+                                  </td>
+                                  <td title="Percent of VP1 with a called base in the consensus. The VP1 tree takes samples at 50% or more.">
+                                    {typeof row.fmdv_vp1_called === "number" ? `${row.fmdv_vp1_called.toFixed(1)}%` : "-"}
+                                  </td>
+                                </>
+                              ) : null}
                               <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                               <td>{row["Average Depth"] || "-"}</td>
                               <td>{fmtPercent1(qcMappingRate(row))}</td>

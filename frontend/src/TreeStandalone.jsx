@@ -38,8 +38,18 @@ export default function TreeStandalone() {
   const project = params.get("project") || "";
   const path = params.get("path") || "";
 
+  // Opening defaults a link may set: bootstrap=1 shows support values,
+  // midpoint=1 roots at the midpoint once the tree is loaded (input order
+  // says nothing about where a root belongs), fit=1 keeps the whole tree in
+  // view instead of zooming to the first search hit.
+  const wantBootstrap = params.get("bootstrap") === "1";
+  const wantMidpoint = params.get("midpoint") === "1";
+  const wantFit = params.get("fit") === "1";
+  const midpointDoneRef = useRef(false);
+  const fitHoldRef = useRef(wantFit);
+
   const [status, setStatus] = useState(project && path ? "Loading…" : "Missing project or path.");
-  const [showBootstrap, setShowBootstrap] = useState(false);
+  const [showBootstrap, setShowBootstrap] = useState(wantBootstrap);
   const [cladogram, setCladogram] = useState(false);
   // The axis unit. Branch lengths are substitutions per site; multiplying by the
   // alignment's column count reads them as SNPs, which is the question actually
@@ -299,6 +309,13 @@ export default function TreeStandalone() {
         // `root` outgroup tip.
         if (tree.nodes && tree.nodes.data && tree.nodes.data.name === "root") {
           tree.nodes.data.name = "";
+        }
+        if (wantMidpoint && !midpointDoneRef.current) {
+          midpointDoneRef.current = true;
+          try {
+            const mid = computeMidpoint(tree);
+            if (mid && mid.location) tree.reroot(mid.location, mid.breakpoint || 0);
+          } catch (_) { /* a tree the midpoint cannot be computed on is shown as written */ }
         }
         installTree(tree);
         setStatus("");
@@ -570,7 +587,7 @@ export default function TreeStandalone() {
   useEffect(() => {
     const lay = layoutRef.current;
     const term = searchTerm.trim();
-    if (!lay || !project || term.length < 3) { setSearchAlso([]); return undefined; }
+    if (!lay || !project || term.length < 3 || term.includes(",")) { setSearchAlso([]); return undefined; }
     if (searchRows(lay, term, displayName).length) { setSearchAlso([]); return undefined; }
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -594,7 +611,12 @@ export default function TreeStandalone() {
     const rows = searchRows(lay, searchTerm, displayName, searchAlso);
     setHits(rows);
     setHitAt(0);
-    if (rows.length) goToHit(rows, 0);
+    if (rows.length && fitHoldRef.current) {
+      // Opened with fit=1: every hit is lit, the view stays on the whole
+      // tree, through every re-layout the load triggers. The first search
+      // the user types ends the hold and zooms as before.
+      scheduleDraw();
+    } else if (rows.length) goToHit(rows, 0);
     else scheduleDraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchTerm, layout, displayName, searchAlso]);
@@ -776,7 +798,7 @@ export default function TreeStandalone() {
           <input
             placeholder="Find tip…"
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => { fitHoldRef.current = false; setSearchTerm(e.target.value); }}
             onKeyDown={(e) => { if (e.key === "Enter") stepHit(e.shiftKey ? -1 : 1); }}
             title="Type part of a sample name. The view jumps to the match."
           />

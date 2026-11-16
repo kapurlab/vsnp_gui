@@ -54,6 +54,9 @@ export default function FmdvVp1Results({
   const chosen = fmdvInfo?.chosen || {};
   const pct = (v) => (typeof v === "number" ? `${v.toFixed(1)}%` : "-");
 
+  // Every tree link: all the run's samples lit, midpoint root, bootstrap
+  // values on, the whole tree in view.
+  const treeOpts = (names) => `&search=${encodeURIComponent((names || []).join(","))}&midpoint=1&bootstrap=1&fit=1`;
   const sitesFile = fileByName(`VP1_${sitesKind}_table_${sitesLevel}.xlsx`);
   const sitesUrl = sitesFile
     ? `${apiBase}/api/projects/${encodeURIComponent(project)}/preview-xlsx?path=${encodeURIComponent(sitesFile.path)}`
@@ -137,15 +140,15 @@ export default function FmdvVp1Results({
             RAxML on the VP1 alignment, {info?.bootstraps ?? 100} bootstraps. The neighbourhood tree is the full tree pruned to the
             samples, their neighbourhoods and one record per other lineage, so every label reads; branch lengths are the full tree's.
             {tables?.neighbourhood_tree ? ` ${tables.neighbourhood_tree.leaves} of ${tables.neighbourhood_tree.full_tree_leaves} leaves: ${tables.neighbourhood_tree.samples} samples, ${tables.neighbourhood_tree.neighbourhood} neighbourhood records, ${tables.neighbourhood_tree.lineage_representatives} lineage representatives.` : ""}
-            {" "}Context labels read lineage | country | year | accession. The viewer opens with the first sample found.
+            {" "}Context labels read lineage | country | year | accession. The viewer opens midpoint-rooted, fitted to the whole tree, with bootstrap values shown and every sample highlighted.
           </p>
           <div style={{ display: "flex", gap: "0.5em", flexWrap: "wrap" }}>
             {hoodFile ? (
-              <button onClick={() => window.open(treeUrlFor(hoodFile.path) + (samples[0] ? `&search=${encodeURIComponent(samples[0])}` : ""), "_blank", "noopener")}
+              <button onClick={() => window.open(treeUrlFor(hoodFile.path) + treeOpts(samples), "_blank", "noopener")}
                 title="The samples among their relatives: the default view.">Neighbourhood tree</button>
             ) : <span className="muted">No neighbourhood tree for this run{run?.state === "running" ? " yet" : ". Build the tree again; it is written with the tables."}</span>}
             {treeFile ? (
-              <button className="ghost" onClick={() => window.open(treeUrlFor(treeFile.path) + (samples[0] ? `&search=${encodeURIComponent(samples[0])}` : ""), "_blank", "noopener")}
+              <button className="ghost" onClick={() => window.open(treeUrlFor(treeFile.path) + treeOpts(samples), "_blank", "noopener")}
                 title="Every panel and context sequence the tree was built with.">Full tree</button>
             ) : null}
             {Object.keys(sampleTrees).length ? (
@@ -154,7 +157,7 @@ export default function FmdvVp1Results({
                   <option value="">one sample…</option>
                   {Object.entries(sampleTrees).map(([s_, t]) => <option key={s_} value={s_}>{s_} ({t.leaves} leaves)</option>)}
                 </select>
-                <button disabled={!sampleTreeFile} onClick={() => sampleTreeFile && window.open(treeUrlFor(sampleTreeFile.path) + `&search=${encodeURIComponent(treeSample)}`, "_blank", "noopener")}>
+                <button disabled={!sampleTreeFile} onClick={() => sampleTreeFile && window.open(treeUrlFor(sampleTreeFile.path) + treeOpts([treeSample]), "_blank", "noopener")}>
                   Sample tree
                 </button>
               </span>
@@ -227,7 +230,7 @@ export default function FmdvVp1Results({
             <div key={item.path} className="results-item">
               <div className="results-main"><div className="results-name">{item.label}</div><div className="results-path">{item.path}</div></div>
               <div className="results-actions">
-                {/\.tre$/i.test(item.label || "") ? <button onClick={() => window.open(treeUrlFor(item.path), "_blank", "noopener")}>View tree</button>
+                {/\.tre$/i.test(item.label || "") ? <button onClick={() => window.open(treeUrlFor(item.path) + treeOpts(samples), "_blank", "noopener")}>View tree</button>
                   : /\.xlsx$/i.test(item.label || "") ? <button onClick={() => previewXlsx(item.path)}>View</button>
                   : /\.(fasta|fa|tsv|json|log|txt|tre)$/i.test(item.label || "") ? <button onClick={() => viewInline(item.path)}>View</button> : null}
                 <button onClick={() => downloadOutput(item.path, item.download_name)}>DL</button>

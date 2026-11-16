@@ -334,7 +334,18 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
   lists, the stats preview, the VCF editor and the variant lookup.
 - VP1 tree: samples placed with their lineage on the panel alone and on
   panel plus context (SAT1 167 taxa in 90 s; O 621 taxa in 11 min).
-- Tests: the five new scripts pass; the 60 stock test scripts give the
+- Known-answer run: a simulated MinKNOW run of eleven barcodes (an
+  outbreak chain of three substitutions per edge with an identical pair,
+  3% and 30% second-serotype spikes, a two-amplicon dropout, a genome 16%
+  from its nearest panel entry, and the founder at 20x and 2000x) went
+  through import, Step 1, Step 2 and the VP1 tree in a fresh project.
+  Chooser 11 of 11 with the distant and mixed flags where the key puts
+  them; every planted substitution in the consensus and nothing else;
+  QC pass, review and fail per sample as the key lists them; Step 2
+  distances 3, 0, 3, 3 along the chain; the annotation row naming
+  VP1:R185M at the planted VP1 change. Step 1 took 38 s for the eleven
+  samples, Step 2 12 s for 57 VCFs.
+- Tests: the six new scripts pass; the 60 stock test scripts give the
   same result on the branch as on `main` (54 pass, six fail for
   environment reasons on both).
 
@@ -343,38 +354,40 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
 In the order they matter for a site that will run this on outbreak
 samples.
 
-1. Step 1 Results still shows the Illumina QC columns. Serotype, lineage,
-   `f_match`, identity and the distant and mixed flags are in
-   `fmdv_reference.json` and in the verdict, not in the table.
-2. No GUI button for the VP1 tree; it is a command.
-3. The consensus is substitution-only with a depth mask. A GenBank
+1. The consensus is substitution-only with a depth mask. A GenBank
    submission needs an indel-aware polish (medaka), which is a separate
    step not built. The consensus and the SNP calls share coordinates by
-   design.
-4. Amplicon reads with primers present have not been seen by either
+   design. The known-answer run shows the cost: a planted in-frame codon
+   deletion is absent from the consensus, as expected, and nothing marks
+   its absence.
+2. Amplicon reads with primers present have not been seen by either
    pipeline. The clipper is adopted from NanoFMDV and tested only on
    primer-free reads.
-5. The importer does not tick "Nanopore reads"; the user does.
-6. Defining SNPs: half the genomes of SAT1 topotypes II, III and IV fall in
+3. Defining SNPs: half the genomes of SAT1 topotypes II, III and IV fall in
    no group, because no single passing SNP is shared by all of a topotype
    that spans 1937 to 2009 and by nothing else. The all-samples tree does
    not have that limit. The reference's own topotype gets no group.
-7. Two-level mapping, proposed and not built: after the lineage reference,
+4. Two-level mapping, proposed and not built: after the lineage reference,
    remap a sample to the closest complete genome in the collection when
    that genome is closer on VP1 than the panel reference by a margin to be
    tuned, and run Step 2 against it with the same-topotype genomes. The
    pieces exist (1,471 genomes marked in the context TSVs, FASTA-mode
    databases, the VP1 tree); the second pass and its place in the GUI do
    not.
-8. The chooser benchmark (leave-one-out over the 79 genomes, crosstalk and
+5. The chooser benchmark (leave-one-out over the 79 genomes, crosstalk and
    co-infection mixes, depth and error rate) is planned, not built. Any
    change to the chooser should at least rerun the ten trial samples.
-9. `fmdv_panel_build.sh` carries development-server paths;
+6. `fmdv_panel_build.sh` carries development-server paths;
    `fmdv_reflib.py`'s docstring still describes the sourmash chooser that
    was replaced (the signatures are built and kept for comparison only).
-10. No GenBank genome exists for some lineages (SAT1 topotype IX is one). A
+7. No GenBank genome exists for some lineages (SAT1 topotype IX is one). A
     sample from such a lineage maps to the nearest genome, is flagged
     distant, and runs; its lineage call is provisional by construction.
+8. A job the backend started is forgotten when the backend restarts (jobs
+   live in memory, in stock as in the branch). The process keeps running
+   and its folder is now shown as running or interrupted from what is on
+   disk and in the process table, but progress and completion are not
+   reported for it, and the user has no way to stop it from the GUI.
 
 ## Questions for Tod
 
@@ -386,7 +399,19 @@ samples.
 2. If a mode: are the four edit points acceptable as placed (the Step 1
    dispatch, the Step 2 reference resolution and database filter, the QC
    threshold layer, the verdict hook)? Each is behind the mode flag or a
-   library-reference check.
+   library-reference check. Four small changes made after the known-answer
+   run are not behind either, because the defects are stock ones, and you
+   should see them as such: `qc_verdict` strips thousands separators from
+   depth and percent (a sample past 999x had no depth signal); Step 2
+   Build copies the enabled reference databases tagged with the project
+   reference into `vcf_database` (the GUI posted import-vcfs for the same
+   files after every Build, a caller of the API alone got "not in the
+   comparison set"); the default `vsnp_gui_deploy_path` is the running
+   checkout rather than the site install, which changes nothing for the
+   site deployment; and the VCF reference detector lets the FASTA stem
+   settle a path that names two known references. The run-list state for
+   a tree folder is keyed on the `_VP1-tree` name and does not touch stock
+   folders.
 3. The ONT run import is independent of FMDV and may be worth having in
    stock on its own.
 4. Two observations on vsnp3 itself, for information. Reads simulated by

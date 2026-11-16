@@ -132,7 +132,8 @@ def pick_diverse(names: List[str], kmer_of: Dict[str, set], seq_len: Dict[str, i
 
 def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Dict[str, str]],
                    sample_seqs: List[Tuple[str, str]], per_topotype: int, neighbours: int,
-                   collapse: bool) -> Tuple[List[Tuple[str, str]], List[Dict], Dict]:
+                   collapse: bool, focus: Optional[set] = None, other_cap: int = 2
+                   ) -> Tuple[List[Tuple[str, str]], List[Dict], Dict]:
     """Backbone plus neighbourhood from one serotype's context set.
 
     Backbone: identical sequences collapsed to one, then up to per_topotype
@@ -167,9 +168,21 @@ def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Di
     per: Dict[str, List[str]] = {}
     for n in reps:
         per.setdefault(meta.get(n, {}).get("topotype") or topotype_of(n), []).append(n)
+    # With a focus (the topotypes the samples were typed to), topotypes
+    # outside it keep only other_cap sequences each, enough to orient the
+    # tree; the samples' own topotypes keep the full backbone. The O set has
+    # about thirty topotype and lineage buckets, and twenty of each made a
+    # 631-taxon tree that took eight minutes of RAxML for three samples.
+    def in_focus(topo: str) -> bool:
+        if not focus:
+            return True
+        t = topo.upper()
+        return any(t == f or t.startswith(f + "/") or f.startswith(t + "/") for f in focus)
+
     for topo, names in per.items():
-        for n in pick_diverse(sorted(names), rep_kmers, seq_len, per_topotype):
-            chosen.setdefault(n, []).append("backbone")
+        cap = per_topotype if in_focus(topo) else min(per_topotype or other_cap, other_cap)
+        for n in pick_diverse(sorted(names), rep_kmers, seq_len, cap):
+            chosen.setdefault(n, []).append("backbone" if in_focus(topo) else "backbone:outgroup")
 
     if neighbours and sample_seqs:
         for sname, sseq in sample_seqs:
@@ -185,6 +198,7 @@ def select_context(sero: str, records: List[Tuple[str, str]], meta: Dict[str, Di
              "country": country(n), "region_source": meta.get(n, {}).get("region_source", ""),
              "why": ";".join(chosen[n]), "identical_to": ",".join(collapsed_into.get(n, []))} for n, _ in out]
     counts = {"context_total": len(records), "after_collapse": len(reps), "topotypes": len(per),
+              "focus": sorted(focus) if focus else [],
               "backbone": sum(1 for n in chosen if "backbone" in chosen[n]),
               "neighbours": sum(1 for n in chosen if any(w.startswith("neighbour") for w in chosen[n])),
               "selected": len(out)}
@@ -222,7 +236,8 @@ def collect_samples(project: Path, serotype: Optional[str], min_called: float) -
 
 
 def collect_panel(lib: Path, serotype: Optional[str], samples_by_sero: Dict[str, List[Tuple[str, str]]],
-                  per_topotype: int, neighbours: int, collapse: bool
+                  per_topotype: int, neighbours: int, collapse: bool,
+                  focus_by_sero: Optional[Dict[str, set]] = None
                   ) -> Tuple[List[Tuple[str, str]], List[str], List[Dict], Dict[str, Dict]]:
     seqs: List[Tuple[str, str]] = []
     sources: List[str] = []
@@ -253,7 +268,8 @@ def collect_panel(lib: Path, serotype: Optional[str], samples_by_sero: Dict[str,
         records = [(name.split()[0], seq) for name, seq in read_fasta(ctx)]
         meta = read_context_tsv(ctx_dir / f"{s}.tsv")
         chosen, why, counts = select_context(s, records, meta, samples_by_sero.get(s, []),
-                                             per_topotype, neighbours, collapse)
+                                             per_topotype, neighbours, collapse,
+                                             (focus_by_sero or {}).get(s))
         seqs.extend(chosen)
         rows.extend(why)
         selection[s] = counts
@@ -310,6 +326,9 @@ def main() -> int:
     ap.add_argument("--neighbours", type=int, default=20,
                     help="context sequences nearest each sample (k-mer Jaccard) added whatever the cap (0 = none)")
     ap.add_argument("--no-collapse", action="store_true", help="keep identical context sequences as separate taxa")
+    ap.add_argument("--context", choices=["typed", "all"], default="typed",
+                    help="typed: the full backbone only for the topotypes the samples were typed to "
+                         "(fmdv_vp1_type.json), two sequences for each other topotype; all: the full backbone everywhere")
     ap.add_argument("--out", help="output folder (default step2/<stamp>_VP1-tree[-SEROTYPE])")
     a = ap.parse_args()
 
@@ -326,11 +345,24 @@ def main() -> int:
     samples_by_sero: Dict[str, List[Tuple[str, str]]] = {}
     for name, seq in samples:
         samples_by_sero.setdefault(sero_of_sample.get(name, ""), []).append((name, seq))
+    focus_by_sero: Dict[str, set] = {}
+    if a.context == "typed":
+        for name, _ in samples:
+            tj = project / "step1" / name / "fmdv_vp1_type.json"
+            try:
+                t = json.loads(tj.read_text()) if tj.is_file() else {}
+            except (OSError, ValueError):
+                t = {}
+            topo = (t.get("topotype") or "").upper()
+            if t.get("status") == "typed" and topo and topo != "NA":
+                focus_by_sero.setdefault(sero_of_sample.get(name, ""), set()).add(topo)
+        # A serotype whose samples are all untyped keeps the full backbone.
     panel, sources, context_rows, selection = collect_panel(
-        lib, serotype, samples_by_sero, a.per_topotype, a.neighbours, not a.no_collapse)
+        lib, serotype, samples_by_sero, a.per_topotype, a.neighbours, not a.no_collapse, focus_by_sero)
     for s_, c in selection.items():
         _err(f"vp1_tree: {s_} context {c['context_total']} records, {c['after_collapse']} distinct, "
-             f"{c['backbone']} backbone + {c['neighbours']} neighbours = {c['selected']} used")
+             f"{c['backbone']} backbone + {c['neighbours']} neighbours = {c['selected']} used"
+             + (f" (focus {', '.join(c['focus'])})" if c.get("focus") else ""))
     if not samples:
         _err("vp1_tree: no sample has a VP1 consensus to place (run fmdv_consensus.py first, or lower --min-called)")
         return 2

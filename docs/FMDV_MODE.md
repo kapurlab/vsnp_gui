@@ -521,6 +521,68 @@ Pirbright samples, 14% or more from their library references, give 36 to
 99.8% called, with 70 to 239 substitutions. That is the point of the slice:
 VP1 is recoverable where the genome is not.
 
+## VP1 typing
+
+Serotype, topotype and lineage are defined on VP1, so the first answer for a
+sample is its VP1 type, as in NanoFMDV. `bin/fmdv_vp1_type.py` searches the
+sample's VP1 consensus (`<sample>_VP1.fasta`, at least 50% called) with
+blastn against one database built once from every record of
+`lib/vp1_context/<SEROTYPE>.fasta` (the NanoFMDV GenBank VP1 set, sliced per
+serotype by `fmdv_vp1_context.py`, with serotype, topotype, lineage,
+country, year and isolate per record from the TSVs beside them) plus the 79
+panel VP1s. The database lives under `lib/vp1_context/_typing/` and is
+rebuilt when a set is newer than it.
+
+The nearest record names the serotype and is reported as the nearest
+relative. The lineage comes from the nearest ANNOTATED record within 3%
+identity of the best hit: a fifth of the O set carries no topotype (whole
+genome deposits, often the sample's own study), and on the Illumina trial
+three of six samples hit one of those at 100% and would have been typed
+"NA". If no annotated record is that close the lineage is left unassigned
+and the nearest annotated record is still reported. Agreement, the share of
+the top 20 annotated hits carrying the same lineage, is reported so a VP1
+between lineages reads as such.
+
+What it gives that the reads vote cannot: the vote names the nearest of 79
+complete genomes, the typing names the nearest of about 9,000 VP1 records.
+On the Illumina trial the vote said O/ME-SA/Ind-2001/e and the typing said
+Ind-2001/D, the depositors' own sublineage; the vote said PanAsia-2/FAR-09
+and the typing said PanAsia-2/ANT-10 at 99.8%; the Kenya 2016 SAT1 samples
+typed to KEN/PRB GenBank records at 97 to 99% where the nearest library
+genome was at 94%.
+
+Step 1 types each sample after its consensus is written (never failing the
+sample). `POST /api/projects/<p>/fmdv/vp1_type` retypes a whole project as
+a background job, for samples run before typing existed or after the sets
+change; the Step 2 VP1 tab has the button. Results are in
+`fmdv_vp1_type.json` per sample, in the QC rows as `fmdv_vp1_*` and
+`fmdv_topotype`, in the fmdv route as `vp1_typing`, and in the Step 1
+Results table as the "Topotype (VP1)" column. A sample whose VP1 serotype
+disagrees with the reads vote gets a note: a mixed sample, or a consensus
+built on the wrong serotype.
+
+Needs BLAST+ (blastn, makeblastdb) on the backend's PATH; the fork's
+`conda_setup/environment.yml` carries it, and the development server has
+the system copy.
+
+## Step 2 in FMDV mode leads with VP1
+
+The Step 2 pane in FMDV mode opens on "VP1: typing and tree": the typing
+table for the project's samples and the VP1 tree per serotype. The
+whole-genome SNP comparison on one lineage reference is the second tab,
+"Whole-genome SNPs", unchanged in what it does. The order follows the
+question: which serotype and lineage is this, then, for samples that share
+a lineage, how far apart are they. The Kenya Illumina trial is the case for
+it: the whole-genome Step 2 put two SAT1 samples 384 SNPs apart and 380 to
+466 from every library genome, and the VP1 tree put each beside a Kenya 2016
+GenBank record as a sister pair.
+
+The VP1 tree's context backbone now follows the typing: topotypes the
+samples were typed to keep the full backbone (20 per topotype or lineage
+bucket), every other topotype keeps two for orientation (`--context typed`,
+the default; `--context all` is the old behaviour). The O tree for three
+samples went from 631 context sequences to 407.
+
 ## The VP1 tree
 
 VP1 is the unit of FMDV epidemiology. Serotypes, topotypes and lineages are

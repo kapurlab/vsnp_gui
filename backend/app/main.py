@@ -370,6 +370,22 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
             row["fmdv_genome_called"] = cj.get("called_percent")
             row["fmdv_vp1_called"] = cj.get("vp1_called_percent")
             row["fmdv_consensus_length"] = cj.get("length")
+        # VP1 typing (bin/fmdv_vp1_type.py): the lineage name from the nearest
+        # annotated GenBank VP1, which the reads vote over 79 genomes cannot give.
+        t = sample_dir / "fmdv_vp1_type.json"
+        if t.is_file():
+            try:
+                tj = json.loads(t.read_text())
+            except (OSError, ValueError):
+                tj = {}
+            best = tj.get("best") or {}
+            row["fmdv_vp1_status"] = tj.get("status")
+            row["fmdv_vp1_serotype"] = tj.get("serotype")
+            row["fmdv_topotype"] = tj.get("topotype")
+            row["fmdv_vp1_lineage"] = tj.get("lineage")
+            row["fmdv_vp1_identity"] = tj.get("identity")
+            row["fmdv_vp1_nearest"] = " ".join(x for x in (best.get("accession"), best.get("isolate"), best.get("country"), str(best.get("year") or "")) if x)
+            row["fmdv_vp1_note"] = tj.get("note")
         p = sample_dir / "fmdv_reference.json"
         if not p.is_file():
             continue
@@ -5353,10 +5369,28 @@ def fmdv_project_get(project: str):
     # Two different references in an FMDV project: the Step 1 SCOPE that
     # bounds the per-sample choice (fmdv_scope) and the reference a Step 2
     # comparison is made on (vsnp_gui's ordinary `reference`). Both reported.
+    typing: Dict[str, Dict] = {}
+    if step1.is_dir():
+        for p in step1.glob("*/fmdv_vp1_type.json"):
+            try:
+                tj = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            best = tj.get("best") or {}
+            typed_by = tj.get("typed_by") or {}
+            typing[p.parent.name] = {
+                "status": tj.get("status"), "serotype": tj.get("serotype"), "topotype": tj.get("topotype"),
+                "lineage": tj.get("lineage"), "identity": tj.get("identity"), "coverage": tj.get("coverage"),
+                "lineage_identity": tj.get("lineage_identity"), "agreement": tj.get("agreement"),
+                "vp1_called_percent": tj.get("vp1_called_percent"), "note": tj.get("note"),
+                "nearest": {k: best.get(k) for k in ("accession", "isolate", "country", "year", "identity", "source")},
+                "typed_by": {k: typed_by.get(k) for k in ("accession", "isolate", "country", "year", "identity")} if typed_by else None,
+            }
     return {"mode": mode,
             "scope": (_project_fmdv_scope(project_dir) or "FMDV") if mode == "fmdv" else "",
             "step2_reference": _project_reference(project_dir) if mode == "fmdv" else "",
-            "lib": str(_fmdv_lib(cfg)), "chosen": chosen,
+            "lib": str(_fmdv_lib(cfg)), "chosen": chosen, "vp1_typing": typing,
+            "vp1_typing_ready": bool(shutil.which("blastn") or _fmdv_tree_env().get("env_bin") and Path(_fmdv_tree_env()["env_bin"], "blastn").exists()),
             # Whether the VP1 tree button has its tools (mafft plus a builder).
             "vp1_tree": {k: v for k, v in _fmdv_tree_env().items() if k in ("ready", "tree_tool", "env_bin")},
             # The thresholds this project's verdicts actually use (defaults <
@@ -5403,6 +5437,34 @@ class FmdvVp1TreeRequest(BaseModel):
     serotype: Optional[str] = None   # one serotype, or empty for every sample with VP1
     bootstraps: int = 100
     min_called: float = 50.0         # skip samples with less of VP1 called
+
+
+class FmdvVp1TypeRequest(BaseModel):
+    force: bool = True               # retype samples that already have a result
+
+
+@app.post("/api/projects/{project}/fmdv/vp1_type")
+def fmdv_vp1_type(project: str, payload: FmdvVp1TypeRequest):
+    """Type every sample's VP1 consensus (bin/fmdv_vp1_type.py --project) as
+    a background job: the way to type samples run before typing existed,
+    or after the context sets change. Step 1 types each new sample itself."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    env = _fmdv_tree_env()
+    path_parts = [env["env_bin"]] if env.get("env_bin") else []
+    path_parts += [str(Path(sys.executable).parent), os.environ.get("PATH", "")]
+    script = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
+    command = " ".join(shlex.quote(p) for p in [
+        sys.executable, "-u", script, "--project", str(project_dir), "--lib", str(_fmdv_lib(cfg)),
+        "--threads", "8"] + (["--force"] if payload.force else []))
+    command = "PATH=" + shlex.quote(":".join(p for p in path_parts if p)) + " " + command
+    job_id = job_manager.start_job(name=f"fmdv_vp1_type:{project}", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent)
+    return {"job_id": job_id}
 
 
 @app.post("/api/projects/{project}/fmdv/vp1_tree")
@@ -5666,9 +5728,15 @@ def _step1_dispatch(
         consensus_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_consensus.py")
         # After vsnp3_step1.py returns 0: the reference-anchored consensus and
         # its VP1 slice, written beside the alignment. Never fails the sample.
+        typer_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
         fmdv_consensus_line = (
             "    python3 " + shlex.quote(consensus_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
             + " >>\"$LOG\" 2>&1 || echo \"FMDV: consensus failed for $d\" | tee -a \"$LOG\""
+            # VP1 typing (blastn of the VP1 consensus against the GenBank
+            # VP1 sets): the serotype, topotype and lineage name. Needs
+            # BLAST+; without it the sample is left untyped, not failed.
+            + "\n    python3 " + shlex.quote(typer_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: VP1 typing failed for $d\" | tee -a \"$LOG\""
         )
         fmdv_choose_lines = [
             "  REF_DIR=$(python3 " + shlex.quote(chooser) + " --reads \"$R1\" ${R2:+\"$R2\"}"

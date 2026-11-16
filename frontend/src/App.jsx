@@ -18,7 +18,7 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
 import FmdvScopePicker from "./FmdvScopePicker.jsx";
-import FmdvVp1Tree from "./FmdvVp1Tree.jsx";
+import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
 import OntRunImport from "./OntRunImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
@@ -1039,6 +1039,11 @@ export default function App() {
   //   "list"  — paste a list of sample names and compare just those (optionally
   //             on top of the reference databases ticked on the Build tab).
   const [step2Mode, setStep2Mode] = useState("build");
+  // In FMDV mode Step 2 leads with VP1 (typing and tree); the whole-genome
+  // comparison is the second tab. Leaving FMDV mode drops back to Build.
+  useEffect(() => {
+    setStep2Mode((m) => (fmdvOn ? (m === "build" ? "vp1" : m) : (m === "vp1" ? "build" : m)));
+  }, [fmdvOn]);
   // Build tab, box 1: include this project's own Step 1 samples. On by default —
   // this is what nearly every comparison is built on. Unticking it compares the
   // ticked reference databases alone.
@@ -8334,13 +8339,6 @@ export default function App() {
                     disabled={step1JobStatus === "running"}
                     onChange={(s) => { setFmdvScope(s); setFmdvMode(true, s); }}
                   />
-                  <FmdvVp1Tree
-                    apiBase={API_BASE}
-                    project={selectedProject}
-                    fmdvInfo={fmdvInfo}
-                    disabled={step1JobStatus === "running"}
-                    onDone={() => refreshStep2Results()}
-                  />
                 </>
               ) : projectReference ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
@@ -8904,6 +8902,7 @@ export default function App() {
                                 database exists. */}
                             <QcSortTh {...qcSortProps} sortKey="fmdv_serotype" title="Serotype of the lineage reference the chooser put the sample on.">Serotype</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_lineage" title="Topotype or lineage of that reference.">Lineage</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_lineage" title="VP1 typing: the lineage of the nearest annotated GenBank VP1 to the sample's VP1 consensus (blastn). Named by GenBank, not by the 79-genome library.">Topotype (VP1)</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_identity" title="Identity of the reads to the chosen reference. Divergence of the sample from the library genome plus, for ONT, the read error.">Identity</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_reads" title="Reads in the sample's FASTQ.">Reads</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="Average Depth" title="Mean read depth over the reference.">Avg Depth</QcSortTh>
@@ -9042,6 +9041,12 @@ export default function App() {
                                     {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : row.fmdv_composition_basis === "undetermined" ? " ?" : ""}
                                   </td>
                                   <td title={row.fmdv_chosen || "Topotype or lineage of the chosen reference."}>{row.fmdv_lineage || "-"}</td>
+                                  <td title={row.fmdv_vp1_status === "typed"
+                                    ? `Nearest VP1 record: ${row.fmdv_vp1_nearest || "-"} at ${typeof row.fmdv_vp1_identity === "number" ? row.fmdv_vp1_identity.toFixed(1) + "%" : "-"}.` + (row.fmdv_vp1_note ? " " + row.fmdv_vp1_note : "")
+                                    : (row.fmdv_vp1_status || "Not typed: Step 1 types each sample as its consensus is written; the Step 2 VP1 tab retypes a project.")}>
+                                    {row.fmdv_vp1_status === "typed" ? `${row.fmdv_vp1_serotype || ""} ${row.fmdv_vp1_lineage || "unassigned"}`.trim() : "-"}
+                                    {row.fmdv_vp1_note ? " ⚠" : ""}
+                                  </td>
                                   <td title={row.fmdv_distant
                                     ? "Distant: the closest library genome is still far from the reads (identity under 0.90)."
                                     : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
@@ -9782,27 +9787,47 @@ export default function App() {
                 into the comparison, build the set, then Run.
               </p>
               <div className="mode-toggle">
+                {fmdvOn ? (
+                  <button
+                    className={step2Mode === "vp1" ? "active" : ""}
+                    onClick={() => setStep2Mode("vp1")}
+                    title="Serotype, topotype and lineage by VP1, and the VP1 tree: the first question for an FMDV sample."
+                  >
+                    VP1
+                  </button>
+                ) : null}
                 <button
                   className={step2Mode === "build" ? "active" : ""}
                   onClick={() => setStep2Mode("build")}
                 >
-                  Build the comparison set
+                  {fmdvOn ? "Genome SNPs: build" : "Build the comparison set"}
                 </button>
                 <button
                   className={step2Mode === "list" ? "active" : ""}
                   onClick={() => setStep2Mode("list")}
                 >
-                  Compare a list of samples
+                  {fmdvOn ? "Genome SNPs: list" : "Compare a list of samples"}
                 </button>
               </div>
               <p className="muted" style={{marginTop:"0.5em", marginBottom:0, fontSize:"0.8em"}}>
-                {step2Mode === "build"
+                {step2Mode === "vp1"
+                  ? "Each sample's VP1 consensus typed against the GenBank VP1 sets, and a VP1 tree per serotype with the panel and context genomes. Whole-genome SNPs are for samples already known to share a lineage: the second tab."
+                  : step2Mode === "build"
                   ? "The normal path: this project's own samples, plus any reference database you want them compared against."
                   : "Paste sample names to compare just those samples out of this project — optionally alongside the reference databases ticked on the Build tab."}
               </p>
             </div>
 
-            {step2Mode === "build" ? (
+            {step2Mode === "vp1" ? (
+              <FmdvVp1Panel
+                apiBase={API_BASE}
+                project={selectedProject}
+                fmdvInfo={fmdvInfo}
+                disabled={step1JobStatus === "running"}
+                onInfo={setFmdvInfo}
+                onTreeDone={() => refreshStep2Results()}
+              />
+            ) : step2Mode === "build" ? (
               <div className="block">
                 {fmdvOn ? (
                   <div className="step2-src" title="In FMDV mode each sample was mapped to its own lineage reference. A comparison is made on one reference at a time; Build collects only that reference's VCFs and Run refuses a mixed set.">
@@ -10436,6 +10461,7 @@ export default function App() {
               </div>
             )}
 
+            {step2Mode !== "vp1" ? (<>
             <div className="block">
                 {importCollisions && importCollisions.samples.length > 0 ? (
                   // Two very different pieces of news share this shape. "A database's
@@ -11539,6 +11565,7 @@ export default function App() {
                 )
               ) : null}
             </div>
+            </>) : null}
           </section>
 
           <section className={paneClass("panel results-panel", "step2-results")}>

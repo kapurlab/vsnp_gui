@@ -4972,6 +4972,16 @@ export default function App() {
     const fastqBadge = kind === "kraken"
       ? { text: "parsed reads", title: "Kraken-parsed reads — import to run through Step 1", bg: "var(--badge-warning-bg)", fg: "var(--badge-warning-fg)" }
       : { text: "input reads", title: "Input reads — the FASTQs staged for this sample's Step 1 run", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" };
+    // The two kinds of report a sample folder holds look alike by name. The
+    // FMDV report is the one with the call, the neighbourhood and the tree;
+    // vsnp3's is its own Step 1 alignment report and says nothing of FMDV.
+    const fileBadge = /_FMDV_report\.(html|pdf)$/.test(f.name)
+      ? { text: "FMDV sample report", title: "The FMDV report: call, flags, QC, neighbourhood, tree, VP1 differences and sequence. Rewritten after each VP1 tree.", bg: "var(--badge-success-bg)", fg: "var(--badge-success-fg)" }
+      : /_report\.(html|pdf)$/.test(f.name)
+        ? { text: "vsnp3 step 1 report", title: "vsnp3's own alignment report for this Step 1 run; no FMDV content.", bg: "var(--badge-neutral-bg, #eee)", fg: "var(--badge-neutral-fg, #555)" }
+        : /_VP1\.fasta$/.test(f.name) ? { text: "VP1 consensus", title: "The VP1 slice of the consensus; what the typing and the VP1 tree use.", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" }
+        : /_consensus\.fasta$/.test(f.name) ? { text: "consensus genome", title: "Reference-anchored consensus: substitutions called, N below depth 10 or where reads disagree, no indels.", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" }
+        : null;
     return (
       <div key={f.path} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
@@ -4979,6 +4989,7 @@ export default function App() {
             <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
           ) : f.relpath}
           {isFastq ? <span title={fastqBadge.title} style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: fastqBadge.bg, color: fastqBadge.fg, fontWeight: 600 }}>{fastqBadge.text}</span> : null}
+          {fileBadge ? <span title={fileBadge.title} style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: fileBadge.bg, color: fileBadge.fg, fontWeight: 600 }}>{fileBadge.text}</span> : null}
         </span>
         <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
         {isFastq ? (
@@ -7250,7 +7261,10 @@ export default function App() {
                                     const s1 = sampleStep1Files[key];
                                     if (!s1 || s1.loading) return <span className="muted" style={{ fontSize: "11px" }}>Loading… <Elapsed /></span>;
                                     if (!(s1.files || []).length) return <span className="muted" style={{ fontSize: "11px" }}>No Step 1 outputs yet — run Step 1 for this sample.</span>;
-                                    return s1.files.map((f) => sampleFileRow(p.name, f));
+                                    // The FMDV report first, then the sequences, then the rest as listed.
+                                    const rank = (f) => /_FMDV_report\.pdf$/.test(f.name) ? 0 : /_FMDV_report\.html$/.test(f.name) ? 1
+                                      : /_VP1\.fasta$/.test(f.name) ? 2 : /_consensus\.fasta$/.test(f.name) ? 3 : 9;
+                                    return s1.files.slice().sort((a, b) => rank(a) - rank(b)).map((f) => sampleFileRow(p.name, f));
                                   })()}
                                 </div>
                                 {krakenDir ? (
@@ -8883,6 +8897,18 @@ export default function App() {
                 </div>
                 {qcError ? <div className="note error">{qcError}</div> : null}
                 <QcCriteriaWidget />
+                {fmdvOn && selectedProject ? (() => {
+                  // The run report for the outbreak team sits at the project root:
+                  // every sample's call on one page, with the serotype trees.
+                  const root = `${selected?._root || settings.projects_root}/${selectedProject}`;
+                  return (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em", marginLeft: "0.8em" }}>
+                      <span className="muted" style={{ fontSize: "0.85em" }} title="One page for the outbreak team: every sample's call, the notes that change how a call is read, and the serotype trees. Rewritten at the end of each Step 1 and after each VP1 tree.">FMDV run report:</span>
+                      <button className="ghost" onClick={() => viewInline(`${root}/FMDV_run_report.html`)}>HTML</button>
+                      <button className="ghost" onClick={() => downloadOutput(`${root}/FMDV_run_report.pdf`, `${selectedProject}_FMDV_run_report.pdf`)}>PDF</button>
+                    </span>
+                  );
+                })() : null}
                 <div className="qc-table scrollable">
                   <ResizableTable widths={step1ColWidths}>
                     <thead>
@@ -9023,6 +9049,14 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
+                                    {fmdvOn && sampleKey(row) && row._file ? (() => {
+                                      const dir = String(row._file).replace(/\/[^/]*$/, "");
+                                      const stem = `${dir}/${sampleKey(row)}_FMDV_report`;
+                                      return (<>
+                                        <button onClick={() => viewInline(`${stem}.html`)} title="This sample's FMDV report: call, flags, QC, neighbourhood, tree, VP1 differences and sequence.">FMDV report</button>
+                                        <button onClick={() => downloadOutput(`${stem}.pdf`, `${sampleKey(row)}_FMDV_report.pdf`)} title="The same report as a PDF, for printing or sending.">PDF</button>
+                                      </>);
+                                    })() : null}
                                     {sampleKey(row) && hasKrakenRun(selectedProject, sampleKey(row)) ? (
                                       <a
                                         className="ghost action"

@@ -122,20 +122,13 @@ export default function FmdvVp1Results({
             );
           })() : null}
           <table className="qc-table" style={{ fontSize: "0.85em", width: "100%" }}>
-            <thead><tr><th>Sample</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th><th title="The sample's one-page report: call, QC, neighbourhood, tree, VP1 differences and sequence. Written at Step 1 and rewritten after each VP1 tree.">Report</th></tr></thead>
+            <thead><tr><th>Sample</th><th title="The sample's one-page report: call, QC, neighbourhood, tree, VP1 differences and sequence. Written at Step 1 and rewritten after each VP1 tree.">Report</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th></tr></thead>
             <tbody>
               {samples.map((s) => {
                 const t = typing[s]; const c = chosen[s] || {}; const n = t?.nearest || {};
                 return (
                   <tr key={s}>
                     <td>{s}</td>
-                    <td>{t?.status === "typed" ? t.serotype : "-"}{t?.note ? " ⚠" : ""}</td>
-                    <td>{t?.status === "typed" ? (t.topotype || "unassigned") : "-"}</td>
-                    <td>{t?.status === "typed" ? (t.lineage || "unassigned") : (t?.status || "not typed")}</td>
-                    <td>{pct(t?.lineage_identity ?? t?.identity)}</td>
-                    <td title={n.isolate || ""}>{[n.accession, n.country, n.year && String(n.year) !== "0" ? n.year : ""].filter(Boolean).join(" ")}{typeof t?.identity === "number" ? ` (${pct(t.identity)})` : ""}</td>
-                    <td title={c.safe || ""}>{c.serotype ? `${c.serotype} ${c.lineage || ""}`.trim() : "-"}{c.mixed ? " mixed" : ""}{c.distant ? " distant" : ""}</td>
-                    <td>{pct(t?.vp1_called_percent)}</td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       {(() => {
                         const base = run?.path ? run.path.replace(/\/step2\/.*$/, "") : "";
@@ -147,6 +140,13 @@ export default function FmdvVp1Results({
                         </>);
                       })()}
                     </td>
+                    <td>{t?.status === "typed" ? t.serotype : "-"}{t?.note ? " ⚠" : ""}</td>
+                    <td>{t?.status === "typed" ? (t.topotype || "unassigned") : "-"}</td>
+                    <td>{t?.status === "typed" ? (t.lineage || "unassigned") : (t?.status || "not typed")}</td>
+                    <td>{pct(t?.lineage_identity ?? t?.identity)}</td>
+                    <td title={n.isolate || ""}>{[n.accession, n.country, n.year && String(n.year) !== "0" ? n.year : ""].filter(Boolean).join(" ")}{typeof t?.identity === "number" ? ` (${pct(t.identity)})` : ""}</td>
+                    <td title={c.safe || ""}>{c.serotype ? `${c.serotype} ${c.lineage || ""}`.trim() : "-"}{c.mixed ? " mixed" : ""}{c.distant ? " distant" : ""}</td>
+                    <td>{pct(t?.vp1_called_percent)}</td>
                   </tr>
                 );
               })}

@@ -449,10 +449,14 @@ def main() -> int:
     # Each included sample's report, rewritten now that it has a
     # neighbourhood, a tree and its VP1 differences.
     report_py = Path(__file__).resolve().parent / "fmdv_sample_report.py"
+    run_report_py = Path(__file__).resolve().parent / "fmdv_run_report.py"
     if report_py.is_file() and not a.out:
         with open(log, "a") as lg:
             subprocess.run([sys.executable, str(report_py), "--project", str(project), "--lib", str(lib),
                             "--samples", *[s for s, _ in samples]], stdout=lg, stderr=lg)
+            if run_report_py.is_file():
+                subprocess.run([sys.executable, str(run_report_py), "--project", str(project), "--lib", str(lib)],
+                               stdout=lg, stderr=lg)
     # The keys the Step 2 run list reads (status, started_at, reference), so
     # the folder shows as a finished run and not as one still running.
     write_run_metadata("ok", tree=method)

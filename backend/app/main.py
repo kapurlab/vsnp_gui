@@ -5730,6 +5730,11 @@ def _step1_dispatch(
         # its VP1 slice, written beside the alignment. Never fails the sample.
         typer_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
         report_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_sample_report.py")
+        run_report_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_run_report.py")
+        fmdv_run_report_line = (
+            "python3 " + shlex.quote(run_report_py) + " --project " + shlex.quote(str(project_dir))
+            + " --lib " + shlex.quote(fmdv_lib) + " >>\"$OVERALL_LOG\" 2>&1 || echo \"FMDV: run report failed\" >> \"$OVERALL_LOG\""
+        )
         fmdv_consensus_line = (
             "    python3 " + shlex.quote(consensus_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
             + " >>\"$LOG\" 2>&1 || echo \"FMDV: consensus failed for $d\" | tee -a \"$LOG\""
@@ -5765,6 +5770,7 @@ def _step1_dispatch(
             "  fi",
         ]
     else:
+        fmdv_run_report_line = ":"
         # Auto-populate reference from project.json if not supplied in payload
         if not payload.reference:
             payload.reference = _project_reference(project_dir)
@@ -5980,6 +5986,9 @@ def _step1_dispatch(
             "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",
             "echo \"End: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
             "echo \"Duration: ${OVERALL_DURATION}s\" >> \"$OVERALL_LOG\"",
+            # FMDV mode: the run report for the outbreak team, once every
+            # sample has its call. Never changes the batch's exit code.
+            (fmdv_run_report_line if fmdv_mode else ":"),
             "exit $FAIL",
         ]),
         encoding="utf-8"

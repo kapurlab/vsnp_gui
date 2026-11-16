@@ -721,6 +721,37 @@ neighbours or after rerooting, not from the root split. Before the
 selection the full SAT1 set (406 sequences) took 6.5 minutes, and a full O
 tree would have run for hours.
 
+## Reports
+
+Two reports, both HTML and PDF (weasyprint, in the vsnp3 env), both
+rewritten whenever their inputs change.
+
+The sample report, `bin/fmdv_sample_report.py`, is written at the end of
+Step 1 and again when a VP1 tree that includes the sample finishes (a run
+restricted to the sample's serotype is preferred over an all-serotype run).
+It holds, in order: the call (serotype, lineage, nearest record, the record
+that named the lineage, agreement); the flags (QC level, mixed with the
+shares, distant with the identity, provisional); the QC numbers and the
+lines they were judged against; the reference the reads chose and the
+serotype composition; the neighbourhood table; the sample's neighbourhood
+tree as an SVG, midpoint-rooted, bootstrap 50 and over; the VP1 amino acid
+differences from the record that named the lineage, or from the nearest
+record in the alignment when that one is not in it; the VP1 sequence in
+print with the consensus genome beside it as a file; versions, the typing
+database's build date and the fixed caveats. Written as
+`<sample>_FMDV_report.html` and `.pdf` in the sample folder; the Step 2
+VP1 view's Typing table links both.
+
+The run report, `bin/fmdv_run_report.py`, is for the outbreak team: a
+summary in words (serotypes and lineages present, samples sharing a
+lineage, how many calls carry a note), one table of calls with the notes
+that change how a call is read (two serotypes in the reads, no close
+genome, lineage unassigned, QC fail or review), and the run-level
+neighbourhood tree per serotype with the samples highlighted. QC detail
+stays in the sample reports. Written as `<project>/FMDV_run_report.html`
+and `.pdf` at the end of every Step 1 batch in FMDV mode and after every
+VP1 tree; linked from the VP1 view beside the typing table.
+
 ## Primer clipping
 
 AHI's protocol is amplicon based (NanoFMDV's L primer scheme, 33 primers,

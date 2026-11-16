@@ -111,6 +111,16 @@ export default function FmdvVp1Results({
             The call per sample: serotype from the VP1 consensus, lineage from the nearest annotated GenBank VP1, and the
             nearest record of all. {info ? `${samples.length} sample${samples.length === 1 ? "" : "s"} in this tree, ${info.panel_sequences} panel and context sequences.` : ""}
           </p>
+          {run?.path ? (() => {
+            const base = run.path.replace(/\/step2\/.*$/, "");
+            return (
+              <div style={{ display: "flex", gap: "0.5em", alignItems: "center", marginBottom: "0.5em", flexWrap: "wrap" }}>
+                <span className="muted" style={{ fontSize: "0.85em" }} title="One page for the outbreak team: every sample's call, the notes that change how a call is read, and the serotype trees. Rewritten after each Step 1 and each VP1 tree.">Run report (outbreak team):</span>
+                <button className="ghost" onClick={() => viewInline(`${base}/FMDV_run_report.html`)}>HTML</button>
+                <button className="ghost" onClick={() => downloadOutput(`${base}/FMDV_run_report.pdf`, `${project}_FMDV_run_report.pdf`)}>PDF</button>
+              </div>
+            );
+          })() : null}
           <table className="qc-table" style={{ fontSize: "0.85em", width: "100%" }}>
             <thead><tr><th>Sample</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th><th title="The sample's one-page report: call, QC, neighbourhood, tree, VP1 differences and sequence. Written at Step 1 and rewritten after each VP1 tree.">Report</th></tr></thead>
             <tbody>

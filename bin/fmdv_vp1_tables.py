@@ -79,6 +79,97 @@ def newick_leaves(text: str) -> List[str]:
     return names
 
 
+class Node:
+    __slots__ = ("name", "length", "label", "kids")
+
+    def __init__(self, name: str = "", length: Optional[float] = None, label: str = ""):
+        self.name, self.length, self.label, self.kids = name, length, label, []
+
+
+def parse_newick(text: str) -> Node:
+    """Enough Newick for RAxML output: nested parentheses, optional quoted
+    names, branch lengths, internal labels (bootstraps) and [comments]."""
+    s = re.sub(r"\[[^\]]*\]", "", text.strip())
+    pos = 0
+
+    def read_label() -> str:
+        nonlocal pos
+        if pos < len(s) and s[pos] == "'":
+            end = s.index("'", pos + 1)
+            while end + 1 < len(s) and s[end + 1] == "'":
+                end = s.index("'", end + 2)
+            lab = s[pos + 1:end].replace("''", "'")
+            pos = end + 1
+            return lab
+        m = re.match(r"[^,:;()\[\]]*", s[pos:])
+        pos += m.end()
+        return m.group(0).strip()
+
+    def read_length() -> Optional[float]:
+        nonlocal pos
+        if pos < len(s) and s[pos] == ":":
+            m = re.match(r":\s*([-+0-9.eE]+)", s[pos:])
+            pos += m.end()
+            return float(m.group(1))
+        return None
+
+    def node() -> Node:
+        nonlocal pos
+        n = Node()
+        if s[pos] == "(":
+            pos += 1
+            while True:
+                n.kids.append(node())
+                if s[pos] == ",":
+                    pos += 1
+                    continue
+                if s[pos] == ")":
+                    pos += 1
+                    break
+            n.label = read_label()
+        else:
+            n.name = read_label()
+        n.length = read_length()
+        return n
+
+    return node()
+
+
+def leaves(n: Node) -> List[Node]:
+    return [n] if not n.kids else [x for k in n.kids for x in leaves(k)]
+
+
+def prune(n: Node, keep: set) -> Optional[Node]:
+    """The subtree over `keep`: dropped leaves vanish, a node left with one
+    child is merged into it with the branch lengths added, so distances
+    between the kept leaves are unchanged."""
+    if not n.kids:
+        return n if n.name in keep else None
+    kids = [k for k in (prune(k, keep) for k in n.kids) if k is not None]
+    if not kids:
+        return None
+    if len(kids) == 1:
+        child = kids[0]
+        if n.length is not None or child.length is not None:
+            child.length = (n.length or 0.0) + (child.length or 0.0)
+        return child
+    n.kids = kids
+    return n
+
+
+def write_newick(n: Node, rename: Optional[Dict[str, str]] = None) -> str:
+    def q(label: str) -> str:
+        return "'" + label.replace("'", "''") + "'" if re.search(r"[\s,:;()\[\]']", label) else label
+
+    def rec(x: Node) -> str:
+        if x.kids:
+            inner = "(" + ",".join(rec(k) for k in x.kids) + ")" + (q(x.label) if x.label else "")
+        else:
+            inner = q((rename or {}).get(x.name, x.name))
+        return inner + (f":{x.length:g}" if x.length is not None else "")
+    return rec(n) + ";"
+
+
 def identity(a: str, b: str) -> Tuple[float, int]:
     """Percent identity over columns where both have a base (gaps and N skipped)."""
     same = n = 0
@@ -202,7 +293,9 @@ def main() -> int:
     summary: Dict = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "files": {}, "near_pct": a.near, "cap": a.cap}
     try:
         aln_path = vp1 / "VP1_aligned.fasta"
-        tre = sorted(vp1.glob("VP1_*.tre"))
+        # The full tree only: the neighbourhood tree this script writes sits
+        # beside it and must never be the one pruned.
+        tre = sorted(p for p in vp1.glob("VP1_*.tre") if "neighbourhood" not in p.name)
         info = json.loads((vp1 / "vp1_tree.json").read_text()) if (vp1 / "vp1_tree.json").is_file() else {}
         aln = dict(read_fasta(aln_path))
         samples = [s for s in info.get("samples_included", []) if s in aln]
@@ -241,6 +334,65 @@ def main() -> int:
                     fh.write("\t".join(str(x) for x in (s, i, r["name"], r["identity"], r["serotype"], r["lineage"],
                                                         r["country"], r["year"], r["host"], r["accession"], r["isolate"])) + "\n")
         summary["files"]["neighbours"] = str(vp1 / "VP1_neighbours.json")
+
+        # The neighbourhood tree: the samples, their neighbourhoods, and one
+        # representative of every other lineage in the run, pruned from the
+        # full tree so branch lengths and topology are the full tree's own.
+        # A viewer draws fifteen to sixty leaves with every label readable;
+        # the full tree stays beside it for the reader who wants it all.
+        if tre:
+            root = parse_newick(tre[-1].read_text())
+            present = [x.name for x in leaves(root)]
+            # One representative per TOPOTYPE outside the neighbourhoods. The
+            # context TSVs name topotypes as the first field of the lineage
+            # string (ME-SA/PANASIA-2/ANT-10); a panel genome's name carries
+            # the same words joined by hyphens (ME-SA-PanAsia-2-FAR-09), so it
+            # is matched to the longest known topotype it starts with.
+            topotypes_by_sero: Dict[str, set] = {}
+            for m in meta.values():
+                t = (m.get("topotype") or "").split("/")[0].upper()
+                if t:
+                    topotypes_by_sero.setdefault(m.get("serotype", "").upper(), set()).add(t)
+
+            def topotype_key(name: str) -> str:
+                d = describe(name, meta)
+                lin = (d["lineage"] or "").upper()
+                if name in meta:
+                    return f"{d['serotype']}:{lin.split('/')[0]}"
+                cands = [t for t in topotypes_by_sero.get(d["serotype"].upper(), set())
+                         if lin == t or lin.startswith(t + "-") or lin.startswith(t + "/")]
+                return f"{d['serotype']}:{max(cands, key=len) if cands else lin.split('-')[0]}"
+
+            by_topo: Dict[str, List[str]] = {}
+            for name in present:
+                if name in keep or name in samples:
+                    continue
+                by_topo.setdefault(topotype_key(name), []).append(name)
+            kept_topos = {topotype_key(n) for n in keep if n not in samples}
+            reps: List[str] = []
+            for topo, names in sorted(by_topo.items()):
+                if topo in kept_topos:
+                    continue
+                # alphabetical first: deterministic, and the reader only needs one of each
+                reps.append(sorted(names)[0])
+            tree_keep = set(keep) | set(reps)
+            pruned = prune(root, tree_keep)
+            if pruned is not None:
+                rename = {}
+                for name in tree_keep:
+                    if name in samples:
+                        continue
+                    d = describe(name, meta)
+                    parts = [d["lineage"] or d["serotype"], d["country"], d["year"] if str(d["year"]) not in ("", "0") else "", d["accession"]]
+                    rename[name] = "|".join(x for x in parts if x).replace(" ", "_")
+                (vp1 / "VP1_neighbourhood.tre").write_text(write_newick(pruned, rename) + "\n")
+                (vp1 / "VP1_neighbourhood_labels.json").write_text(json.dumps(
+                    {"samples": samples, "neighbourhood": sorted(keep - set(samples)),
+                     "lineage_representatives": reps, "labels": rename}, indent=1))
+                summary["files"]["neighbourhood_tree"] = str(vp1 / "VP1_neighbourhood.tre")
+                summary["neighbourhood_tree"] = {"leaves": len(tree_keep), "samples": len(samples),
+                                                 "neighbourhood": len(keep) - len(samples), "lineage_representatives": len(reps),
+                                                 "full_tree_leaves": len(present)}
 
         # Site tables over samples + neighbourhoods, in tree order
         rows_names = [n for n in order if n in keep]
@@ -313,8 +465,10 @@ def main() -> int:
             summary["files"][f"sorted_{level}"] = str(vp1 / f"VP1_sorted_table_{level}.xlsx")
             summary["files"][f"cascade_{level}"] = str(vp1 / f"VP1_cascade_table_{level}.xlsx")
         summary.update({"status": "ok", "samples": samples, "rows": rows_names, "counts": counts})
+        nt_ = summary.get("neighbourhood_tree") or {}
         _err(f"vp1_tables: {len(samples)} samples, {len(rows_names)} rows; nt sites {counts['nt']['variable_sites']}, "
-             f"aa sites {counts['aa']['variable_sites']}")
+             f"aa sites {counts['aa']['variable_sites']}"
+             + (f"; neighbourhood tree {nt_['leaves']} of {nt_['full_tree_leaves']} leaves" if nt_ else ""))
     except Exception as e:  # never fail the tree run
         summary.update({"status": "failed", "error": f"{type(e).__name__}: {e}"})
         _err(f"vp1_tables: failed: {e}")

@@ -56,7 +56,9 @@ export default function TreeStandalone() {
   const [ordering, setOrdering] = useState("file");
   const orderingRef = useRef("file");
   const [rerootMode, setRerootMode] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
+  // A link may bring its own search term (the Step 2 VP1 view passes a
+  // sample name), so the tree opens with that leaf already highlighted.
+  const [searchTerm, setSearchTerm] = useState(params.get("search") || "");
   const [hits, setHits] = useState([]);
   const [hitAt, setHitAt] = useState(0);
   const [tables, setTables] = useState([]);

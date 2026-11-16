@@ -43,7 +43,8 @@ export default function FmdvVp1Results({
     return g ? g.files || [] : [];
   }, [groups]);
   const fileByName = (name) => files.find((f) => (f.label || "").endsWith(name));
-  const treeFile = files.find((f) => /\.tre$/i.test(f.label || ""));
+  const treeFile = files.find((f) => /\.tre$/i.test(f.label || "") && !/neighbourhood/i.test(f.label || ""));
+  const hoodFile = files.find((f) => /VP1_neighbourhood\.tre$/i.test(f.label || ""));
   const samples = info?.samples_included || Object.keys(neigh?.neighbourhoods || {});
   const typing = fmdvInfo?.vp1_typing || {};
   const chosen = fmdvInfo?.chosen || {};
@@ -129,12 +130,21 @@ export default function FmdvVp1Results({
       {section === "tree" ? (
         <div>
           <p className="muted" style={{ fontSize: "0.85em", marginTop: 0 }}>
-            RAxML on the VP1 alignment, {info?.bootstraps ?? 100} bootstraps. The viewer opens in a new tab; the project's samples are among
-            {info ? ` ${info.panel_sequences}` : ""} panel and context sequences.
+            RAxML on the VP1 alignment, {info?.bootstraps ?? 100} bootstraps. The neighbourhood tree is the full tree pruned to the
+            samples, their neighbourhoods and one record per other lineage, so every label reads; branch lengths are the full tree's.
+            {tables?.neighbourhood_tree ? ` ${tables.neighbourhood_tree.leaves} of ${tables.neighbourhood_tree.full_tree_leaves} leaves: ${tables.neighbourhood_tree.samples} samples, ${tables.neighbourhood_tree.neighbourhood} neighbourhood records, ${tables.neighbourhood_tree.lineage_representatives} lineage representatives.` : ""}
+            {" "}Context labels read lineage | country | year | accession. The viewer opens with the first sample found.
           </p>
-          {treeFile ? (
-            <button onClick={() => window.open(treeUrlFor(treeFile.path), "_blank", "noopener")}>View tree</button>
-          ) : <span className="muted">No tree file yet.</span>}
+          <div style={{ display: "flex", gap: "0.5em", flexWrap: "wrap" }}>
+            {hoodFile ? (
+              <button onClick={() => window.open(treeUrlFor(hoodFile.path) + (samples[0] ? `&search=${encodeURIComponent(samples[0])}` : ""), "_blank", "noopener")}
+                title="The samples among their relatives: the default view.">Neighbourhood tree</button>
+            ) : <span className="muted">No neighbourhood tree for this run{run?.state === "running" ? " yet" : ". Build the tree again; it is written with the tables."}</span>}
+            {treeFile ? (
+              <button className="ghost" onClick={() => window.open(treeUrlFor(treeFile.path) + (samples[0] ? `&search=${encodeURIComponent(samples[0])}` : ""), "_blank", "noopener")}
+                title="Every panel and context sequence the tree was built with.">Full tree</button>
+            ) : null}
+          </div>
           {info?.context_selection ? (
             <div className="muted" style={{ fontSize: "0.8em", marginTop: "0.5em" }}>
               Context: {Object.entries(info.context_selection).map(([sero, c]) =>

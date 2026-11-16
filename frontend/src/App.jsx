@@ -8910,9 +8910,9 @@ export default function App() {
                             <QcSortTh {...qcSortProps} sortKey="mapping" title="Reads mapped to the chosen reference. Host and other reads make up the rest; the FMDV pass line is 20%.">Mapping %</QcSortTh>
                             {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_error_rate" title="Long reads only: mismatches and indels per aligned base. About 2% is clean; 6% or more points to a mixed sample or a distant reference.">Error rate</QcSortTh> : null}
                             {fmdvShortRead ? <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads" title="Short reads only: mapped reads marked duplicate and set aside before calling.">Dup %</QcSortTh> : null}
-                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage" title="Positions of the reference with at least one read.">Genome ≥1 read</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called" title="Positions with a called base in the consensus: depth 10 or more and an unambiguous call. The FMDV QC lines are 90% pass and 70% fail.">Consensus called</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called" title="VP1 positions with a called base in the consensus. The VP1 tree takes samples at 50% or more.">VP1 called</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage" title="Percent of reference positions covered by at least one read.">Genome covered %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called" title="Percent of reference positions with a called base in the consensus: depth 10 or more and an unambiguous call. The FMDV QC lines are 90% pass and 70% fail.">Genome called %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called" title="Percent of VP1 positions with a called base in the consensus. The VP1 tree takes samples at 50% or more.">VP1 called %</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="Quality SNPs" title="vsnp3's quality SNP calls against the chosen lineage reference. Hundreds are normal for a sample a few percent from the library genome; this is distance from the reference, not a quality figure.">SNPs vs reference</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="Ambiguous SNPs" title="Sites where the reads disagree with each other (vsnp3 AC=1). Hundreds on one sample against single digits on the rest is a mixed infection.">Mixed sites</QcSortTh>
                             {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_thin_calls" title="Long reads only: calls raised to the N floor by the long-read model; the consensus masks these sites.">Thin calls</QcSortTh> : null}
@@ -9058,7 +9058,7 @@ export default function App() {
                                       {row.read_type === "ont" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
                                     </td>
                                   ) : null}
-                                  <td title="Positions of the reference with at least one read.">{formatPercent(row["Genome with Coverage"])}</td>
+                                  <td title="Percent of reference positions covered by at least one read.">{formatPercent(row["Genome with Coverage"])}</td>
                                   <td title="Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous).">
                                     {typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
                                   </td>

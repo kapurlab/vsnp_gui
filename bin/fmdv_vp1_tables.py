@@ -375,24 +375,45 @@ def main() -> int:
                     continue
                 # alphabetical first: deterministic, and the reader only needs one of each
                 reps.append(sorted(names)[0])
+            def context_label(name: str) -> str:
+                d = describe(name, meta)
+                parts = [d["lineage"] or d["serotype"], d["country"], d["year"] if str(d["year"]) not in ("", "0") else "", d["accession"]]
+                return "|".join(x for x in parts if x).replace(" ", "_")
+
+            def write_pruned(path: Path, tree_keep: set) -> Optional[Dict]:
+                # The pruner edits nodes in place, so each tree comes from a fresh parse.
+                pruned = prune(parse_newick(tre[-1].read_text()), tree_keep)
+                if pruned is None:
+                    return None
+                rename = {n: context_label(n) for n in tree_keep if n not in samples}
+                path.write_text(write_newick(pruned, rename) + "\n")
+                return {"leaves": len(tree_keep), "labels": rename}
+
+            # The run's tree: every sample with its relatives, which answers
+            # whether the samples cluster with each other.
             tree_keep = set(keep) | set(reps)
-            pruned = prune(root, tree_keep)
-            if pruned is not None:
-                rename = {}
-                for name in tree_keep:
-                    if name in samples:
-                        continue
-                    d = describe(name, meta)
-                    parts = [d["lineage"] or d["serotype"], d["country"], d["year"] if str(d["year"]) not in ("", "0") else "", d["accession"]]
-                    rename[name] = "|".join(x for x in parts if x).replace(" ", "_")
-                (vp1 / "VP1_neighbourhood.tre").write_text(write_newick(pruned, rename) + "\n")
+            run_tree = write_pruned(vp1 / "VP1_neighbourhood.tre", tree_keep)
+            if run_tree:
                 (vp1 / "VP1_neighbourhood_labels.json").write_text(json.dumps(
                     {"samples": samples, "neighbourhood": sorted(keep - set(samples)),
-                     "lineage_representatives": reps, "labels": rename}, indent=1))
+                     "lineage_representatives": reps, "labels": run_tree["labels"]}, indent=1))
                 summary["files"]["neighbourhood_tree"] = str(vp1 / "VP1_neighbourhood.tre")
                 summary["neighbourhood_tree"] = {"leaves": len(tree_keep), "samples": len(samples),
                                                  "neighbourhood": len(keep) - len(samples), "lineage_representatives": len(reps),
                                                  "full_tree_leaves": len(present)}
+            # One tree per sample: that sample, its relatives, and one record
+            # per other topotype. The figure a sample's report prints.
+            per_sample: Dict[str, Dict] = {}
+            for s_ in samples:
+                own = {s_} | {r["name"] for r in neigh.get(s_, {}).get("records", [])}
+                own_topos = {topotype_key(n) for n in own if n != s_}
+                s_reps = [sorted(names)[0] for topo, names in sorted(by_topo.items()) if topo not in own_topos]
+                safe = re.sub(r"[^A-Za-z0-9._-]", "_", s_)
+                t = write_pruned(vp1 / f"VP1_neighbourhood_{safe}.tre", own | set(s_reps))
+                if t:
+                    per_sample[s_] = {"file": str(vp1 / f"VP1_neighbourhood_{safe}.tre"), "leaves": t["leaves"],
+                                      "neighbourhood": len(own) - 1, "lineage_representatives": len(s_reps)}
+            summary["sample_trees"] = per_sample
 
         # Site tables over samples + neighbourhoods, in tree order
         rows_names = [n for n in order if n in keep]

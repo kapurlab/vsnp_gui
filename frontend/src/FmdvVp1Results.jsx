@@ -45,6 +45,10 @@ export default function FmdvVp1Results({
   const fileByName = (name) => files.find((f) => (f.label || "").endsWith(name));
   const treeFile = files.find((f) => /\.tre$/i.test(f.label || "") && !/neighbourhood/i.test(f.label || ""));
   const hoodFile = files.find((f) => /VP1_neighbourhood\.tre$/i.test(f.label || ""));
+  const [treeSample, setTreeSample] = useState("");
+  const sampleTrees = tables?.sample_trees || {};
+  const sampleTreeFile = treeSample && sampleTrees[treeSample]
+    ? files.find((f) => f.path === sampleTrees[treeSample].file) : null;
   const samples = info?.samples_included || Object.keys(neigh?.neighbourhoods || {});
   const typing = fmdvInfo?.vp1_typing || {};
   const chosen = fmdvInfo?.chosen || {};
@@ -143,6 +147,17 @@ export default function FmdvVp1Results({
             {treeFile ? (
               <button className="ghost" onClick={() => window.open(treeUrlFor(treeFile.path) + (samples[0] ? `&search=${encodeURIComponent(samples[0])}` : ""), "_blank", "noopener")}
                 title="Every panel and context sequence the tree was built with.">Full tree</button>
+            ) : null}
+            {Object.keys(sampleTrees).length ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em" }}>
+                <select value={treeSample} onChange={(e) => setTreeSample(e.target.value)} title="One sample with its relatives and one record per other topotype: the figure its report prints.">
+                  <option value="">one sample…</option>
+                  {Object.entries(sampleTrees).map(([s_, t]) => <option key={s_} value={s_}>{s_} ({t.leaves} leaves)</option>)}
+                </select>
+                <button disabled={!sampleTreeFile} onClick={() => sampleTreeFile && window.open(treeUrlFor(sampleTreeFile.path) + `&search=${encodeURIComponent(treeSample)}`, "_blank", "noopener")}>
+                  Sample tree
+                </button>
+              </span>
             ) : null}
           </div>
           {info?.context_selection ? (

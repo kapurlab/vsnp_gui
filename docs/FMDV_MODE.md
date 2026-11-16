@@ -312,18 +312,26 @@ distant); the other five Pirbright samples fail on genome covered at 52 to
 68%, because their amplicon scheme does not reach a third of the genome,
 with distant and mixed added as reasons where they apply.
 
-In FMDV mode the Step 1 Results table has five extra columns after
-Reference, all sortable and in the CSV and XLSX exports under their
-`fmdv_` names: Serotype and Lineage (the chooser's answer, from
+In FMDV mode the Step 1 Results table is laid out for long reads. After
+Reference come Serotype and Lineage (the chooser's answer, from
 `fmdv_reference.json`), Identity (reads to the chosen reference over the
-VP1 panel vote, marked when under 0.90 as distant), Genome called and VP1
-called (from `fmdv_consensus.json`: the percent of the reference genome and
-of VP1 with a called base, that is depth 10 or more and an unambiguous
-call). A mixed-serotype sample carries a mark on its serotype, with the
-shares in the tooltip. Genome called is the figure to read alongside Genome
-Cov: vsnp3's coverage counts any read, the consensus counts positions it
-would print a base for. On the Pirbright amplicon pairs the two differ by
-half the genome.
+VP1 panel vote, marked when under 0.90 as distant), Reads, Avg Depth,
+Mapping %, Error rate (mismatches and indels per aligned base from samtools
+stats: about 2% on a clean sample, 6% or more on a mixed sample or a distant
+reference), Zero Cov %, Genome Cov (vsnp3's figure, any read), Genome called
+and VP1 called (from `fmdv_consensus.json`: positions with depth 10 or more
+and an unambiguous call), Quality SNPs, Ambiguous SNPs (vsnp3's AC=1 calls;
+hundreds on one sample against single digits on the rest is a mixed
+infection), Thin calls (calls raised to the N floor by the long-read model)
+and Groups last. Dup %, Avg Read Len, R1 Q20 and R2 Q20 are not shown in
+FMDV mode: for long reads they read "not marked", R2 does not exist, and Q20
+sits near 80% on every sample. A mixed-serotype sample carries a mark on its
+serotype with the shares in the tooltip. Every column sorts; the three
+parsed figures (`fmdv_reads`, `fmdv_error_rate`, `fmdv_thin_calls`) and the
+rest of the `fmdv_` fields are in the CSV and XLSX exports. On the synthetic
+set the three faults each show in one glance: the mixed sample at 6.25%
+error, 610 ambiguous and 40 thin calls; the VP1 dropout at 68% genome and
+0% VP1 called; the distant reference at 0.893 identity and 9.5% error.
 
 ## Step 2 context: the lineage genomes as reference databases
 

@@ -120,8 +120,15 @@ def test_results_rows_carry_chooser_and_consensus():
             "f_match": 0.91, "identity": 0.985, "distant": False, "mixed": False}))
         (a / "fmdv_consensus.json").write_text(json.dumps({"length": 8156, "called_percent": 99.67, "vp1_called_percent": 100.0}))
         (step1 / "B").mkdir()   # Step 1 not run: no files at all
-        rows = [{"sample": "A"}, {"sample": "B"}, "not a row"]
+        rows = [{"sample": "A", "R1 Read Count": "7,269",
+                 "Long-read Error Rate": "6.25% (0.0625 measured by samtools stats (mismatches and indels per aligned base))",
+                 "Long-read Calls Limited to N": "0 of 610 (0 one-strand, 0 homopolymer >= 6 bp); 40 thin calls raised to the N floor; genotype from the model"},
+                {"sample": "B"}, "not a row"]
         _fmdv_flag_qc_rows(rows, step1)
+        check((rows[0]["fmdv_reads"], rows[0]["fmdv_error_rate"], rows[0]["fmdv_thin_calls"]), (7269, 6.25, 40),
+              "reads, error rate and thin calls parsed out of the workbook prose")
+        check((rows[1]["fmdv_reads"], rows[1]["fmdv_error_rate"], rows[1]["fmdv_thin_calls"]), (None, None, None),
+              "missing prose gives None, not a crash")
         check((rows[0]["fmdv_serotype"], rows[0]["fmdv_lineage"], rows[0]["fmdv_identity"]), ("SAT1", "I", 0.985), "chooser fields")
         check((rows[0]["fmdv_genome_called"], rows[0]["fmdv_vp1_called"]), (99.67, 100.0), "consensus percentages")
         check(rows[0].get("_contamination"), None, "a clean sample is not flagged")

@@ -326,6 +326,18 @@ def _resolve_qc_thresholds(cfg: Dict, project_dir: Path | None = None) -> Dict:
     return qc_verdict.merge_thresholds(cfg.get("qc_thresholds"), project_layer)
 
 
+def _int_or_none(value) -> Optional[int]:
+    """"7,269" or 7269 -> 7269; anything else -> None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
     """FMDV mode: the per-sample chooser's flags become the QC engine's
     contamination signal (review, never fail). `distant` means the closest
@@ -336,6 +348,15 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        # Three long-read figures the FMDV table shows as numbers. The stats
+        # workbook has them as prose: "7,269" reads, "2.12% (0.0212 measured
+        # by samtools stats ...)" and "0 of 610 (...); 40 thin calls raised to
+        # the N floor; ...". Parsed here so the columns sort numerically.
+        row["fmdv_reads"] = _int_or_none(row.get("R1 Read Count"))
+        m = re.match(r"\s*([0-9.]+)\s*%", str(row.get("Long-read Error Rate") or ""))
+        row["fmdv_error_rate"] = float(m.group(1)) if m else None
+        m = re.search(r"(\d[\d,]*) thin calls", str(row.get("Long-read Calls Limited to N") or ""))
+        row["fmdv_thin_calls"] = int(m.group(1).replace(",", "")) if m else None
         sample_dir = step1_dir / str(row.get("sample") or "")
         # The consensus block's numbers: how much of the genome and of VP1
         # was called (depth >= 10 and an unambiguous base), the two figures

@@ -8884,27 +8884,43 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="Reference">Reference</QcSortTh>
                         {fmdvOn ? (
                           <>
-                            {/* The FMDV chooser's answer and the consensus block's
-                                numbers: which serotype and lineage the reads were
-                                put on, how well they fit, and how much of the
-                                genome and of VP1 the consensus calls. */}
+                            {/* FMDV mode, long reads: the chooser's answer, the
+                                consensus numbers and the long-read calling
+                                figures. Dup %, read length and Q20 are left
+                                out: for ONT they read "not marked" or sit at
+                                80% on every sample. Groups goes last, since
+                                it reads "No defining SNPs" until a topotype
+                                database exists. */}
                             <QcSortTh {...qcSortProps} sortKey="fmdv_serotype">Serotype</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_lineage">Lineage</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_identity">Identity</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_reads">Reads</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_error_rate">Error rate</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called">Genome called</QcSortTh>
                             <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called">VP1 called</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Ambiguous SNPs">Ambiguous SNPs</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_thin_calls">Thin calls</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
                           </>
-                        ) : null}
-                        <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="read_length">Avg Read Len</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                        ) : (
+                          <>
+                            <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="read_length">Avg Read Len</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -9018,24 +9034,41 @@ export default function App() {
                                     : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
                                     {typeof row.fmdv_identity === "number" ? row.fmdv_identity.toFixed(3) : "-"}{row.fmdv_distant ? " ⚠" : ""}
                                   </td>
+                                  <td title="Reads in the sample's FASTQ.">{typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}</td>
+                                  <td>{row["Average Depth"] || "-"}</td>
+                                  <td>{fmtPercent1(qcMappingRate(row))}</td>
+                                  <td title={row["Long-read Error Rate"] || "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference."}>
+                                    {typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
+                                  </td>
+                                  <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                                  <td title="vsnp3's figure: positions with any read.">{formatPercent(row["Genome with Coverage"])}</td>
                                   <td title="Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous).">
                                     {typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
                                   </td>
                                   <td title="Percent of VP1 with a called base in the consensus. The VP1 tree takes samples at 50% or more.">
                                     {typeof row.fmdv_vp1_called === "number" ? `${row.fmdv_vp1_called.toFixed(1)}%` : "-"}
                                   </td>
+                                  <td>{row["Quality SNPs"] || "-"}</td>
+                                  <td title="vsnp3's AC=1 calls: sites where the reads disagree. Hundreds on one sample, against single digits on the rest, is a mixed infection.">{row["Ambiguous SNPs"] ?? "-"}</td>
+                                  <td title={row["Long-read Calls Limited to N"] || "Calls raised to the N floor by the long-read model; the consensus masks these sites."}>
+                                    {typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
+                                  </td>
+                                  <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                                 </>
-                              ) : null}
-                              <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
-                              <td>{row["Average Depth"] || "-"}</td>
-                              <td>{fmtPercent1(qcMappingRate(row))}</td>
-                              <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
-                              <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
-                              <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
-                              <td>{formatPercent(row["R1 Passing Q20"])}</td>
-                              <td>{formatPercent(row["R2 Passing Q20"])}</td>
-                              <td>{formatPercent(row["Genome with Coverage"])}</td>
-                              <td>{row["Quality SNPs"] || "-"}</td>
+                              ) : (
+                                <>
+                                  <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
+                                  <td>{row["Average Depth"] || "-"}</td>
+                                  <td>{fmtPercent1(qcMappingRate(row))}</td>
+                                  <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                                  <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                                  <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
+                                  <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                                  <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                                  <td>{formatPercent(row["Genome with Coverage"])}</td>
+                                  <td>{row["Quality SNPs"] || "-"}</td>
+                                </>
+                              )}
                             </tr>
                           );
                         })}

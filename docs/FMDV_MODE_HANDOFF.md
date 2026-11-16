@@ -1,8 +1,9 @@
 # FMDV mode: handoff for review and trial
 
-Branch `fmdv-mode` of `kapurlab/vsnp_gui`, written 14 and 15 November 2026
+Branch `fmdv-mode` of `kapurlab/vsnp_gui`, written 14 to 16 November 2026
 for Tod Stuber and anyone else who will try it, review it, or decide what,
-if anything, goes into `main`. `FMDV_MODE.md` in this folder is the design
+if anything, goes into `main`. Draft pull request kapurlab/vsnp_gui#14
+holds the diff. `FMDV_MODE.md` in this folder is the design
 and the measurements. This file is the state: what the branch is, how to
 run it, what is verified, what is not, and the questions that need an
 answer before it is merged.
@@ -72,10 +73,11 @@ reference to serve (section "Why" in `FMDV_MODE.md`).
 | `samtools ampliconclip`, same settings | adopted; unmapped reads pass through | vsnp3's mapping rate must still describe the sample |
 | minimap2 alignment to the chosen genome | replaced by `vsnp3_step1.py -t <lineage folder>` | vsnp3's alignment and calling produce the `_zc.vcf` that Step 2, the groups and the trees need |
 | VSENSUS draft, medaka polish, depth mask 10 | replaced by a consensus built from vsnp3's own calls with a pileup check and the same depth-10 mask; no indels, coordinates stay the reference's | the consensus and the SNP calls then agree by construction; measured identical to medaka's on SAT1 and 99.8% on strains 10 to 14% from their reference. An indel-aware polish for GenBank submission is a later, separate step |
-| blastn typing of the consensus | not adopted; serotype and lineage come from the chooser's VP1 composition | typing is decided before mapping, which is what makes the mapping work. The GenBank collection is used instead for the VP1 context tree and for the same-serotype genome databases |
+| blastn typing of the consensus | adopted, on the same GenBank VP1 collection: the nearest record names the serotype, the nearest annotated record within 3% names the topotype and lineage, with agreement over the top 20 | the reads vote names the nearest of 79 genomes, the typing the nearest of 9,000 VP1 records; on the Illumina trial that was Ind-2001/D where the vote said e, and PanAsia-2/ANT-10 where it said FAR-09 |
 | Statistics CSV | replaced by vsnp3's stats and an FMDV QC verdict (genome covered, depth, mapping rate, distant, mixed) | the stock verdict judged an FMDV field sample by bacterial-isolate rules |
 | Shell loop over barcode folders | replaced by a MinKNOW run import into vsnp_gui's one-file-per-sample layout, with a sample sheet | the barcode-to-sample step belongs in the GUI, and it is useful in stock mode too |
 | (none) | added: Step 2 per reference with lineage and GenBank genome databases, defining-SNP groups per topotype, and a VP1 tree with a GenBank context set | the between-sample questions NanoFMDV does not ask |
+| Per-barcode stats line | replaced by a one-page sample report (HTML and PDF) and a run report for the outbreak team, both written by the pipeline and rewritten when a tree is built | the people who act on the result do not open a GUI |
 
 ## Schematic
 
@@ -153,10 +155,17 @@ same `_zc.vcf`, the same Step 2, groups, trees and viewer. The reason is in
 nanopore reads stop mapping past 10 to 15% divergence, so one reference per
 project loses the capsid, and with it the typing signal, for most samples.
 
-Against `main` at `2b5d1bf` (v0.4.139) the branch is 15 commits: 19 new
-files and edits to four stock files, 4,900 lines added and 43 removed. The
-branch also carries a rebuilt `frontend/dist/` so a checkout serves the
-FMDV interface without a build.
+Against `main` at `2b5d1bf` (v0.4.139) the branch is 62 commits: 53
+files touched, 12,120 lines added and 98 removed (the built `frontend/dist/`
+and the lock file not counted). The branch carries a rebuilt
+`frontend/dist/` so a checkout serves the FMDV interface without a build.
+
+In FMDV mode Step 2 leads with VP1. The Step 2 pane opens on a VP1 tab
+(typing table, tree build) and the results pane follows it; the
+whole-genome SNP comparison is the second tab. The order follows the
+questions an outbreak sample asks: which serotype and lineage, then, for
+samples that share a lineage, how far apart. The stock panes are unchanged
+in stock mode.
 
 New, FMDV only, nothing in stock mode calls them:
 
@@ -172,17 +181,25 @@ New, FMDV only, nothing in stock mode calls them:
 | `bin/fmdv_panel_build.sh` | calls the 78 other lineage genomes against one reference (vsnp3 step1 FASTA mode) as a Step 2 reference database |
 | `bin/fmdv_genome_db.py` | the same for every complete genome of the reference's serotype in the collection |
 | `bin/fmdv_define_snps.py` | derives one defining-SNP group per topotype into the reference's `define_filter.xlsx` |
+| `bin/fmdv_vp1_type.py` | VP1 typing: blastn of the VP1 consensus against one database of the GenBank VP1 sets and the panel; nearest record, nearest annotated record, agreement; writes `fmdv_vp1_type.json` |
+| `bin/fmdv_vp1_tables.py` | after a tree: each sample's neighbourhood (records within 3% of its nearest, cap 20, floor 5), the VP1 variable-site tables (nucleotide and amino acid, sorted and cascade, shaded as vsnp3's), and the neighbourhood trees (run-level and one per sample) pruned from the full tree |
+| `bin/fmdv_sample_report.py` | the one-page sample report, HTML and PDF (weasyprint): call, flags, QC, reference, neighbourhood, tree figure, VP1 amino acid differences, VP1 in print |
+| `bin/fmdv_run_report.py` | the run report for the outbreak team: summary in words, one table of calls with notes, serotype trees |
+| `bin/fmdv_simulate.py` | the simulated MinKNOW run with an answer key (outbreak chain, spikes, dropout, distant genome, depth series) |
 | `bin/fmdv_bench_nanofmdv.py` | compares our consensus with NanoFMDV's on the same reads |
 | `backend/app/ont_import.py`, `frontend/src/OntRunImport.jsx` | MinKNOW run import: barcode folders to one FASTQ per sample. Not FMDV specific; works in stock mode |
 | `frontend/src/FmdvScopePicker.jsx` | the scope picker (serotype, topotype or lineage, genome, each with Auto) |
-| `backend/app/test_fmdv_*.py`, `backend/app/test_ont_import.py` | tests in the stock script style |
+| `frontend/src/FmdvVp1Panel.jsx`, `FmdvVp1Tree.jsx` | the Step 2 VP1 tab: typing table, Type VP1, Build VP1 tree per serotype |
+| `frontend/src/FmdvVp1Results.jsx` | the VP1 half of Step 2 Results: run pills; Typing, Tree, Neighbours, Sites, Files; report links |
+| `backend/app/test_fmdv_*.py`, `test_ont_import.py`, `test_vcf_reference_detect.py` | tests in the stock script style |
+| `docs/FMDV_WALKTHROUGH_PRJNA693428.md`, `docs/SYN_synthetic_run1_answer_key/` | the walkthrough on public data, and the synthetic run's key |
 | `conda_setup/environment.yml` | the fork's own tools beside the vsnp3 env: mafft, iqtree, seqkit, BLAST+ |
 | `docs/FMDV_MODE.md`, this file | design, measurements, state |
 
 Edits to stock files, every one gated on the mode flag or on an FMDV
 library reference, so stock projects run the code they ran before:
 
-- `backend/app/main.py` (416 lines added). The Step 1 dispatch
+- `backend/app/main.py` (827 lines added, 33 removed). The Step 1 dispatch
   (`_step1_dispatch`) runs the chooser, the clipper and the consensus per
   sample around `vsnp3_step1.py -t <lineage folder>`; `Step1Request` and
   the status routes carry the mode, the scope and the chooser's result;
@@ -192,11 +209,20 @@ library reference, so stock projects run the code they ran before:
   `step2_vcf_count`, `project_vcfs_list`) resolves a library reference to
   its folder on demand and filters databases by the comparison reference;
   `project_link_local` and the `/fmdv` routes switch the mode and scope.
-- `frontend/src/App.jsx` (210 lines added). The FMDV checkbox and scope
-  picker in Step 1, the "Compare on reference" select and the database
-  tick boxes in the Step 2 Build tab, and the QC criteria panel in FMDV
-  mode. Build now asks the backend which databases are ticked before it
-  imports, which fixes a stale-list race that exists in stock too.
+- `frontend/src/App.jsx` (439 lines added, 46 removed). The FMDV checkbox
+  and scope picker in Step 1, the FMDV column set in Step 1 Results
+  (serotype, lineage, topotype by VP1, identity, consensus called), the
+  VP1 tab first in the Step 2 pane and the matching tabs in the results
+  pane, the "Compare on reference" select and the database tick boxes in
+  the Build tab, the QC criteria panel and the report buttons. Build now
+  asks the backend which databases are ticked before it imports, which
+  fixes a stale-list race that exists in stock too.
+- `frontend/src/TreeStandalone.jsx` and `tree/layout.js` (33 lines). The
+  viewer takes `search=a,b,c` (several names lit), `midpoint=1`,
+  `bootstrap=1` and `fit=1` from its URL. Stock links pass none and see no
+  change.
+- `backend/app/config.py` (5 lines). The default `vsnp_gui_deploy_path` is
+  the running checkout, so a fork's runs record their own commit.
 - `backend/app/qc_verdict.py` (35 lines). Two extra signals through the
   existing contamination hook: a distant reference and a mixed serotype,
   both review, never fail.
@@ -273,17 +299,27 @@ Then in the GUI:
 2. Add reads: local FASTQs, or "Import ONT run" on the Inputs page with a
    MinKNOW run folder and an optional `sample_sheet.csv`
    (`barcode,sample_id`). Tick Nanopore reads. Grab, then Run.
-3. Step 1 Results shows the stock table; the chooser's result is in
-   `step1/<sample>/fmdv_reference.json`, the consensus and VP1 slice beside
-   the alignment folder, and the QC verdict uses the FMDV thresholds.
-4. Step 2: choose the comparison reference (one lineage at a time; the
-   select lists the lineages the project's samples landed on), tick the
-   reference databases to compare against, Build, Run. Samples on other
-   references are left out and listed.
-5. The VP1 tree is a command for now:
-   `python bin/fmdv_vp1_tree.py --project <project dir> --lib ~/fmdv_refs --serotype SAT1`.
-   Its output folder appears in the Step 2 run list and opens in the tree
-   viewer.
+3. Step 1 Results shows the FMDV column set: serotype, lineage and
+   topotype by VP1, identity, depth, genome covered and called, VP1
+   called, with Dup % for short reads or error rate and thin calls for
+   long reads. The QC verdict uses the FMDV thresholds. Each sample has an
+   "FMDV report" button, and the pane header the run report. The chooser's
+   result is in `step1/<sample>/fmdv_reference.json`, the typing in
+   `fmdv_vp1_type.json`, the consensus and VP1 slice beside the alignment
+   folder.
+4. Step 2 opens on the VP1 tab: the typing table (Type VP1 retypes a
+   project) and Build VP1 tree per serotype. The results pane's VP1 tab
+   shows one tree run at a time: Typing, Tree (the neighbourhood tree by
+   default, every sample highlighted, midpoint-rooted, bootstrap on; the
+   full tree and one tree per sample behind it), Neighbours, Sites (the
+   variable VP1 sites, amino acid or nucleotide, cascade or sorted) and
+   Files. The sample reports are rewritten when the tree finishes, and the
+   run report with them.
+5. Genome SNPs, the second and third tabs: choose the comparison reference
+   (one lineage at a time; the select lists the lineages the samples
+   landed on), tick the reference databases, Build, Run. Samples on other
+   references are left out and listed. This is the stock pane over the
+   vsnp3 runs only.
 
 Test data, all public: SRA `SRR34371563` (SAT1/I, TAN/27/2012, expected
 genome `PV524918`, the one NanoFMDV publishes), and Pirbright's BioProject
@@ -345,7 +381,25 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
   distances 3, 0, 3, 3 along the chain; the annotation row naming
   VP1:R185M at the planted VP1 change. Step 1 took 38 s for the eleven
   samples, Step 2 12 s for 57 VCFs.
-- Tests: the six new scripts pass; the 60 stock test scripts give the
+- Illumina: six public paired-end runs (three Kenya 2016 SAT1/SAT2 plaque
+  samples, O from Pakistan 2012, India 2014 and Viet Nam 2017) through the
+  mode. Every serotype matched ENA; the VP1 typing named Ind-2001/D,
+  PanAsia-2/ANT-10 and Cathay against GenBank records at 99.8 to 100%,
+  and put the Kenya samples beside KEN/PRB 2016 records at 97 to 99%. Two
+  of the Kenya samples are genuine SAT1/SAT2 mixtures (521 VP1 reads on
+  SAT2 at 0.90 identity beside 877 on SAT1 at 0.93) and are flagged so.
+  The short-read VP1 vote needed a more sensitive minimap2 setting, now
+  the default for short reads; the mixture flag is never taken from the
+  whole-genome composition, which reads a clean SAT1 sample as 49% SAT1.
+- VP1 tables and neighbourhood trees: for the Illumina O run the full
+  tree of 659 leaves prunes to 59 with every sample label readable, and
+  each sample's own tree to 18 to 33; the amino acid cascade table on the
+  SAT1 run is 12 rows by 24 sites and reads one sample's lineage from its
+  row.
+- Reports: sample and run reports written for the three trial projects
+  and read page by page; the run report for the Illumina project says six
+  samples, three O, two SAT1, one SAT2, two carrying a note.
+- Tests: the seven new scripts pass; the 60 stock test scripts give the
   same result on the branch as on `main` (54 pass, six fail for
   environment reasons on both).
 
@@ -374,9 +428,12 @@ samples.
    pieces exist (1,471 genomes marked in the context TSVs, FASTA-mode
    databases, the VP1 tree); the second pass and its place in the GUI do
    not.
-5. The chooser benchmark (leave-one-out over the 79 genomes, crosstalk and
-   co-infection mixes, depth and error rate) is planned, not built. Any
-   change to the chooser should at least rerun the ten trial samples.
+5. The chooser has its known-answer set; the VP1 typing does not. A
+   leave-one-out over the 79 genomes and a sample of annotated GenBank
+   records through the typing would give a right-call rate per serotype
+   and show where the 3% rule names the wrong sublineage. Any change to
+   the chooser should at least rerun the ten ONT and six Illumina trial
+   samples.
 6. `fmdv_panel_build.sh` carries development-server paths;
    `fmdv_reflib.py`'s docstring still describes the sourmash chooser that
    was replaced (the signatures are built and kept for comparison only).
@@ -388,6 +445,13 @@ samples.
    and its folder is now shown as running or interrupted from what is on
    disk and in the process table, but progress and completion are not
    reported for it, and the user has no way to stop it from the GUI.
+9. In the tree viewer, collapsing the full tree by lineage and linking a
+   click in the typing or site tables to the tree. The neighbourhood trees
+   took the urgency out of both.
+10. vsnp3's own Step 1 report still sits beside the FMDV report in a
+    sample's folder (badged apart now); in FMDV mode it could be hidden.
+    The run report does not yet say which tree run each serotype figure
+    came from in its header, only in the caption.
 
 ## Questions for Tod
 
@@ -411,7 +475,9 @@ samples.
    site deployment; and the VCF reference detector lets the FASTA stem
    settle a path that names two known references. The run-list state for
    a tree folder is keyed on the `_VP1-tree` name and does not touch stock
-   folders.
+   folders. The tree viewer's four URL parameters are additive. The one
+   change a stock user would notice is none: the Step 2 pane's tab order
+   and the results pane's tabs appear only in FMDV mode.
 3. The ONT run import is independent of FMDV and may be worth having in
    stock on its own.
 4. Two observations on vsnp3 itself, for information. Reads simulated by

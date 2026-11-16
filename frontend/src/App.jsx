@@ -168,11 +168,11 @@ function ReferenceOptions({ references }) {
    the whole header row on every keystroke in the Step 1 filter box — which
    threw away keyboard focus on a resize grip after a single nudge. Taking the
    sort state as props keeps the type stable and the DOM in place. */
-function QcSortTh({ sortKey, children, sort, onSort }) {
+function QcSortTh({ sortKey, children, sort, onSort, title }) {
   return (
     <th className={`qc-sortable ${sort.key === sortKey ? "qc-sorted" : ""}`}>
       <button type="button" className="qc-sort-btn" onClick={() => onSort(sortKey)}
-              title="Sort by this column">
+              title={title ? `${title} Click to sort.` : "Sort by this column"}>
         {/* Wrapped so a narrowed column truncates the label with an ellipsis:
             a bare text node inside a flex row cannot be given one. */}
         <span className="rt-th-label">{children}</span>
@@ -1486,6 +1486,17 @@ export default function App() {
   }
   // Sort state for the header component, which lives at module scope.
   const qcSortProps = { sort: qcSort, onSort: toggleQcSort };
+  // FMDV mode shows the long-read figures (error rate, thin calls) only when
+  // a long-read sample is on the table, and Dup % only when a short-read one
+  // is: an Illumina FMDV project read "-" down two columns otherwise.
+  const fmdvLongRead = useMemo(
+    () => visibleQcRows.some((r) => r.read_type === "ont" || r["Long-read Error Rate"]),
+    [visibleQcRows]
+  );
+  const fmdvShortRead = useMemo(
+    () => visibleQcRows.some((r) => r.read_type && r.read_type !== "ont"),
+    [visibleQcRows]
+  );
 
   /* Column widths for the two wide QC tables, remembered per browser. Owned
      here rather than inside ResizableTable so the panel header can offer a
@@ -8891,21 +8902,21 @@ export default function App() {
                                 80% on every sample. Groups goes last, since
                                 it reads "No defining SNPs" until a topotype
                                 database exists. */}
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_serotype">Serotype</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_lineage">Lineage</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_identity">Identity</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_reads">Reads</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_error_rate">Error rate</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called">Genome called</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called">VP1 called</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Ambiguous SNPs">Ambiguous SNPs</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="fmdv_thin_calls">Thin calls</QcSortTh>
-                            <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_serotype" title="Serotype of the lineage reference the chooser put the sample on.">Serotype</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_lineage" title="Topotype or lineage of that reference.">Lineage</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_identity" title="Identity of the reads to the chosen reference. Divergence of the sample from the library genome plus, for ONT, the read error.">Identity</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_reads" title="Reads in the sample's FASTQ.">Reads</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Average Depth" title="Mean read depth over the reference.">Avg Depth</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="mapping" title="Reads mapped to the chosen reference. Host and other reads make up the rest; the FMDV pass line is 20%.">Mapping %</QcSortTh>
+                            {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_error_rate" title="Long reads only: mismatches and indels per aligned base. About 2% is clean; 6% or more points to a mixed sample or a distant reference.">Error rate</QcSortTh> : null}
+                            {fmdvShortRead ? <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads" title="Short reads only: mapped reads marked duplicate and set aside before calling.">Dup %</QcSortTh> : null}
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage" title="Positions of the reference with at least one read.">Genome ≥1 read</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called" title="Positions with a called base in the consensus: depth 10 or more and an unambiguous call. The FMDV QC lines are 90% pass and 70% fail.">Consensus called</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called" title="VP1 positions with a called base in the consensus. The VP1 tree takes samples at 50% or more.">VP1 called</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs" title="vsnp3's quality SNP calls against the chosen lineage reference. Hundreds are normal for a sample a few percent from the library genome; this is distance from the reference, not a quality figure.">SNPs vs reference</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Ambiguous SNPs" title="Sites where the reads disagree with each other (vsnp3 AC=1). Hundreds on one sample against single digits on the rest is a mixed infection.">Mixed sites</QcSortTh>
+                            {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_thin_calls" title="Long reads only: calls raised to the N floor by the long-read model; the consensus masks these sites.">Thin calls</QcSortTh> : null}
+                            <QcSortTh {...qcSortProps} sortKey="Groups" title="Defining-SNP groups, once a topotype database exists for the reference.">Groups</QcSortTh>
                           </>
                         ) : (
                           <>
@@ -9037,22 +9048,30 @@ export default function App() {
                                   <td title="Reads in the sample's FASTQ.">{typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}</td>
                                   <td>{row["Average Depth"] || "-"}</td>
                                   <td>{fmtPercent1(qcMappingRate(row))}</td>
-                                  <td title={row["Long-read Error Rate"] || "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference."}>
-                                    {typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
-                                  </td>
-                                  <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
-                                  <td title="vsnp3's figure: positions with any read.">{formatPercent(row["Genome with Coverage"])}</td>
+                                  {fmdvLongRead ? (
+                                    <td title={row["Long-read Error Rate"] || (row.read_type === "ont" ? "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference." : "Long reads only.")}>
+                                      {typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
+                                    </td>
+                                  ) : null}
+                                  {fmdvShortRead ? (
+                                    <td title={row.read_type === "ont" ? "Not marked for long reads." : "Mapped reads marked duplicate and set aside before calling."}>
+                                      {row.read_type === "ont" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
+                                    </td>
+                                  ) : null}
+                                  <td title="Positions of the reference with at least one read.">{formatPercent(row["Genome with Coverage"])}</td>
                                   <td title="Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous).">
                                     {typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
                                   </td>
                                   <td title="Percent of VP1 with a called base in the consensus. The VP1 tree takes samples at 50% or more.">
                                     {typeof row.fmdv_vp1_called === "number" ? `${row.fmdv_vp1_called.toFixed(1)}%` : "-"}
                                   </td>
-                                  <td>{row["Quality SNPs"] || "-"}</td>
+                                  <td title="Quality SNP calls against the chosen lineage reference: distance from the reference, not a quality figure.">{row["Quality SNPs"] || "-"}</td>
                                   <td title="vsnp3's AC=1 calls: sites where the reads disagree. Hundreds on one sample, against single digits on the rest, is a mixed infection.">{row["Ambiguous SNPs"] ?? "-"}</td>
-                                  <td title={row["Long-read Calls Limited to N"] || "Calls raised to the N floor by the long-read model; the consensus masks these sites."}>
-                                    {typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
-                                  </td>
+                                  {fmdvLongRead ? (
+                                    <td title={row["Long-read Calls Limited to N"] || (row.read_type === "ont" ? "Calls raised to the N floor by the long-read model; the consensus masks these sites." : "Long reads only.")}>
+                                      {typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
+                                    </td>
+                                  ) : null}
                                   <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
                                 </>
                               ) : (

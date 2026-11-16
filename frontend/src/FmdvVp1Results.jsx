@@ -112,7 +112,7 @@ export default function FmdvVp1Results({
             nearest record of all. {info ? `${samples.length} sample${samples.length === 1 ? "" : "s"} in this tree, ${info.panel_sequences} panel and context sequences.` : ""}
           </p>
           <table className="qc-table" style={{ fontSize: "0.85em", width: "100%" }}>
-            <thead><tr><th>Sample</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th></tr></thead>
+            <thead><tr><th>Sample</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th><th title="The sample's one-page report: call, QC, neighbourhood, tree, VP1 differences and sequence. Written at Step 1 and rewritten after each VP1 tree.">Report</th></tr></thead>
             <tbody>
               {samples.map((s) => {
                 const t = typing[s]; const c = chosen[s] || {}; const n = t?.nearest || {};
@@ -126,6 +126,17 @@ export default function FmdvVp1Results({
                     <td title={n.isolate || ""}>{[n.accession, n.country, n.year && String(n.year) !== "0" ? n.year : ""].filter(Boolean).join(" ")}{typeof t?.identity === "number" ? ` (${pct(t.identity)})` : ""}</td>
                     <td title={c.safe || ""}>{c.serotype ? `${c.serotype} ${c.lineage || ""}`.trim() : "-"}{c.mixed ? " mixed" : ""}{c.distant ? " distant" : ""}</td>
                     <td>{pct(t?.vp1_called_percent)}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      {(() => {
+                        const base = run?.path ? run.path.replace(/\/step2\/.*$/, "") : "";
+                        const dir = base ? `${base}/step1/${s}` : "";
+                        if (!dir) return "-";
+                        return (<>
+                          <button className="ghost" onClick={() => viewInline(`${dir}/${s}_FMDV_report.html`)} title="Open the HTML report in a new tab">HTML</button>{" "}
+                          <button className="ghost" onClick={() => downloadOutput(`${dir}/${s}_FMDV_report.pdf`, `${s}_FMDV_report.pdf`)} title="Download the PDF">PDF</button>
+                        </>);
+                      })()}
+                    </td>
                   </tr>
                 );
               })}

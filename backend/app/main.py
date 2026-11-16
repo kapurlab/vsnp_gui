@@ -5729,6 +5729,7 @@ def _step1_dispatch(
         # After vsnp3_step1.py returns 0: the reference-anchored consensus and
         # its VP1 slice, written beside the alignment. Never fails the sample.
         typer_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
+        report_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_sample_report.py")
         fmdv_consensus_line = (
             "    python3 " + shlex.quote(consensus_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
             + " >>\"$LOG\" 2>&1 || echo \"FMDV: consensus failed for $d\" | tee -a \"$LOG\""
@@ -5737,6 +5738,10 @@ def _step1_dispatch(
             # BLAST+; without it the sample is left untyped, not failed.
             + "\n    python3 " + shlex.quote(typer_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
             + " >>\"$LOG\" 2>&1 || echo \"FMDV: VP1 typing failed for $d\" | tee -a \"$LOG\""
+            # The sample's report (HTML and PDF): the call, QC, neighbourhood
+            # and sequences. Rewritten when a VP1 tree includes the sample.
+            + "\n    python3 " + shlex.quote(report_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: report failed for $d\" | tee -a \"$LOG\""
         )
         fmdv_choose_lines = [
             "  REF_DIR=$(python3 " + shlex.quote(chooser) + " --reads \"$R1\" ${R2:+\"$R2\"}"

@@ -26,7 +26,7 @@ Usage:
     fmdv_reflib.py panels --lib <dir> --vp1 <Refs/fmdv_vp1.fasta>
     fmdv_reflib.py list  --lib <dir>
     fmdv_reflib.py materialize --lib <dir> --genome <safe>
-    fmdv_reflib.py annotations --lib <dir> [--email you@example.org] [--force]
+    fmdv_reflib.py annotations --lib <dir> [--email you@example.org] [--force] [--no-proteins]
 
 Annotation: `annotations` fetches each genome's GenBank record and GFF3
 from NCBI once, into annotations/<safe>.gbk and .gff, and materialize
@@ -36,6 +36,12 @@ identifier, KM268899.1, while the FASTA header and every VCF use the bare
 accession, so the VERSION line and the GFF's first column are rewritten to
 the bare accession at fetch time. Without that rewrite the file is read and
 never matches. Fetching at build time keeps a site offline afterwards.
+
+An FMDV record carries one coding feature, the polyprotein, so a Step 2
+table would name every call `unlisted gene:H984Q, polyprotein`. After
+fetching, `annotations` hands the files to fmdv_proteins.py, which writes
+the 12 mature proteins into each record as CDS features so a call reads
+`2B:H23Q` instead. Pass --no-proteins to keep the records as fetched.
 """
 
 from __future__ import annotations
@@ -195,7 +201,8 @@ def _efetch(acc: str, rettype: str, email: str) -> str:
         return r.read().decode("utf-8", "replace")
 
 
-def fetch_annotations(lib: Path, email: str = "", force: bool = False, delay: float = 0.4) -> Dict[str, int]:
+def fetch_annotations(lib: Path, email: str = "", force: bool = False, delay: float = 0.4,
+                      proteins: bool = True) -> Dict[str, int]:
     """Fetch every library genome's GenBank record (gbwithparts) and GFF3
     into lib/annotations/, identifiers rewritten to the bare accession, and
     copy them into any reference folder already materialized. NCBI asks for
@@ -238,6 +245,15 @@ def fetch_annotations(lib: Path, email: str = "", force: bool = False, delay: fl
         "accession to match the FASTA headers and VCF CHROM values.\n"
         f"fetched {time.strftime('%Y-%m-%d')}\n")
     print(f"annotations: {counts}", file=sys.stderr)
+    if proteins:
+        # The mature proteins go in after every record is on disk, because a
+        # genome with no mat_peptide features of its own takes its boundaries
+        # from one that has them. The step keeps the fetched file under
+        # annotations/raw/ and copies the rewritten pair into every reference
+        # folder, so it corrects a stale copy the loop above left behind.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import fmdv_proteins
+        fmdv_proteins.annotate(lib, force=force)
     return counts
 
 
@@ -315,6 +331,8 @@ def main() -> int:
     an = sub.add_parser("annotations"); an.add_argument("--lib", required=True)
     an.add_argument("--email", default="", help="contact address for NCBI (default: NCBI_EMAIL)")
     an.add_argument("--force", action="store_true", help="fetch again even when present")
+    an.add_argument("--no-proteins", action="store_true",
+                    help="leave the records as fetched, one polyprotein CDS")
     a = ap.parse_args()
     lib = Path(a.lib).expanduser().resolve()
     if a.cmd == "build":
@@ -323,7 +341,7 @@ def main() -> int:
     elif a.cmd == "panels":
         build_panels(lib, Path(a.vp1).expanduser().resolve())
     elif a.cmd == "annotations":
-        fetch_annotations(lib, a.email, a.force)
+        fetch_annotations(lib, a.email, a.force, proteins=not a.no_proteins)
     elif a.cmd == "list":
         idx = load(lib)
         for sero in sorted(idx["tree"]):

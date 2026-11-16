@@ -53,17 +53,93 @@ genomes into:
   header and every VCF carry the bare `KM268899`, so the VERSION line and
   the GFF's first column are rewritten to the bare accession at fetch time.
   A file copied in by hand without that change is read and never matches.
-  Every one of the 79 records annotates a single polyprotein CDS and only
-  one carries a gene name, so a SNP reads as, for example, `CTT->CAT,
-  unlisted gene:L65H, polyprotein, nonsynonymous`: the codon and residue in
-  polyprotein numbering, "unlisted gene" because the CDS has no `/gene`
-  qualifier, and a 5' UTR site as "position not annotated" (checked on a
-  five-VCF run against SAT1-I_KM268899, 15 November 2026). Eleven records
-  carry mature-peptide features, which vsnp3 does not read, so no table
-  names VP1 or 3D yet; the capsid boundaries would have to be added as
-  features, and `VP1_coords.json` already holds one of them.
+  Every one of the 79 records as fetched annotates a single polyprotein
+  CDS with no `/gene` qualifier, so a SNP would read `CTT->CAT, unlisted
+  gene:L65H, polyprotein, nonsynonymous` in polyprotein numbering. The
+  `annotations` step therefore hands each record to `bin/fmdv_proteins.py`,
+  which writes the 12 mature proteins in as CDS features (next section), so
+  the same call reads `2B:H23Q, 2B (polyprotein 962-1115), nonsynonymous`.
+  The fetched files are kept under `annotations/raw/`.
 
 The library path is `fmdv_reflib` in the user config, default `~/fmdv_refs`.
+
+### Mature protein features
+
+FMDV work is done in mature proteins and residue numbers within them, VP1
+position 45 or 2B position 24, and the residue in the polyprotein is the
+wrong unit. vsnp3's annotation module reads CDS, tRNA, rRNA, repeat_region,
+mobile_element and ncRNA features and nothing else, so the `mat_peptide`
+features that 11 of the 79 records carry are invisible to it, and where
+coding features overlap it keeps the longest, so mature peptides added as
+CDS beside the polyprotein would lose to it every time. The polyprotein
+CDS therefore stops being a CDS. `bin/fmdv_proteins.py annotate` rewrites
+each `.gbk` so the polyprotein is a `misc_feature` with its location,
+product and protein_id, and 12 CDS features follow it, L, VP4, VP2, VP3,
+VP1, 2A, 2B, 2C, 3A, 3B, 3C and 3D, each with `/gene` and `/product` set
+to the protein name, `/transl_table=1`, and a `/translation` sliced from
+the polyprotein translation. `/product` also carries the protein's residue
+range in the polyprotein, `VP1 (polyprotein 725-943)`, so a table row
+still says where a residue sits in the older numbering. 3D runs to the
+polyprotein's stop codon so no position in the ORF falls outside every
+coding feature; that adds the terminator as its last residue and changes
+no numbering. The `.gff` gets the same 12 lines, first column the bare
+accession, so the IGV gene track shows 12 labelled blocks. Exactly one
+coding feature covers any coding position, so vsnp3 reports it without an
+overlap note.
+
+Where the boundaries come from. Ten records carry a complete set of 12
+`mat_peptide` features under eight spellings (`Lab`, `LAB`, `L`, `Lab
+peptide; leader peptide`, `3B1/3B2/3B3 peptide`, `VPg1` to `VPg3`, which
+merge into 3B, and so on), and those are used as given: one A, three Asia
+1, one C, four O and one SAT1 (`SAT1-X_MN275121`). `SAT2-II_AF540910`
+carries only three and is treated like the unannotated 68. For each of
+those 69 the polyprotein translation is aligned (global, BLOSUM62, gap
+open 11, extend 1, free end gaps) against every donor of the same serotype,
+or every donor when the serotype has none, and the donor with the highest
+identity supplies the boundaries: each protein starts at the first target
+residue aligned at or after the donor residue that opens it. Fifty-four
+genomes came from a same-serotype donor at 86 to 99 percent identity; the
+nine SAT2 and six SAT3 genomes came from the SAT1 donor at 82 to 83
+percent. Every transfer is checked before anything is written: the 12
+proteins must be in order, start at residue 1, end at the last residue,
+tile the polyprotein with no gap or overlap (which also puts each in
+frame), and each must be within 8 percent or three residues of its donor's
+length, whichever is larger. A genome that fails is reported and left as
+fetched; none of the 79 failed. The resulting table is
+`annotations/protein_coords.json`, and `fmdv_proteins.py table --lib <lib>
+--vp1-crosscheck` prints it beside the `VP1_coords.json` that
+`fmdv_consensus.py` derives independently with minimap2 from the VP1 panel:
+on the five references that had one, every VP1 start agreed, and three
+ends agreed exactly while two differed by six bases, the panel record for
+those two genomes being two residues short at the 3' end.
+
+Checked on 15 November 2026 on `FMDV_Demo_Synthetic2` against
+`SAT1-I_KM268899`: position 3957, which read `unlisted gene:H984Q,
+polyprotein`, reads `2B:H23Q, 2B (polyprotein 962-1115)` (2B spans
+polyprotein residues 962 to 1115, so 984 is its residue 23); the 2,711
+annotated columns of the sorted table name all 12 proteins; the Step 2 log
+carries no annotation self-check warning, because vsnp3's check translates
+each CDS with `cds=True`, which a mature protein fails for want of a start
+or stop codon and is counted as uncheckable; and IGV on `SYN-01_nanopore`
+draws the 12 blocks between the two UTRs.
+
+Two things to know. Numbering in the tables is now within the protein, so
+notes written against polyprotein numbering stop matching, and a project
+has to re-run Step 2 to see the change; the `/product` text gives the
+polyprotein range for the conversion. And vsnp3 applies the translation
+table's initiator rule to a CDS's first codon, so where a mature protein
+happens to begin with ATG, CTG or TTG, a variant in that codon reports the
+mutant residue as M and the type as `start codon lost` (position 3835 on
+KM268899, the CTG that opens 2A, is one). The protein, the residue number
+and the reference residue are still right. Declaring `/transl_table=1`
+holds this to 23 of the library's 869 internal first codons; under the
+table 11 vsnp3 assumes when a CDS says nothing, it would be 101.
+
+The step is idempotent: a record that already carries `/gene="VP1"` is
+left alone, `--force` rewrites from `annotations/raw/`, and the rewritten
+pair is copied over any stale copy in a reference folder. A library built
+before this step gains it with `fmdv_reflib.py annotations --lib <lib>`;
+`--no-proteins` keeps the records as fetched.
 
 ## The scope
 

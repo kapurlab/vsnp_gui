@@ -163,6 +163,7 @@ New, FMDV only, nothing in stock mode calls them:
 | File | What it does |
 |---|---|
 | `bin/fmdv_reflib.py` | the reference library: the 79 NanoFMDV lineage genomes as a hierarchy, panels, and vsnp3 reference folders made on demand |
+| `bin/fmdv_proteins.py` | writes the 12 FMDV mature proteins into each library record as CDS features, boundaries from the record's own `mat_peptide` features or transferred by protein alignment from an annotated genome, so Step 2 tables read `2B:H23Q` rather than `unlisted gene:H984Q, polyprotein` |
 | `bin/fmdv_choose_reference.py` | the per-sample chooser: competitive minimap2 on the VP1 panel, whole genomes as fallback; writes `fmdv_reference.json` |
 | `bin/fmdv_clip_primers.py` | amplicon primer clipping on the chosen reference, `samtools ampliconclip` |
 | `bin/fmdv_consensus.py` | depth-masked consensus from vsnp3's own calls plus a pileup check, and the VP1 slice |
@@ -317,7 +318,14 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
   with the GUI run and a direct vsnp3 run forming the same groups.
   Defining-SNP groups derived from 117 genomes are recognised by vsnp3.
 - Step 2 tables carry the annotation row and IGV the gene track, from the
-  GenBank and GFF files the library fetches once per genome; a variant of a
+  GenBank and GFF files the library fetches once per genome and rewrites
+  with the 12 mature proteins as CDS features. On `FMDV_Demo_Synthetic2`
+  against `SAT1-I_KM268899` every annotated column names a protein and
+  numbers the residue within it (`2B:H23Q` where the fetched record gave
+  `unlisted gene:H984Q, polyprotein`), vsnp3's annotation self-check stays
+  quiet, and IGV draws the 12 blocks. The boundary transfer passed its own
+  checks on all 79 genomes and agrees with the independently derived
+  `VP1_coords.json`; `FMDV_MODE.md` has the method. A variant of a
   database genome opens IGV on the alignment the library build kept, with
   a note that the reads were simulated from the genome's sequence. An ONT
   sample's own reads open too: vsnp3 3.37 labels it `<sample>_nanopore`
@@ -326,7 +334,7 @@ Numbers and methods are in `FMDV_MODE.md`; this is the list.
   lists, the stats preview, the VCF editor and the variant lookup.
 - VP1 tree: samples placed with their lineage on the panel alone and on
   panel plus context (SAT1 167 taxa in 90 s; O 621 taxa in 11 min).
-- Tests: the four new scripts pass; the 60 stock test scripts give the
+- Tests: the five new scripts pass; the 60 stock test scripts give the
   same result on the branch as on `main` (54 pass, six fail for
   environment reasons on both).
 
@@ -388,7 +396,17 @@ samples.
    `test_step2_perf_caches` fails three times in three on an xfs home on
    `main` as well, because two writes of `project.json` in a row get the
    same mtime.
-5. Merge, or keep the branch? Our proposal is to keep `fmdv-mode` open as a
+5. Amino acid numbering. The library's records now carry the 12 mature
+   proteins as CDS features, so a Step 2 call reads `VP1:H45Q` instead of
+   `unlisted gene:H769Q, polyprotein`, which is the convention FMDV people
+   use. Two consequences for you to weigh: anything noted against
+   polyprotein numbering stops matching (the `/product` text keeps the
+   polyprotein range for the conversion), and vsnp3's initiator rule fires
+   on a mature protein whose first codon is ATG, CTG or TTG, reporting a
+   variant there as `start codon lost`. A flag on the CDS saying "not a
+   protein start", or honouring `mat_peptide` features in
+   `vsnp3_annotation.py`, would remove the need for the rewrite.
+6. Merge, or keep the branch? Our proposal is to keep `fmdv-mode` open as a
    branch with a draft pull request for the diff view, use it for the AHI
-   trial from the branch, and decide on merging once items 1 to 4 above
+   trial from the branch, and decide on merging once items 1 to 5 above
    have a shape you agree with.

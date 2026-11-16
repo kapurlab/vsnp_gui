@@ -157,14 +157,21 @@ def write_xlsx(path: Path, header: List[str], rows: List[List[str]], note: str, 
     white = Font(color="FFFFFFFF", bold=True)
     centre = Alignment(horizontal="center")
     if rows:
-        ref = rows[0]
+        # Differences are read against the first SAMPLE in tree order, not the
+        # top row, which is usually a context record; the sample rows are bold
+        # so the eye finds them among the records.
+        ref_i = next((i for i, r in enumerate(rows) if r[1] == "sample"), 0)
+        ref = rows[ref_i]
         for ri, r in enumerate(rows, start=2):
+            if r[1] == "sample":
+                ws.cell(row=ri, column=1).font = bold
+                ws.cell(row=ri, column=2).font = bold
             for ci, v in enumerate(r[2:], start=3):
                 cell = ws.cell(row=ri, column=ci)
                 cell.alignment = centre
                 if v in ("", "-", "N", "X"):
                     cell.fill = other
-                elif ri > 2 and v == ref[ci - 1]:
+                elif ri - 2 != ref_i and v == ref[ci - 1]:
                     cell.fill = match
                 else:
                     cell.fill = fills.get(v, other)
@@ -293,7 +300,7 @@ def main() -> int:
 
         note = (f"VP1 sites that vary among the samples and their neighbourhoods (records within {a.near}% of each "
                 f"sample's nearest, at most {a.cap}). Rows in tree order. Numbering is {first}'s VP1, 1-based, gaps "
-                f"removed. A cell that matches the first row is near-white; only differences carry colour (vsnp3's scheme). Written by fmdv_vp1_tables.py.")
+                f"removed. A cell that matches the first sample (in tree order) is near-white; only differences carry colour (vsnp3's scheme). Sample rows are bold. Written by fmdv_vp1_tables.py.")
         counts = {}
         for level in ("nt", "aa"):
             variable, cascade, table = build(level)

@@ -1,0 +1,217 @@
+import { useEffect, useMemo, useState } from "react";
+
+// The VP1 half of Step 2 Results in FMDV mode. One VP1 tree run at a time
+// (pills, newest first), and inside it the sections a typing report is made
+// of: the calls, the tree, each sample's neighbourhood, the variable sites of
+// VP1 at the nucleotide and amino acid level (sorted and cascade, from
+// fmdv_vp1_tables.py), and the run's files.
+export default function FmdvVp1Results({
+  apiBase, project, runs, selectedRun, onSelectRun, groups, loading,
+  fmdvInfo, previewXlsx, viewInline, downloadOutput, treeUrlFor,
+}) {
+  const [section, setSection] = useState("typing");
+  const [info, setInfo] = useState(null);        // vp1_tree.json
+  const [neigh, setNeigh] = useState(null);      // VP1_neighbours.json
+  const [tables, setTables] = useState(null);    // vp1_tables.json
+  const [sitesLevel, setSitesLevel] = useState("aa");
+  const [sitesKind, setSitesKind] = useState("cascade");
+
+  const run = runs.find((r) => r.run_id === selectedRun) || null;
+  const vp1Dir = run?.path ? `${run.path}/VP1` : "";
+
+  useEffect(() => {
+    setInfo(null); setNeigh(null); setTables(null);
+    if (!vp1Dir || !project) return undefined;
+    let cancelled = false;
+    const get = async (name) => {
+      try {
+        const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/download-file?path=${encodeURIComponent(`${vp1Dir}/${name}`)}&inline=1`);
+        if (!res.ok) return null;
+        return await res.json();
+      } catch (_) { return null; }
+    };
+    (async () => {
+      const [i, n, t] = await Promise.all([get("vp1_tree.json"), get("VP1_neighbours.json"), get("vp1_tables.json")]);
+      if (cancelled) return;
+      setInfo(i); setNeigh(n); setTables(t);
+    })();
+    return () => { cancelled = true; };
+  }, [vp1Dir, project, apiBase, run?.status]);
+
+  const files = useMemo(() => {
+    const g = (groups || []).find((x) => x.name === "VP1");
+    return g ? g.files || [] : [];
+  }, [groups]);
+  const fileByName = (name) => files.find((f) => (f.label || "").endsWith(name));
+  const treeFile = files.find((f) => /\.tre$/i.test(f.label || ""));
+  const samples = info?.samples_included || Object.keys(neigh?.neighbourhoods || {});
+  const typing = fmdvInfo?.vp1_typing || {};
+  const chosen = fmdvInfo?.chosen || {};
+  const pct = (v) => (typeof v === "number" ? `${v.toFixed(1)}%` : "-");
+
+  const sitesFile = fileByName(`VP1_${sitesKind}_table_${sitesLevel}.xlsx`);
+  const sitesUrl = sitesFile
+    ? `${apiBase}/api/projects/${encodeURIComponent(project)}/preview-xlsx?path=${encodeURIComponent(sitesFile.path)}`
+    : "";
+
+  const sections = [
+    ["typing", "Typing"], ["tree", "Tree"], ["neighbours", "Neighbours"], ["sites", "Sites"], ["files", "Files"],
+  ];
+
+  function runLabel(r) {
+    const m = /^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-\d{2}_VP1-tree(?:-(.+))?$/.exec(r.run_id);
+    const when = m ? `${m[1]} ${m[2]}:${m[3]}` : r.run_id;
+    const sero = m && m[4] ? m[4] : "all serotypes";
+    const state = r.state === "running" ? " · running" : r.state === "interrupted" ? " · interrupted" : "";
+    return `${sero} · ${when}${state}`;
+  }
+
+  if (!runs.length) {
+    return (
+      <div className="note">
+        No VP1 tree yet. Build one from the VP1 tab on the left: one serotype per tree, the samples typed to it with the
+        library panel and the GenBank context for their topotypes.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: "0.4em", flexWrap: "wrap", alignItems: "center", marginBottom: "0.5em" }}>
+        <span className="muted" style={{ fontSize: "0.85em" }}>VP1 tree:</span>
+        {runs.map((r) => (
+          <button key={r.run_id} className={`ghost${r.run_id === selectedRun ? " active" : ""}`}
+            style={r.run_id === selectedRun ? { fontWeight: 600, borderColor: "var(--accent, #4a9)" } : undefined}
+            onClick={() => onSelectRun(r.run_id)} title={r.path || r.run_id}>
+            {runLabel(r)}
+          </button>
+        ))}
+      </div>
+      {run?.path ? <div className="note s2-folder s2-folder-selected">Folder: <span className="s2-folder-path">{run.path}</span></div> : null}
+      {run?.state === "running" ? <div className="note"><span className="pulse-dot" /> This tree is still being built. Sections fill in as its files appear.</div> : null}
+      <div className="mode-toggle" style={{ marginTop: "0.6em", marginBottom: "0.6em" }}>
+        {sections.map(([k, label]) => (
+          <button key={k} className={section === k ? "active" : ""} onClick={() => setSection(k)}>{label}</button>
+        ))}
+      </div>
+
+      {loading ? <div className="note"><span className="pulse-dot" /> Loading…</div> : null}
+
+      {section === "typing" ? (
+        <div>
+          <p className="muted" style={{ fontSize: "0.85em", marginTop: 0 }}>
+            The call per sample: serotype from the VP1 consensus, lineage from the nearest annotated GenBank VP1, and the
+            nearest record of all. {info ? `${samples.length} sample${samples.length === 1 ? "" : "s"} in this tree, ${info.panel_sequences} panel and context sequences.` : ""}
+          </p>
+          <table className="qc-table" style={{ fontSize: "0.85em", width: "100%" }}>
+            <thead><tr><th>Sample</th><th>Serotype</th><th>Topotype</th><th>Lineage</th><th>Identity</th><th>Nearest record</th><th>Reads vote</th><th>VP1 called</th></tr></thead>
+            <tbody>
+              {samples.map((s) => {
+                const t = typing[s]; const c = chosen[s] || {}; const n = t?.nearest || {};
+                return (
+                  <tr key={s}>
+                    <td>{s}</td>
+                    <td>{t?.status === "typed" ? t.serotype : "-"}{t?.note ? " ⚠" : ""}</td>
+                    <td>{t?.status === "typed" ? (t.topotype || "unassigned") : "-"}</td>
+                    <td>{t?.status === "typed" ? (t.lineage || "unassigned") : (t?.status || "not typed")}</td>
+                    <td>{pct(t?.lineage_identity ?? t?.identity)}</td>
+                    <td title={n.isolate || ""}>{[n.accession, n.country, n.year && String(n.year) !== "0" ? n.year : ""].filter(Boolean).join(" ")}{typeof t?.identity === "number" ? ` (${pct(t.identity)})` : ""}</td>
+                    <td title={c.safe || ""}>{c.serotype ? `${c.serotype} ${c.lineage || ""}`.trim() : "-"}{c.mixed ? " mixed" : ""}{c.distant ? " distant" : ""}</td>
+                    <td>{pct(t?.vp1_called_percent)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {section === "tree" ? (
+        <div>
+          <p className="muted" style={{ fontSize: "0.85em", marginTop: 0 }}>
+            RAxML on the VP1 alignment, {info?.bootstraps ?? 100} bootstraps. The viewer opens in a new tab; the project's samples are among
+            {info ? ` ${info.panel_sequences}` : ""} panel and context sequences.
+          </p>
+          {treeFile ? (
+            <button onClick={() => window.open(treeUrlFor(treeFile.path), "_blank", "noopener")}>View tree</button>
+          ) : <span className="muted">No tree file yet.</span>}
+          {info?.context_selection ? (
+            <div className="muted" style={{ fontSize: "0.8em", marginTop: "0.5em" }}>
+              Context: {Object.entries(info.context_selection).map(([sero, c]) =>
+                `${sero}: ${c.selected} of ${c.context_total} records${c.focus && c.focus.length ? ` (focus ${c.focus.join(", ")})` : ""}`).join("; ")}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {section === "neighbours" ? (
+        <div>
+          <p className="muted" style={{ fontSize: "0.85em", marginTop: 0 }}>
+            Each sample's relatives in the alignment: every record within {neigh?.neighbourhoods ? (Object.values(neigh.neighbourhoods)[0]?.within_pct ?? 3) : 3}% identity of its nearest, at most 20 and at least 5, by identity over the compared bases.
+          </p>
+          {!neigh ? <span className="muted">No neighbourhood table for this run{run?.state === "running" ? " yet" : ""}.</span> : null}
+          {neigh ? samples.map((s) => {
+            const v = neigh.neighbourhoods?.[s];
+            if (!v) return null;
+            return (
+              <details key={s} open={samples.length <= 3} style={{ marginBottom: "0.5em" }}>
+                <summary><strong>{s}</strong>{v.nearest ? ` · nearest ${v.nearest.name} at ${v.nearest.identity}%` : ""}{typeof v.n_within === "number" ? ` · ${v.n_within} within ${v.within_pct}%` : ""}</summary>
+                <table className="qc-table" style={{ fontSize: "0.82em", width: "100%" }}>
+                  <thead><tr><th>#</th><th>Identity</th><th>Record</th><th>Lineage</th><th>Country</th><th>Year</th><th>Host</th><th>Isolate</th></tr></thead>
+                  <tbody>
+                    {(v.records || []).map((r, i) => (
+                      <tr key={r.name}>
+                        <td>{i + 1}</td><td>{r.identity}%</td><td>{r.name}</td><td>{r.lineage || "-"}</td>
+                        <td>{r.country || "-"}</td><td>{r.year && String(r.year) !== "0" ? r.year : "-"}</td><td>{r.host || "-"}</td><td>{r.isolate || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            );
+          }) : null}
+        </div>
+      ) : null}
+
+      {section === "sites" ? (
+        <div>
+          <div style={{ display: "flex", gap: "1em", alignItems: "center", flexWrap: "wrap" }}>
+            <div className="mode-toggle">
+              <button className={sitesLevel === "aa" ? "active" : ""} onClick={() => setSitesLevel("aa")}>Amino acids</button>
+              <button className={sitesLevel === "nt" ? "active" : ""} onClick={() => setSitesLevel("nt")}>Nucleotides</button>
+            </div>
+            <div className="mode-toggle">
+              <button className={sitesKind === "cascade" ? "active" : ""} onClick={() => setSitesKind("cascade")} title="Sites ordered by how many rows carry the minority state: shared differences first, private ones last.">Cascade</button>
+              <button className={sitesKind === "sorted" ? "active" : ""} onClick={() => setSitesKind("sorted")} title="Sites in VP1 order.">Sorted</button>
+            </div>
+            {sitesFile ? <>
+              <button onClick={() => previewXlsx(sitesFile.path)} title="Open in a new tab">Open</button>
+              <button onClick={() => downloadOutput(sitesFile.path, sitesFile.download_name)}>DL</button>
+            </> : null}
+            {tables?.counts ? <span className="muted" style={{ fontSize: "0.8em" }}>{tables.counts[sitesLevel]?.rows} rows (samples and neighbourhoods, tree order), {tables.counts[sitesLevel]?.variable_sites} variable sites</span> : null}
+          </div>
+          {sitesUrl ? (
+            <iframe title={`VP1 ${sitesKind} ${sitesLevel}`} src={sitesUrl} style={{ width: "100%", height: "60vh", border: "1px solid var(--rule, #ccc)", borderRadius: "6px", marginTop: "0.5em", background: "#fff" }} />
+          ) : <p className="muted" style={{ fontSize: "0.85em" }}>No site table for this run{tables?.status === "failed" ? `: ${tables.error}` : run?.state === "running" ? " yet" : ". Build the tree again; tables are written with it."}</p>}
+        </div>
+      ) : null}
+
+      {section === "files" ? (
+        <div>
+          {files.map((item) => (
+            <div key={item.path} className="results-item">
+              <div className="results-main"><div className="results-name">{item.label}</div><div className="results-path">{item.path}</div></div>
+              <div className="results-actions">
+                {/\.tre$/i.test(item.label || "") ? <button onClick={() => window.open(treeUrlFor(item.path), "_blank", "noopener")}>View tree</button>
+                  : /\.xlsx$/i.test(item.label || "") ? <button onClick={() => previewXlsx(item.path)}>View</button>
+                  : /\.(fasta|fa|tsv|json|log|txt|tre)$/i.test(item.label || "") ? <button onClick={() => viewInline(item.path)}>View</button> : null}
+                <button onClick={() => downloadOutput(item.path, item.download_name)}>DL</button>
+              </div>
+            </div>
+          ))}
+          {!files.length ? <span className="muted">No files listed yet.</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}

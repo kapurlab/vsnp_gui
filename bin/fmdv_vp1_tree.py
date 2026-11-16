@@ -437,6 +437,15 @@ def main() -> int:
         "alignment": str(aligned), "newick": str(tre),
     }
     (out_dir / "vp1_tree.json").write_text(json.dumps(summary, indent=1))
+    # The neighbourhoods and the VP1 site tables (nt and aa, sorted and
+    # cascade) from the alignment and the tree, for the Step 2 VP1 view and
+    # the sample reports. A failure there is written to vp1_tables.json and
+    # never undoes the tree.
+    tables_py = Path(__file__).resolve().parent / "fmdv_vp1_tables.py"
+    if tables_py.is_file():
+        with open(log, "a") as lg:
+            subprocess.run([sys.executable, str(tables_py), "--run", str(out_root), "--lib", str(lib)],
+                           stdout=lg, stderr=lg)
     # The keys the Step 2 run list reads (status, started_at, reference), so
     # the folder shows as a finished run and not as one still running.
     write_run_metadata("ok", tree=method)

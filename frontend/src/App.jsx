@@ -19,6 +19,7 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
 import VirtualRows from "./VirtualRows.jsx";
 import FmdvScopePicker from "./FmdvScopePicker.jsx";
 import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
+import FmdvVp1Results from "./FmdvVp1Results.jsx";
 import OntRunImport from "./OntRunImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
@@ -3929,6 +3930,21 @@ export default function App() {
              + (r.group_count > 0 ? ` (${r.group_count} groups)` : "");
     }
   }
+
+  // FMDV mode splits the comparisons by kind: VP1 tree runs belong to the VP1
+  // tab, vsnp3 comparisons to the Genome SNPs tabs. The selected run follows
+  // the tab, newest of its kind.
+  const isVp1Run = (r) => /_VP1-tree(?:-|$)/.test(r?.run_id || "");
+  const vp1Runs = useMemo(() => step2Runs.filter(isVp1Run), [step2Runs]);
+  const genomeRuns = useMemo(() => (fmdvOn ? step2Runs.filter((r) => !isVp1Run(r)) : step2Runs), [step2Runs, fmdvOn]);
+  useEffect(() => {
+    if (!fmdvOn || !step2Runs.length) return;
+    const cur = step2Runs.find((r) => r.run_id === step2SelectedRun);
+    const wantVp1 = step2Mode === "vp1";
+    if (cur && isVp1Run(cur) === wantVp1) return;
+    const pool = wantVp1 ? vp1Runs : genomeRuns;
+    if (pool.length) setStep2SelectedRun(pool[0].run_id);
+  }, [fmdvOn, step2Mode, step2Runs, step2SelectedRun, vp1Runs, genomeRuns]);
 
   function pickDefaultRun(runs) {
     const live = runs.find((r) => r.live);
@@ -11584,7 +11600,31 @@ export default function App() {
                 {paneExpand("step2-results", "Step 2 Results")}
               </div>
             </div>
-            {step2Runs.length > 0 ? (
+            {fmdvOn ? (
+              <div className="mode-toggle" style={{ marginBottom: "0.6em" }}>
+                <button className={step2Mode === "vp1" ? "active" : ""} onClick={() => setStep2Mode("vp1")}
+                  title="VP1 typing, neighbourhoods, site tables and the VP1 tree.">VP1</button>
+                <button className={step2Mode !== "vp1" ? "active" : ""} onClick={() => { if (step2Mode === "vp1") setStep2Mode("build"); }}
+                  title="The whole-genome SNP comparisons on one lineage reference.">Genome SNPs</button>
+              </div>
+            ) : null}
+            {fmdvOn && step2Mode === "vp1" ? (
+              <FmdvVp1Results
+                apiBase={API_BASE}
+                project={selectedProject}
+                runs={vp1Runs}
+                selectedRun={step2SelectedRun}
+                onSelectRun={(id) => setStep2SelectedRun(id)}
+                groups={step2Groups}
+                loading={!!selectedProject && step2OutputsFor !== selectedProject}
+                fmdvInfo={fmdvInfo}
+                previewXlsx={previewXlsx}
+                viewInline={viewInline}
+                downloadOutput={downloadOutput}
+                treeUrlFor={(path) => `${window.location.pathname.replace(/[^/]*$/, "")}?view=tree&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(path)}`}
+              />
+            ) : (<>
+            {genomeRuns.length > 0 ? (
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
                 <label style={{ fontWeight: 600, whiteSpace: "nowrap", fontSize: "0.9em" }}>Comparison:</label>
                 <select
@@ -11592,7 +11632,7 @@ export default function App() {
                   onChange={(e) => setStep2SelectedRun(e.target.value || null)}
                   style={{ flex: 1 }}
                 >
-                  {step2Runs.map((r) => (
+                  {genomeRuns.map((r) => (
                     <option key={r.run_id} value={r.run_id}>
                       {step2RunTitle(r)}
                       {step2RunStateSuffix(r)}
@@ -11928,6 +11968,7 @@ export default function App() {
                 </>
               );
             })()}
+            </>)}
           </section>
         </div>
         ) : null}

@@ -342,6 +342,20 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     log = out_dir / "vp1_tree.log"
 
+    def write_run_metadata(status: str, **extra) -> None:
+        # Written at the start with "running", so the Step 2 run list shows a
+        # build in progress even after a backend restart has forgotten the job,
+        # and again at the end with the outcome.
+        (out_root / "run_metadata.json").write_text(json.dumps({
+            "kind": "vp1_tree", "status": status, "started_at": started_at,
+            "dispatch_state": {"reference": f"VP1 panel ({serotype or 'all serotypes'})"},
+            "stamp": stamp, "serotype": serotype or "all",
+            "comparison_samples": [s for s, _ in samples], "panel_sequences": len(panel),
+            **extra,
+        }, indent=1))
+
+    write_run_metadata("running")
+
     labels: Dict[str, str] = {}
     unaligned = out_dir / "VP1_input.fasta"
     with open(unaligned, "w") as fh:
@@ -364,11 +378,13 @@ def main() -> int:
         lg.write(f"$ {mafft} --auto --thread {a.threads} {unaligned}\n")
         rc = subprocess.run([mafft, "--auto", "--thread", str(a.threads), str(unaligned)], stdout=fh, stderr=lg).returncode
     if rc != 0:
+        write_run_metadata("failed", error="mafft failed")
         _err(f"vp1_tree: mafft failed, see {log}")
         return 1
 
     method, nwk = build_tree(aligned, out_dir, log, a.threads, a.bootstraps)
     if nwk is None:
+        write_run_metadata("failed", error="no tree builder succeeded")
         _err(f"vp1_tree: no tree builder succeeded (raxmlHPC, iqtree2, FastTree), see {log}")
         return 1
     tre = out_dir / f"VP1_{stamp}.tre"
@@ -387,12 +403,7 @@ def main() -> int:
     (out_dir / "vp1_tree.json").write_text(json.dumps(summary, indent=1))
     # The keys the Step 2 run list reads (status, started_at, reference), so
     # the folder shows as a finished run and not as one still running.
-    (out_root / "run_metadata.json").write_text(json.dumps({
-        "kind": "vp1_tree", "status": "ok", "started_at": started_at,
-        "dispatch_state": {"reference": f"VP1 panel ({serotype or 'all serotypes'})"},
-        "stamp": stamp, "serotype": serotype or "all",
-        "comparison_samples": [s for s, _ in samples], "panel_sequences": len(panel), "tree": method,
-    }, indent=1))
+    write_run_metadata("ok", tree=method)
     _err(f"vp1_tree: {len(samples)} samples + {len(panel)} panel sequences, {method}, {tre}")
     print(str(tre))
     return 0

@@ -74,7 +74,10 @@ def _parse_depth(value: Any) -> float | None:
     """Parse 'Average Depth' values like "223.8X". Returns None if unparseable."""
     if value is None:
         return None
-    s = str(value).strip().rstrip("xX").rstrip("X").strip()
+    # vsnp3 writes depth with a thousands separator past 999x ("2,762.2"),
+    # which float() refuses; without the strip a deep sample simply had no
+    # depth signal and the depth threshold was never applied to it.
+    s = str(value).strip().rstrip("xX").rstrip("X").strip().replace(",", "")
     try:
         return float(s)
     except ValueError:
@@ -87,7 +90,7 @@ def _parse_percent(value: Any) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    s = str(value).strip().rstrip("%").strip()
+    s = str(value).strip().rstrip("%").strip().replace(",", "")
     try:
         return float(s)
     except ValueError:

@@ -1550,6 +1550,30 @@ def _step2_run_shape(run_dir: Path) -> Dict[str, Any]:
     return shape
 
 
+_VP1_TREE_STALE_S = 15 * 60.0
+
+
+def _vp1_tree_run_state(run_dir: Path, run_id: str) -> str:
+    """"running" or "interrupted" for a VP1 tree folder that has no tree yet;
+    "" for any other folder, including a finished tree.
+
+    The job manager forgets a job when the backend restarts, and the RAxML it
+    started keeps going on its own, so liveness cannot come from the job. The
+    log RAxML appends to does the job instead: a write within the last fifteen
+    minutes is a build still running (a bootstrap replicate on 2,000 VP1
+    sequences takes about 30 s), anything older is a build that died."""
+    if "_VP1-tree" not in run_id:
+        return ""
+    vp1 = run_dir / "VP1"
+    try:
+        if not vp1.is_dir() or any(vp1.glob("*.tre")):
+            return ""
+        newest = max((p.stat().st_mtime for p in vp1.iterdir()), default=0.0)
+    except OSError:
+        return ""
+    return "running" if newest and time.time() - newest < _VP1_TREE_STALE_S else "interrupted"
+
+
 def _step2_run_state(shape: Dict[str, Any], is_live: bool) -> str:
     """Name the state, from the folder plus whether a job is alive on it.
 
@@ -8513,6 +8537,16 @@ def step2_runs_list(project: str):
                 shape = _step2_run_shape(run_entry)
                 state = _step2_run_state(shape, run_id == live_run_id)
                 parts = _step2_split_run_name(run_id) or {}
+                tree_state = _vp1_tree_run_state(run_entry, run_id)
+                if tree_state:
+                    # A VP1 tree build writes its alignment and RAxML files into
+                    # VP1/ while it runs, which the shape reads as results. Until
+                    # the Newick exists the folder is a build in progress (or
+                    # one that died), not a comparison with one group.
+                    state = tree_state
+                    shape = {**shape, "groups": 0, "has_results": False}
+                    if meta["status"] in ("unknown", "ok"):
+                        meta = {**meta, "status": "running" if tree_state == "running" else "failed"}
                 return {
                     "run_id": run_id,
                     # Where the comparison is, for the results pane to show and
@@ -12862,11 +12896,25 @@ def _stats_reference_name(raw: str, alias_map: Dict[str, str]) -> str:
 def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
     ref = ref.replace("file://", "").strip()
     lower_ref = ref.lower()
-    for name in alias_map.values():
-        if f"/{name.lower()}/" in lower_ref:
-            return name
     ref_path = Path(ref)
     candidate = ref_path.stem
+    # Every known reference whose name is a folder on the path. Usually one.
+    # The FMDV panel builds put one reference genome's VCFs under a folder named
+    # for the GENOME that was called, and that genome is itself a reference in
+    # the library (panel_build/SAT1-I_KM268899/SAT1-III_AY593843/SAT1-I_KM268899
+    # .fasta), so two names match and the first in dict order used to win. The
+    # FASTA stem names the file the calls were made against, so when it settles
+    # the tie, it decides.
+    matches = [name for name in alias_map.values() if f"/{name.lower()}/" in lower_ref]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        by_stem = alias_map.get(candidate)
+        if by_stem in matches:
+            return by_stem
+        if candidate in matches:
+            return candidate
+        return matches[0]
     if candidate in alias_map:
         return alias_map[candidate]
     return candidate.replace("_", " ").strip().replace(" ", "_")

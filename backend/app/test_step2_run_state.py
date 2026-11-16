@@ -33,6 +33,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,6 +48,7 @@ from app.main import (
     _step2_run_state,
     _step2_runs_newest_first,
     _step2_split_run_name,
+    _vp1_tree_run_state,
 )
 import app.main as main_mod
 
@@ -84,7 +86,29 @@ def make_staged_run(step2: Path, ts: str, vcfs: int = 25) -> Path:
     return run
 
 
+def check_vp1_tree_state() -> None:
+    """A VP1 tree folder is a build in progress until its Newick exists."""
+    print("[_vp1_tree_run_state]")
+    with tempfile.TemporaryDirectory() as td:
+        run = Path(td) / "2026-11-15_20-39-43_VP1-tree"
+        vp1 = run / "VP1"
+        vp1.mkdir(parents=True)
+        (vp1 / "VP1_input.fasta").write_text(">a\nACGT\n")
+        (vp1 / "vp1_tree.log").write_text("Bootstrap[1]\n")
+        assert_eq(_vp1_tree_run_state(run, run.name), "running", "fresh log, no tree → running")
+        old = time.time() - 3600
+        for f in vp1.iterdir():
+            os.utime(f, (old, old))
+        assert_eq(_vp1_tree_run_state(run, run.name), "interrupted", "hour-old log, no tree → interrupted")
+        (vp1 / "VP1_2026-11-15_20-39-43.tre").write_text("(a,b);")
+        assert_eq(_vp1_tree_run_state(run, run.name), "", "tree written → not special")
+        plain = Path(td) / "2026-11-15_20-36-58"
+        (plain / "VP1").mkdir(parents=True)
+        assert_eq(_vp1_tree_run_state(plain, plain.name), "", "a Step 2 comparison is never a tree build")
+
+
 def main() -> int:
+    check_vp1_tree_state()
     tmp = Path(tempfile.mkdtemp(prefix="step2_run_state_"))
     try:
         print("\n[labelled comparison names are recognised and split]")

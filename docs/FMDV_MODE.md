@@ -590,6 +590,14 @@ vsnp3's) at the nucleotide and the amino acid level. Site numbering is
 the first row's VP1, gaps removed; amino acids come from the alignment
 frame, since the panel VP1s are whole ORFs.
 
+The neighbourhood tree. After every tree build the full Newick is pruned
+to the samples, their neighbourhoods and one representative of every other
+topotype in the run, and written as `VP1_neighbourhood.tre` with context
+leaves relabelled `lineage|country|year|accession`. Pruning merges the
+dropped branches so distances between the kept leaves are unchanged. The
+Tree section opens it by default with the first sample highlighted; the
+full tree is the second button. O for three samples: 659 leaves to 59.
+
 The VP1 tree's context backbone now follows the typing: topotypes the
 samples were typed to keep the full backbone (20 per topotype or lineage
 bucket), every other topotype keeps two for orientation (`--context typed`,

@@ -9036,8 +9036,10 @@ export default function App() {
                                 <>
                                   <td title={row.fmdv_mixed && row.fmdv_serotype_share
                                     ? "Mixed serotypes: " + Object.entries(row.fmdv_serotype_share).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(", ")
-                                    : "Serotype of the lineage reference the chooser put this sample on (competitive mapping to the VP1 panel)."}>
-                                    {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : ""}
+                                    : row.fmdv_composition_basis === "undetermined"
+                                      ? "Serotype of the lineage reference the chooser put this sample on. Too few reads reached any VP1 to say whether a second serotype is present."
+                                      : "Serotype of the lineage reference the chooser put this sample on (competitive mapping to the VP1 panel)."}>
+                                    {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : row.fmdv_composition_basis === "undetermined" ? " ?" : ""}
                                   </td>
                                   <td title={row.fmdv_chosen || "Topotype or lineage of the chosen reference."}>{row.fmdv_lineage || "-"}</td>
                                   <td title={row.fmdv_distant

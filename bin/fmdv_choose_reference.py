@@ -84,7 +84,7 @@ def _map(minimap2: str, preset: str, threads: int, panel: Path, reads: Path) -> 
     # -c: base-level alignment, so column 10 is true matches and the de tag
     # is gap-compressed divergence. Without it both are chaining estimates
     # (identities of 0.2 to 0.4 on correct references, measured 14 Nov 2026).
-    p = subprocess.run([minimap2, "-c", "-t", str(threads), "-x", preset, "--secondary=no",
+    p = subprocess.run([minimap2, "-c", "-t", str(threads), *preset.split(), "--secondary=no",
                         str(panel), str(reads)], capture_output=True, text=True, check=True)
     per: Dict[str, Dict] = defaultdict(lambda: {"reads": set(), "match": 0, "block": 0, "div": 0.0})
     for line in p.stdout.splitlines():
@@ -119,7 +119,9 @@ def main() -> int:
     ap.add_argument("--sample-dir", required=True)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--subsample", type=int, default=SUBSAMPLE)
-    ap.add_argument("--preset", default="auto", help="minimap2 preset: auto | map-ont | sr")
+    ap.add_argument("--preset", default="auto", help="minimap2 preset for the genome panel: auto | map-ont | sr")
+    ap.add_argument("--vp1-preset", default="", help="minimap2 options for the VP1 panel, e.g. '-x map-ont -k13 -w5' "
+                    "(default: that for short reads, -x <preset> for long reads)")
     ap.add_argument("--distant-below", type=float, default=DISTANT_BELOW)
     ap.add_argument("--mixed-above", type=float, default=MIXED_ABOVE)
     a = ap.parse_args()
@@ -149,11 +151,21 @@ def main() -> int:
 
     work = sample_dir / "fmdv_choose"
     reads, mean_len = _subsample(seqkit, [Path(r) for r in a.reads], work, a.subsample)
-    preset = a.preset if a.preset != "auto" else ("sr" if 0 < mean_len < 300 else "map-ont")
-    result.update({"preset": preset, "reads_used": a.subsample, "mean_read_length": round(mean_len)})
+    short = 0 < mean_len < 300
+    preset = a.preset if a.preset != "auto" else ("sr" if short else "map-ont")
+    # Short reads against the VP1 panel need a more sensitive seed than the
+    # sr preset gives: on a lineage 12% from the nearest panel VP1 (O/Cathay,
+    # Illumina 2x150, measured 15 November 2026) sr placed one read in 20,000
+    # and map-ont none, while map-ont with k=13 and w=5 placed 523, all on the
+    # right genome. The genome panel keeps the platform preset: it gives the
+    # identity figure and the sample's overall FMDV read count, and sr maps
+    # the same divergent reads to whole genomes well enough for both.
+    vp1_preset = a.vp1_preset or ("-x map-ont -k13 -w5" if short else f"-x {preset}")
+    result.update({"preset": preset, "vp1_preset": vp1_preset,
+                   "reads_used": a.subsample, "mean_read_length": round(mean_len)})
 
-    gen = _map(minimap2, preset, a.threads, gen_panel, reads)
-    vp1 = _map(minimap2, preset, a.threads, vp1_panel, reads) if vp1_panel.is_file() else {}
+    gen = _map(minimap2, f"-x {preset}", a.threads, gen_panel, reads)
+    vp1 = _map(minimap2, vp1_preset, a.threads, vp1_panel, reads) if vp1_panel.is_file() else {}
 
     # Composition over ALL genomes (not just the scope): a sample whose reads
     # are mostly another serotype must be visible even under a serotype scope.
@@ -172,11 +184,18 @@ def main() -> int:
     fmdv_reads, _, share_genome = composition(gen)
     vp1_reads, ranked, share = composition(vp1)
     share_table = vp1
-    if vp1_reads < MIXED_MIN_READS:          # too few capsid reads: fall back
-        vp1_reads, ranked, share = composition(gen)
-        share_table = gen
+    # The mixture call comes from VP1 or not at all. The whole-genome
+    # composition is not a serotype composition: the non-structural half
+    # recombines across serotypes, and on it a clean SAT1 sample reads as
+    # SAT1 49%, SAT2 38%, SAT3 12%, and an O/PanAsia-2 sample puts more reads
+    # on an Asia1 genome than on any O genome (both measured 15 November
+    # 2026). It used to stand in when VP1 had under 50 reads, and then
+    # declared an O/Cathay sample 19% "A". Now too few capsid reads means the
+    # composition is reported as undetermined, with the genome figure kept
+    # beside it for information.
+    composition_basis = "vp1" if vp1_reads >= MIXED_MIN_READS else "undetermined"
     second = ranked[1] if len(ranked) > 1 else None
-    mixed = bool(second and vp1_reads and second[1] >= MIXED_MIN_READS
+    mixed = bool(composition_basis == "vp1" and second and second[1] >= MIXED_MIN_READS
                  and second[1] / vp1_reads >= a.mixed_above)
     # The same composition weighted by matching bases, which is what the vote
     # below counts. The two can rank serotypes differently on a mixture: a
@@ -185,9 +204,14 @@ def main() -> int:
     # Reporting both is what makes that readable instead of contradictory.
     _, _, share_bases = composition(share_table, "match")
     result.update({"fmdv_reads": fmdv_reads, "vp1_reads": vp1_reads, "serotype_share": share,
+                   "composition_basis": composition_basis,
                    "serotype_share_bases": share_bases,
                    "serotype_share_genome": share_genome, "mixed": mixed,
                    "top_vp1": _top(vp1), "top_genome": _top(gen)})
+    if composition_basis == "undetermined":
+        _err(f"fmdv: {sample_dir.name}: only {vp1_reads} reads reached any VP1, so the serotype "
+             f"composition and the mixture flag are undetermined (whole-genome shares are kept "
+             f"for information only)")
     if mixed:
         _err(f"fmdv: WARNING {sample_dir.name} looks mixed: "
              + ", ".join(f"{s} {share[s]:.0%}" for s in list(share)[:3])

@@ -398,6 +398,9 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
         row["fmdv_f_match"] = d.get("f_match")
         row["fmdv_distant"] = bool(d.get("distant"))
         row["fmdv_mixed"] = bool(d.get("mixed"))
+        # "vp1" when the serotype composition and the mixture flag rest on
+        # VP1 reads; "undetermined" when too few reads reached any VP1.
+        row["fmdv_composition_basis"] = d.get("composition_basis") or ("vp1" if d.get("serotype_share") else "")
         row["fmdv_identity"] = d.get("identity")
         row["fmdv_serotype_share"] = d.get("serotype_share")
 

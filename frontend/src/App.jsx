@@ -7419,7 +7419,7 @@ export default function App() {
                   apiBase={API_BASE}
                   project={selectedProject}
                   enabled={!!selectedProject && settingsReady}
-                  onImported={() => loadAll()}
+                  onImported={() => { setNanoporeMode(true); loadAll(); }}
                 />
                 <h3>SRA Download</h3>
                 <textarea

@@ -1571,7 +1571,35 @@ def _vp1_tree_run_state(run_dir: Path, run_id: str) -> str:
         newest = max((p.stat().st_mtime for p in vp1.iterdir()), default=0.0)
     except OSError:
         return ""
-    return "running" if newest and time.time() - newest < _VP1_TREE_STALE_S else "interrupted"
+    if newest and time.time() - newest < _VP1_TREE_STALE_S:
+        return "running"
+    # RAxML writes nothing during its final search after the bootstraps,
+    # which on a large alignment is longer than the staleness window, so a
+    # quiet folder is only interrupted when no process names it any more.
+    return "running" if _process_names_path(vp1) else "interrupted"
+
+
+def _process_names_path(path: Path) -> bool:
+    """True when a live process has this path on its command line (the
+    mafft or RAxML a tree build started, found again after a backend restart
+    that forgot the job). Linux /proc first; pgrep -f elsewhere."""
+    needle = str(path)
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if needle.encode() in cmdline:
+                return True
+        return False
+    try:
+        return subprocess.run(["pgrep", "-f", needle], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _step2_run_state(shape: Dict[str, Any], is_live: bool) -> str:
@@ -5630,7 +5658,8 @@ def _step1_dispatch(
         ref_arg = ""
         payload.reference = None
         update_project_meta(project_dir, {"fmdv_scope": fmdv_scope,
-                                          "display_name": f"{project}_fmdv_{fmdv_scope.replace('/', '-')}"})
+                                          "display_name": (f"{project}_FMDV" if fmdv_scope == "FMDV"
+                                                           else f"{project}_{fmdv_scope.replace('/', '-')}")})
         consensus_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_consensus.py")
         # After vsnp3_step1.py returns 0: the reference-anchored consensus and
         # its VP1 slice, written beside the alignment. Never fails the sample.
@@ -6682,6 +6711,34 @@ def step2_setup(project: str):
     # cleanup: once a wrong-reference VCF has been dropped from the set, the
     # sample disappears from the set's own contents, and with it the user's
     # list of what still has to be re-run or deleted at the command line.
+    # The ticked reference databases for this reference come in with the same
+    # Build. The GUI used to post import-vcfs for them straight after setup;
+    # a caller of the API alone then had Run refuse every panel name as "not
+    # in the comparison set". Only folders tagged with a reference that
+    # matches are copied: an untagged legacy folder is left to the importer,
+    # which asks before it mixes references. A name already in the database
+    # is kept, so a project sample wins over a panel copy of the same name.
+    panel_copied = 0
+    if project_reference:
+        for folder in _resolved_vcf_db_folders(cfg):
+            if not folder.get("enabled"):
+                continue
+            fref = folder.get("reference", "") or ""
+            if not fref or not _refs_match(fref, project_reference, True):
+                continue
+            folder_path = Path(folder.get("path", ""))
+            if not folder_path.is_dir():
+                continue
+            for src in sorted(list(folder_path.glob("*_zc.vcf")) + list(folder_path.glob("*_zc.vcf.gz"))):
+                if src.name in in_db:
+                    continue
+                try:
+                    shutil.copy2(src, step2_dir / src.name)
+                except OSError as e:
+                    logger.warning("step2/setup: could not copy panel VCF %s: %s", src, e)
+                    continue
+                in_db[src.name] = False
+                panel_copied += 1
     prior_ignored: set = set()
     try:
         prior = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
@@ -6785,6 +6842,7 @@ def step2_setup(project: str):
         # kept for back-compat with older callers:
         "skipped_excluded": excluded,
         "preserved": preserved,
+        "panel_copied": panel_copied,
     }
 
 
@@ -8545,8 +8603,8 @@ def step2_runs_list(project: str):
                     # one that died), not a comparison with one group.
                     state = tree_state
                     shape = {**shape, "groups": 0, "has_results": False}
-                    if meta["status"] in ("unknown", "ok"):
-                        meta = {**meta, "status": "running" if tree_state == "running" else "failed"}
+                    if meta["status"] in ("unknown", "ok", "running"):
+                        meta = {**meta, "status": tree_state}
                 return {
                     "run_id": run_id,
                     # Where the comparison is, for the results pane to show and

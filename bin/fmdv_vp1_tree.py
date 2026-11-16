@@ -238,7 +238,11 @@ def collect_panel(lib: Path, serotype: Optional[str], samples_by_sero: Dict[str,
     # subset plus each sample's nearest neighbours, so the tree shows the
     # lineages and the fine structure around the sample without every record.
     ctx_dir = lib / "vp1_context"
-    wanted = [serotype] if serotype else sorted({serotype_of(n) for n, _ in seqs})
+    # Context for the serotypes the samples landed on, not for every serotype
+    # in the panel: with no --serotype the old rule pulled all seven context
+    # sets (1,900 sequences, 35 minutes of RAxML) into a tree whose samples
+    # sat in two of them.
+    wanted = [serotype] if serotype else sorted(s for s, v in samples_by_sero.items() if v)
     rows: List[Dict] = []
     selection: Dict[str, Dict] = {}
     for s in wanted:

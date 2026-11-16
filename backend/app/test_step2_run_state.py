@@ -100,6 +100,15 @@ def check_vp1_tree_state() -> None:
         for f in vp1.iterdir():
             os.utime(f, (old, old))
         assert_eq(_vp1_tree_run_state(run, run.name), "interrupted", "hour-old log, no tree → interrupted")
+        # RAxML's final search writes nothing for a long time: a process that
+        # still names the folder keeps it running however old the files are.
+        import subprocess as _sp
+        sleeper = _sp.Popen(["sh", "-c", f"sleep 30 # {vp1}"])
+        try:
+            assert_eq(_vp1_tree_run_state(run, run.name), "running", "quiet folder, live process names it → running")
+        finally:
+            sleeper.kill(); sleeper.wait()
+        assert_eq(_vp1_tree_run_state(run, run.name), "interrupted", "process gone → interrupted")
         (vp1 / "VP1_2026-11-15_20-39-43.tre").write_text("(a,b);")
         assert_eq(_vp1_tree_run_state(run, run.name), "", "tree written → not special")
         plain = Path(td) / "2026-11-15_20-36-58"

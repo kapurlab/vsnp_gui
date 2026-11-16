@@ -19,7 +19,8 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
     for (const c of Object.values(fmdvInfo?.chosen || {})) {
       if (c?.serotype) n[c.serotype] = (n[c.serotype] || 0) + 1;
     }
-    return Object.entries(n).sort();
+    // Most samples first, so the default tree is the one most of the run is in.
+    return Object.entries(n).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [fmdvInfo]);
 
   useEffect(() => {

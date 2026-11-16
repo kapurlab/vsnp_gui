@@ -120,7 +120,24 @@ def translate(seq_nogap: str) -> str:
     return "".join(aa)
 
 
-def write_xlsx(path: Path, header: List[str], rows: List[List[str]], note: str) -> None:
+# vsnp3's cascade-table scheme, kept so the two tabs read alike: a cell that
+# matches the first row is near-white and only differences carry colour; A
+# green, G yellow, C blue, T red; ambiguity codes, N and gaps a pale mauve.
+# Amino acids colour by class. Fills are written opaque ("FF" alpha): openpyxl
+# stores a bare six-digit colour with alpha 00, which the GUI's renderer, like
+# Excel, treats as transparent.
+NT_FILL = {"A": "FF58FA82", "G": "FFF7FE2E", "C": "FF0000FF", "T": "FFFF0000"}
+AA_CLASS = {**{a: "FFFFE26B" for a in "AVLIMFWY"},    # hydrophobic
+            **{a: "FF7FE3A1" for a in "STNQ"},        # polar
+            **{a: "FF8FB4FF" for a in "KRH"},         # positive
+            **{a: "FFFF8A80" for a in "DE"},          # negative
+            **{a: "FFD9B3FF" for a in "GPC"}}         # special
+OTHER_FILL = "FFE2CFDD"
+MATCH_FILL = "FFFDFEFE"
+WHITE_TEXT = {"C", "T"}
+
+
+def write_xlsx(path: Path, header: List[str], rows: List[List[str]], note: str, level: str) -> None:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
     wb = openpyxl.Workbook()
@@ -133,16 +150,26 @@ def write_xlsx(path: Path, header: List[str], rows: List[List[str]], note: str) 
     for c in ws[1]:
         c.font = bold
         c.alignment = Alignment(textRotation=90, horizontal="center")
-    fills = {"A": "C6EFCE", "C": "BDD7EE", "G": "FFE699", "T": "F4B084", "-": "D9D9D9", "N": "D9D9D9"}
-    # colour by difference from the first data row (the first sample in tree order)
+    palette = NT_FILL if level == "nt" else AA_CLASS
+    fills = {k: PatternFill("solid", fgColor=v) for k, v in palette.items()}
+    other = PatternFill("solid", fgColor=OTHER_FILL)
+    match = PatternFill("solid", fgColor=MATCH_FILL)
+    white = Font(color="FFFFFFFF", bold=True)
+    centre = Alignment(horizontal="center")
     if rows:
         ref = rows[0]
         for ri, r in enumerate(rows, start=2):
             for ci, v in enumerate(r[2:], start=3):
-                if v != ref[ci - 1] and v not in ("", "-", "N", "X"):
-                    ws.cell(row=ri, column=ci).fill = PatternFill("solid", fgColor=fills.get(v, "FFD966"))
-                elif v in ("-", "N", "X"):
-                    ws.cell(row=ri, column=ci).fill = PatternFill("solid", fgColor="EDEDED")
+                cell = ws.cell(row=ri, column=ci)
+                cell.alignment = centre
+                if v in ("", "-", "N", "X"):
+                    cell.fill = other
+                elif ri > 2 and v == ref[ci - 1]:
+                    cell.fill = match
+                else:
+                    cell.fill = fills.get(v, other)
+                    if level == "nt" and v in WHITE_TEXT:
+                        cell.font = white
     ws.freeze_panes = "C2"
     ws.column_dimensions["A"].width = 34
     ws.column_dimensions["B"].width = 22
@@ -266,15 +293,15 @@ def main() -> int:
 
         note = (f"VP1 sites that vary among the samples and their neighbourhoods (records within {a.near}% of each "
                 f"sample's nearest, at most {a.cap}). Rows in tree order. Numbering is {first}'s VP1, 1-based, gaps "
-                f"removed. Colours mark differences from the first row. Written by fmdv_vp1_tables.py.")
+                f"removed. A cell that matches the first row is near-white; only differences carry colour (vsnp3's scheme). Written by fmdv_vp1_tables.py.")
         counts = {}
         for level in ("nt", "aa"):
             variable, cascade, table = build(level)
             h, r = table(variable)
-            write_xlsx(vp1 / f"VP1_sorted_table_{level}.xlsx", h, r, note + f" Sorted: {level} sites in VP1 order.")
+            write_xlsx(vp1 / f"VP1_sorted_table_{level}.xlsx", h, r, note + f" Sorted: {level} sites in VP1 order.", level)
             h, r = table(cascade)
             write_xlsx(vp1 / f"VP1_cascade_table_{level}.xlsx", h, r,
-                       note + f" Cascade: {level} sites ordered by how many rows carry the minority state.")
+                       note + f" Cascade: {level} sites ordered by how many rows carry the minority state.", level)
             counts[level] = {"rows": len(rows_names), "variable_sites": len(variable)}
             summary["files"][f"sorted_{level}"] = str(vp1 / f"VP1_sorted_table_{level}.xlsx")
             summary["files"][f"cascade_{level}"] = str(vp1 / f"VP1_cascade_table_{level}.xlsx")

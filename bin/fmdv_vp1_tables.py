@@ -171,8 +171,8 @@ def write_xlsx(path: Path, header: List[str], rows: List[List[str]], note: str, 
                     if level == "nt" and v in WHITE_TEXT:
                         cell.font = white
     ws.freeze_panes = "C2"
-    ws.column_dimensions["A"].width = 34
-    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["B"].width = 14
     for ci in range(3, len(header) + 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(ci)].width = 3.2
     ws2 = wb.create_sheet("about")

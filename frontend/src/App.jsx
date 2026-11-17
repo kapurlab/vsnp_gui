@@ -1331,6 +1331,12 @@ export default function App() {
   const [dfStatus, setDfStatus] = useState("");
   const [rmSampleText, setRmSampleText] = useState("");
   const [rmStatus, setRmStatus] = useState("");
+  // Reference editor: filter positions under one group of the define_filter
+  // (rows 3+ of that group's column; column A = every group).
+  const [dfGroups, setDfGroups] = useState(null);
+  const [dfFilterGroup, setDfFilterGroup] = useState("");
+  const [dfFilterPositions, setDfFilterPositions] = useState("");
+  const [dfFilterStatus, setDfFilterStatus] = useState("");
   // Cumulative VCF database (step2/vcf_database)
   const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
   const [vcfsFolderPath, setVcfsFolderPath] = useState("");
@@ -2407,6 +2413,21 @@ export default function App() {
       setRefEditorWritable(data.ref_dir_writable !== false);
     }
     loadRemoveEntries(refName);
+    loadDfGroups(refName);
+  }
+
+  // The groups the define_filter holds, for the "filter positions" picker.
+  async function loadDfGroups(refName) {
+    if (!refName) { setDfGroups(null); return; }
+    try {
+      const res = await fetch(`${API_BASE}/api/references/${encodeURIComponent(refName)}/define-filter/groups`);
+      const data = res.ok ? await res.json() : { available: false, reason: `could not list groups (${res.status})` };
+      setDfGroups(data);
+      // A group picked on another reference may not exist on this one.
+      setDfFilterGroup((cur) => (cur && cur !== DF_ALL && !(data.groups || []).some((g) => g.name === cur)) ? "" : cur);
+    } catch {
+      setDfGroups({ available: false, reason: "could not list groups" });
+    }
   }
 
   async function loadMetadata(refName) {
@@ -2485,6 +2506,49 @@ export default function App() {
     } else {
       const err = await res.json().catch(() => ({}));
       setDfStatus(`Error: ${err.detail || res.status}`);
+    }
+  }
+
+  // Add filter positions under one group (or every group) of the
+  // define_filter: vsnp3 leaves them out of that group's SNP table on the
+  // next Step 2 run. Audited + archived like every other edit here.
+  const DF_ALL = "\u0001all";
+  async function addFilterPositions() {
+    if (!refEditorRef || !dfFilterGroup) return;
+    const allGroups = dfFilterGroup === DF_ALL;
+    const label = allGroups ? `every group (${(dfGroups && dfGroups.all && dfGroups.all.name) || "All"})` : dfFilterGroup;
+    const positions = dfFilterPositions.split(/[\s,;]+/).map((p) => p.trim()).filter(Boolean);
+    if (!positions.length) { setDfFilterStatus("Enter at least one position."); return; }
+    const rationale = window.prompt(
+      `Rationale for leaving ${positions.length} position(s) out of ${label}? Required.`
+    );
+    if (!rationale || !rationale.trim()) { setDfFilterStatus("Cancelled — rationale is required."); return; }
+    setDfFilterStatus("Saving…");
+    const res = await postRefEdit(
+      `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-positions`,
+      { group: allGroups ? "" : dfFilterGroup, all_groups: allGroups, positions, rationale: rationale.trim() }
+    );
+    if (!res) { setDfFilterStatus(`Cancelled — ${CANCEL_NOTE}`); return; }
+    if (res.ok) {
+      const data = await res.json();
+      const added = data.added || [];
+      const skipped = data.skipped || [];
+      const addTxt = added.length
+        ? `Added ${added.length} to ${label} (column ${data.column}): ${added.join(", ")}`
+        : `Nothing added to ${label}`;
+      const skipTxt = skipped.length
+        ? `; skipped ${skipped.map((s) => `${s.position} (${s.why})`).join(", ")}`
+        : "";
+      const shared = data.master
+        ? ` — written to the shared file ${data.master}` +
+          ((data.also_used_by || []).length ? `, also used by ${data.also_used_by.join(", ")}` : "")
+        : "";
+      setDfFilterStatus(`${addTxt}${skipTxt}${shared}.${added.length ? " Takes effect the next time Step 2 runs." : ""}`);
+      if (added.length) setDfFilterPositions("");
+      await loadRefEditorFiles(refEditorRef);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setDfFilterStatus(`Error: ${err.detail || res.status}`);
     }
   }
 
@@ -7913,6 +7977,64 @@ export default function App() {
                                 Add group
                               </button>
                               {dfStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{dfStatus}{dfStatus.endsWith("…") ? <> <Elapsed /></> : null}</div>}
+                            </div>
+                          ) : null}
+                          {hasDefine && defineFile ? (
+                            <div style={{marginTop:"0.9em"}}>
+                              <div style={{fontWeight:600, fontSize:"0.85em", marginBottom:"0.3em"}}>Filter positions from a group</div>
+                              <div className="muted" style={{fontSize:"0.82em", marginBottom:"0.3em"}}>
+                                Positions listed under a group are left out of that group&apos;s SNP table
+                                {dfGroups && dfGroups.all && dfGroups.all.name ? <>; listed under <code>{dfGroups.all.name}</code>, out of every table</> : null}.
+                                Takes effect the next time Step 2 runs. Enter positions as <code>sequence:position</code> or
+                                a range <code>sequence:start-end</code>, separated by spaces, commas or new lines
+                                {dfGroups && (dfGroups.sequences || []).length === 1 ? <> (a bare number is read as <code>{dfGroups.sequences[0]}</code>)</> : null}.
+                                You can also pick them on a SNP table: open the table and click <em>Filter positions…</em>.
+                              </div>
+                              {dfGroups === null ? (
+                                <div className="muted" style={{fontSize:"0.82em"}}>Reading groups…</div>
+                              ) : !dfGroups.available ? (
+                                <div className="note warning" style={{fontSize:"0.82em"}}>Groups unavailable: {dfGroups.reason}</div>
+                              ) : (
+                                <>
+                                  {dfGroups.file && dfGroups.file !== defineFile.name ? (
+                                    <div className="note warning" style={{fontSize:"0.82em", marginBottom:"0.3em"}}>
+                                      vsnp3 reads <code>{dfGroups.file}</code> as this reference&apos;s defining-SNP file; that is the file this adds to.
+                                    </div>
+                                  ) : null}
+                                  <select
+                                    value={dfFilterGroup}
+                                    onChange={(e) => setDfFilterGroup(e.target.value)}
+                                    style={{width:"100%", boxSizing:"border-box", marginBottom:"0.3em"}}
+                                    aria-label="Group to filter positions from"
+                                  >
+                                    <option value="">Choose a group ({dfGroups.groups.length})…</option>
+                                    {dfGroups.all && dfGroups.all.name ? (
+                                      <option value={DF_ALL}>{dfGroups.all.name} — every group ({dfGroups.all.count} listed)</option>
+                                    ) : null}
+                                    {dfGroups.groups.map((g) => (
+                                      <option key={g.name} value={g.name}>{g.name} ({g.count} listed)</option>
+                                    ))}
+                                  </select>
+                                  <textarea
+                                    rows={3}
+                                    placeholder={(dfGroups.sequences || []).length === 1
+                                      ? `${dfGroups.sequences[0]}:1234567\n1234568\n${dfGroups.sequences[0]}:1000-1200`
+                                      : "sequence:position\nsequence:start-end"}
+                                    value={dfFilterPositions}
+                                    onChange={(e) => setDfFilterPositions(e.target.value)}
+                                    style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
+                                    aria-label="Positions to filter"
+                                  />
+                                  <button
+                                    style={{marginTop:"0.3em"}}
+                                    disabled={!dfFilterGroup || !dfFilterPositions.trim()}
+                                    onClick={addFilterPositions}
+                                  >
+                                    Add to filter
+                                  </button>
+                                </>
+                              )}
+                              {dfFilterStatus && <div className="note" style={{marginTop:"0.4em", fontSize:"0.85em"}}>{dfFilterStatus}{dfFilterStatus.endsWith("…") ? <> <Elapsed /></> : null}</div>}
                             </div>
                           ) : null}
                         </div>

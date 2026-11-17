@@ -2395,6 +2395,13 @@ def view_controls(loci: dict, row_samples: "list[str]") -> str:
         'remove its mark.">Click a sample name or position header to colour '
         'it.</span>'
         '<a href="#" id="xlsxHlClear" style="display:none">clear colours</a>'
+        # Shown by the page only on a Step 2 group table (it needs the project
+        # and the table's path); what it does is in the template's script.
+        '<button type="button" id="xlsxFltBtn" class="xlsx-flt-btn" '
+        'aria-pressed="false" hidden title="Pick position headers on this '
+        'table and add them to this group&#39;s filter in the reference&#39;s '
+        'defining-SNP file, so the next Step 2 run leaves them out.">'
+        'Filter positions…</button>'
     )
 
 
@@ -3112,6 +3119,22 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     outline: 2px dashed rgba(15, 22, 33, 0.45);
     outline-offset: -2px;
   }}
+  /* Filter positions: header clicks pick positions for the group's filter. */
+  .xlsx-flt-btn {{ font: inherit; font-size: 12.5px; padding: 1px 10px; cursor: pointer; }}
+  .xlsx-flt-btn[aria-pressed="true"] {{ background: #b85a3e; border-color: #b85a3e; color: #fff; }}
+  .xlsx-flt {{ flex-basis: 100%; font-size: 12.5px; line-height: 1.5;
+    padding: 6px 0 2px; border-top: 1px dashed var(--xlsx-border); }}
+  .xlsx-flt[hidden] {{ display: none; }}
+  .xlsx-flt .flt-row {{ display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 2px 0; }}
+  .xlsx-flt label {{ white-space: nowrap; }}
+  .xlsx-flt button {{ font: inherit; padding: 2px 10px; cursor: pointer; }}
+  .xlsx-flt .flt-chips {{ display: block; max-height: 4.8em; overflow-y: auto; }}
+  .xlsx-flt .flt-chip {{ display: inline-block; margin: 1px 4px 1px 0; padding: 0 5px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; cursor: pointer;
+    background: #f6d6cc; border: 1px solid #b85a3e; border-radius: 3px; }}
+  .xlsx-flt .flt-status {{ color: #1e3a1a; }}
+  .xlsx-flt .flt-status.err {{ color: #9a2a12; }}
+  body.xlsx-flt-on #xlsxBody tr:first-child td.xlsx-hl-target {{ cursor: copy; }}
   /* Per-cell styles, deduplicated into classes — the same handful of fills and
      fonts repeat across every cell of these tables. */
   {style_css}
@@ -3123,6 +3146,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
   {controls}
   <span style="margin-left: auto;">{download_link}</span>
+  <div id="xlsxFlt" class="xlsx-flt" hidden></div>
 </div>
 {notice}
 <div id="xlsxIgvNote" class="xlsx-igv-note" style="display:none"></div>
@@ -3307,7 +3331,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     if (!td) return;
     var tr = td.parentNode;
     if (tr.rowIndex === 0 && LOCI[String(td.cellIndex + 1)]) {{
-      toggleMark(hlCols, td.cellIndex + 1);
+      if (fltOn) pickClick(td.cellIndex + 1, ev.shiftKey);
+      else toggleMark(hlCols, td.cellIndex + 1);
     }} else if (td.cellIndex === 0 && SAMPLES[tr.rowIndex]) {{
       toggleMark(hlRows, tr.rowIndex);
     }}
@@ -3324,7 +3349,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     for (var c = markedCols; c < hdr.length; c++) {{
       if (LOCI[String(c + 1)]) {{
         hdr[c].classList.add("xlsx-hl-target");
-        hdr[c].title = "Click to colour this position";
+        hdr[c].title = headerTitle(c + 1);
       }}
     }}
     markedCols = hdr.length;
@@ -3337,6 +3362,339 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     markedTo = rows.length;
   }}
   markTargets();
+
+  // ---- filter positions ---------------------------------------------------
+  // "Filter positions…" turns header clicks from colouring into picking. The
+  // picked positions go, in one edit, under this table's group in the
+  // reference's defining-SNP workbook (or under its All column), which vsnp3
+  // reads on the next Step 2 run. The server works out the group and the file
+  // from where this table sits; the page only says which positions.
+  var fltBtn = document.getElementById("xlsxFltBtn");
+  var fltBox = document.getElementById("xlsxFlt");
+  var TABLE_PATH = new URL(window.location.href).searchParams.get("path") || "";
+  var fltApi = "snp-table-filter";   // beside this page: /api/projects/<p>/
+  var fltOpen = false, fltOn = false, flt = null, fltToAll = false, fltLast = null;
+  var fltBusy = false, fltTimer = null, fltStatus = "", fltStatusErr = false;
+  var picked = new Map();            // column (1-based) -> locus
+  var listedCols = [];
+  var fltStyle = document.createElement("style");
+  document.head.appendChild(fltStyle);
+  var none = function() {{ return false; }};
+  var inGroup = none, inAll = none;
+
+  function esc(s) {{
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function(ch) {{
+      return {{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }}[ch];
+    }});
+  }}
+
+  // vsnp3 matches a single listed position as text and expands a range by
+  // its numbers (commas allowed), so "already filtered" is decided the same way.
+  function parseEntry(e) {{
+    e = String(e);
+    var i = e.lastIndexOf(":");
+    if (i < 1) return null;
+    var m = /^(\\d[\\d,]*)(?:-(\\d[\\d,]*))?$/.exec(e.slice(i + 1).trim());
+    if (!m) return null;
+    var a = parseInt(m[1].replace(/,/g, ""), 10);
+    var b = m[2] ? parseInt(m[2].replace(/,/g, ""), 10) : a;
+    return {{ chrom: e.slice(0, i).trim(), a: a, b: b, range: !!m[2] }};
+  }}
+  function coverTest(entries) {{
+    var exact = {{}}, ranges = [];
+    (entries || []).forEach(function(e) {{
+      var p = parseEntry(e);
+      if (p && p.range) ranges.push(p); else exact[String(e).trim()] = true;
+    }});
+    if (!ranges.length && !Object.keys(exact).length) return none;
+    return function(locus) {{
+      if (exact[locus]) return true;
+      var q = parseEntry(locus);
+      if (!q) return false;
+      for (var i = 0; i < ranges.length; i++) {{
+        var r = ranges[i];
+        if (r.chrom === q.chrom && r.a <= q.a && q.a <= r.b) return true;
+      }}
+      return false;
+    }};
+  }}
+  function listedWhy(c) {{
+    if (!fltOn) return "";
+    var locus = LOCI[String(c)];
+    if (!locus) return "";
+    if (inAll(locus)) return "Already left out of every table (" + flt.all_name + ")";
+    if (inGroup(locus)) return "Already in the " + flt.group + " filter";
+    return "";
+  }}
+  // A pick that would change nothing for the chosen target.
+  function blocked(c) {{
+    var locus = LOCI[String(c)];
+    if (!locus) return true;
+    if (inAll(locus)) return true;
+    return !(flt.is_all || fltToAll) && inGroup(locus);
+  }}
+  function headerTitle(c) {{
+    if (!fltOn) return "Click to colour this position";
+    return listedWhy(c) || ("Click to pick " + LOCI[String(c)] + " for the filter. "
+      + "Shift-click picks every position from the last pick to here.");
+  }}
+  function retitle() {{
+    var rows = body.rows;
+    if (!rows.length) return;
+    var hdr = rows[0].cells;
+    for (var c = 0; c < hdr.length; c++) {{
+      if (LOCI[String(c + 1)]) hdr[c].title = headerTitle(c + 1);
+    }}
+  }}
+
+  function renderFltStyle() {{
+    var css = [];
+    if (fltOn) {{
+      for (var j = 0; j < listedCols.length; j += 400) {{
+        css.push(listedCols.slice(j, j + 400).map(function(c) {{
+          return "#xlsxBody tr:first-child td:nth-child(" + c + ")";
+        }}).join(",") + " {{ text-decoration: line-through; opacity: 0.45; }}");
+      }}
+      picked.forEach(function(_locus, c) {{
+        css.push("#xlsxBody td:nth-child(" + c + ") {{ box-shadow: inset 2px 0 0 0 #b85a3e, inset -2px 0 0 0 #b85a3e; }}");
+        css.push("#xlsxBody tr:first-child td:nth-child(" + c + ") {{ background-color: #f6d6cc; box-shadow: inset 0 0 0 2px #b85a3e; }}");
+      }});
+    }}
+    fltStyle.textContent = css.join(" ");
+    document.body.classList.toggle("xlsx-flt-on", fltOn);
+  }}
+
+  function tick(since) {{
+    var s = (Date.now() - since) / 1000;
+    return s < 10 ? s.toFixed(1) + " s" : Math.round(s) + " s";
+  }}
+  function startBusy(label) {{
+    var since = Date.now();
+    fltBusy = true;
+    fltStatus = label; fltStatusErr = false;
+    renderPanel();
+    clearInterval(fltTimer);
+    fltTimer = setInterval(function() {{
+      var el = document.getElementById("xlsxFltTick");
+      if (el) el.textContent = tick(since);
+    }}, 100);
+  }}
+  function stopBusy() {{
+    fltBusy = false;
+    clearInterval(fltTimer);
+    fltTimer = null;
+  }}
+  function setStatus(msg, err) {{
+    fltStatus = msg; fltStatusErr = !!err;
+    renderPanel();
+  }}
+
+  function renderPanel() {{
+    if (!fltBox) return;
+    if (!fltOpen) {{ fltBox.hidden = true; fltBox.innerHTML = ""; return; }}
+    fltBox.hidden = false;
+    var h = [];
+    if (!flt) {{
+      h.push('<div class="flt-row"><strong>Filter positions</strong> <span>Reading the filter file… '
+        + '<span id="xlsxFltTick"></span></span></div>');
+      fltBox.innerHTML = h.join("");
+      return;
+    }}
+    if (!flt.available) {{
+      h.push('<div class="flt-row"><strong>Filter positions</strong> <span class="flt-status err">'
+        + esc(flt.reason) + '</span> <button type="button" data-flt="done">Close</button></div>');
+      fltBox.innerHTML = h.join("");
+      return;
+    }}
+    var toAll = !!(flt.is_all || fltToAll);
+    h.push('<div class="flt-row"><strong>Filter positions</strong><span>Click position headers to pick them; '
+      + 'shift-click picks every position from the last pick to the one clicked. '
+      + (listedCols.length ? listedCols.length + ' position' + (listedCols.length === 1 ? '' : 's')
+         + ' in this table ' + (listedCols.length === 1 ? 'is' : 'are') + ' already filtered (struck through).'
+         : '') + '</span></div>');
+    if (!flt.is_all && flt.all_name) {{
+      h.push('<div class="flt-row">Leave them out of: '
+        + '<label><input type="radio" name="xlsxFltTo" value="group"' + (fltToAll ? '' : ' checked') + '> '
+        + esc(flt.group) + ' only</label> '
+        + '<label><input type="radio" name="xlsxFltTo" value="all"' + (fltToAll ? ' checked' : '') + '> every group ('
+        + esc(flt.all_name) + ')</label></div>');
+    }} else if (flt.is_all) {{
+      h.push('<div class="flt-row">This is the ' + esc(flt.all_name) + ' table, so picked positions are left out of every table.</div>');
+    }}
+    var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
+    h.push('<div class="flt-row flt-chips">' + (cols.length
+      ? cols.map(function(c) {{
+          return '<span class="flt-chip" data-col="' + c + '" title="Click to un-pick">'
+            + esc(picked.get(c)) + ' &times;</span>';
+        }}).join("")
+      : '<span class="xlsx-ctl-note">No positions picked yet.</span>') + '</div>');
+    var canAdd = cols.length && flt.writable && !fltBusy;
+    h.push('<div class="flt-row"><button type="button" data-flt="add"' + (canAdd ? '' : ' disabled') + '>Add '
+      + cols.length + ' to the ' + esc(toAll ? flt.all_name + ' filter (every group)' : flt.group + ' filter')
+      + '</button> '
+      + '<button type="button" data-flt="clear"' + (cols.length && !fltBusy ? '' : ' disabled') + '>Clear picks</button> '
+      + '<button type="button" data-flt="done">Done</button> '
+      + '<span class="xlsx-ctl-note">Writes to ' + esc(flt.file) + ' (reference ' + esc(flt.reference)
+      + '). Takes effect the next time Step 2 runs; this table does not change.</span></div>');
+    if (!flt.writable) {{
+      h.push('<div class="flt-row flt-status err">' + esc(flt.not_writable_reason) + '</div>');
+    }}
+    if (fltStatus) {{
+      h.push('<div class="flt-row flt-status' + (fltStatusErr ? ' err' : '') + '">' + esc(fltStatus)
+        + (fltBusy ? ' <span id="xlsxFltTick"></span>' : '') + '</div>');
+    }}
+    fltBox.innerHTML = h.join("");
+  }}
+
+  function dropBlockedPicks() {{
+    picked.forEach(function(_locus, c) {{ if (blocked(c)) picked.delete(c); }});
+  }}
+  function setCtx(d) {{
+    flt = d;
+    fltOn = fltOpen && !!d.available;
+    if (d.available && d.is_all) {{ inAll = coverTest(d.entries); inGroup = none; }}
+    else if (d.available) {{ inGroup = coverTest(d.entries); inAll = coverTest(d.all_entries); }}
+    else {{ inGroup = none; inAll = none; }}
+    listedCols = Object.keys(LOCI).map(Number).filter(function(c) {{ return !!listedWhy(c); }});
+    dropBlockedPicks();
+    renderFltStyle();
+    retitle();
+  }}
+  function loadCtx() {{
+    return fetch(fltApi + "?path=" + encodeURIComponent(TABLE_PATH), {{ headers: {{ "Accept": "application/json" }} }})
+      .then(function(r) {{
+        return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
+          if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+          return d;
+        }});
+      }})
+      .then(setCtx, function(e) {{
+        setCtx({{ available: false, reason: "Could not read the filter file (" + e.message + ")." }});
+      }});
+  }}
+  function openFlt() {{
+    fltOpen = true;
+    fltBtn.setAttribute("aria-pressed", "true");
+    flt = null;
+    startBusy("");
+    renderPanel();
+    loadCtx().then(function() {{ stopBusy(); fltStatus = ""; renderPanel(); }});
+  }}
+  function closeFlt() {{
+    stopBusy();
+    fltOpen = false; fltOn = false; flt = null; fltLast = null; fltStatus = "";
+    picked.clear(); listedCols = [];
+    inGroup = none; inAll = none;
+    fltBtn.setAttribute("aria-pressed", "false");
+    renderFltStyle();
+    retitle();
+    renderPanel();
+  }}
+
+  function pickClick(c, shift) {{
+    if (fltBusy) return;
+    fltStatus = "";
+    if (shift && fltLast !== null && fltLast !== c) {{
+      var lo = Math.min(fltLast, c), hi = Math.max(fltLast, c), hidden = {{}};
+      (hiddenCols || []).forEach(function(k) {{ hidden[k] = true; }});
+      for (var k = lo; k <= hi; k++) {{
+        if (LOCI[String(k)] && !hidden[k] && !blocked(k)) picked.set(k, LOCI[String(k)]);
+      }}
+      fltLast = c;
+    }} else if (picked.has(c)) {{
+      picked.delete(c);
+      fltLast = c;
+    }} else if (blocked(c)) {{
+      fltStatus = LOCI[String(c)] + ": " + (listedWhy(c) || "already filtered") + ".";
+    }} else {{
+      picked.set(c, LOCI[String(c)]);
+      fltLast = c;
+    }}
+    renderFltStyle();
+    renderPanel();
+  }}
+
+  function postAdd(payload) {{
+    return fetch(fltApi + "/add", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json", "Accept": "application/json" }},
+      body: JSON.stringify(payload)
+    }});
+  }}
+  function addPicked() {{
+    var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
+    var positions = cols.map(function(c) {{ return picked.get(c); }});
+    if (!positions.length || fltBusy) return;
+    var toAll = !!(flt.is_all || fltToAll);
+    var where = toAll ? "every group (" + flt.all_name + ")" : flt.group;
+    var nameEl = document.querySelector(".xlsx-bar .filename");
+    var rationale = window.prompt(
+      "Leave " + positions.length + " position(s) out of " + where + "?\\n\\n"
+      + "They are added to " + flt.file + ", the reference's shared filter file "
+      + "(the previous copy is archived). Rationale (required):",
+      "Picked on " + (nameEl ? nameEl.textContent : "a SNP table"));
+    if (rationale === null) return;
+    if (!rationale.trim()) {{ setStatus("Not added: a rationale is required.", true); return; }}
+    var payload = {{ path: TABLE_PATH, positions: positions, all_groups: toAll, rationale: rationale.trim() }};
+    startBusy("Saving…");
+    postAdd(payload).then(function(r) {{
+      if (r.status !== 409) return r;
+      return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
+        if (!window.confirm((d.detail || "That file may be open in Excel.") + "\\n\\nEdit it anyway?")) return null;
+        payload.ignore_lock = true;
+        return postAdd(payload);
+      }});
+    }}).then(function(r) {{
+      if (!r) {{ stopBusy(); setStatus("Not added: cancelled.", false); return; }}
+      return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
+        if (!r.ok) {{ stopBusy(); setStatus("Not added: " + (d.detail || ("HTTP " + r.status)), true); return; }}
+        var added = d.added || [], skipped = d.skipped || [];
+        var msg = added.length
+          ? "Added " + added.length + " to " + (toAll ? flt.all_name + " (every group)" : flt.group)
+            + " in " + d.filename + " (column " + d.column
+            + (d.rows ? ", rows " + d.rows[0] + "–" + d.rows[1] : "") + ")."
+          : "Nothing new to add.";
+        if (skipped.length) {{
+          msg += " Skipped " + skipped.map(function(s) {{ return s.position + " (" + s.why + ")"; }}).join(", ") + ".";
+        }}
+        if (d.master) msg += " Written to the shared file " + d.master + ".";
+        if (added.length) msg += " They are left out the next time Step 2 runs.";
+        picked.clear();
+        fltLast = null;
+        return loadCtx().then(function() {{ stopBusy(); setStatus(msg, false); }});
+      }});
+    }}).catch(function(e) {{ stopBusy(); setStatus("Not added: " + e.message, true); }});
+  }}
+
+  if (fltBox) {{
+    fltBox.addEventListener("click", function(ev) {{
+      var chip = ev.target.closest ? ev.target.closest(".flt-chip") : null;
+      if (chip && !fltBusy) {{
+        picked.delete(parseInt(chip.getAttribute("data-col"), 10));
+        renderFltStyle();
+        renderPanel();
+        return;
+      }}
+      var b = ev.target.closest ? ev.target.closest("button[data-flt]") : null;
+      if (!b || b.disabled) return;
+      var what = b.getAttribute("data-flt");
+      if (what === "done") closeFlt();
+      else if (what === "clear") {{ picked.clear(); fltLast = null; fltStatus = ""; renderFltStyle(); renderPanel(); }}
+      else if (what === "add") addPicked();
+    }});
+    fltBox.addEventListener("change", function(ev) {{
+      if (ev.target.name !== "xlsxFltTo") return;
+      fltToAll = ev.target.value === "all";
+      dropBlockedPicks();
+      renderFltStyle();
+      retitle();
+      renderPanel();
+    }});
+  }}
+  if (fltBtn && fltBox && PROJECT && TABLE_PATH && Object.keys(LOCI).length) {{
+    fltBtn.hidden = false;
+    fltBtn.addEventListener("click", function() {{ if (fltOpen) closeFlt(); else openFlt(); }});
+  }}
 
   // ---- the identical-position toggle --------------------------------------
   // "Identical" is exact: a position hides only when every sample row shows

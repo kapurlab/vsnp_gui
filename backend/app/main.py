@@ -3408,6 +3408,510 @@ def ref_define_filter_add_group(ref_name: str, payload: DefineFilterAddGroupRequ
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-group filter positions in the defining-SNP workbook.
+#
+# vsnp3 reads the workbook three ways (vsnp3_group_on_defining_snps.Group):
+#   row 1, columns B..  the defining SNP of each group (abs_pos)
+#   row 2               the group's name; column A's is the "All" table's name
+#   rows 3..            positions to leave out — column A from EVERY table,
+#                       a group's column from that group's table only.
+# The filter list is looked up by group NAME through pandas' header=1 read,
+# which renames a repeated name "name.1", so when one group spans several
+# defining-SNP columns only the FIRST column's filter rows are ever applied.
+# That first column is the one written here. Single positions match the
+# table's abs_pos as exact text; "chrom:start-end" ranges are expanded, with
+# commas allowed in the numbers (Group.list_expansion).
+# ---------------------------------------------------------------------------
+
+_DF_LAYOUT_MEMO: Dict[tuple, Dict[str, Any]] = {}
+_DF_LAYOUT_LOCK = threading.Lock()
+
+
+def _df_text(v: Any) -> str:
+    return "" if v is None else str(v)
+
+
+def _define_filter_layout(path: Path) -> Dict[str, Any]:
+    """Columns of a defining-SNP workbook: names, defining SNPs and filter rows.
+
+    Read-only and memoised on (size, mtime) — a 2,000-row, 239-column file
+    reads in under 0.1 s, but the SNP-table page asks on every pick session.
+    """
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    with _DF_LAYOUT_LOCK:
+        hit = _DF_LAYOUT_MEMO.get(key)
+    if hit is not None:
+        return hit
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        rows = [tuple(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    ncols = max((len(r) for r in rows), default=0)
+
+    def cell(r: int, c: int) -> Any:
+        return rows[r][c] if r < len(rows) and c < len(rows[r]) else None
+
+    columns: List[Dict[str, Any]] = []
+    for c in range(ncols):
+        entries = [_df_text(cell(r, c)).strip() for r in range(2, len(rows))]
+        columns.append({
+            "column": c + 1,
+            "letter": get_column_letter(c + 1),
+            "header": _df_text(cell(0, c)).strip(),
+            "name": _df_text(cell(1, c)),
+            "entries": [e for e in entries if e],
+        })
+    groups: List[Dict[str, Any]] = []
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for col in columns[1:]:
+        if not col["name"].strip():
+            continue
+        g = by_name.get(col["name"])
+        if g is None:
+            g = {"name": col["name"], "column": col["column"], "letter": col["letter"],
+                 "entries": col["entries"], "defining": []}
+            by_name[col["name"]] = g
+            groups.append(g)
+        if col["header"]:
+            g["defining"].append(col["header"].lstrip("#"))
+    all_col = columns[0] if columns else None
+    out = {
+        "file": path.name,
+        "all": ({"name": all_col["name"], "column": 1, "letter": "A",
+                 "entries": all_col["entries"]} if all_col else None),
+        "groups": groups,
+        "header_chroms": sorted({
+            h.lstrip("#").split(":", 1)[0]
+            for col in columns[1:] for h in [col["header"]] if ":" in h
+        }),
+    }
+    with _DF_LAYOUT_LOCK:
+        if len(_DF_LAYOUT_MEMO) > 16:
+            _DF_LAYOUT_MEMO.clear()
+        _DF_LAYOUT_MEMO[key] = out
+    return out
+
+
+def _define_filter_column(layout: Dict[str, Any], group: str,
+                          all_groups: bool) -> Optional[Dict[str, Any]]:
+    """The column a filter for `group` lives in (column A for every group)."""
+    if all_groups:
+        return layout.get("all")
+    for g in layout["groups"]:
+        if g["name"] == group:
+            return g
+    stripped = group.strip()
+    for g in layout["groups"]:
+        if g["name"].strip() == stripped:
+            return g
+    return None
+
+
+_DF_POS_RE = re.compile(r"(\d[\d,]*)(?:-(\d[\d,]*))?")
+
+
+def _parse_filter_entry(text: str) -> Optional[Tuple[str, int, int]]:
+    """chrom:pos or chrom:start-end as vsnp3 expands it, or None."""
+    chrom, sep, rest = text.strip().rpartition(":")
+    if not sep or not chrom:
+        return None
+    m = _DF_POS_RE.fullmatch(rest.strip())
+    if not m:
+        return None
+    a = int(m.group(1).replace(",", ""))
+    b = int(m.group(2).replace(",", "")) if m.group(2) else a
+    return chrom, a, b
+
+
+def _filter_covers(entries: List[str]):
+    """A test for "this position is already filtered by these entries".
+
+    A single position counts only as the exact text vsnp3 compares
+    (`isin`); a range counts by numbers, because vsnp3 expands it."""
+    exact = set()
+    ranges: List[Tuple[str, int, int]] = []
+    for e in entries:
+        p = _parse_filter_entry(e)
+        if p and "-" in e.rpartition(":")[2]:
+            ranges.append(p)
+        else:
+            exact.add(e.strip())
+
+    def covers(canon: str, parsed: Tuple[str, int, int]) -> bool:
+        if canon in exact:
+            return True
+        chrom, a, b = parsed
+        return any(rc == chrom and ra <= a and b <= rb for rc, ra, rb in ranges)
+    return covers
+
+
+def _plan_filter_positions(raw: List[str], layout: Dict[str, Any],
+                           column: Dict[str, Any], all_groups: bool,
+                           contigs: Optional[Tuple]) -> Tuple[List[str], List[Dict[str, str]]]:
+    """Normalise typed/picked positions and split them into new and skipped.
+
+    Raises 400 for anything vsnp3 could not use, so nothing is written for a
+    batch with one bad entry in it. Positions are written the way the SNP
+    tables spell them (chrom:pos, no commas, no leading zeros), because a
+    single position is matched as text."""
+    names = [n for n, _len in contigs] if contigs else []
+    lengths = dict(contigs) if contigs else {}
+    if len(names) == 1:
+        default_chrom = names[0]
+    elif not names and len(layout.get("header_chroms") or []) == 1:
+        default_chrom = layout["header_chroms"][0]
+    else:
+        default_chrom = None
+
+    covers_here = _filter_covers(column["entries"])
+    covers_all = (_filter_covers(layout["all"]["entries"])
+                  if not all_groups and layout.get("all") else None)
+    all_name = (layout.get("all") or {}).get("name") or "the All column"
+
+    to_add: List[str] = []
+    skipped: List[Dict[str, str]] = []
+    seen = set()
+    for item in raw:
+        text = str(item).strip()
+        if not text:
+            continue
+        if ":" not in text:
+            if not default_chrom:
+                seqs = ", ".join(names) if names else "unknown"
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"'{text}' has no sequence name, and this reference has "
+                            f"{len(names) or 'an unknown number of'} sequences ({seqs}). "
+                            "Write it as sequence:position. Nothing was added."))
+            text = f"{default_chrom}:{text}"
+        parsed = _parse_filter_entry(text)
+        if not parsed:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"'{item}' is not a position. Use sequence:position or "
+                        "sequence:start-end. Nothing was added."))
+        chrom, a, b = parsed
+        if a < 1 or b < a:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{item}': a range must run from low to high, starting at 1. Nothing was added.")
+        if names and chrom not in lengths:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"'{item}': {chrom} is not a sequence in this reference "
+                        f"(it has {', '.join(names)}). Nothing was added."))
+        if lengths and b > lengths[chrom]:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"'{item}' is past the end of {chrom} "
+                        f"({lengths[chrom]:,} bases). Nothing was added."))
+        canon = f"{chrom}:{a}" if a == b else f"{chrom}:{a}-{b}"
+        if canon in seen:
+            continue
+        seen.add(canon)
+        if covers_here(canon, (chrom, a, b)):
+            skipped.append({"position": canon, "why": "already listed"})
+        elif covers_all and covers_all(canon, (chrom, a, b)):
+            skipped.append({"position": canon,
+                            "why": f"already left out of every table by {all_name}"})
+        else:
+            to_add.append(canon)
+    # A position inside a range given in the same batch adds nothing.
+    batch_ranges = [e for e in to_add if "-" in e.rpartition(":")[2]]
+    if batch_ranges:
+        covers_batch = _filter_covers(batch_ranges)
+        kept: List[str] = []
+        for canon in to_add:
+            parsed = _parse_filter_entry(canon)
+            if canon not in batch_ranges and parsed and covers_batch(canon, parsed):
+                skipped.append({"position": canon, "why": "inside a range in the same list"})
+            else:
+                kept.append(canon)
+        to_add = kept
+    if not to_add and not skipped:
+        raise HTTPException(status_code=400, detail="No positions were given.")
+    return to_add, skipped
+
+
+# openpyxl mutator: appends positions below the last non-empty cell of ONE
+# column. Gaps higher in the column are left alone (some files use them), and
+# nothing else in the workbook is touched. Re-checks the column's name and its
+# entries against the live file, so an edit that raced this one is never
+# duplicated or written into a column that moved.
+_DEFINE_FILTER_ADD_POSITIONS_CODE = _XLSX_GUARDED_SAVE + r"""
+import openpyxl, json, sys
+target = sys.argv[1]
+payload = json.load(open(sys.argv[2]))
+col = int(payload['column'])
+wb = openpyxl.load_workbook(target)
+ws = wb.worksheets[0]
+before = shape_of(wb)
+name = ws.cell(row=2, column=col).value
+if ('' if name is None else str(name)) != payload['name']:
+    sys.stderr.write('ERR:moved'); sys.exit(2)
+last = 2
+present = set()
+for r in range(3, ws.max_row + 1):
+    v = ws.cell(row=r, column=col).value
+    if v is not None and str(v).strip():
+        last = r
+        present.add(str(v).strip())
+added = []
+row = last
+for p in payload['positions']:
+    if p in present:
+        continue
+    row += 1
+    ws.cell(row=row, column=col, value=p)
+    present.add(p)
+    added.append(p)
+if added:
+    guarded_save(wb, target, before)
+print(json.dumps({'added': added, 'first_row': last + 1, 'last_row': row}))
+"""
+
+
+def _define_filter_add_positions(ref_name: str, ref_dir: Path, group: str,
+                                 all_groups: bool, positions: List[str],
+                                 rationale: str, ignore_lock: bool,
+                                 source: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Add filter positions under one group (or All) in the workbook vsnp3 reads.
+
+    Shared by the Reference Editor and the SNP-table page. Same safety path as
+    every other reference edit: refuse links we cannot write through, warn on
+    an Excel lock, refuse a workbook openpyxl would flatten, archive the old
+    bytes, guarded save, audit record."""
+    cfg = load_config()
+    if not (rationale or "").strip():
+        raise HTTPException(status_code=400, detail="A rationale is required")
+    target, why = sample_groups.define_filter_of(ref_dir)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No filter file to edit: {why}.")
+    layout = _define_filter_layout(target)
+    column = _define_filter_column(layout, group or "", all_groups)
+    if column is None:
+        what = "All column" if all_groups else f"group named '{group}'"
+        raise HTTPException(status_code=404, detail=f"{target.name} has no {what}.")
+    to_add, skipped = _plan_filter_positions(
+        positions, layout, column, all_groups, ref_contigs.reference_contigs(ref_dir))
+    label = column["name"] or "All"
+    base = {
+        "ok": True, "filename": target.name, "group": label, "all_groups": all_groups,
+        "column": column["letter"], "skipped": skipped,
+    }
+    if not to_add:
+        return {**base, "added": [], "no_change": True}
+
+    master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, ignore_lock)
+    _refuse_if_fragile(target)
+    old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False,
+                                     dir=str(ref_dir)) as tf:
+        json.dump({"column": column["column"], "name": column["name"],
+                   "positions": to_add}, tf)
+        tmp_json = tf.name
+    try:
+        result = subprocess.run(
+            conda_python_cmd(cfg, _DEFINE_FILTER_ADD_POSITIONS_CODE, [str(target), tmp_json]),
+            text=True, capture_output=True,
+        )
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        if err.startswith("ERR:moved"):
+            detail = (f"{target.name} changed while this was being saved — column "
+                      f"{column['letter']} is no longer '{label}'. Nothing was added; "
+                      "reload and try again.")
+        elif err.startswith("ERR:shrank"):
+            detail = f"Refused: saving would have lost part of {target.name}. Nothing was changed."
+        else:
+            detail = f"Failed to add positions: {err[-400:]}"
+        raise HTTPException(status_code=400, detail=detail)
+    summary = json.loads(result.stdout.strip() or "{}")
+    added = summary.get("added") or []
+    new_sha = _sha256_of_path(target)
+    if not added:
+        # Another edit got there first; the archive holds identical bytes.
+        if archived and new_sha == old_sha:
+            Path(archived).unlink(missing_ok=True)
+        return {**base, "added": [], "no_change": True}
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "define_filter_add_positions",
+        "reference": ref_name,
+        "filename": target.name,
+        "user": _current_os_user(),
+        "rationale": rationale.strip(),
+        "group": label,
+        "all_groups": all_groups,
+        "column": column["letter"],
+        "positions": added,
+        "skipped": skipped,
+        "old_sha256": old_sha,
+        "new_sha256": new_sha,
+        "archived_old": archived,
+        "target": str(target),
+        **({"source": source} if source else {}),
+        **_shared_master_fields(ref_dir, master),
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
+    }
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
+    return {
+        **base,
+        "added": added,
+        "rows": [summary.get("first_row"), summary.get("last_row")],
+        "archived_old": archived,
+        "audit_log": audit_path,
+        **_shared_master_fields(ref_dir, master),
+    }
+
+
+@app.get("/api/references/{ref_name}/define-filter/groups")
+def ref_define_filter_groups(ref_name: str):
+    """The groups in the filter file vsnp3 reads, with how many positions each
+    already leaves out — what the Reference Editor's group picker lists."""
+    ref_dir = _ref_dir_or_404(ref_name)
+    target, why = sample_groups.define_filter_of(ref_dir)
+    if target is None:
+        return {"available": False, "reason": why, "file": "", "all": None, "groups": []}
+    try:
+        layout = _define_filter_layout(target)
+    except Exception as exc:  # noqa: BLE001 — say why instead of a bare 500
+        return {"available": False, "reason": f"{target.name} could not be read: {exc}",
+                "file": target.name, "all": None, "groups": []}
+    contigs = ref_contigs.reference_contigs(ref_dir)
+    all_col = layout.get("all")
+    return {
+        "available": True, "reason": "", "file": layout["file"],
+        "all": ({"name": all_col["name"], "count": len(all_col["entries"])}
+                if all_col else None),
+        "groups": [{"name": g["name"], "count": len(g["entries"]), "column": g["letter"]}
+                   for g in layout["groups"]],
+        "sequences": [n for n, _len in contigs] if contigs else [],
+    }
+
+
+class DefineFilterAddPositionsRequest(BaseModel):
+    group: str = ""
+    all_groups: bool = False
+    positions: List[str]
+    rationale: str
+    ignore_lock: bool = False
+
+
+@app.post("/api/references/{ref_name}/define-filter/add-positions")
+def ref_define_filter_add_positions(ref_name: str, payload: DefineFilterAddPositionsRequest):
+    """Leave positions out of one group's SNP table (or, with all_groups, out
+    of every table) by listing them under that group in the filter file."""
+    return _define_filter_add_positions(
+        ref_name, _ref_dir_or_404(ref_name), payload.group, payload.all_groups,
+        payload.positions, payload.rationale, payload.ignore_lock)
+
+
+def _snp_table_filter_target(project: str, path: str) -> Dict[str, Any]:
+    """Which reference, filter file and group a Step 2 SNP table belongs to.
+
+    A group's tables sit in step2/<run>/<group>/ (or the legacy
+    step2/runs/<run>/<group>/), and vsnp3 names that folder after the group —
+    the All table's folder after column A's name. The reference is the
+    project's own: that is what the next Step 2 run, where the edit takes
+    effect, will read."""
+    cfg = load_config()
+    try:
+        project_dir = _project_dir_for(cfg, project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    table = Path(path).resolve()
+    step2 = (project_dir / "step2").resolve()
+    try:
+        rel = table.relative_to(step2)
+    except ValueError:
+        return {"available": False, "reason": "This table is not part of a Step 2 run."}
+    parts = rel.parts
+    if parts and parts[0] == "runs":
+        parts = parts[1:]
+    if (len(parts) != 3 or not _STEP2_COMPARISON_RE.match(parts[0])
+            or table.suffix.lower() not in (".xlsx", ".xlsm")):
+        return {"available": False,
+                "reason": "Only a group's SNP table (step2/<run>/<group>/) can add to a group's filter."}
+    group = parts[1]
+    ref_name = _project_reference(project_dir)
+    ref_dir = _project_reference_dir(project_dir, cfg)
+    if not ref_name or ref_dir is None:
+        return {"available": False, "group": group,
+                "reason": "This project's reference folder could not be found."}
+    target, why = sample_groups.define_filter_of(ref_dir)
+    if target is None:
+        return {"available": False, "group": group, "reference": ref_name,
+                "reason": f"No filter file to add to: {why}."}
+    try:
+        layout = _define_filter_layout(target)
+    except Exception as exc:  # noqa: BLE001 — say why instead of a bare 500
+        return {"available": False, "group": group, "reference": ref_name,
+                "file": target.name, "reason": f"{target.name} could not be read: {exc}"}
+    all_col = layout.get("all")
+    is_all = bool(all_col and all_col["name"] and all_col["name"] == group)
+    column = all_col if is_all else _define_filter_column(layout, group, False)
+    if column is None:
+        return {"available": False, "group": group, "reference": ref_name,
+                "file": target.name,
+                "reason": (f"{target.name} has no group named '{group}' (vsnp3 names "
+                           "the folder after the group, so the file may have changed "
+                           "since this run).")}
+    writable, why_not = True, ""
+    try:
+        _edit_target_or_403(ref_dir, target)
+    except HTTPException as exc:
+        writable, why_not = False, str(exc.detail)
+    return {
+        "available": True, "reason": "", "project_dir": project_dir,
+        "ref_dir": ref_dir, "reference": ref_name, "file": target.name,
+        "group": group, "is_all": is_all,
+        "all_name": (all_col or {}).get("name") or "",
+        "entries": column["entries"],
+        "all_entries": [] if is_all else ((all_col or {}).get("entries") or []),
+        "writable": writable, "not_writable_reason": why_not,
+    }
+
+
+@app.get("/api/projects/{project}/snp-table-filter")
+def snp_table_filter_context(project: str, path: str = Query(...)):
+    """What the SNP-table page needs to offer "Filter positions": the group,
+    the file, and the positions it already leaves out."""
+    ctx = _snp_table_filter_target(project, path)
+    return {k: v for k, v in ctx.items() if k not in ("project_dir", "ref_dir")}
+
+
+class SnpTableFilterAddRequest(BaseModel):
+    path: str
+    positions: List[str]
+    all_groups: bool = False
+    rationale: str
+    ignore_lock: bool = False
+
+
+@app.post("/api/projects/{project}/snp-table-filter/add")
+def snp_table_filter_add(project: str, payload: SnpTableFilterAddRequest):
+    """Add positions picked on a SNP table to that table's group filter (or to
+    every group's). The group and reference come from where the table is, not
+    from the request, so a page cannot write into some other group."""
+    ctx = _snp_table_filter_target(project, payload.path)
+    if not ctx.get("available"):
+        raise HTTPException(status_code=400, detail=ctx.get("reason") or "Not available")
+    all_groups = bool(payload.all_groups or ctx["is_all"])
+    return _define_filter_add_positions(
+        ctx["reference"], ctx["ref_dir"], ctx["group"], all_groups,
+        payload.positions, payload.rationale, payload.ignore_lock,
+        source={"project": project, "table": str(Path(payload.path).name)})
+
+
 class RemoveSampleAddRequest(BaseModel):
     samples: List[str]
     rationale: str
@@ -10112,7 +10616,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "17"  # 17: the page inlines a column window; batches take cols_from / cols_count
+_XLSX_RENDER_VERSION = "18"  # 18: "Filter positions…" picks headers for the group's filter (17: column window)
 #                                  (the windows themselves did not change — the ETag had to, so a
 #                                  browser holding the old page does not keep it on a 304)
 #                              16: windows record the rows drawn without reads; sample sets left the key

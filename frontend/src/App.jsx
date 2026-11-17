@@ -5598,6 +5598,12 @@ export default function App() {
         + (data.ref_skipped
             ? ` · left out (called against another reference): ${data.ref_skipped}`
             : "")
+        + (data.edits_applied?.length
+            ? ` · VCF edits applied: ${data.edits_applied.join(", ")}`
+            : "")
+        + (data.edits_not_applied?.length
+            ? ` · VCF edits NOT applied: ${data.edits_not_applied.map((x) => x.message).join(" ")}`
+            : "")
       );
     }
     await loadAll();
@@ -6547,11 +6553,15 @@ export default function App() {
     const data = await res.json();
     const setFields = Object.entries((data.entry && data.entry.set) || {});
     const setNote = setFields.length
-      ? `\\nAlso set so Step 2 accepts the call: ${setFields.map(([k, v]) => `${k}=${v}`).join(", ")} (marked CURATED; measured values kept in the header and log).`
+      ? `\nAlso set so Step 2 accepts the call: ${setFields.map(([k, v]) => `${k}=${v}`).join(", ")} (marked CURATED; measured values kept in the header and log).`
       : editVcfPassFilters
-        ? "\\nQUAL, MQ and AC already pass Step 2's thresholds; only the ALT changed."
-        : "\\nOnly the ALT changed, as requested.";
-    window.alert(`VCF patched:\\n${data.patched_vcf}${setNote}`);
+        ? "\nQUAL, MQ and AC already pass Step 2's thresholds; only the ALT changed."
+        : "\nOnly the ALT changed, as requested.";
+    // What happened to the copy Step 2 compares (vcf_database): updated in
+    // place, not there yet, or left alone because it is not this sample's own
+    // Step 1 VCF. The user is told which, here, every time.
+    const dbNote = data.vcf_database?.message ? `\n\nStep 2: ${data.vcf_database.message}` : "";
+    window.alert(`VCF patched:\n${data.patched_vcf}${setNote}${dbNote}`);
     setEditVcfOpen(false);
     if (project === selectedProject) {
       await loadQC();
@@ -6559,7 +6569,7 @@ export default function App() {
       if (step2Mode === "build" && step2UseVcfDb) {
         await step2Setup();
       } else {
-        setStep2SetupMsg("Patched VCF created. Rebuild the Step 2 VCF set to use it.");
+        setStep2SetupMsg(data.vcf_database?.message || "Patched VCF created. Rebuild the Step 2 VCF set to use it.");
       }
       await loadStep2Outputs();
     }
@@ -8602,6 +8612,7 @@ export default function App() {
                         vcfsCollectResult.auto_added.length ? `+${vcfsCollectResult.auto_added.length} added` : null,
                         vcfsCollectResult.force_added.length ? `+${vcfsCollectResult.force_added.length} force-added` : null,
                         vcfsCollectResult.already_present.length ? `${vcfsCollectResult.already_present.length} already present` : null,
+                        vcfsCollectResult.edits_applied?.length ? `${vcfsCollectResult.edits_applied.length} VCF edit${vcfsCollectResult.edits_applied.length === 1 ? "" : "s"} applied` : null,
                         vcfsCollectResult.excluded_skipped?.length ? `${vcfsCollectResult.excluded_skipped.length} excluded (skipped)` : null,
                         vcfsCollectResult.no_vcf?.length ? `${vcfsCollectResult.no_vcf.length} with no VCF` : null,
                       ].filter(Boolean).join(" • ") || "Up to date"}
@@ -8619,9 +8630,17 @@ export default function App() {
                       {vcfsCollectResult.shadowed.length > 10
                         ? `, +${vcfsCollectResult.shadowed.length - 10} more`
                         : ""}.{" "}
-                      Collect never overwrites. Usually a reference database's copy of the same public
-                      accession, imported by an earlier Build. To compare your own call, delete that sample's
-                      VCF from the folder and Collect again.
+                      Collect never overwrites a VCF this project's Step 1 did not produce, and that
+                      includes putting a VCF edit over it. Usually a reference database's copy of the same
+                      public accession, imported by an earlier Build. To compare your own call, delete that
+                      sample's VCF from the folder and Collect again.
+                    </div>
+                  ) : null}
+                  {vcfsCollectResult?.edits_not_applied?.length ? (
+                    <div className="note warning" style={{fontSize:"0.82em", marginTop:"0.2em"}}>
+                      {vcfsCollectResult.edits_not_applied.map((x) => (
+                        <div key={x.sample}>{x.message}</div>
+                      ))}
                     </div>
                   ) : null}
                   {(() => {

@@ -6430,6 +6430,19 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
     # this project's own result is quietly not the one being compared. Same
     # calls under a different header is the ordinary case and stays silent.
     shadowed: List[str] = []
+    edits_applied: List[str] = []
+    edits_not_applied: List[Dict[str, str]] = []
+    # What is in the set, from ONE listing: name -> is it a (legacy) link.
+    in_db: Dict[str, bool] = {}
+    try:
+        with os.scandir(vcfs_dir) as it:
+            for e in it:
+                try:
+                    in_db[e.name] = e.is_symlink()
+                except OSError:
+                    in_db[e.name] = False
+    except OSError:
+        pass
 
     for sample_dir in sorted(step1_dir.glob("*")):
         if not sample_dir.is_dir() or sample_dir.name.startswith(("_", ".")):
@@ -6471,34 +6484,58 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         patched_vcf = _find_patched_vcf(sample_dir, sample, source_vcf)
         chosen_vcf = (patched_vcf or source_vcf).resolve()
         target = vcfs_dir / _target_name_for_vcf(source_vcf, chosen_vcf)
+        # Either name Build gives this sample means it is already in the set —
+        # an edited sample's copy is <s>_zc.vcf.gz beside a plain <s>_zc.vcf,
+        # and asking for the one name alone added the edit as a second file.
+        have = [n for n in _db_names_for(source_vcf) if n in in_db]
 
-        if target.exists() or target.is_symlink():
-            # Already in the database. If it's a legacy (or broken) symlink,
-            # replace it with a durable real copy so the cumulative collection
-            # is self-contained and survives a step1 cleanup; a real file is
-            # left untouched (accumulate, never clobber).
-            if target.is_symlink():
+        if have:
+            if patched_vcf:
+                # An edit not yet in the set goes into the sample's one entry —
+                # if that entry is this sample's own Step 1 VCF (see
+                # _sync_edit_into_db). One that is not is left, and reported.
+                synced = _sync_edit_into_db(project_dir, sample_of(target.name), patched_vcf,
+                                            [source_vcf], actor=_current_user(), trigger="collect",
+                                            names=have)
+                if synced["status"] == "updated":
+                    edits_applied.append(sample)
+                    for gone in synced["removed"]:
+                        in_db.pop(gone, None)
+                    in_db[synced["entry"]] = False
+                elif synced["status"] == "kept_other":
+                    shadowed.append(sample)
+                elif synced["status"] == "failed":
+                    edits_not_applied.append({"sample": sample, "message": synced["message"]})
+            elif target.name in have and in_db[target.name]:
+                # A legacy (or broken) symlink: replace it with a durable real
+                # copy so the cumulative collection is self-contained and
+                # survives a step1 cleanup.
                 target.unlink()
                 shutil.copy2(chosen_vcf, target)
+                in_db[target.name] = False
             else:
-                in_place = _vcf_variant_digest(target)
+                # A real file is left untouched (accumulate, never clobber).
                 mine = _vcf_variant_digest(chosen_vcf)
-                if in_place and mine and in_place != mine:
-                    shadowed.append(sample)
+                for name in have:
+                    in_place = _vcf_variant_digest(vcfs_dir / name)
+                    if in_place and mine and in_place != mine:
+                        shadowed.append(sample)
+                        break
             already_present.append(sample)
             continue
 
         # Copy (don't symlink) so vcf_database is a standalone, permanent store.
         shutil.copy2(chosen_vcf, target)
+        in_db[target.name] = False
         if sample in force_set and not passed:
             force_added.append(sample)
         else:
             auto_added.append(sample)
 
     total = len(list(vcfs_dir.glob("*_zc.vcf"))) + len(list(vcfs_dir.glob("*_zc.vcf.gz")))
-    if auto_added or force_added:
-        # The groups of the VCFs that just arrived, read now rather than when
-        # the pane first asks (see _prewarm_sample_groups).
+    if auto_added or force_added or edits_applied:
+        # The groups of the VCFs that just arrived (or changed), read now rather
+        # than when the pane first asks (see _prewarm_sample_groups).
         _prewarm_sample_groups(project_dir, cfg, "collect")
     return {
         "auto_added": auto_added,
@@ -6507,6 +6544,8 @@ def project_vcfs_collect(project: str, payload: VcfsCollectRequest):
         "no_vcf": no_vcf,
         "excluded_skipped": excluded_skipped,
         "shadowed": sorted(shadowed),
+        "edits_applied": sorted(edits_applied),
+        "edits_not_applied": edits_not_applied,
         "total": total,
     }
 
@@ -6613,6 +6652,8 @@ def step2_setup(project: str):
                     in_db[e.name] = False
     except OSError:
         in_db = {}
+    edits_applied: List[str] = []
+    edits_not_applied: List[Dict[str, str]] = []
 
     for sample, vcf_candidates in plans:
         sample_dir = step1_dir / sample
@@ -6662,10 +6703,31 @@ def step2_setup(project: str):
         target = step2_dir / target_name
         if patched_vcf:
             edited_samples.append(sample)
-        if target_name in in_db:
+        # Either name Build gives this sample — <s>_zc.vcf, or <s>_zc.vcf.gz for
+        # an edited copy — means it is already in the set. Asked by the one
+        # name alone, an edited sample looked absent and went in a second time.
+        have = [n for n in _db_names_for(source_vcf) if n in in_db]
+        db_sample = sample_of(target_name)
+        if have:
+            if patched_vcf:
+                # An edit not yet in the set — made before edits went there
+                # directly, or one whose update failed. The edit endpoint's own
+                # rule: only an entry that is this sample's Step 1 VCF is
+                # replaced, archived first; anything else is reported.
+                synced = _sync_edit_into_db(project_dir, db_sample, patched_vcf, [source_vcf],
+                                            actor=_current_user(), trigger="build", names=have)
+                if synced["status"] == "updated":
+                    edits_applied.append(db_sample)
+                    count += 1
+                    for gone in synced["removed"]:
+                        in_db.pop(gone, None)
+                    in_db[synced["entry"]] = False
+                elif synced["status"] in ("kept_other", "failed"):
+                    edits_not_applied.append({"sample": db_sample, "message": synced["message"]})
+                continue
             # Upgrade a legacy (or broken) symlink entry to a durable real copy;
             # leave an existing real file in place (accumulate, never clobber).
-            if in_db[target_name]:
+            if target_name in have and in_db.get(target_name):
                 target.unlink()
                 shutil.copy2(chosen_vcf, target)
                 in_db[target_name] = False
@@ -6779,6 +6841,10 @@ def step2_setup(project: str):
         "excluded_reference_blocklist": excluded_blocklist,
         "excluded_step1_results": excluded_step1,
         "edited": len(set(edited_samples)),
+        # Edits this Build put into the set, and the ones it could not, each
+        # with the reason in words (see _sync_edit_into_db).
+        "edits_applied": sorted(edits_applied),
+        "edits_not_applied": edits_not_applied,
         # Samples left out because every VCF they have was called against a
         # different reference than this project's.
         "ref_skipped": len(ref_skipped_samples),
@@ -12137,6 +12203,10 @@ def vcf_edit(project: str, payload: VcfEditRequest):
         _discard_staging()
         raise HTTPException(status_code=500,
                             detail=f"Index failed; the edit was not applied: {idx.stderr.strip()}")
+    # The edited file as it stands before this edit replaces it: a database
+    # entry holding exactly that text is this sample's own, edited earlier.
+    pre_edit_shas = {s for s in (_vcf_text_sha(p) for p in {base_vcf, patched_vcf, legacy_patched}
+                                 if p.exists()) if s}
     try:
         os.replace(stage_gz, patched_vcf)
         os.replace(stage_tbi, tbi_path)
@@ -12149,6 +12219,25 @@ def vcf_edit(project: str, payload: VcfEditRequest):
         pass
 
     edit_meta = edit_meta or {}
+
+    # Step 2 compares vcf_database and nothing else, so the edit goes there now,
+    # into the sample's one entry — not at the next Build, and never as a second
+    # file beside it. Done here rather than left to Build because here the user,
+    # the reason and the locus are known, and the user is looking: an entry that
+    # is not this sample's own Step 1 VCF is reported in this response, not in a
+    # Build summary that may never be read. A failure here does not undo the
+    # edit (it is installed and logged below); the next Build retries.
+    try:
+        db_sync = _sync_edit_into_db(
+            project_dir, sample_of(source_vcf.name), patched_vcf, [source_vcf],
+            own_shas=pre_edit_shas, actor=payload.user or _current_user(),
+            trigger="vcf_edit", locus=f"{contig}:{pos}")
+    except Exception as exc:  # the edit is installed; it must still be logged
+        logger.exception("vcf_database update after a VCF edit failed")
+        db_sync = {"status": "failed", "folder": vcf_db_dir(project_dir / "step2").name,
+                   "entry": "", "removed": [], "archived": [],
+                   "message": (f"The comparison set was not updated ({exc}). The edit is "
+                               f"saved in Step 1; the next Build tries again.")}
 
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -12191,7 +12280,9 @@ def vcf_edit(project: str, payload: VcfEditRequest):
                   "FILTER and every other field are unchanged"),
         "source_vcf": str(source_vcf),
         "base_vcf": str(base_vcf),
-        "patched_vcf": str(patched_vcf)
+        "patched_vcf": str(patched_vcf),
+        # What happened to the comparison set's copy (see _sync_edit_into_db).
+        "vcf_database": db_sync,
     }
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
@@ -12202,7 +12293,8 @@ def vcf_edit(project: str, payload: VcfEditRequest):
     return {
         "patched_vcf": str(patched_vcf),
         "log": str(log_path),
-        "entry": entry
+        "entry": entry,
+        "vcf_database": db_sync,
     }
 
 
@@ -12289,6 +12381,298 @@ def _find_patched_vcf(sample_dir: Path, sample: str, source_vcf: Optional[Path])
         key=lambda p: p.stat().st_mtime
     )
     return candidates[-1] if candidates else None
+
+
+# --- An edit reaches the comparison set --------------------------------------
+# Step 2 compares step2/vcf_database/ and nothing else. An edit used to stay in
+# step1/<sample>/vcf_edits/, so it changed no result until a Build — and Build
+# then named the edited copy <sample>_zc.vcf.gz, beside the <sample>_zc.vcf
+# already there. Two files for one sample, and Run refused the sample. (When the
+# entry already had the .gz name, Build left it alone and the edit was silently
+# never compared.) Now the edit itself puts the edited calls into the sample's
+# ONE entry, and Build applies the same rule to edits it finds not yet there.
+
+def _vcf_text_sha(path: Path) -> Optional[str]:
+    """SHA-256 of a VCF's text — read through gzip when compressed, so a plain
+    entry and a .gz of the same text compare equal. None if unreadable."""
+    h = hashlib.sha256()
+    try:
+        opener = gzip.open if path.name.endswith(".gz") else open
+        with opener(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except (OSError, EOFError):
+        return None
+    return h.hexdigest()
+
+
+def _db_history_dir(db_dir: Path) -> Path:
+    """Where replaced database VCFs are kept: step2/.history/vcf_database/.
+
+    Outside the database folder on purpose: Clear removes that folder whole,
+    and nothing that lists the comparison set may ever count an archived copy.
+    """
+    return db_dir.parent / ".history" / db_dir.name
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Replace `path` with `text` in one rename, keeping its mode."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        try:
+            shutil.copymode(path, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _manifest_after_db_change(db_dir: Path, removed: List[str], relinked: List[str]) -> None:
+    """Edit .vcf_source_manifest.csv in place for entries this module changed.
+
+    A removed entry loses its line; an entry that was a link and is now a real
+    file gets its own path as its source. Every other line stays as written —
+    Build rewrites the whole file from the folder, an edit has no business to.
+    """
+    path = db_dir / ".vcf_source_manifest.csv"
+    gone, relinked_set = set(removed), set(relinked)
+    if not (gone or relinked_set):
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    try:
+        real_db = db_dir.resolve()
+    except OSError:
+        real_db = db_dir
+    out = lines[:1]
+    for line in lines[1:]:
+        parts = line.rstrip("\r\n").split(",", 2)
+        if parts[0] in gone:
+            continue
+        if parts[0] in relinked_set and len(parts) == 3:
+            line = f"{parts[0]},{parts[1]},{real_db / parts[0]}\n"
+        out.append(line)
+    if out != lines:
+        try:
+            _atomic_write_text(path, "".join(out))
+        except OSError:
+            pass
+
+
+def _forget_db_cache_entries(project_dir: Path, db_dir: Path, names: List[str]) -> None:
+    """Drop the step2/ cache rows for these database files.
+
+    The group, contig and reference-audit caches each hold one row per database
+    VCF, valid for one (size, mtime). A rewritten file already misses on that
+    signature; a removed one would linger as a row for a file that is gone. Both
+    are dropped by name so no cache answers for a file as it used to be.
+    """
+    names = [n for n in names if n]
+    if not names:
+        return
+    step2 = project_dir / "step2"
+    rel = set()
+    for n in names:
+        p = db_dir / n
+        rel.add(str(p))
+        try:
+            rel.add(str(p.relative_to(project_dir)))
+        except ValueError:
+            pass
+    for basename, keys in (
+        (sample_groups.CACHE_BASENAME, set(names)),
+        (_VCF_REF_CACHE_BASENAME, set(names)),
+        (ref_contigs.CACHE_BASENAME, rel),
+    ):
+        path = step2 / basename
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        files = data.get("files") if isinstance(data, dict) else None
+        if not isinstance(files, dict) or not (keys & files.keys()):
+            continue
+        for k in keys:
+            files.pop(k, None)
+        try:
+            _atomic_write_text(path, json.dumps(data, separators=(",", ":")))
+        except OSError:
+            pass
+
+
+def _sync_edit_into_db(project_dir: Path, sample: str, patched_vcf: Path, own: List[Path],
+                       *, actor: str, trigger: str, locus: str = "",
+                       own_shas: Optional[set] = None,
+                       names: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Make `sample`'s one vcf_database entry hold its edited calls.
+
+    An entry is replaced only when it is provably this sample's own Step 1
+    output: its text is identical to one of `own` (the Step 1 VCF the edits
+    were made on) or to `own_shas` (the edited file as it stood before this
+    edit). Anything else — a reference database's copy of the same accession,
+    a historical import, a run against another reference — was not produced
+    here, and is left exactly as it is; the answer says so, for the user to
+    decide. A second entry for the sample that is also its own (the .gz an
+    earlier Build added beside the original) is folded into the first.
+
+    The previous bytes go to step2/.history/<db>/ before anything changes,
+    and the change is appended to the _audit.jsonl there.
+
+    `names` are the sample's entries when the caller has already listed the
+    folder (Build, Collect); otherwise it is listed here.
+
+    status: "updated", "current", "not_in_set", "kept_other" or "failed".
+    """
+    db_dir = vcf_db_dir(project_dir / "step2")
+    folder = db_dir.name
+    result: Dict[str, Any] = {"status": "not_in_set", "folder": folder, "entry": "",
+                              "removed": [], "archived": [], "message": ""}
+    if names is not None:
+        entries = [Entry(n, sample_of(n), n.endswith(".gz"), False) for n in names]
+    else:
+        entries = [e for e in db_entries(db_dir) if e.sample == sample]
+    if not entries:
+        result["message"] = (f"{sample} is not in {folder} yet; the next Build adds it "
+                             f"with this edit.")
+        return result
+    want = _vcf_text_sha(patched_vcf)
+    if want is None:
+        result.update(status="failed", message=f"Could not read the edited VCF {patched_vcf}; "
+                                               f"{folder} was not changed.")
+        return result
+    mine_shas = {s for s in (_vcf_text_sha(p) for p in own if p) if s} | set(own_shas or ())
+    current, other, unreadable = set(), [], []
+    for e in entries:
+        p = db_dir / e.filename
+        sha = _vcf_text_sha(p)
+        if sha == want:
+            current.add(e.filename)
+        elif sha is not None and sha in mine_shas:
+            pass
+        elif sha is None and p.is_symlink() and not p.exists():
+            pass    # a broken legacy link into step1/: Build always replaced these
+        elif sha is None:
+            unreadable.append(e.filename)
+        else:
+            other.append(e.filename)
+    if unreadable:
+        names = ", ".join(unreadable)
+        result.update(status="failed", entry=names, message=(
+            f"Could not read {folder}/{names}, so it was not changed and Step 2 does not "
+            f"compare this edit yet. The edit is saved in Step 1; the next Build tries again."))
+        return result
+    if other:
+        names = ", ".join(other)
+        result.update(status="kept_other", entry=names, message=(
+            f"{folder}/{names} was NOT changed: it is not this project's Step 1 VCF for "
+            f"{sample} (typically a reference database's copy of the same accession, or an "
+            f"earlier import), so Step 2 still compares that file and not this edit. To "
+            f"compare the edit, delete {names} from {folder} and Build again."))
+        return result
+
+    # The vsnp3-native plain name is kept: it is the entry Step 1 put there, the
+    # manifest and caches already know it, and it stages without a decompress.
+    keeper = sorted(entries, key=lambda e: (e.compressed, e.filename))[0]
+    keeper_path = db_dir / keeper.filename
+    keeper_was_link = keeper_path.is_symlink()
+    need_write = keeper.filename not in current or keeper_was_link
+    drop = [e for e in entries if e.filename != keeper.filename]
+    if not need_write and not drop:
+        result.update(status="current", entry=keeper.filename,
+                      message=f"{folder}/{keeper.filename} already holds this edit.")
+        return result
+
+    hist = _db_history_dir(db_dir)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    archived: List[Dict[str, str]] = []
+    part = db_dir / f".{keeper.filename}.{os.getpid()}.part"
+    try:
+        hist.mkdir(parents=True, exist_ok=True)
+        for e in ([keeper] if need_write else []) + drop:
+            src = db_dir / e.filename
+            if not src.exists():
+                archived.append({"entry": e.filename, "sha256": "", "archived": "",
+                                 "was": f"broken link to {os.readlink(src)}"})
+                continue
+            sha = _sha256_of_path(src)
+            dest = hist / f"{stamp}_{sha[:8]}_{e.filename}"
+            shutil.copy2(src, dest)
+            archived.append({"entry": e.filename, "sha256": sha, "archived": str(dest)})
+        if need_write:
+            src_gz = patched_vcf.name.endswith(".gz")
+            if src_gz == keeper.compressed:
+                shutil.copyfile(patched_vcf, part)
+            elif src_gz:
+                with gzip.open(patched_vcf, "rb") as fi, open(part, "wb") as fo:
+                    shutil.copyfileobj(fi, fo)
+            else:
+                with open(patched_vcf, "rb") as fi, gzip.open(part, "wb") as fo:
+                    shutil.copyfileobj(fi, fo)
+            try:
+                shutil.copymode(keeper_path, part)
+            except OSError:
+                pass
+            # os.replace swaps the directory entry: a link is replaced, never
+            # written through, and a reader sees the old file or the new one.
+            os.replace(part, keeper_path)
+        for e in drop:
+            (db_dir / e.filename).unlink()
+    except OSError as exc:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        result.update(status="failed", entry=keeper.filename, archived=archived, message=(
+            f"Could not update {folder}/{keeper.filename}: {exc}. The edit is saved in "
+            f"Step 1; the next Build tries again."))
+        return result
+
+    removed = [e.filename for e in drop]
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "user": actor,
+        "trigger": trigger,
+        "project": project_dir.name,
+        "sample": sample,
+        "locus": locus,
+        "folder": str(db_dir),
+        "entry": keeper.filename,
+        "removed": removed,
+        "from": str(patched_vcf),
+        # Of the VCF text (decompressed), the same whatever the entry's format.
+        "new_text_sha256": want,
+        "archived": archived,
+    }
+    try:
+        with (hist / "_audit.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        pass
+    _manifest_after_db_change(db_dir, removed, [keeper.filename] if keeper_was_link else [])
+    _forget_db_cache_entries(project_dir, db_dir, [keeper.filename, *removed])
+    message = (f"{folder}/{keeper.filename} now holds the edit; the previous copy is in "
+               f"step2/.history/{folder}/.")
+    if removed:
+        message += f" Removed the second copy {', '.join(removed)}, also archived there."
+    result.update(status="updated", entry=keeper.filename, removed=removed,
+                  archived=archived, message=message)
+    return result
+
+
+def _db_names_for(source_vcf: Path) -> Tuple[str, str]:
+    """Both names Build can give a Step 1 VCF in the set: plain and .gz."""
+    plain = source_vcf.name[:-len(".gz")] if source_vcf.name.endswith(".gz") else source_vcf.name
+    return plain, plain + ".gz"
 
 
 def _target_name_for_vcf(source_vcf: Path, chosen_vcf: Path) -> str:

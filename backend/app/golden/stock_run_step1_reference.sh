@@ -54,13 +54,13 @@ run_sample() {
   mkdir -p .provenance
   if [ -n "$R2" ]; then echo paired > .provenance/read_type; elif [ -n "$NP" ]; then echo ont > .provenance/read_type; else echo single > .provenance/read_type; fi
   date -u +%s.%N > .provenance/started_at
-  RUN_ARGS=(vsnp3_step1.py -r1 "$R1")
+  RUN_ARGS=(<TMP>/vsnp3/bin/vsnp3_step1.py -r1 "$R1")
   if [ -n "$R2" ]; then RUN_ARGS+=(-r2 "$R2"); fi
   RUN_ARGS+=(-t '<TMP>/ref locs/Mycobacterium_AF2122'   $NP)
   PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')
   PROV_SAMPLE=$(basename "$d")
   PROV_CWD=$(pwd)
-  PROV_VSNP3=$(command -v vsnp3_step1.py 2>/dev/null || echo vsnp3_step1.py)
+  PROV_VSNP3=<TMP>/vsnp3/bin/vsnp3_step1.py
   {
     echo "# ================================================================"
     echo "# vsnp_gui - Step 1 (per-sample alignment)"

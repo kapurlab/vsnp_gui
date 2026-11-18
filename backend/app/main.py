@@ -6000,6 +6000,11 @@ def _step1_dispatch(
     # samples reaching here are ordinary samples and the batch knows nothing
     # about it. See _dispatch_trim_phase.
     samples_bash = " ".join(shlex.quote(s) for s in samples)
+    # The install Settings chose, by absolute path. A bare "vsnp3_step1.py"
+    # is resolved by the job's PATH, which need not be that install, and a
+    # user has no way to see or correct the one that won. Step 2 already
+    # refuses that fallback (_require_vsnp3_script).
+    step1_exe = shlex.quote(str(_require_vsnp3_script(cfg, "vsnp3_step1.py")))
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -6082,13 +6087,13 @@ def _step1_dispatch(
             # ref_arg/debug_flag/assemble_unmap_flag/$NP are unquoted on purpose:
             # they are server-built option tokens that must word-split into
             # separate argv entries, and each is now validated or a fixed literal.
-            "  RUN_ARGS=(vsnp3_step1.py -r1 \"$R1\")",
+            f"  RUN_ARGS=({step1_exe} -r1 \"$R1\")",
             "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
             f"  RUN_ARGS+=({ref_arg} {debug_flag} {assemble_unmap_flag} $NP)",
             "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
             "  PROV_SAMPLE=$(basename \"$d\")",
             "  PROV_CWD=$(pwd)",
-            "  PROV_VSNP3=$(command -v vsnp3_step1.py 2>/dev/null || echo vsnp3_step1.py)",
+            f"  PROV_VSNP3={step1_exe}",
             "  {",
             "    echo \"# ================================================================\"",
             "    echo \"# vsnp_gui - Step 1 (per-sample alignment)\"",

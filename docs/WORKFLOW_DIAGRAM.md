@@ -61,14 +61,14 @@
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                       │
 │  ┌─────────────────────────────────────────────────────────┐        │
-│  │  1a. SETUP                                               │        │
+│  │  1a. GRAB                                                │        │
 │  │                                                           │        │
-│  │  Click "Setup" → Creates sample directories:             │        │
-│  │                                                           │        │
+│  │  Click "Grab ready-to-run samples" → copies              │        │
+│  │  FASTQs from download/, one folder per sample:            │        │
 │  │  step1/                                                  │        │
 │  │  ├─ Sample1/                                             │        │
-│  │  │  ├─ Sample1_R1.fastq.gz (symlink)                    │        │
-│  │  │  └─ Sample1_R2.fastq.gz (symlink)                    │        │
+│  │  │  ├─ Sample1_R1.fastq.gz (copy)                       │        │
+│  │  │  └─ Sample1_R2.fastq.gz (copy)                       │        │
 │  │  ├─ Sample2/                                             │        │
 │  │  │  ├─ Sample2_R1.fastq.gz                               │        │
 │  │  │  └─ Sample2_R2.fastq.gz                               │        │
@@ -168,14 +168,14 @@
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                       │
 │  ┌─────────────────────────────────────────────────────────┐        │
-│  │  2a. SETUP                                               │        │
+│  │  2a. BUILD COMPARISON SET                                │        │
 │  │                                                           │        │
-│  │  Links *_zc.vcf files to step2/vcf_source/:             │        │
-│  │                                                           │        │
-│  │  step2/vcf_source/                                       │        │
-│  │  ├─ Sample1_zc.vcf (symlink)                            │        │
-│  │  ├─ Sample2_zc.vcf (symlink)                            │        │
-│  │  ├─ Sample3_zc.vcf (symlink)                            │        │
+│  │  Click "Build comparison set" → collects                │        │
+│  │  *_zc.vcf files into step2/vcf_database/:                 │        │
+│  │  step2/vcf_database/                                     │        │
+│  │  ├─ Sample1_zc.vcf                                      │        │
+│  │  ├─ Sample2_zc.vcf                                      │        │
+│  │  ├─ Sample3_zc.vcf                                      │        │
 │  │  └─ ...                                                  │        │
 │  │                                                           │        │
 │  │  ⚠️  Reference Lock Check:                              │        │
@@ -344,9 +344,9 @@ ProjectName/
 │       └── ...                         │
 │                                        │
 └── step2/                               │
-    ├── vcf_source/                      │
-    │   ├── Sample1_zc.vcf (symlink)◄───┘
-    │   └── Sample2_zc.vcf (symlink)
+    ├── vcf_database/                    │
+    │   ├── Sample1_zc.vcf (copy)◄──────┘
+    │   └── Sample2_zc.vcf (copy)
     │
     ├── ProjectName_sort_table.xlsx           ← Primary SNP matrix
     ├── ProjectName_alt_sort_table.txt

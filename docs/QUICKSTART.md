@@ -84,9 +84,9 @@ You should see:
 
 ## Part 2: Configure Settings
 
-On first launch, you'll see a yellow banner: **"Setup required: Set vSNP3 path, projects root, and vSNP3 path in Settings, then click Save + Preflight."**
+On first launch, you'll see a yellow banner: **"Setup required: Set vSNP3 path, projects root, and conda env in Settings, then click Save & Refresh + Preflight."**
 
-All action buttons (Setup, Run, Build VCF set, etc.) remain disabled until these three settings are configured. The banner disappears once you've saved valid settings.
+All action buttons (Grab ready-to-run samples, Run, Build comparison set, etc.) remain disabled until these three settings are configured. The banner disappears once you've saved valid settings.
 
 ### Step 2.1: Fill in Settings
 
@@ -183,8 +183,8 @@ Now let's run a complete analysis from raw reads.
 
 ### Step 4.3: Run Step 1
 
-1. In **Step 1** panel, click **Setup**
-   - Creates sample directories from FASTQ pairs
+1. In **Step 1** panel, click **Grab ready-to-run samples**
+   - Copies the downloaded FASTQs into Step 1, one folder per sample; they appear as Not Started
 2. Select a **Reference** (or choose "Auto-detect")
 3. Click **Run**
 
@@ -208,16 +208,17 @@ After Step 1 completes:
 
 ### Step 4.5: Run Step 2
 
-**Using Step 1 VCFs only:**
-1. Select **"Use Step 1 only"** mode
-2. Click **Setup** (links VCFs from Step 1)
-3. Click **Run**
+**All of this project's samples (the normal path):**
+1. Open the **Build the comparison set** tab
+2. Keep this project's **vcf_database** ticked
+3. Optionally tick reference databases to compare against
+4. Click **Build comparison set** → **Run**
 
-**Combining with external VCFs:**
-1. Keep **"Use custom VCF set"** mode
-2. Check **"Include current project Step 1 ZC VCFs"**
-3. Optionally add external VCF folders
-4. Click **Build VCF set** → **Run**
+**Only some samples:**
+1. Open the **Compare a list of samples** tab
+2. Paste the sample names
+3. Optionally tick a reference database to compare against
+4. Click **Run**
 
 ### Step 4.6: Explore outputs
 

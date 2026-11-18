@@ -81,7 +81,7 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
 - Project Management
 - Input Data Methods (3 options)
 - Step 1: Alignment & Variant Calling
-  - Setup, Reference Selection, Run
+  - Grab ready-to-run samples, Reference Selection, Run
   - Understanding outputs
 - Quality Control & Metrics
   - 6 critical metrics explained
@@ -158,7 +158,7 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
   - Missing packages
   - Reference problems
 - Step 1 Issues
-  - Setup failures
+  - Grab ready-to-run samples failures
   - Run errors
   - Low mapping rate
 - Quality Control Issues

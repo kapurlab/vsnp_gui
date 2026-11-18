@@ -40,7 +40,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 ## 🧬 Step 1: Alignment & SNP Calling
 
 ### Run Step 1
-1. **Setup** → Creates sample folders
+1. **Grab ready-to-run samples** → Copies downloaded FASTQs into sample folders
 2. **Select Reference:**
    - **Auto-detect** (recommended) OR
    - Specific reference (e.g., `Mycobacterium_AF2122`)
@@ -76,8 +76,8 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 ## 🌳 Step 2: Trees & SNP Tables
 
 ### Run Step 2
-1. **Use Step 1 only**: Setup → Links `*_zc.vcf`
-2. **Use custom VCF set**: Build VCF set → Run
+1. **Build the comparison set** tab: Build comparison set → Run
+2. **Compare a list of samples** tab: paste sample names → Run
 3. Verify: Single reference (no mixed references!)
 
 ### VCF Lite Pack
@@ -116,7 +116,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 | **Too many SNPs (>10% genome)** | Reference too distant |
 | **Mixed reference error (Step 2)** | Split into separate projects |
 | **Job fails** | Check logs, verify vSNP3 path |
-| **No samples showing** | Check Step 1 Setup ran |
+| **No samples showing** | Click Grab ready-to-run samples in Step 1 |
 
 ---
 

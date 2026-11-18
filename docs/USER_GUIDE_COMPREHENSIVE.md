@@ -176,7 +176,7 @@ ProjectName/
 │   │   └── run_step1.log
 │   └── Sample2/
 └── step2/            # Multi-sample analysis
-    ├── vcf_source/   # VCF files from Step 1
+    ├── vcf_database/ # VCFs collected from Step 1
     ├── *.xlsx        # SNP matrices
     ├── *.tre         # Phylogenetic trees
     └── *.html        # Summary reports
@@ -1034,7 +1034,7 @@ SNP tables include annotation columns:
 
 **Step-by-Step QC:**
 
-1. **After Step 1 Setup:**
+1. **After Grab ready-to-run samples (Step 1):**
    - Verify all expected samples present
    - Check R1/R2 pairing is correct
 
@@ -1230,12 +1230,12 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to:
 **Per-Project Workflow:**
 - [ ] Create new project
 - [ ] Add FASTQ files (link/upload/SRA)
-- [ ] Run Step 1 Setup
+- [ ] Click Grab ready-to-run samples in Step 1
 - [ ] Select reference (auto-detect or manual)
 - [ ] Run Step 1
 - [ ] Review QC Summary
 - [ ] Exclude poor quality samples
-- [ ] Run Step 2 Setup
+- [ ] Click Build comparison set in Step 2
 - [ ] Verify reference lock (single reference)
 - [ ] Run Step 2
 - [ ] Review SNP matrices

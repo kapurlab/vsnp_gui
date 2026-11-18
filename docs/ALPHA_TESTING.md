@@ -80,15 +80,15 @@ Make sure the GUI Settings use the correct Python/venv if prompted.
 ## Using the GUI (high-level)
 1. Create a project
 2. Add input files (BYO FASTQ or SRA download)
-3. Step 1: Setup → Run
+3. Step 1: Grab ready-to-run samples → pick a reference → Run
 4. QC Summary: review and optionally exclude
-5. Step 2: Setup → Run
+5. Step 2: Build comparison set → Run
 6. Step 2 Results: open outputs
 
 ## Reporting issues / feedback
 Please report:
 - Exact error messages
-- Which step (Setup/Run/Preflight)
+- Which step and button (Grab ready-to-run samples, Run, Build comparison set, Preflight)
 - The project name and reference used
 - Screenshots of the panel where it failed
 

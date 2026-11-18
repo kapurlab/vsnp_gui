@@ -188,9 +188,9 @@ conda install vsnp3 -c conda-forge -c bioconda
 
 ## Step 1 Issues
 
-### Issue: No samples created after Setup
+### Issue: No samples created after Grab ready-to-run samples
 
-**Symptoms:** Step 1 Setup runs but no sample folders appear
+**Symptoms:** Grab ready-to-run samples finishes but no sample folders appear
 
 **Possible causes:**
 1. No FASTQ files in download directory
@@ -384,13 +384,13 @@ reference.
 
 ### Issue: No VCF files found for Step 2
 
-**Symptoms:** Step 2 Setup shows `VCFs ready: 0`
+**Symptoms:** Step 2 shows no VCFs after Build comparison set
 
 **Possible causes:**
 1. Step 1 not completed
 2. No `*_zc.vcf` files in step1 directories
-3. Step 2 Setup not run yet
-4. Using **custom VCF set** but Build VCF set not run
+3. Build comparison set not clicked yet
+4. This project's **vcf_database** box not ticked on the Build the comparison set tab
 
 **Solution:**
 ```bash
@@ -402,9 +402,9 @@ find step1 -name "*_zc.vcf"
 # Re-run failed samples
 ```
 
-**If using a custom VCF set:**
-- Step 2 → VCF Sources → **Build VCF set**
-- Verify VCFs in `step2/vcf_source/`
+**Check the comparison set:**
+- Step 2 → Build the comparison set → **Build comparison set**
+- Verify VCFs in `step2/vcf_database/` (`step2/vcf_source/` in projects made before the rename)
 
 ### Issue: RAxML fails to build tree
 
@@ -418,7 +418,7 @@ find step1 -name "*_zc.vcf"
 **Solution:**
 ```bash
 # Check number of VCF files
-ls step2/vcf_source/*.vcf | wc -l
+ls step2/vcf_database/*.vcf* | wc -l
 
 # Need at least 3 samples for tree
 # If >=3, check SNP matrix for variation

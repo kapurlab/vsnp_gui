@@ -97,10 +97,10 @@ FASTQ → Step 1 (align + call) → QC Review → Step 2 (tree + matrix)
 
 1. **Create project** - Organizes your analysis
 2. **Add inputs** - Link local FASTQ or download from SRA
-3. **Step 1 Setup** - Creates sample directories
+3. **Step 1: Grab ready-to-run samples** - Copies the downloaded FASTQs into Step 1, one folder per sample
 4. **Step 1 Run** - Aligns reads, calls SNPs (per sample)
 5. **QC Summary** - Review metrics, exclude bad samples
-6. **Step 2 Setup/Build** - Gather VCFs for comparison
+6. **Step 2: Build comparison set** - Gathers the VCFs to compare into step2/vcf_database
 7. **Step 2 Run** - Build phylogenetic tree and SNP matrices
 
 ## Documentation

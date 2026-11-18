@@ -485,7 +485,11 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
 
     Side effect: writes normalized yaml + pip freeze to the shared
     env_snapshots store at <audit_root>/env_snapshots/<sha256>.{yaml,txt}
-    (idempotent via stat-then-link).
+    (idempotent via stat-then-link). The store is a convenience, never a
+    requirement: on a site where it is admin-only (SciComp, 2026-11-18: an
+    ordinary user's Run 500ed on mkstemp there) the write is skipped, and the
+    content rides along in the returned dict so copy_env_snapshot_into_run can
+    still put it in the run's own _provenance/.
 
     Returns environment dict with shared store paths. The caller is
     responsible for copying the yaml/txt into the per-run _provenance/ dir
@@ -531,9 +535,8 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
         )
         conda_yaml_shared_path = None
         if conda_yaml_sha and snapshots_dir is not None:
-            target = snapshots_dir / f"{conda_yaml_sha}.yaml"
-            _write_to_shared_store(target, conda_yaml_normalized)
-            conda_yaml_shared_path = str(target)
+            conda_yaml_shared_path = _store_snapshot(
+                snapshots_dir / f"{conda_yaml_sha}.yaml", conda_yaml_normalized)
 
         # Pip freeze (only if pip is available — vsnp3 conda envs sometimes
         # ship without pip).
@@ -544,9 +547,8 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
         )
         pip_freeze_shared_path = None
         if pip_freeze_sha and snapshots_dir is not None:
-            target = snapshots_dir / f"{pip_freeze_sha}.txt"
-            _write_to_shared_store(target, pip_freeze_normalized)
-            pip_freeze_shared_path = str(target)
+            pip_freeze_shared_path = _store_snapshot(
+                snapshots_dir / f"{pip_freeze_sha}.txt", pip_freeze_normalized)
 
         # System packages: try `dpkg-query` first (works for apt-installed
         # tools); if that returns nothing for a tool, probe the vsnp3 env's
@@ -563,9 +565,11 @@ def capture_env_snapshot(cfg: dict[str, Any]) -> dict[str, Any]:
             "conda_env_yaml_sha256": conda_yaml_sha,
             "conda_env_yaml_path": None,  # filled in per-run by caller
             "_conda_env_yaml_shared_path": conda_yaml_shared_path,  # internal; stripped before serialize
+            "_conda_env_yaml_content": conda_yaml_normalized or None,  # internal; stripped before serialize
             "pip_freeze_sha256": pip_freeze_sha,
             "pip_freeze_path": None,  # filled in per-run by caller
             "_pip_freeze_shared_path": pip_freeze_shared_path,  # internal; stripped before serialize
+            "_pip_freeze_content": pip_freeze_normalized or None,  # internal; stripped before serialize
             "system_packages": system_packages,
             "python_version": _platform.python_version(),
             "platform": f"{_platform.system()} {_platform.release()} {_platform.machine()}",
@@ -756,6 +760,20 @@ def _capture_system_packages() -> dict[str, str | None]:
     return out
 
 
+def _store_snapshot(target: Path, content: str) -> str | None:
+    """`target` as a string once the shared store holds it, else None.
+
+    Any OSError — the store unwritable or unsearchable for this account — is a
+    warning, not a failure: the run's own copy is written from `content`."""
+    try:
+        _write_to_shared_store(target, content)
+    except OSError as e:
+        logger.warning("env snapshot not written to the shared store (%s); "
+                       "the run keeps its own copy", e)
+        return None
+    return str(target)
+
+
 def _write_to_shared_store(target: Path, content: str) -> None:
     """Stat-first short-circuit; os.link with EEXIST fallback for race safety.
 
@@ -787,24 +805,45 @@ def copy_env_snapshot_into_run(env: dict[str, Any], provenance_dir: Path) -> dic
 
     Returns a NEW environment dict with conda_env_yaml_path and
     pip_freeze_path set to the per-run paths. The internal `_*_shared_path`
-    keys are stripped from the return value (they're for writer use only).
+    and `_*_content` keys are stripped from the return value (they're for
+    writer use only).
+
+    The shared copy is preferred; when there is none, or this account cannot
+    read it (the store keeps snapshots 0640 for its admin group), the file is
+    written from the captured content instead — same bytes, same sha256.
     """
     provenance_dir.mkdir(parents=True, exist_ok=True)
     out = dict(env)
 
-    shared_yaml = out.pop("_conda_env_yaml_shared_path", None)
-    if shared_yaml:
-        dst = provenance_dir / "conda_env.yaml"
-        shutil.copy2(shared_yaml, dst)
-        out["conda_env_yaml_path"] = str(dst)
-
-    shared_pip = out.pop("_pip_freeze_shared_path", None)
-    if shared_pip:
-        dst = provenance_dir / "pip_freeze.txt"
-        shutil.copy2(shared_pip, dst)
-        out["pip_freeze_path"] = str(dst)
+    for shared_key, content_key, name, path_key in (
+        ("_conda_env_yaml_shared_path", "_conda_env_yaml_content",
+         "conda_env.yaml", "conda_env_yaml_path"),
+        ("_pip_freeze_shared_path", "_pip_freeze_content",
+         "pip_freeze.txt", "pip_freeze_path"),
+    ):
+        shared = out.pop(shared_key, None)
+        content = out.pop(content_key, None)
+        dst = provenance_dir / name
+        if _place_env_file(shared, content, dst):
+            out[path_key] = str(dst)
 
     return out
+
+
+def _place_env_file(shared: str | None, content: str | None, dst: Path) -> bool:
+    """Copy the shared snapshot to `dst`, falling back to writing `content`.
+    True when `dst` now holds the snapshot."""
+    if shared:
+        try:
+            shutil.copy2(shared, dst)
+            return True
+        except OSError as e:
+            logger.warning("env snapshot %s not readable here (%s); "
+                           "writing the run's copy from the capture", shared, e)
+    if content:
+        dst.write_text(content, encoding="utf-8")
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

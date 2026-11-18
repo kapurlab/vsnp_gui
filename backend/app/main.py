@@ -5925,6 +5925,17 @@ def _step1_dispatch(
                 )
                 logger.warning("Step 1 provenance dispatch failed; batch proceeds "
                                "without run_metadata.json: %s", e)
+            except Exception as e:  # noqa: BLE001 — see below
+                # Anything else from the capture is the same case, most often
+                # an OSError on a shared site file this account can't write or
+                # read. SciComp, 2026-11-18: a PermissionError from the
+                # admin-only audit/env_snapshots escaped this block and 500ed
+                # every ordinary user's Run while the admin's worked.
+                provenance_warning = (
+                    f"Run-metadata (provenance) was not recorded for this run: {e}"
+                )
+                logger.exception("Step 1 provenance dispatch raised; batch "
+                                 "proceeds without run_metadata.json")
 
             if prov_batch_run_id is not None:
                 def prov_finalize_cb(job_id, exit_code, started_at, finished_at):
@@ -7394,6 +7405,13 @@ def step2_run(project: str, payload: Step2Request):
         )
         logger.warning("Step 2 provenance dispatch failed; run proceeds without "
                        "run_metadata.json: %s", e)
+    except Exception as e:  # noqa: BLE001 — same case as Step 1's (see there)
+        prov_step2_run_id = None
+        provenance_warning = (
+            f"Run-metadata (provenance) was not recorded for this run: {e}"
+        )
+        logger.exception("Step 2 provenance dispatch raised; run proceeds "
+                         "without run_metadata.json")
 
     # The reconciliation, on disk beside the run. A tree that gets published and
     # questioned six months later needs a record of which samples went into it

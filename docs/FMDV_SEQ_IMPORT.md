@@ -121,10 +121,13 @@ project's context is then a candidate when its samples are typed, and the
 library's typing database is untouched.
 
 An accession already in the library (the 79 panel genomes, the 9,177
-context records, the `genomes_context` set) is reported as present and not
-fetched or added: it is in the tree and the typing database already. The
-TSVs carry the accession column that makes this a lookup. An accession
-already in the project's own set is reported the same way.
+context records, the `genomes_context` set) or in the project's own set is
+not added as context again: it is in the tree and the typing database
+already. The TSVs carry the accession column that makes this a lookup. It
+can still be imported as a sample. The first trial showed why: EU448369,
+the published isolate beside the short-read test samples, is in the O
+context set, and the user wants it typed and highlighted, not merely
+present among 4,930 comparators.
 
 The alternative, writing additions into the library beside the collection
 as `<SEROTYPE>.added.fasta`, would share a deposit across projects and

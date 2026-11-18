@@ -323,8 +323,12 @@ NanoFMDV-style header (`SEROTYPE|TOPOTYPE|COUNTRY|YEAR|HOST|ACCESSION|LENGTH|ISO
 or from a sidecar sheet with a `sample` column (template at
 `/api/fmdv/sequence_sheet_template`), and every field can be edited in the
 row. Names lose underscores as the MinKNOW importer's do. A name already in
-`step1/` or `download/`, or an accession already in the library or the
-project's context, refuses the import.
+`step1/` or `download/` refuses the import. An accession the library or the
+project already holds as context cannot be added as context twice, and can
+still be imported as a sample: the library's copy is an unnamed
+comparator, and a published isolate from the outbreak under study (the
+short-read test's EU448369, which the O set carries) is wanted typed and
+highlighted beside the project's own samples.
 
 Accessions are fetched with the plain HTTPS efetch `fmdv_reflib.py` uses,
 `gbwithparts`, 50 per request, and every record is written to

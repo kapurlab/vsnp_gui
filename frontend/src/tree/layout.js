@@ -297,9 +297,9 @@ export function searchRows(layout, term, displayName, alsoTry) {
   const out = [];
   const t = String(term || "").trim().toLowerCase();
   if (!t) return out;
-  // Several names at once, comma-separated: a link from the Step 2 VP1 view
-  // names every sample in the run, so all of them light up rather than one
-  // and a hunt for the rest.
+  // Several names at once, comma-separated: a link from a pathogen add-on's
+  // panel names every sample in the run, so all of them light up rather than
+  // one and a hunt for the rest.
   const terms = t.split(",").map((x) => x.trim()).filter(Boolean);
   // `alsoTry` are other spellings of the same sample, from the reference's
   // metadata. A tree written through that metadata labels its tips

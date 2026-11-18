@@ -133,6 +133,14 @@ test("search is case-insensitive and returns rows in order", () => {
   assert.deepEqual(searchRows(lay, "aa", null), [0, 2]);
 });
 
+test("a comma-separated search lights every named tip", () => {
+  // A link from a pathogen add-on's panel passes every sample in the run.
+  const lay = buildLayout(parse("((AaA:0.1,bbb:0.1):0.1,(aab:0.1,ccc:0.1):0.1);").nodes);
+  assert.deepEqual(searchRows(lay, "bbb,ccc", null), [1, 3]);
+  assert.deepEqual(searchRows(lay, " bbb , ,ccc ", null), [1, 3]);
+  assert.deepEqual(searchRows(lay, "bbb", null), [1]);
+});
+
 test("sampleTips drops the reference tip and strips the suffix", () => {
   assert.deepEqual(sampleTips(["a_zc.vcf", "root", "b_zc.vcf.gz", "c"]), ["a", "b", "c"]);
   assert.deepEqual(sampleTips(["ROOT", "Root"]), []);

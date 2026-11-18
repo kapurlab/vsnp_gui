@@ -66,8 +66,8 @@ export default function TreeStandalone() {
   const [ordering, setOrdering] = useState("file");
   const orderingRef = useRef("file");
   const [rerootMode, setRerootMode] = useState(false);
-  // A link may bring its own search term (the Step 2 VP1 view passes a
-  // sample name), so the tree opens with that leaf already highlighted.
+  // A link may bring its own search term (a pathogen add-on's panel passes
+  // its sample names), so the tree opens with those leaves already highlighted.
   const [searchTerm, setSearchTerm] = useState(params.get("search") || "");
   const [hits, setHits] = useState([]);
   const [hitAt, setHitAt] = useState(0);

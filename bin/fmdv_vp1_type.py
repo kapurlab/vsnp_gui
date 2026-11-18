@@ -77,11 +77,12 @@ def split_lineage(topotype_field: str) -> Tuple[str, str]:
     return t.split("/", 1)[0], t
 
 
-def load_metadata(lib: Path) -> Dict[str, Dict[str, str]]:
-    """name -> row for every context record, from the per-serotype TSVs."""
+def load_metadata(lib: Path, project_context: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
+    """name -> row for every context record, from the per-serotype TSVs of the
+    library and, when given, of the project's own context folder."""
     meta: Dict[str, Dict[str, str]] = {}
-    ctx = lib / "vp1_context"
-    for tsv in sorted(ctx.glob("*.tsv")):
+    dirs = [lib / "vp1_context"] + ([project_context] if project_context and project_context.is_dir() else [])
+    for tsv in sorted(t for d in dirs for t in d.glob("*.tsv")):
         with open(tsv) as fh:
             header = fh.readline().rstrip("\n").split("\t")
             for line in fh:
@@ -123,15 +124,50 @@ def ensure_db(lib: Path, makeblastdb: str) -> Path:
     return prefix
 
 
-def blast(blastn: str, db: Path, query: Path, threads: int) -> List[Dict]:
+def ensure_project_db(project_context: Optional[Path], makeblastdb: str) -> Optional[Path]:
+    """The project's own context records (<project>/fmdv_context/<SEROTYPE>.fasta,
+    written by the sequence import) as a second, small BLAST database under
+    <project>/fmdv_context/_typing/, rebuilt when a set is newer. None when
+    the project has no context of its own. The library's database is untouched."""
+    if not project_context or not project_context.is_dir():
+        return None
+    sources = sorted(p for p in project_context.glob("*.fasta") if not p.name.startswith((".", "_")))
+    if not sources:
+        return None
+    out = project_context / "_typing"
+    out.mkdir(exist_ok=True)
+    fasta, prefix, marker = out / "project_vp1.fasta", out / "project_vp1", out / "project_vp1.nsq"
+    newest = max(p.stat().st_mtime for p in sources)
+    if marker.is_file() and marker.stat().st_mtime >= newest and fasta.is_file():
+        return prefix
+    seen: set = set()
+    with open(fasta, "w") as fh:
+        for src in sources:
+            for name, seq in read_fasta(src):
+                key = name.split()[0]
+                if key in seen or not seq:
+                    continue
+                seen.add(key)
+                fh.write(f">{key}\n{seq}\n")
+    subprocess.run([makeblastdb, "-in", str(fasta), "-dbtype", "nucl", "-out", str(prefix)],
+                   check=True, capture_output=True, text=True)
+    return prefix
+
+
+def blast(blastn: str, dbs: "Path | List[Path]", query: Path, threads: int) -> List[Dict]:
+    """Hits against one database or several (the library's, then the
+    project's), merged and ranked by bitscore."""
     cols = ["sseqid", "pident", "length", "qlen", "slen", "bitscore", "evalue", "qcovs", "mismatch", "gapopen"]
-    p = subprocess.run([blastn, "-task", "blastn", "-query", str(query), "-db", str(db),
-                        "-outfmt", "6 " + " ".join(cols), "-max_target_seqs", "50",
-                        "-num_threads", str(threads), "-evalue", "1e-20"],
-                       check=True, capture_output=True, text=True)
+    out_lines: List[str] = []
+    for db in ([dbs] if isinstance(dbs, Path) else dbs):
+        p = subprocess.run([blastn, "-task", "blastn", "-query", str(query), "-db", str(db),
+                            "-outfmt", "6 " + " ".join(cols), "-max_target_seqs", "50",
+                            "-num_threads", str(threads), "-evalue", "1e-20"],
+                           check=True, capture_output=True, text=True)
+        out_lines.extend(p.stdout.splitlines())
     hits: List[Dict] = []
     seen: set = set()
-    for line in p.stdout.splitlines():
+    for line in out_lines:
         f = line.split("\t")
         if len(f) < len(cols):
             continue
@@ -154,14 +190,14 @@ def describe(name: str, meta: Dict[str, Dict[str, str]]) -> Dict[str, str]:
                 "topotype": topo or topotype_of_name(name), "lineage": lineage or topotype_of_name(name),
                 "accession": m.get("accession", ""), "isolate": m.get("isolate", ""),
                 "country": m.get("country", ""), "year": m.get("year", ""), "host": m.get("host", ""),
-                "source": "genbank"}
+                "source": "project" if str(m.get("region_source", "")).startswith("imported") else "genbank"}
     topo = topotype_of_name(name)
     return {"name": name, "serotype": serotype_of_name(name), "topotype": topo.split("-")[0] if topo else "",
             "lineage": topo, "accession": name.rsplit("_", 1)[-1], "isolate": "", "country": "", "year": "",
             "host": "", "source": "panel"}
 
 
-def type_sample(sample_dir: Path, lib: Path, db: Path, meta: Dict[str, Dict[str, str]],
+def type_sample(sample_dir: Path, lib: Path, db: "Path | List[Path]", meta: Dict[str, Dict[str, str]],
                 blastn: str, threads: int, min_called: float) -> Dict:
     sample = sample_dir.name
     out: Dict = {"sample": sample, "method": "blastn of the VP1 consensus against the GenBank VP1 sets and the panel",
@@ -245,6 +281,8 @@ def main() -> int:
     g.add_argument("--sample-dir", help="one Step 1 sample folder")
     g.add_argument("--project", help="type every sample folder under <project>/step1")
     ap.add_argument("--lib", required=True, help="FMDV reference library")
+    ap.add_argument("--project-context", help="the project's own VP1 context folder (<project>/fmdv_context), "
+                    "searched beside the library's sets; ignored when absent or empty")
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--min-called", type=float, default=MIN_CALLED)
     ap.add_argument("--force", action="store_true", help="retype samples that already have fmdv_vp1_type.json")
@@ -255,12 +293,16 @@ def main() -> int:
     if not (blastn and makeblastdb):
         _err("vp1_type: blastn and makeblastdb must be on PATH (BLAST+; conda_setup/environment.yml has it)")
         return 2
+    project_context = Path(a.project_context).expanduser() if a.project_context else None
     try:
-        db = ensure_db(lib, makeblastdb)
+        db: "Path | List[Path]" = ensure_db(lib, makeblastdb)
+        pdb = ensure_project_db(project_context, makeblastdb)
+        if pdb is not None:
+            db = [db, pdb]
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
         _err(f"vp1_type: cannot build the VP1 typing database: {e}")
         return 2
-    meta = load_metadata(lib)
+    meta = load_metadata(lib, project_context)
 
     if a.sample_dir:
         dirs = [Path(a.sample_dir).resolve()]

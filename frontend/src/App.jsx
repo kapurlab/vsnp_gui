@@ -21,6 +21,7 @@ import FmdvScopePicker from "./FmdvScopePicker.jsx";
 import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
 import FmdvVp1Results from "./FmdvVp1Results.jsx";
 import OntRunImport from "./OntRunImport.jsx";
+import SeqImport from "./SeqImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -1400,6 +1401,9 @@ export default function App() {
       paired: { label: "Paired", bg: "#e3f0e6", fg: "#256029" },
       single: { label: "Single", bg: "#e6eef7", fg: "#1f4e79" },
       ont: { label: "ONT", bg: "#f3e8f7", fg: "#6b2d7a" },
+      // An imported sequence (FMDV mode): no reads at all, typed from the
+      // sequence it was given.
+      sequence: { label: "Sequence", bg: "#fdf2e9", fg: "#8a4b08" },
     };
     const s = map[rt];
     if (!s) return <span className="muted">-</span>;
@@ -1447,7 +1451,7 @@ export default function App() {
   /* Step 1 Results column sorting. null key = the order the scanner returned,
      which is the sensible default; a header click takes over, and a third
      click gives that default back. */
-  const QC_LEVEL_RANK = { fail: 0, review: 1, pass: 2 };
+  const QC_LEVEL_RANK = { fail: 0, review: 1, pass: 2, na: 3 };
   function qcSortValue(row, key) {
     switch (key) {
       case "qc": return QC_LEVEL_RANK[qcLevel(row)] ?? 9;
@@ -1606,7 +1610,7 @@ export default function App() {
   // above the samples that are. The backend returns samples alphabetically;
   // sort is stable so alphabetical order is preserved within each group.
   const step1StatusSorted = useMemo(() => {
-    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4, misfit: 6 };
+    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4, sequence: 5, misfit: 6 };
     return [...step1Status].sort(
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
@@ -3693,7 +3697,7 @@ export default function App() {
           className={`qc-badge qc-badge-${level}`}
           title={reasons.length ? reasons.join("\n") : "All thresholds met"}
         >
-          {level}
+          {level === "na" ? "n/a" : level}
         </span>
         {reasons.length > 0 ? (
           <span className="qc-reason" title={reasons.join("\n")}>
@@ -7467,6 +7471,14 @@ export default function App() {
                   enabled={!!selectedProject && settingsReady}
                   onImported={() => { setNanoporeMode(true); loadAll(); }}
                 />
+                {fmdvOn ? (
+                  <SeqImport
+                    apiBase={API_BASE}
+                    project={selectedProject}
+                    enabled={!!selectedProject && settingsReady}
+                    onImported={() => { loadAll(); }}
+                  />
+                ) : null}
                 <h3>SRA Download</h3>
                 <textarea
                   placeholder="SRR/SRX/SRS accessions (one per line)"
@@ -8591,7 +8603,9 @@ export default function App() {
                         title={
                           s.status === "misfit"
                             ? "Held out of every Run — this folder has no usable reads, so vsnp3 has nothing to align. Fix the folder, or Remove it to file it in Quarantine."
-                            : ""
+                            : s.status === "sequence"
+                              ? "An imported sequence: no reads, so Step 1 never aligns it. It is typed from its VP1 and placed on the VP1 tree like any sample."
+                              : ""
                         }
                       >
                         {s.status.replace("_", " ")}
@@ -9083,14 +9097,16 @@ export default function App() {
                               <td title={row.Reference || undefined}>{row.Reference ? referenceCellLabel(row.Reference) : "-"}</td>
                               {fmdvOn ? (
                                 <>
-                                  <td title={row.fmdv_mixed && row.fmdv_serotype_share
+                                  <td title={row.read_type === "sequence"
+                                    ? "Serotype as entered at import (from the nearest panel VP1, or the record's own label)."
+                                    : row.fmdv_mixed && row.fmdv_serotype_share
                                     ? "Mixed serotypes: " + Object.entries(row.fmdv_serotype_share).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(", ")
                                     : row.fmdv_composition_basis === "undetermined"
                                       ? "Serotype of the lineage reference the chooser put this sample on. Too few reads reached any VP1 to say whether a second serotype is present."
                                       : "Serotype of the lineage reference the chooser put this sample on (competitive mapping to the VP1 panel)."}>
                                     {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : row.fmdv_composition_basis === "undetermined" ? " ?" : ""}
                                   </td>
-                                  <td title={row.fmdv_chosen || "Topotype or lineage of the chosen reference."}>{row.fmdv_lineage || "-"}</td>
+                                  <td title={row.read_type === "sequence" ? "Lineage as entered at import; the Topotype (VP1) column is what the typing says." : (row.fmdv_chosen || "Topotype or lineage of the chosen reference.")}>{row.fmdv_lineage || "-"}</td>
                                   <td title={row.fmdv_vp1_status === "typed"
                                     ? `Nearest VP1 record: ${row.fmdv_vp1_nearest || "-"} at ${typeof row.fmdv_vp1_identity === "number" ? row.fmdv_vp1_identity.toFixed(1) + "%" : "-"}.` + (row.fmdv_vp1_note ? " " + row.fmdv_vp1_note : "")
                                     : (row.fmdv_vp1_status || "Not typed: Step 1 types each sample as its consensus is written; the Step 2 VP1 tab retypes a project.")}>
@@ -9102,7 +9118,9 @@ export default function App() {
                                     : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
                                     {typeof row.fmdv_identity === "number" ? row.fmdv_identity.toFixed(3) : "-"}{row.fmdv_distant ? " ⚠" : ""}
                                   </td>
-                                  <td title="Reads in the sample's FASTQ.">{typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}</td>
+                                  <td title={row.read_type === "sequence" ? `Imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): ${row.fmdv_import_class || "record"} of ${typeof row.fmdv_import_length === "number" ? row.fmdv_import_length.toLocaleString() : "?"} nt, no reads.` : "Reads in the sample's FASTQ."}>
+                                    {row.read_type === "sequence" ? <span className="muted">none</span> : typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}
+                                  </td>
                                   <td>{row["Average Depth"] || "-"}</td>
                                   <td>{fmtPercent1(qcMappingRate(row))}</td>
                                   {fmdvLongRead ? (

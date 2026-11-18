@@ -181,9 +181,14 @@ def identity(a: str, b: str) -> Tuple[float, int]:
     return (100.0 * same / n if n else 0.0), n
 
 
-def load_meta(lib: Path) -> Dict[str, Dict[str, str]]:
+def load_meta(lib: Path, project: Optional[Path] = None) -> Dict[str, Dict[str, str]]:
+    """Context metadata from the library's TSVs and, when the run sits in a
+    project, from <project>/fmdv_context/*.tsv (the sequence import)."""
     meta: Dict[str, Dict[str, str]] = {}
-    for tsv in sorted((lib / "vp1_context").glob("*.tsv")):
+    tsvs = sorted((lib / "vp1_context").glob("*.tsv"))
+    if project and (project / "fmdv_context").is_dir():
+        tsvs += sorted((project / "fmdv_context").glob("*.tsv"))
+    for tsv in tsvs:
         with open(tsv) as fh:
             header = fh.readline().rstrip("\n").split("\t")
             for line in fh:
@@ -303,7 +308,10 @@ def main() -> int:
             samples = [n for n in aln if not re.match(r"^[A-Z0-9]+-", n)]
         order = newick_leaves(tre[-1].read_text()) if tre else list(aln)
         order = [n for n in order if n in aln] + [n for n in aln if n not in order]
-        meta = load_meta(lib)
+        # The run folder is <project>/step2/<stamp>_VP1-tree..., so the
+        # project is two levels up; vp1_tree.json says so when it differs.
+        project = Path(info["project"]) if info.get("project") else run.parent.parent
+        meta = load_meta(lib, project)
         others = [n for n in aln if n not in samples]
 
         # Neighbourhoods

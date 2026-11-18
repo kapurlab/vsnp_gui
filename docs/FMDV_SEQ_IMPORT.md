@@ -7,7 +7,10 @@ another lab or pipeline), and GenBank accessions for context sequences or
 for published isolates from the same outbreak. This note says how both
 should enter a project so that typing, the VP1 tree, the neighborhood
 tables, the site tables and the reports treat them like any other sample,
-and what happens when NCBI is out of reach. Nothing here is built yet.
+and what happens when NCBI is out of reach. Built on 18 November 2026 as
+described below; what the build left out is listed at the end. The user's
+description is the "Importing sequences that are not reads" section of
+`FMDV_MODE.md`.
 
 ## The one decision that shapes the rest: sample or context
 
@@ -270,7 +273,8 @@ Backend:
   built from the project set, hits merged by bitscore; the Step 1 batch
   and the retype route pass it.
 - `bin/fmdv_sample_report.py`, `bin/fmdv_run_report.py`: include
-  `fmdv_import.json` folders. Report code, flagged for its owner.
+  `fmdv_import.json` folders. Report code, flagged for its owner; not
+  made in this build, so an imported sample has no report yet.
 - `backend/app/test_seq_import.py` (new): header and flat-file parsing,
   classification and slicing against a small panel, the offline branch of
   the fetch, the preview's collision rules.

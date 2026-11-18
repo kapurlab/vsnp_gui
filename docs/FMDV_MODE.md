@@ -277,6 +277,75 @@ two underscored names). Preview, import, Grab and Step 1 in scope `SAT1`
 gave three samples named as the sheet said, each choosing SAT1/I at
 `f_match` 0.98 to 0.99 (sourmash chooser).
 
+## Importing sequences that are not reads
+
+The Inputs page in FMDV mode has an "Import sequences" block under the
+MinKNOW importer (`frontend/src/SeqImport.jsx`, `backend/app/seq_import.py`;
+the design and the alternatives rejected are in `FMDV_SEQ_IMPORT.md`). It
+takes FASTA or GenBank files, dropped or chosen, and GenBank accessions
+typed one per line, and shows one editable row per record before anything
+is written. Each record plays one of two roles:
+
+- a **sample** lands in `step1/<name>/` with `<name>_imported.fasta` (as
+  given), `<name>_VP1.fasta`, `fmdv_import.json` (provenance, the slice
+  coordinates and template, the metadata as entered) and
+  `fmdv_consensus.json` (what the tree reads: `source: imported`,
+  `serotype`, `vp1_called_percent`). No reads, so Grab and the Step 1 batch
+  skip the folder, the Samples list shows it as "sequence", and the Results
+  table shows a row with the read columns blank, a Sequence badge and a QC
+  of "n/a". It is typed at import and the Step 2 VP1 tab lists it; "Build
+  VP1 tree" includes it and highlights it like any sample;
+- a **context** record is appended to `<project>/fmdv_context/<SEROTYPE>.fasta`
+  and `.tsv`, named `<SEROTYPE>-<topotype or NA>_<accession>` with the
+  library's TSV columns plus `source`. The tree reads the project set beside
+  the library's for that serotype and never prunes it; the tables read its
+  TSV for labels; the typer builds a second small BLAST database from it
+  under `fmdv_context/_typing/` and merges the hits with the library's.
+
+VP1 is found as the context builder finds it: a record of 600 to 700 nt is
+checked by blastn against the 79 panel VP1s (own serotype, 70 percent of
+the record covered) and taken whole; a longer record has VP1 cut out by its
+best blastn hit to the checked VP1 set of its serotype (library, project
+and panel), extended to the template's ends. A record under 600 nt, one
+with no panel hit, or one whose slice is not VP1 length is refused in the
+preview with the reason. The serotype of an unlabelled record is the
+serotype of its best panel hit; a stated serotype that disagrees with it is
+flagged on the row. Checked on WGS3 on 18 November 2026: a complete A
+genome from the collection gave VP1 at 3247 to 3879 on its own record at
+100 percent, and a panel VP1 imported as a sample typed to the same lineage
+the panel names.
+
+Metadata: a GenBank record's `source` feature fills country (the part of
+`/geo_loc_name` before the colon), year (from `/collection_date`), host and
+isolate; lineage is left `NA` unless filled in, which the typer and the
+tree already treat as unannotated. A FASTA row is filled from a
+NanoFMDV-style header (`SEROTYPE|TOPOTYPE|COUNTRY|YEAR|HOST|ACCESSION|LENGTH|ISOLATE`)
+or from a sidecar sheet with a `sample` column (template at
+`/api/fmdv/sequence_sheet_template`), and every field can be edited in the
+row. Names lose underscores as the MinKNOW importer's do. A name already in
+`step1/` or `download/`, or an accession already in the library or the
+project's context, refuses the import.
+
+Accessions are fetched with the plain HTTPS efetch `fmdv_reflib.py` uses,
+`gbwithparts`, 50 per request, and every record is written to
+`<lib>/genbank_cache/<accession>.gb` before it is read. Accessions already
+in the library or the cache are not fetched. When
+`eutils.ncbi.nlm.nih.gov` cannot be reached (a 5 s probe), the preview says
+so per accession and tells the user to download the GenBank record on a
+connected machine and import that file, or import the FASTA and fill the
+metadata by hand. There is no queue: on a server where the link is down
+more than up a queued import is the normal state and nobody watches it.
+Set `ncbi.email` and `ncbi.api_key` in the user config, or `NCBI_EMAIL`
+and `NCBI_API_KEY` in the backend's environment, for NCBI's scripted-use
+policy and the higher rate.
+
+Not done: imported genomes in the whole-genome Step 2 (`vsnp3_step1.py -f`
+turns N into random bases and the reference would have to be chosen for a
+sequence), promoting a project's context into the library, editing metadata
+after import (delete and import again), and the sample and run reports,
+which still take only folders with `fmdv_reference.json`, so an imported
+sample has no report yet.
+
 ## QC in FMDV mode
 
 Stock vsnp_gui judges a sample on depth and mapping rate, which is right for

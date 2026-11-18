@@ -188,6 +188,7 @@ New, FMDV only, nothing in stock mode calls them:
 | `bin/fmdv_simulate.py` | the simulated MinKNOW run with an answer key (outbreak chain, spikes, dropout, distant genome, depth series) |
 | `bin/fmdv_bench_nanofmdv.py` | compares our consensus with NanoFMDV's on the same reads |
 | `backend/app/ont_import.py`, `frontend/src/OntRunImport.jsx` | MinKNOW run import: barcode folders to one FASTQ per sample. Not FMDV specific; works in stock mode |
+| `backend/app/seq_import.py`, `frontend/src/SeqImport.jsx` | FASTA, GenBank files and accessions as samples without reads (typed, in the VP1 tree) or as the project's own VP1 context; blastn VP1 slicing, cached efetch, a clear error offline (`FMDV_SEQ_IMPORT.md`) |
 | `frontend/src/FmdvScopePicker.jsx` | the scope picker (serotype, topotype or lineage, genome, each with Auto) |
 | `frontend/src/FmdvVp1Panel.jsx`, `FmdvVp1Tree.jsx` | the Step 2 VP1 tab: typing table, Type VP1, Build VP1 tree per serotype |
 | `frontend/src/FmdvVp1Results.jsx` | the VP1 half of Step 2 Results: run pills; Typing, Tree, Neighbours, Sites, Files; report links |

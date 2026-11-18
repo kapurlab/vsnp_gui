@@ -586,6 +586,14 @@ label {
   border-style: dashed;
 }
 
+/* An imported sequence (FMDV mode): a sample with no reads. Quiet like
+   misfit, but a solid border, because it is a sample and not a fault. */
+.badge.sequence {
+  background: #fdf2e9;
+  color: #8a4b08;
+  border-color: #f6d5b5;
+}
+
 .badge.edited {
   background: #e0f2fe;
   color: #075985;
@@ -638,6 +646,12 @@ label {
   background: #fef2f2;
   color: #991b1b;
   border-color: #fecaca;
+}
+/* QC does not apply: an imported sequence has no reads to judge. */
+.qc-badge-na {
+  background: #f3f4f6;
+  color: #6b7280;
+  border-color: #e5e7eb;
 }
 /* Subtle row tint mirrors the badge so the table scans at a glance. */
 .qc-row.qc-review td {
@@ -1736,6 +1750,7 @@ html[data-theme="dark"] .badge.complete,html[data-theme="dark"] .qc-badge-pass {
 html[data-theme="dark"] .badge.error,html[data-theme="dark"] .qc-badge-fail { background:#39241e;color:#f0b39d; }
 html[data-theme="dark"] .badge.edited { background:#17364a;color:#9ed8fa; }
 html[data-theme="dark"] .badge.misfit { background:transparent;color:#7c8b95; }
+html[data-theme="dark"] .badge.sequence, html[data-theme="dark"] .qc-badge-na { background:#3a2a1a;color:#e8c39a; }
 html[data-theme="dark"] .qc-badge-review { background:#352818;color:#efca8d; }
 html[data-theme="dark"] .qc-row.qc-review td { background:#2d271b; }
 html[data-theme="dark"] .qc-row.qc-fail td { background:#302020; }

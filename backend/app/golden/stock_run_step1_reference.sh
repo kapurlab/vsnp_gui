@@ -45,7 +45,7 @@ run_sample() {
   fi
   NP=""
   if [ -z "$NP" ]; then
-    AVG=$(zcat "$R1" 2>/dev/null | head -n 1600 | awk 'NR%4==2{n++;s+=length($0)} END{if(n>0)printf "%d", s/n; else print 0}')
+    AVG=$(gzip -dc "$R1" 2>/dev/null | head -n 1600 | awk 'NR%4==2{n++;s+=length($0)} END{if(n>0)printf "%d", s/n; else print 0}')
     if [ "${AVG:-0}" -gt 600 ]; then
       NP="--nanopore"
       echo "Auto-detected long reads (avg ${AVG}bp) — using --nanopore" | tee -a "$LOG"

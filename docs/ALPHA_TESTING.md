@@ -48,11 +48,10 @@ Electron app (native folder pickers):
 
 ## 4) Configure in the GUI (Settings panel)
 In the Settings panel:
-- **vSNP3 path**: the folder containing `vsnp3_step1.py` (e.g. `~/vsnp3`)
+- **vSNP3 path**: the vSNP3 conda environment directory, the one holding `bin/vsnp3_step1.py` (e.g. `~/miniconda3/envs/vsnp3`)
 - **Projects root**: where projects live (e.g. `~/vsnp3/projects`)
-- **vSNP3 path**: the conda environment directory (e.g. `~/miniconda3/envs/vsnp3`)
 
-Then click **Save** and **Preflight**.
+Then click **Save & Refresh** and check for a ✓ beside each path.
 
 ## 4b) Sample data (bundled VCFs)
 For Step 2 testing without FASTQs, use the 8 MTBC VCFs in `sample_data/vcf_lite/` (needs the `mtbc0_v1.1` reference):
@@ -69,7 +68,7 @@ Create a conda environment and install dependencies:
 conda create -n vsnp3 python=3.9 -y
 conda install -n vsnp3 -c conda-forge pandas biopython -y
 ```
-Set **vSNP3 path** in the GUI to the environment directory (e.g. `~/miniconda3/envs/vsnp3`) and run **Preflight**.
+Set **vSNP3 path** in the GUI to the environment directory (e.g. `~/miniconda3/envs/vsnp3`) and click **Save & Refresh**.
 
 ## Venv path (if you do not use conda)
 Create a virtual environment and install dependencies:
@@ -82,16 +81,16 @@ Make sure the GUI Settings use the correct Python/venv if prompted.
 
 ## Using the GUI (high-level)
 1. Create a project
-2. Add input files (BYO FASTQ or SRA download)
+2. Add input files (Inputs → Add local FASTQ, upload, or SRA Download)
 3. Step 1: Grab ready-to-run samples → pick a reference → Run
-4. QC Summary: review and optionally exclude
+4. Step 1 Results: review and optionally exclude
 5. Step 2: Build comparison set → Run
 6. Step 2 Results: open outputs
 
 ## Reporting issues / feedback
 Please report:
 - Exact error messages
-- Which step and button (Grab ready-to-run samples, Run, Build comparison set, Preflight)
+- Which step and button (Grab ready-to-run samples, Run, Build comparison set, Save & Refresh)
 - The project name and reference used
 - Screenshots of the panel where it failed
 
@@ -99,5 +98,5 @@ You can open an issue or send notes directly to the dev team.
 
 ## Notes
 - The GUI stores projects under the **Projects root** path.
-- The **Projects** panel now supports Archive/Delete.
-- If you change paths, click **Save** and rerun **Preflight**.
+- The **Projects** panel has **Archive**, which moves a project into `projects_archive/`. There is no Delete button; deleting a project is done from the command line.
+- If you change paths, click **Save & Refresh** and check for a ✓ beside each path.

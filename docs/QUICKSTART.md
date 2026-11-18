@@ -84,30 +84,27 @@ You should see:
 
 ## Part 2: Configure Settings
 
-On first launch, you'll see a yellow banner: **"Setup required: Set vSNP3 path, projects root, and conda env in Settings, then click Save & Refresh + Preflight."**
+On first launch, you'll see a yellow **Setup required** banner.
 
-All action buttons (Grab ready-to-run samples, Run, Build comparison set, etc.) remain disabled until these three settings are configured. The banner disappears once you've saved valid settings.
+All action buttons (Grab ready-to-run samples, Run, Build comparison set, etc.) remain disabled until the two required settings are saved. The banner disappears once you've saved valid settings.
 
 ### Step 2.1: Fill in Settings
 
-In the **Settings** panel (top-left):
+In the **Settings** panel (at the top, under **Setup**; click **Show** if it is hidden):
 
 | Field | Value | Notes |
 |-------|-------|-------|
-| **vSNP3 path** | `~/vsnp3` or wherever vSNP3 is installed | Contains `dependencies/` folder |
-| **Projects root** | `~/vsnp3/projects` | Where your analyses will be saved |
-| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts and Python runtime |
+| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts (`bin/vsnp3_step1.py`) and Python runtime |
+| **Projects root** | `~/vsnp3/projects` | Where your analyses will be saved. **Browse…** picks a folder on the server |
 
-**Electron users**: Click the folder icon next to each path field to open a native folder picker dialog.
+**Electron users**: Click **Choose** next to each path field to open a native folder picker dialog.
 
 ### Step 2.2: Save and verify
 
-1. Click **Save**
-2. Click **Preflight**
+1. Click **Save & Refresh**
+2. Check for a green ✓ beside **vSNP3 path** and **Projects root**. A red ✗ means the folder was not found (or, for Projects root, cannot be written); fix the path and click **Save & Refresh** again
 
-You should see: `Checked: pandas, Bio | Missing: none`
-
-If you see missing dependencies:
+There is no separate Preflight button. If a run later fails because pandas or Bio is missing, install them:
 ```bash
 conda install -n vsnp3 pandas biopython -y
 ```
@@ -143,7 +140,7 @@ You should see: `Imported 8 | Ref: mtbc0_v1.1`, and below it `This run compares 
 
 ### Step 3.3: Run Step 2
 
-1. Verify **Step 2 Options** shows **Reference:** `mtbc0_v1.1`
+1. Verify the **Reference:** badge just above **Run** shows `mtbc0_v1.1`
 2. Click **Run**
 3. Watch the **Live Logs** panel for progress
 
@@ -175,10 +172,12 @@ Now let's run a complete analysis from raw reads.
 
 ### Step 4.2: Add FASTQ files
 
-**Option A: Link local files**
-1. In **Inputs** → "Bring Your Own FASTQ"
-2. Enter the path to a folder containing `*.fastq.gz` files
-3. Click **Link Local Files**
+**Option A: Link FASTQs already on the server**
+1. In **Inputs** → **Add local FASTQ**, click **Browse server files…**
+2. Go to the folder holding your `*.fastq.gz` files (type a path and click **Go**, or use **↑ Up**)
+3. Click **Link all FASTQs in this folder**, or tick some files and click **Link N selected**
+
+The files are symlinked into the project's `download/` folder, not copied. You can also pick another project's `download/` folder from the **Pick a folder on the server…** list, or choose **Custom path…** there, type a path and click **Link**. In the Electron app, click **Choose Folder** instead. To copy files in from your own computer, use **Choose Files** or drag them onto the box under it.
 
 **Option B: Download from SRA**
 1. In **Inputs** → "SRA Download"
@@ -206,15 +205,14 @@ Monitor progress:
 
 ### Step 4.4: Review QC
 
-After Step 1 completes:
+After Step 1 completes, the **Step 1 Results** panel fills in by itself (click **Refresh** there to re-read it):
 
-1. Click **Refresh** in QC Summary
-2. Review metrics:
+1. Review metrics:
    - **Avg Depth** - Target >40X (flagged if <40)
    - **Dup %** - Target <80%
-   - **R1/R2 Q20** - Target >50%
-3. Check **Exclude** box for poor samples
-4. Click **Save Exclusions**
+   - **R1 Q20** / **R2 Q20** - Target >50%
+   - Tick **Show only flagged samples** to see just the ones that miss a threshold
+2. Tick the **Exclude** box for poor samples. Each tick saves on its own (the panel shows `Exclusions saved ✓`), and Step 2 leaves those samples out
 
 ### Step 4.5: Run Step 2
 
@@ -236,20 +234,20 @@ Results appear in **Step 2 Results**:
 
 | Output | Description |
 |--------|-------------|
-| `all_vcf_*.html` | Interactive summary |
-| `*_cascade.xlsx` | SNP matrix (evolutionary sorting) |
-| `*_tree.tre` | Newick tree file |
+| `vSNP_step2_summary-*.html` | Interactive summary |
+| `*_cascade1_table-*.xlsx` | SNP matrix (evolutionary sorting) |
+| `*.tre` | Newick tree file |
 | Group folders | Per-clade breakdowns (if defining SNPs exist) |
 
-Click **Open** to view any file in your default application.
+Click **View** to open the summary in the browser, or **DL** to download a file.
 
 ---
 
 ## Troubleshooting
 
-### "Preflight failed"
-- Verify vSNP3 path points to the correct conda environment directory
-- Run: `conda install -n vsnp3 pandas biopython`
+### Red ✗ beside a path in Settings, or a missing Python package
+- Verify vSNP3 path points to the correct conda environment directory, then click **Save & Refresh**
+- If a run reports pandas or Bio missing, run: `conda install -n vsnp3 pandas biopython`
 
 ### "No FASTQ files found"
 - Check your path contains `*.fastq.gz` files
@@ -260,7 +258,7 @@ Click **Open** to view any file in your default application.
 - Create separate projects for different organisms
 
 ### Step 1 stuck or errored
-- Click **View log** for the specific sample
+- Click **View log** next to the sample in the Step 1 panel's sample list
 - Check for disk space, memory issues
 - Re-run just the failed samples
 

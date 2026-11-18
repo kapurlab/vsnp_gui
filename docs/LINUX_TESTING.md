@@ -18,13 +18,13 @@ cd vsnp_gui
 
 4) Verify:
 - Backend: http://127.0.0.1:8000/api/health
-- Frontend: http://localhost:5173
-- Browser opens via `xdg-open`
+- Frontend: http://localhost:5173 (open it in your browser; the script does not open one for you)
 
-5) File open test
-- In Step 2 Results, click **Open** and confirm the file opens
+5) File view and download test
+- In Step 2 Results, click **View** on the summary `.html` and confirm it opens in a new browser tab
+- Click **DL** on a file and confirm it downloads
 
 6) Report back
 - OS + version
 - Errors (if any)
-- Whether `xdg-open` worked
+- Whether **View** and **DL** worked

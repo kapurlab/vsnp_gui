@@ -154,7 +154,7 @@ This project includes comprehensive documentation based on the vSNP3 pipeline (S
   - Port conflicts
   - Dependency issues
 - Configuration Issues
-  - Preflight failures
+  - vSNP3 path problems
   - Missing packages
   - Reference problems
 - Step 1 Issues

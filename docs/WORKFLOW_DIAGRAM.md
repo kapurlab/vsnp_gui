@@ -10,11 +10,11 @@
 │  1. Configure Settings                                               │
 │     ├─ vSNP3 path                                                   │
 │     ├─ Projects root                                                │
-│     ├─ Conda environment                                            │
-│     └─ Save                                                          │
-│                                                                       │
-│  2. Run Preflight Check                                             │
-│     └─ Verify: pandas, biopython installed                           │
+│     └─ Save & Refresh                                               │
+│                                                                      │
+│  2. Check the mark beside each path                                   │
+│     ├─ ✓ = folder found                                             │
+│     └─ ✗ = fix the path, Save & Refresh again                        │
 │                                                                       │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
@@ -41,12 +41,12 @@
 │  Choose ONE of three methods:                                        │
 │                                                                       │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐ │
-│  │  Link Local      │  │  Upload/Drag     │  │  SRA Download    │ │
-│  │  Files           │  │  & Drop          │  │                  │ │
+│  │  Link FASTQs     │  │  Upload/Drag     │  │  SRA Download    │ │
+│  │  on the server   │  │  & Drop          │  │                  │ │
 │  ├──────────────────┤  ├──────────────────┤  ├──────────────────┤ │
-│  │ Enter path to    │  │ Select or drag   │  │ Enter accessions │ │
-│  │ FASTQ directory  │  │ FASTQ.GZ files   │  │ (SRR/ERR/DRR)   │ │
-│  │                  │  │                  │  │                  │ │
+│  │ Browse server    │  │ Select or drag   │  │ Enter accessions │ │
+│  │ files…, or pick  │  │ FASTQ.GZ files   │  │ (SRR/ERR/DRR)   │ │
+│  │ a folder → Link  │  │                  │  │                  │ │
 │  │ Creates symlinks │  │ Copies files     │  │ Downloads from   │ │
 │  │ (saves space)    │  │ to project       │  │ NCBI/ENA        │ │
 │  └──────────────────┘  └──────────────────┘  └──────────────────┘ │
@@ -131,7 +131,7 @@
 │                         QUALITY CONTROL REVIEW                       │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                       │
-│  QC Summary Table:                                                   │
+│  Step 1 Results:                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐   │
 │  │ Sample  │ AvgDepth │ ZeroCov │ Dup% │ R1Q20 │ R2Q20 │ SNPs│   │
 │  ├─────────┼──────────┼─────────┼──────┼───────┼───────┼─────┤   │
@@ -155,9 +155,9 @@
 │  Actions:                                                            │
 │  ┌────────────────────────────────────────────────────────┐         │
 │  │ ☑ Show only flagged samples                            │         │
-│  │ ☐ Sample4  [Exclude from Step 2]                       │         │
+│  │ ☐ Sample4  [Exclude]  (each tick saves itself)         │         │
 │  │                                                          │         │
-│  │ [Download CSV] [Save Exclusions] [Refresh]             │         │
+│  │ [Refresh] [Download CSV] [Download XLSX]               │         │
 │  └────────────────────────────────────────────────────────┘         │
 │                                                                       │
 └─────────────────────────────────────────────────────────────────────┘

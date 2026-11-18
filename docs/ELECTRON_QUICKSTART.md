@@ -18,12 +18,11 @@ This starts:
 - Electron app pointing at the dev server
 
 ## 3) First run settings
-In **Settings**, use **Choose** buttons to pick:
-- vSNP3 path
+In **Settings**, use the **Choose** button beside each field to pick:
+- vSNP3 path (the vSNP3 conda environment directory, e.g. `~/miniconda3/envs/vsnp3`)
 - Projects root
-- vSNP3 path (conda environment directory, e.g. `~/miniconda3/envs/vsnp3`)
 
-Click **Save** and **Preflight**.
+Click **Save & Refresh** and check for a ✓ beside each path.
 
 ## 4) Try the bundled demo VCFs
 For a quick Step 2 demo (needs the `mtbc0_v1.1` reference):
@@ -36,5 +35,5 @@ Full walkthrough: [QUICKSTART.md](QUICKSTART.md), Part 3.
 
 ## 5) Troubleshooting
 - If the Electron window is blank, check that the frontend dev server is running.
-- If Preflight fails, install dependencies in the vSNP3 environment:
+- If a run fails because a Python package (pandas or Bio) is missing, install them in the vSNP3 environment:
   - `conda install -n vsnp3 pandas biopython`

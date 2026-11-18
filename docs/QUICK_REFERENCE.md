@@ -15,15 +15,13 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 ## ⚙️ Initial Setup (One-Time)
 
 1. **Settings Panel:**
-   - vSNP3 path: `/path/to/vsnp3`
+   - vSNP3 path: `~/miniconda3/envs/vsnp3` (the vSNP3 conda environment)
    - Projects root: `/path/to/projects`
-   - vSNP3 path: `~/miniconda3/envs/vsnp3`
-   - Click **Save**
+   - Click **Save & Refresh**
 
-2. **Preflight Check:**
-   - Click **Preflight**
-   - Should show: `Missing: none`
-   - If missing packages: `conda install -n vsnp3 pandas biopython`
+2. **Check:**
+   - A green ✓ beside each path means it was found; a red ✗ means fix the path and save again
+   - If a run reports missing packages: `conda install -n vsnp3 pandas biopython`
 
 ---
 
@@ -31,8 +29,8 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 
 1. **Create:** Enter name → **Create**
 2. **Add Files:** Choose one:
-   - **Link Local:** Path → **Link Local Files**
-   - **Upload:** Drag files to dropzone
+   - **Link server FASTQs:** **Browse server files…** → go to the folder → **Link all FASTQs in this folder** (Electron: **Choose Folder**)
+   - **Upload:** **Choose Files**, or drag files onto the drop box
    - **SRA:** Accessions (one/line) → **Download**
 
 ---
@@ -65,11 +63,11 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 | **R1/R2 Q20** | >50% | <50% | Poor sequencing |
 | **Quality SNPs** | Varies | >10% genome | Wrong reference |
 
-### Actions
-- ✅ **Download CSV** - Export QC data
-- ✅ **Show flagged** - Filter poor samples
-- ✅ **Exclude** - Check boxes → **Save Exclusions**
-- ✅ **View log** - Sample-specific details
+### Actions (Step 1 Results panel)
+- ✅ **Download CSV** / **Download XLSX** - Export QC data
+- ✅ **Show only flagged samples** - Filter poor samples
+- ✅ **Exclude** - Tick the box; it saves on its own (`Exclusions saved ✓`)
+- ✅ **View log** (Step 1 sample list) or **Files** → **Stats** - Sample-specific details
 
 ---
 
@@ -204,7 +202,7 @@ SampleName_1.fastq.gz + SampleName_2.fastq.gz
 
 ## 📖 References
 
-- **Full User Guide:** `USER_GUIDE.md`
+- **Full User Guide:** `USER_GUIDE_COMPREHENSIVE.md`
 - **Alpha Testing:** `ALPHA_TESTING.md`
 - **vSNP3 Paper:** https://pmc.ncbi.nlm.nih.gov/articles/PMC11143592/
 - **GitHub:** https://github.com/USDA-VS/vSNP3
@@ -213,9 +211,9 @@ SampleName_1.fastq.gz + SampleName_2.fastq.gz
 
 ## 🔑 Keyboard Shortcuts
 
-- **Hide/Show sections:** Click section headers
+- **Hide/Show sections:** Click **Hide** / **Show** beside a section heading
 - **Scroll:** Page Up/Down, Arrow keys
-- **Refresh QC:** After Step 1 completes
+- **Re-read QC:** **Refresh** in Step 1 Results (it also refreshes by itself when Step 1 finishes)
 
 ---
 

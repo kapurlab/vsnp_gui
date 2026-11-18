@@ -117,24 +117,21 @@ Navigate to the **Settings** panel and enter:
 
 | Setting | Example | Description |
 |---------|---------|-------------|
-| **vSNP3 path** | `/Users/yourname/vsnp3` | Directory containing `bin/vsnp3_step1.py` |
+| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts (`bin/vsnp3_step1.py`) and Python runtime |
 | **Projects root** | `/Users/yourname/vsnp3/projects` | Where project folders will be created |
-| **vSNP3 path** | `~/miniconda3/envs/vsnp3` | Conda environment directory containing vSNP3 scripts and Python runtime |
 
-Click **Save Settings**
+Click **Save & Refresh**
 
-**Step 3: Run Preflight Check**
+**Step 3: Check the paths**
 
-1. Click the **Preflight** button
-2. Verify output shows:
-   ```
-   Checked: pandas, Bio | Missing: none
-   ```
-3. If packages are missing, install them (see Prerequisites above)
-4. ✅ Green "All good" indicator means you're ready!
+1. Look for a green ✓ beside **vSNP3 path** and **Projects root**
+2. A red ✗ means the folder was not found (or, for Projects root, cannot be written). Fix the path and click **Save & Refresh** again
+3. When both are set, the yellow **Setup required** banner goes away and the action buttons enable
+
+There is no separate Preflight button. If a run later fails because pandas or Bio is missing, install them (see Prerequisites above).
 
 **Troubleshooting Setup:**
-- If preflight fails, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+- If a path stays ✗ or a package is missing, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 - For alpha testing setup, see [ALPHA_TESTING.md](ALPHA_TESTING.md)
 
 ---
@@ -152,7 +149,8 @@ A project is a self-contained analysis workspace containing:
 **How to create:**
 1. Navigate to **Projects** panel
 2. Enter a descriptive project name
-3. Click **Create**
+3. Optionally pick the project's reference in the **-- reference (optional) --** list
+4. Click **Create**
 
 **Naming Guidelines:**
 - ✅ Use descriptive names: `TB_Outbreak_Hospital_Feb2026`
@@ -185,16 +183,14 @@ ProjectName/
 ### Managing Projects
 
 **Archive a Project:**
-1. Click **Archive** next to project name
-2. Project renamed to `{ProjectName}_archived`
+1. Click **Archive** next to project name, then confirm
+2. The project folder moves into `projects_archive/`
 3. Frees up space in active projects list
 4. Data preserved for long-term storage
 
 **Delete a Project:**
-1. Click **Delete** next to project name
-2. ⚠️ **Warning:** This is permanent! Cannot be undone!
-3. All files in the project directory are removed
-4. Consider archiving first
+- There is no Delete button. Archive is reversible; deleting a project removes every read, alignment and result in it, so it is done deliberately from the command line
+- ⚠️ **Warning:** Deleting is permanent and cannot be undone. Consider archiving instead
 
 **Best Practices:**
 - Archive completed projects regularly
@@ -208,16 +204,21 @@ ProjectName/
 
 The GUI supports three methods for adding FASTQ sequencing data:
 
-### Method 1: Link Local Files
+### Method 1: Link FASTQs Already on the Server
 
-**When to use:** You have FASTQ files already on your computer/server
+**When to use:** You have FASTQ files already on the computer/server running the GUI
 
 **Steps:**
-1. Navigate to **Inputs** → **Bring Your Own FASTQ**
-2. Enter the **full path** to your FASTQ directory
+1. Navigate to **Inputs** → **Add local FASTQ**
+2. Click **Browse server files…**
+   - Go to your FASTQ directory: type its path and click **Go**, or use **↑ Up** and the folder list
    - Example: `/Users/yourname/sequencing_data/run_2026_02/`
-   - ⚠️ Use absolute paths, not relative (`~/` may not work)
-3. Click **Link Local Files**
+3. Click **Link all FASTQs in this folder**, or tick individual files and click **Link N selected**
+
+**Other ways to pick the folder:**
+- **Pick a folder on the server…** lists other projects' `download/` folders; choosing one links it straight away
+- In the same list, **Custom path…** opens a box: type the **full path** and click **Link** (⚠️ use absolute paths, not relative; `~/` may not work)
+- In the Electron app, click **Choose Folder** and pick the folder
 
 **What happens:**
 - GUI creates **symbolic links** to `*.fastq.gz` files
@@ -248,9 +249,9 @@ The GUI supports three methods for adding FASTQ sequencing data:
 **When to use:** You want to copy files into the project
 
 **Steps:**
-1. Navigate to **Inputs** → **Upload / Drag & Drop**
+1. Navigate to **Inputs** → **Add local FASTQ** → the **…or upload / drag & drop** box
 2. Either:
-   - **Click** "Choose Files" and select FASTQ files
+   - **Click** **Choose Files** and select FASTQ files
    - **Drag** files from Finder directly onto the dropzone
 
 **What happens:**
@@ -462,7 +463,7 @@ For each sample, you get:
 
 **2. Quality Metrics (`*_stats.xlsx`)**
 - Excel file with comprehensive QC data
-- Used for QC Summary table
+- Used for the Step 1 Results (QC summary) table
 - Contains ~30 metrics
 
 **3. BAM Files (`*_nodup.bam` + `.bai`)**
@@ -488,13 +489,13 @@ For each sample, you get:
 
 ## 6. Quality Control & Metrics
 
-### QC Summary Table
+### QC Summary Table (Step 1 Results panel)
 
-After Step 1 completes, the **QC Summary** panel displays metrics for all samples.
+After Step 1 completes, the **Step 1 Results** panel displays metrics for all samples.
 
 **How to access:**
-1. Step 1 must be complete (all samples green status)
-2. Click **Refresh** in QC Summary panel
+1. Select the project; the table loads by itself, and reloads when a Step 1 run finishes
+2. Click **Refresh** in the Step 1 Results panel to re-read it at any time
 3. Table populates with metrics from `*_stats.xlsx` files
 
 ### Critical Quality Metrics
@@ -598,27 +599,29 @@ After Step 1 completes, the **QC Summary** panel displays metrics for all sample
 3. Verify sample identity (mix-up?)
 4. Run Kraken to check for contamination
 
-### Using the QC Summary Interface
+### Using the Step 1 Results Panel
 
 **Filter Flagged Samples:**
 1. Check ☑ **Show only flagged samples**
 2. Table shows only samples failing QC thresholds
 3. Review why each sample is flagged
 
+The **Filter samples…** box and the **Run date** filter (**Today**, **Last 7d**, **Last 30d**, **Clear dates**) narrow the table further.
+
 **Exclude Poor Quality Samples:**
 1. Check boxes in **Exclude** column for samples to remove
-2. Click **Save Exclusions**
-3. Creates `step2/remove_from_analysis.xlsx`
+2. Each tick saves on its own; the panel shows `Saving exclusions…` and then `Exclusions saved ✓` (if it shows **Exclusion save failed — Retry**, click it)
+3. The list is kept in the project's `step2/` folder
 4. These samples won't be included in Step 2 analysis
 
 **Download QC Data:**
-- Click **Download CSV** button
-- Exports complete QC table
+- Click **Download CSV** or **Download XLSX**
+- Exports the QC table, limited to the name and run-date filters if you set them
 - Use for reports, publications, or further analysis in Excel/R
 
-**View Sample-Specific Logs:**
-- Click **View log** button next to any sample
-- Opens detailed `run_step1.log` in viewer
+**View Sample-Specific Logs and Files:**
+- In the **Step 1** panel's sample list, click **View log** next to any sample to open its Step 1 log
+- In Step 1 Results, click **Files** on a row for **Open Folder**, **IGV**, **Edit VCF** and **Stats**
 - Review processing steps and any warnings/errors
 
 ---
@@ -1043,7 +1046,7 @@ SNP tables include annotation columns:
    - Check sample status indicators
 
 3. **After Step 1 Complete:**
-   - Review QC Summary table
+   - Review the Step 1 Results table
    - Filter flagged samples
    - Investigate outliers:
      - Very high/low SNP count
@@ -1055,7 +1058,7 @@ SNP tables include annotation columns:
 4. **Before Step 2:**
    - Verify reference lock (single reference)
    - Confirm VCF count matches expectations
-   - Save exclusions if any
+   - Check Step 1 Results shows `Exclusions saved ✓` if you excluded any samples
 
 5. **After Step 2:**
    - Review SNP matrix for patterns
@@ -1224,8 +1227,8 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to:
 **Initial Setup (Once):**
 - [ ] Install vSNP3 in conda environment
 - [ ] Install pandas, biopython
-- [ ] Configure GUI settings
-- [ ] Run preflight check (all good)
+- [ ] Configure GUI settings and click Save & Refresh
+- [ ] Green ✓ beside vSNP3 path and Projects root
 
 **Per-Project Workflow:**
 - [ ] Create new project
@@ -1233,7 +1236,7 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to:
 - [ ] Click Grab ready-to-run samples in Step 1
 - [ ] Select reference (auto-detect or manual)
 - [ ] Run Step 1
-- [ ] Review QC Summary
+- [ ] Review Step 1 Results (QC)
 - [ ] Exclude poor quality samples
 - [ ] Click Build comparison set in Step 2
 - [ ] Verify reference lock (single reference)

@@ -133,9 +133,9 @@ and is rebuilt on demand:
 rm -rf ~/.cache/vsnp_gui/xlsx_preview
 ```
 
-### Issue: Preflight fails with missing packages
+### Issue: Python packages missing (pandas, Bio)
 
-**Error:** `Missing: pandas` or `Missing: Bio`
+**Error:** a run's log shows `ModuleNotFoundError: No module named 'pandas'` (or `'Bio'`). The GUI has no separate Preflight button; this shows up when a step runs.
 
 **Solution:**
 ```bash
@@ -325,9 +325,9 @@ cat kraken_report.txt | head -20
 4. Consider excluding sample from Step 2 analysis
 5. If biological (co-infection), document in report
 
-### Issue: QC Summary shows "No stats loaded yet"
+### Issue: Step 1 Results shows "No stats loaded yet"
 
-**Symptoms:** QC table is empty after Step 1 completes
+**Symptoms:** QC table in the Step 1 Results panel is empty after Step 1 completes (click **Refresh** there first)
 
 **Possible causes:**
 1. Step 1 didn't complete successfully
@@ -447,7 +447,7 @@ ls step2/*.html step2/*.xlsx step2/*.tre
 
 ### Issue: FASTQ files not linking
 
-**Symptoms:** Link Local Files runs but no files appear in download/
+**Symptoms:** Linking from **Inputs** → **Add local FASTQ** (**Browse server files…** → **Link all FASTQs in this folder**, or **Custom path…** → **Link**) finishes but no files appear in download/
 
 **Possible causes:**
 1. Path incorrect
@@ -667,7 +667,7 @@ it is only a cache, and deleting it costs one slower first visit.
 
 ### `Reference type is required for Step 2`
 
-**Solution:** Select reference in Step 2 panel (should auto-populate from Step 1)
+**Solution:** Step 2 has no reference selector. It uses the project's reference (picked when the project was created), or else the one reference all of the project's Step 1 samples were run against; the **Reference:** badge above **Run** shows which. If the badge is missing, the Step 1 samples used more than one reference or none: run them against a single reference, or create the project with a reference
 
 ### `No FASTQ files found`
 

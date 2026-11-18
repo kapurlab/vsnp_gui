@@ -76,7 +76,7 @@ On first launch, a yellow banner appears and all actions are disabled until you 
 | vSNP3 path | `~/miniconda3/envs/vsnp3` | Path to the vSNP3 conda environment (contains scripts, references, and runtime) |
 | Projects root | `~/vsnp3/projects` | Where project data is stored |
 
-Click **Save** → **Preflight** (banner disappears, buttons enable)
+Click **Save & Refresh**. A ✓ beside each path means it was found; the banner disappears and the buttons enable.
 
 ### 3. Try the demo (no FASTQ needed)
 
@@ -95,10 +95,10 @@ FASTQ → Step 1 (align + call) → QC Review → Step 2 (tree + matrix)
 ```
 
 1. **Create project** - Organizes your analysis
-2. **Add inputs** - Link local FASTQ or download from SRA
+2. **Add inputs** - Link FASTQs already on the server, upload them, or download from SRA
 3. **Step 1: Grab ready-to-run samples** - Copies the downloaded FASTQs into Step 1, one folder per sample
 4. **Step 1 Run** - Aligns reads, calls SNPs (per sample)
-5. **QC Summary** - Review metrics, exclude bad samples
+5. **Step 1 Results** - Review QC metrics, exclude bad samples
 6. **Step 2: Build comparison set** - Gathers the VCFs to compare into step2/vcf_database
 7. **Step 2 Run** - Build phylogenetic tree and SNP matrices
 

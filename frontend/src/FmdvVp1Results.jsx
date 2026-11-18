@@ -134,6 +134,9 @@ export default function FmdvVp1Results({
                         const base = run?.path ? run.path.replace(/\/step2\/.*$/, "") : "";
                         const dir = base ? `${base}/step1/${s}` : "";
                         if (!dir) return "-";
+                        // An imported sequence has no report yet: the report
+                        // scripts take folders with a chooser result.
+                        if (fmdvInfo?.imports?.[s]) return <span className="muted" title="Imported sequence, no reads: no report is written for it yet.">imported</span>;
                         return (<>
                           <button className="ghost" onClick={() => viewInline(`${dir}/${s}_FMDV_report.html`)} title="Open the HTML report in a new tab">HTML</button>{" "}
                           <button className="ghost" onClick={() => downloadOutput(`${dir}/${s}_FMDV_report.pdf`, `${s}_FMDV_report.pdf`)} title="Download the PDF">PDF</button>

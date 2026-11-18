@@ -13,11 +13,16 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
   const [msg, setMsg] = useState("");
   const pollRef = useRef(null);
 
-  // Serotypes present among the samples Step 1 placed, with counts.
+  // Serotypes present among the samples Step 1 placed, plus the sequences
+  // imported without reads (their serotype is the one entered at import),
+  // with counts.
   const serotypes = useMemo(() => {
     const n = {};
     for (const c of Object.values(fmdvInfo?.chosen || {})) {
       if (c?.serotype) n[c.serotype] = (n[c.serotype] || 0) + 1;
+    }
+    for (const [name, imp] of Object.entries(fmdvInfo?.imports || {})) {
+      if (imp?.serotype && !fmdvInfo?.chosen?.[name]) n[imp.serotype] = (n[imp.serotype] || 0) + 1;
     }
     // Most samples first, so the default tree is the one most of the run is in.
     return Object.entries(n).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));

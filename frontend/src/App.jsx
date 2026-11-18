@@ -5191,14 +5191,14 @@ export default function App() {
     setSraJobId(data.job_id);
   }
 
-  async function importVcfs() {
+  async function importVcfs(folders = vcfDbFolders) {
     if (!selectedProject || !settingsReady) return;
     // Auto-populate from enabled vcfDbFolders matching the selected reference.
     // The picker UI already filters to importReference for display, but the
     // underlying state holds every shared+user DB. Without the reference
     // filter here, e.g. selecting NC_045512_wuhan-hu-1 still pulls in the
     // mtbc0_v1.1 DBs because they're "enabled by default."
-    const enabledPaths = vcfDbFolders
+    const enabledPaths = (Array.isArray(folders) ? folders : vcfDbFolders)
       .filter((f) => f.enabled && (f.reference || "") === importReference)
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
@@ -5616,7 +5616,24 @@ export default function App() {
   // no database compares the project alone.
   async function buildComparisonSet() {
     if (!selectedProject || !settingsReady) return;
-    const dbPaths = step2AvailablePanels.filter((p) => p.enabled).map((p) => p.path);
+    // Ask the backend which databases are ticked instead of trusting the
+    // page's copy. A tick is saved by its own request, and Build pressed
+    // right behind it read the list from before the tick, so the database
+    // just ticked added nothing until Build was pressed a second time.
+    let folders = vcfDbFolders;
+    try {
+      const res = await fetch(`${API_BASE}/api/vcf-db-folders`);
+      if (res.ok) {
+        folders = (await res.json()) || [];
+        setVcfDbFolders(folders);
+      }
+    } catch (e) {
+      // Unreachable backend: fall through with the page's list; the import
+      // call below reports the failure.
+    }
+    const dbPaths = folders
+      .filter((f) => f.enabled !== false && (f.reference || "") === importReference)
+      .map((f) => f.path);
     if (!step2UseVcfDb && !dbPaths.length && !parseAccessions(importSourcesText).length) {
       setImportStatus("Nothing selected — tick this project's samples, a reference database, or both.");
       return;
@@ -5624,7 +5641,7 @@ export default function App() {
     setImportStatus("");
     if (step2UseVcfDb) await step2Setup();
     if (dbPaths.length || parseAccessions(importSourcesText).length) {
-      await importVcfs();
+      await importVcfs(folders);
     } else {
       setStep2BuiltAt(new Date().toISOString());
       await loadVcfSourceSamples();

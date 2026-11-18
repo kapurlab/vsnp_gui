@@ -7027,6 +7027,34 @@ def step2_setup(project: str):
     # cleanup: once a wrong-reference VCF has been dropped from the set, the
     # sample disappears from the set's own contents, and with it the user's
     # list of what still has to be re-run or deleted at the command line.
+    # The ticked reference databases for this reference come in with the same
+    # Build. The GUI used to post import-vcfs for them straight after setup;
+    # a caller of the API alone then had Run refuse every panel name as "not
+    # in the comparison set". Only folders tagged with a reference that
+    # matches are copied: an untagged legacy folder is left to the importer,
+    # which asks before it mixes references. A name already in the database
+    # is kept, so a project sample wins over a panel copy of the same name.
+    panel_copied = 0
+    if project_reference:
+        for folder in _resolved_vcf_db_folders(cfg):
+            if not folder.get("enabled"):
+                continue
+            fref = folder.get("reference", "") or ""
+            if not fref or not _refs_match(fref, project_reference, True):
+                continue
+            folder_path = Path(folder.get("path", ""))
+            if not folder_path.is_dir():
+                continue
+            for src in sorted(list(folder_path.glob("*_zc.vcf")) + list(folder_path.glob("*_zc.vcf.gz"))):
+                if src.name in in_db:
+                    continue
+                try:
+                    shutil.copy2(src, step2_dir / src.name)
+                except OSError as e:
+                    logger.warning("step2/setup: could not copy panel VCF %s: %s", src, e)
+                    continue
+                in_db[src.name] = False
+                panel_copied += 1
     prior_ignored: set = set()
     try:
         prior = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
@@ -7134,6 +7162,8 @@ def step2_setup(project: str):
         # kept for back-compat with older callers:
         "skipped_excluded": excluded,
         "preserved": preserved,
+        # Reference-database VCFs this Build brought into the set.
+        "panel_copied": panel_copied,
     }
 
 

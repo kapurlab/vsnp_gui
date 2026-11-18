@@ -2242,3 +2242,13 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
   margin-bottom: 0.7em;
 }
 .page-ask-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.page-ask input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  margin-bottom: 0.7em;
+}
+.page-ask textarea.page-ask-copy {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.85em;
+}

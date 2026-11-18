@@ -11,6 +11,7 @@ import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
 import Elapsed from "./Elapsed.jsx";
+import { askOnPage, PageAskHost } from "./pageAsk.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
 import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolveList,
@@ -93,7 +94,7 @@ function BusyButton({ onClick, busyLabel, children, disabled, onError, ...rest }
           await onClick(e);
         } catch (err) {
           if (onError) onError(err);
-          else window.alert(err?.message || String(err));
+          else askOnPage({ notice: true, message: err?.message || String(err) });
         } finally {
           if (mounted.current) setBusy(false);
         }
@@ -440,7 +441,7 @@ async function copyToClipboard(text) {
   let ok = false;
   try { ok = document.execCommand("copy"); } catch { ok = false; }
   document.body.removeChild(area);
-  if (!ok) window.prompt("The browser would not copy it — select and copy it here:", text);
+  if (!ok) askOnPage({ title: "Copy", message: "The browser would not copy it — select and copy it here:", copyText: text });
   return ok;
 }
 
@@ -1273,32 +1274,6 @@ export default function App() {
   // which never land in download/ and so leave no other on-screen trace — stay
   // visible when working through hundreds of samples.
   const [sraReport, setSraReport] = useState({ downloaded: [], already_in_step1: [], failed: [] });
-  // In-page questions for the Reference Editor's edits. A browser may decline
-  // to show window.prompt / confirm / alert, and then answers "cancelled"
-  // without showing anything: an edit asked for its rationale that way and
-  // quietly did nothing (2026-11-18). A dialog the page draws itself cannot be
-  // suppressed. askOnPage resolves to the typed text (or null) when it asks for
-  // a rationale, otherwise true / false; notice: true shows a message with OK.
-  const [pageAsk, setPageAsk] = useState(null);
-  const pageAskPending = useRef(null);
-  function askOnPage({ title = "", message = "", rationale = false, okLabel = "OK",
-                       cancelLabel = "Cancel", notice = false }) {
-    return new Promise((resolve) => {
-      // A second question replaces the first, which counts as cancelled.
-      const prev = pageAskPending.current;
-      if (prev) prev.resolve(prev.rationale ? null : false);
-      pageAskPending.current = { resolve, rationale };
-      setPageAsk({ title, message, rationale, okLabel, cancelLabel, notice, value: "" });
-    });
-  }
-  function answerPageAsk(ok, value = "") {
-    const pending = pageAskPending.current;
-    pageAskPending.current = null;
-    setPageAsk(null);
-    if (!pending) return;
-    pending.resolve(pending.rationale ? (ok ? value : null) : !!ok);
-  }
-
   // Item 6: Reference Editor
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
@@ -2348,7 +2323,7 @@ export default function App() {
 
   async function addVcfDbFolder(path, reference) {
     if (!reference) {
-      alert("Select a reference before adding a custom VCF folder — VCFs are reference-dependent.");
+      askOnPage({ notice: true, message: "Select a reference before adding a custom VCF folder — VCFs are reference-dependent." });
       return;
     }
     try {
@@ -2362,10 +2337,10 @@ export default function App() {
         setVcfDbFolders(data || []);
       } else {
         const err = await res.json().catch(() => ({}));
-        alert(`Failed to add VCF folder: ${err.detail || res.statusText}`);
+        askOnPage({ notice: true, message: `Failed to add VCF folder: ${err.detail || res.statusText}` });
       }
     } catch (e) {
-      alert(`Cannot reach backend to add VCF folder. Is the backend running?\n\n${e.message}`);
+      askOnPage({ notice: true, message: `Cannot reach backend to add VCF folder. Is the backend running?\n\n${e.message}` });
     }
   }
 
@@ -3384,7 +3359,7 @@ export default function App() {
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
-      window.alert(`Could not create project: ${detail.detail || res.status}`);
+      askOnPage({ notice: true, message: `Could not create project: ${detail.detail || res.status}` });
       return;
     }
     setNewProjectName("");
@@ -3419,7 +3394,7 @@ export default function App() {
   }
 
   async function archiveProject(name) {
-    if (!window.confirm(`Archive project "${name}" to projects_archive?`)) return;
+    if (!(await askOnPage({ okLabel: "Archive", message: `Archive project "${name}" to projects_archive?` }))) return;
     await fetch(`${API_BASE}/api/projects/${name}/archive`, { method: "POST" });
     // An archived selection is no longer listed, so the first project is selected.
     await refreshProjects();
@@ -4140,16 +4115,14 @@ export default function App() {
       });
       if (!res.ok) {
         const msg = await res.json().catch(() => ({}));
-        window.alert(`Could not repair the comparison set: ${msg.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not repair the comparison set: ${msg.detail || `HTTP ${res.status}`}` });
         return;
       }
       const data = await res.json();
       if (data.audit) setStep2RefAudit(data.audit);
       if (data.skipped && data.skipped.length) {
-        window.alert(
-          `${data.skipped.length} sample(s) were skipped — the audit no longer lists them ` +
-          `under this action, or the file could not be written:\n\n${data.skipped.slice(0, 20).join("\n")}`
-        );
+        askOnPage({ notice: true, message: `${data.skipped.length} sample(s) were skipped — the audit no longer lists them ` +
+          `under this action, or the file could not be written:\n\n${data.skipped.slice(0, 20).join("\n")}` });
       }
       // The set changed on disk: re-pull the counts and the browse list.
       await loadVcfSourceSamples();
@@ -4511,7 +4484,7 @@ export default function App() {
     if (!res.ok) {
       const msg = await res.json().catch(() => ({}));
       setPosthocRunError(msg.detail || "Failed to start SNP analysis");
-      window.alert(msg.detail || "Failed to start SNP analysis");
+      askOnPage({ notice: true, message: msg.detail || "Failed to start SNP analysis" });
       return;
     }
     loadPosthocStatuses([{ name: groupName }], { merge: true });
@@ -4548,10 +4521,8 @@ export default function App() {
     try {
       await navigator.clipboard.writeText(text);
     } catch (err) {
-      window.alert(
-        "The browser would not give the page clipboard access — "
-        + "select the list in the box and copy it by hand."
-      );
+      askOnPage({ notice: true, message: "The browser would not give the page clipboard access — "
+        + "select the list in the box and copy it by hand." });
     }
   }
 
@@ -4564,9 +4535,9 @@ export default function App() {
     if (!path) return;
     try {
       await navigator.clipboard.writeText(path);
-      window.alert(`Copied path to clipboard:\n${path}\n\nPaste into the OOD Files app or scp from a terminal.`);
+      askOnPage({ notice: true, message: `Copied path to clipboard:\n${path}\n\nPaste into the OOD Files app or scp from a terminal.` });
     } catch (err) {
-      window.prompt(`Copy this path (${label || "path"}):`, path);
+      askOnPage({ title: "Copy", message: `Copy this path (${label || "path"}):`, copyText: path });
     }
   }
 
@@ -4590,7 +4561,7 @@ export default function App() {
     const res = await fetch(`${API_BASE}/api/bootstrap`, { method: "POST" });
     if (!res.ok) {
       const msg = await res.json();
-      window.alert(msg.detail || "Bootstrap failed to start");
+      askOnPage({ notice: true, message: msg.detail || "Bootstrap failed to start" });
       return;
     }
     const data = await res.json();
@@ -4897,7 +4868,7 @@ export default function App() {
       setCopiedPath(path);
       setTimeout(() => setCopiedPath((c) => (c === path ? "" : c)), 1500);
     } catch (_) {
-      window.prompt("Copy this path:", path);
+      askOnPage({ title: "Copy", message: "Copy this path:", copyText: path });
     }
   }
 
@@ -4911,12 +4882,12 @@ export default function App() {
         body: JSON.stringify({ path }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { window.alert(`Import failed: ${data.detail || res.status}`); return; }
+      if (!res.ok) { askOnPage({ notice: true, message: `Import failed: ${data.detail || res.status}` }); return; }
       if (project === selectedProject) await loadInputs(selectedProject);
       await loadProjData(project);
-      window.alert(data.linked ? `Imported ${data.linked} file into download/. It's now available in the Inputs panel and for Step 1.` : "Already in download/.");
+      askOnPage({ notice: true, message: data.linked ? `Imported ${data.linked} file into download/. It's now available in the Inputs panel and for Step 1.` : "Already in download/." });
     } catch (e) {
-      window.alert(`Import failed: ${e.message}`);
+      askOnPage({ notice: true, message: `Import failed: ${e.message}` });
     }
   }
 
@@ -5072,7 +5043,7 @@ export default function App() {
     const label = groupFiles.length > 1
       ? `${groupFiles.length} paired files (${groupFiles.map((f) => f.name).join(", ")})`
       : groupFiles[0].name;
-    if (!window.confirm(`Delete ${label}? This cannot be undone.`)) return;
+    if (!(await askOnPage({ okLabel: "Delete", message: `Delete ${label}? This cannot be undone.` }))) return;
     for (const f of groupFiles) {
       try {
         const res = await fetch(
@@ -5081,11 +5052,11 @@ export default function App() {
         );
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          window.alert(`Delete of ${f.name} failed: ${err.detail || res.statusText}`);
+          askOnPage({ notice: true, message: `Delete of ${f.name} failed: ${err.detail || res.statusText}` });
           return;
         }
       } catch (e) {
-        window.alert(`Delete of ${f.name} failed: ${e.message}`);
+        askOnPage({ notice: true, message: `Delete of ${f.name} failed: ${e.message}` });
         return;
       }
     }
@@ -5094,7 +5065,7 @@ export default function App() {
 
   async function deleteInput(filename) {
     if (!selectedProject) return;
-    if (!window.confirm(`Delete ${filename}? This cannot be undone.`)) return;
+    if (!(await askOnPage({ okLabel: "Delete", message: `Delete ${filename}? This cannot be undone.` }))) return;
     try {
       const res = await fetch(
         `${API_BASE}/api/projects/${selectedProject}/inputs/${encodeURIComponent(filename)}`,
@@ -5102,11 +5073,11 @@ export default function App() {
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        window.alert(`Delete failed: ${err.detail || res.statusText}`);
+        askOnPage({ notice: true, message: `Delete failed: ${err.detail || res.statusText}` });
         return;
       }
     } catch (e) {
-      window.alert(`Delete failed: ${e.message}`);
+      askOnPage({ notice: true, message: `Delete failed: ${e.message}` });
       return;
     }
     await loadInputs(selectedProject);
@@ -5275,7 +5246,7 @@ export default function App() {
     if (!res.ok) {
       const data = await res.json();
       if (data.detail && data.detail.startsWith("Large import")) {
-        const ok = window.confirm(`${data.detail} Continue?`);
+        const ok = (await askOnPage({ okLabel: "Continue", message: `${data.detail} Continue?` }));
         if (!ok) return;
         payload.confirm_large = true;
         res = await fetch(`${API_BASE}/api/projects/${selectedProject}/import-vcfs`, {
@@ -5310,11 +5281,9 @@ export default function App() {
     // database was NOT included (and can fix its path), while the valid ones did.
     const missing = data.skipped_missing || [];
     if (missing.length) {
-      window.alert(
-        `${missing.length} database path(s) were not found and were SKIPPED (not included):\n\n` +
+      askOnPage({ notice: true, message: `${missing.length} database path(s) were not found and were SKIPPED (not included):\n\n` +
         missing.join("\n") +
-        `\n\nCheck the path for these databases. The other selected databases were imported.`
-      );
+        `\n\nCheck the path for these databases. The other selected databases were imported.` });
     }
     const parts = [
       // "Imported 0" is noise on a rebuild where every reference VCF is already
@@ -5429,7 +5398,7 @@ export default function App() {
       });
     } catch (e) {
       step1DispatchingRef.current = false;
-      window.alert(`Step 1 run failed: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Step 1 run failed: ${e.message || "network error"}` });
       return;
     }
     let data = {};
@@ -5439,7 +5408,7 @@ export default function App() {
       // dispatch failures (and the 409 when a run is already active). Surface
       // that instead of silently swallowing.
       step1DispatchingRef.current = false;
-      window.alert(`Step 1 run failed: ${data.detail || `HTTP ${res.status}`}`);
+      askOnPage({ notice: true, message: `Step 1 run failed: ${data.detail || `HTTP ${res.status}`}` });
       return;
     }
     setJobId(data.job_id);
@@ -5488,9 +5457,7 @@ export default function App() {
     // written — worth a diagnostic lab's attention, never a blocker. This one
     // stays a modal: it is an anomaly, not a routine outcome.
     if (data.provenance_warning) {
-      window.alert(
-        `Step 1 dispatched.\n\n⚠ ${data.provenance_warning}\nThe analysis itself is unaffected.`
-      );
+      askOnPage({ notice: true, message: `Step 1 dispatched.\n\n⚠ ${data.provenance_warning}\nThe analysis itself is unaffected.` });
     }
     // Clear the re-entry guard now that the job is recorded; step1JobStatus is
     // about to read "running" (loadStep1Status), which keeps the button disabled.
@@ -5505,11 +5472,9 @@ export default function App() {
     // hitting /api/jobs/{id}/stop — would silently fail. The project endpoint is
     // restart-resilient (falls back to killing the orphaned wrapper's group).
     if (!selectedProject || step1JobStatus !== "running") return;
-    const ok = window.confirm(
-      "Stop the Step 1 run?\n\n" +
+    const ok = (await askOnPage({ okLabel: "Stop Step 1", cancelLabel: "Keep running", message: "Stop the Step 1 run?\n\n" +
       "Samples that have already finished keep their results. Any samples still " +
-      "running will be terminated and left incomplete — you can re-run them later."
-    );
+      "running will be terminated and left incomplete — you can re-run them later." }));
     if (!ok) return;
     setStep1Stopping(true);
     try {
@@ -5517,10 +5482,10 @@ export default function App() {
       if (!res.ok && res.status !== 409) {
         let data = {};
         try { data = await res.json(); } catch (_) { /* non-JSON body */ }
-        window.alert(`Could not stop Step 1: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not stop Step 1: ${data.detail || `HTTP ${res.status}`}` });
       }
     } catch (e) {
-      window.alert(`Could not stop Step 1: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not stop Step 1: ${e.message || "network error"}` });
     } finally {
       setStep1Stopping(false);
       await loadStep1Status();
@@ -5539,11 +5504,11 @@ export default function App() {
       );
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        window.alert(`Could not remove ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not remove ${sample}: ${data.detail || `HTTP ${res.status}`}` });
         return;
       }
     } catch (e) {
-      window.alert(`Could not remove ${sample}: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not remove ${sample}: ${e.message || "network error"}` });
       return;
     }
     await loadStep1Status();
@@ -5576,14 +5541,14 @@ export default function App() {
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        window.alert(`Could not restore ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not restore ${sample}: ${data.detail || `HTTP ${res.status}`}` });
         return;
       }
       if ((data.skipped || []).length) {
-        window.alert(`Restored ${sample}, but skipped (already in download/): ${data.skipped.join(", ")}`);
+        askOnPage({ notice: true, message: `Restored ${sample}, but skipped (already in download/): ${data.skipped.join(", ")}` });
       }
     } catch (e) {
-      window.alert(`Could not restore ${sample}: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not restore ${sample}: ${e.message || "network error"}` });
       return;
     }
     // Reads are back in download/; a Setup will re-create the Step 1 sample.
@@ -5605,11 +5570,11 @@ export default function App() {
       );
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        window.alert(`Could not delete ${sample}: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not delete ${sample}: ${data.detail || `HTTP ${res.status}`}` });
         return;
       }
     } catch (e) {
-      window.alert(`Could not delete ${sample}: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not delete ${sample}: ${e.message || "network error"}` });
       return;
     }
     await loadQuarantine();
@@ -5713,13 +5678,11 @@ export default function App() {
     // was fixed when the VCFs were staged, and it is those copies vsnp3 reads —
     // today's ticks say nothing about it.
     if (!resumeRunId && step2SetSamples.length && step2ComparisonSamples.length === 0) {
-      window.alert(
-        step2Mode === "list"
+      askOnPage({ notice: true, message: step2Mode === "list"
           ? "None of the pasted sample names matched a sample in this project. Nothing to compare."
           : step2RunSelection.keep.size === 0
             ? "No sources are ticked, so there is nothing to compare. Tick this project's samples and/or a reference database."
-            : "Every sample the ticked sources name is excluded (Step 1 Results, the build list, or the reference blocklist), so there is nothing to compare."
-      );
+            : "Every sample the ticked sources name is excluded (Step 1 Results, the build list, or the reference blocklist), so there is nothing to compare." });
       return;
     }
     // Instant feedback: flip the button to a disabled "Running…" state and post
@@ -5833,7 +5796,7 @@ export default function App() {
       setStep2Running(false);
       if (resumeRunId) {
         setStep2SetupMsg("");
-        window.alert(`Step 2 failed to start: ${e.message || "network error"}`);
+        askOnPage({ notice: true, message: `Step 2 failed to start: ${e.message || "network error"}` });
       } else {
         // The likeliest cause on a big comparison is the proxy timing the
         // request out while the server is still copying — the run is not
@@ -5845,13 +5808,11 @@ export default function App() {
             "The start request did not complete — on a large comparison the proxy can time out while VCFs are still being staged."
           );
         }
-        window.alert(
-          `Step 2 start did not complete: ${e.message || "network error"}.\n\n` +
+        askOnPage({ notice: true, message: `Step 2 start did not complete: ${e.message || "network error"}.\n\n` +
           "If this is a large comparison, staging may still be running on the server. " +
           "Refresh the Comparison list in a minute: the new folder will show either " +
           "“running now” (it made it) or “staged, never ran” — " +
-          "which offers a Run button that starts it without re-copying anything."
-        );
+          "which offers a Run button that starts it without re-copying anything." });
       }
       return;
     }
@@ -5860,7 +5821,7 @@ export default function App() {
       setStep2Running(false);
       setStep2SetupMsg("");
       const msg = await res.json().catch(() => ({}));
-      window.alert(msg.detail || "Step 2 failed to start");
+      askOnPage({ notice: true, message: msg.detail || "Step 2 failed to start" });
       return;
     }
     const data = await res.json();
@@ -5883,13 +5844,11 @@ export default function App() {
       }
       setStep2Running(false);
       setStep2SetupMsg("");
-      window.alert(
-        `Step 2 was NOT run against your exclusions.\n\n` +
+      askOnPage({ notice: true, message: `Step 2 was NOT run against your exclusions.\n\n` +
         `You have ${uiExclude.length} sample(s) marked excluded, but the server applied 0. ` +
         `The run was stopped so it wouldn't analyze the entire database.\n\n` +
         `Reload the page (Refresh), confirm the exclusions still show, and Run again. ` +
-        `If it persists, the backend may be older than v0.3.9 — update it.`
-      );
+        `If it persists, the backend may be older than v0.3.9 — update it.` });
       return;
     }
     setStep2Outputs([]);
@@ -5932,14 +5891,12 @@ export default function App() {
 
   async function stopStep2() {
     if (!step2JobId || !step2Running) return;
-    const ok = window.confirm(
-      step2JobStatus === "queued"
+    const ok = (await askOnPage({ okLabel: step2JobStatus === "queued" ? "Remove from queue" : "Stop Step 2", cancelLabel: "Keep it", message: step2JobStatus === "queued"
         ? "Cancel this queued Step 2 run?\n\nIt hasn't started yet — cancelling just removes it from the queue."
         : "Stop the Step 2 run?\n\n" +
           "This terminates the SNP-matrix / tree build and every background process " +
           "it spawned (vsnp3 workers, RAxML). Partial outputs for this run are " +
-          "discarded — you can start a new run afterward."
-    );
+          "discarded — you can start a new run afterward." }));
     if (!ok) return;
     // Enter the "shutting down" phase. The backend SIGTERMs the whole process
     // group immediately and escalates to SIGKILL after a grace period; the job
@@ -5957,12 +5914,12 @@ export default function App() {
       if (!res.ok && res.status !== 409) {
         let data = {};
         try { data = await res.json(); } catch (_) { /* non-JSON body */ }
-        window.alert(`Could not stop Step 2: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not stop Step 2: ${data.detail || `HTTP ${res.status}`}` });
         setStep2Stopping(false);
         setStep2SetupMsg("");
       }
     } catch (e) {
-      window.alert(`Could not stop Step 2: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not stop Step 2: ${e.message || "network error"}` });
       setStep2Stopping(false);
       setStep2SetupMsg("");
     }
@@ -5972,12 +5929,10 @@ export default function App() {
   // project's queued run is waiting for. Same endpoint as Stop; the queued run
   // then starts on its own.
   async function stopSlotHolder(h) {
-    const ok = window.confirm(
-      `Stop the Step 2 run in project ${h.project || "(unknown)"}${h.run_id ? ` (comparison ${h.run_id})` : ""}?\n\n` +
+    const ok = (await askOnPage({ okLabel: "Stop that run", cancelLabel: "Keep it", message: `Stop the Step 2 run in project ${h.project || "(unknown)"}${h.run_id ? ` (comparison ${h.run_id})` : ""}?\n\n` +
       "This terminates that SNP-matrix / tree build and every background process it " +
       "spawned (vsnp3 workers, RAxML); its partial outputs are discarded. This project's " +
-      "queued run then starts."
-    );
+      "queued run then starts." }));
     if (!ok) return;
     setSlotStopping(h.job_id);
     try {
@@ -5986,11 +5941,11 @@ export default function App() {
       if (!res.ok && res.status !== 409) {
         let data = {};
         try { data = await res.json(); } catch (_) { /* non-JSON body */ }
-        window.alert(`Could not stop that run: ${data.detail || `HTTP ${res.status}`}`);
+        askOnPage({ notice: true, message: `Could not stop that run: ${data.detail || `HTTP ${res.status}`}` });
         setSlotStopping("");
       }
     } catch (e) {
-      window.alert(`Could not stop that run: ${e.message || "network error"}`);
+      askOnPage({ notice: true, message: `Could not stop that run: ${e.message || "network error"}` });
       setSlotStopping("");
     }
   }
@@ -6350,7 +6305,7 @@ export default function App() {
 
   async function openSampleInIgv(project, sample) {
     if (!project || !sample) {
-      window.alert("IGV: missing project or sample.");
+      askOnPage({ notice: true, message: "IGV: missing project or sample." });
       return;
     }
     if (igvPopoutOpen) {
@@ -6367,7 +6322,7 @@ export default function App() {
     }
     const res = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/step1/files?sample=${encodeURIComponent(sample)}`);
     if (!res.ok) {
-      window.alert(`IGV: cannot resolve sample files (HTTP ${res.status}).`);
+      askOnPage({ notice: true, message: `IGV: cannot resolve sample files (HTTP ${res.status}).` });
       return;
     }
     const data = await res.json();
@@ -6379,14 +6334,12 @@ export default function App() {
       if (!data.bam) missing.push("no BAM");
       if (!data.reference_fasta) missing.push("no reference FASTA");
       const where = data.alignment_dir || data.sample_dir || "";
-      window.alert(
-        `IGV cannot open ${sample}: ${missing.join(" and ")}.\n\n`
+      askOnPage({ notice: true, message: `IGV cannot open ${sample}: ${missing.join(" and ")}.\n\n`
         + (data.alignment_dir
           ? `Looked in ${where}`
           : "This sample has no alignment directory, so Step 1 has not aligned "
             + "it yet — there are reads but nothing to view."
-             + (where ? `\n\nSample directory: ${where}` : ""))
-      );
+             + (where ? `\n\nSample directory: ${where}` : "")) });
       return;
     }
     const baiPath = data.bam.endsWith(".bam") ? `${data.bam}.bai` : "";
@@ -6435,7 +6388,7 @@ export default function App() {
     const url = `${base}?view=igv&tracks=${encodeURIComponent(trackParts.join(","))}`;
     const w = window.open(url, "vsnp_igv_popout");
     if (!w) {
-      window.alert("Pop out blocked by browser. Allow popups for this site and try again.");
+      askOnPage({ notice: true, message: "Pop out blocked by browser. Allow popups for this site and try again." });
       return;
     }
     igvPopoutRef.current = w;
@@ -6534,7 +6487,7 @@ export default function App() {
   async function fetchCurrentVcfCall() {
     const project = editVcfProject || selectedProject;
     if (!project || !editVcfSample || !editVcfLocus) {
-      window.alert("Select a sample and locus first.");
+      askOnPage({ notice: true, message: "Select a sample and locus first." });
       return;
     }
     const res = await fetch(`${API_BASE}/api/projects/${project}/vcf_lookup`, {
@@ -6547,7 +6500,7 @@ export default function App() {
     });
     if (!res.ok) {
       const msg = await res.json();
-      window.alert(typeof msg.detail === "string" ? msg.detail : "Lookup failed");
+      askOnPage({ notice: true, message: typeof msg.detail === "string" ? msg.detail : "Lookup failed" });
       return;
     }
     const data = await res.json();
@@ -6560,18 +6513,18 @@ export default function App() {
   async function submitEditVcf() {
     const project = editVcfProject || selectedProject;
     if (!project || !editVcfSample) {
-      window.alert("Select a project to edit this sample.");
+      askOnPage({ notice: true, message: "Select a project to edit this sample." });
       return;
     }
     // bcftools comes from the vsnp3 conda env — the backend resolves it from
     // PATH and returns a clear error if it's genuinely missing. No client-side
     // path check needed.
     if (!editVcfLocus || !editVcfAlt) {
-      window.alert("Locus and ALT are required.");
+      askOnPage({ notice: true, message: "Locus and ALT are required." });
       return;
     }
     if (!editVcfReason) {
-      window.alert("Please select a reason for the edit.");
+      askOnPage({ notice: true, message: "Please select a reason for the edit." });
       return;
     }
     const res = await fetch(`${API_BASE}/api/projects/${project}/vcf_edit`, {
@@ -6588,7 +6541,7 @@ export default function App() {
     });
     if (!res.ok) {
       const msg = await res.json();
-      window.alert(msg.detail || "VCF edit failed");
+      askOnPage({ notice: true, message: msg.detail || "VCF edit failed" });
       return;
     }
     const data = await res.json();
@@ -6602,7 +6555,7 @@ export default function App() {
     // place, not there yet, or left alone because it is not this sample's own
     // Step 1 VCF. The user is told which, here, every time.
     const dbNote = data.vcf_database?.message ? `\n\nStep 2: ${data.vcf_database.message}` : "";
-    window.alert(`VCF patched:\n${data.patched_vcf}${setNote}${dbNote}`);
+    askOnPage({ notice: true, message: `VCF patched:\n${data.patched_vcf}${setNote}${dbNote}` });
     setEditVcfOpen(false);
     if (project === selectedProject) {
       await loadQC();
@@ -6625,7 +6578,7 @@ export default function App() {
         defaultPath: settings.projects_root || undefined
       });
     } else {
-      picked = window.prompt("Enter Step 1 folder path:");
+      picked = (await askOnPage({ title: "Step 1 folder", message: "Enter Step 1 folder path:", okLabel: "Add", input: { placeholder: "/path/to/step1" } }));
     }
     if (!picked) return;
     setPosthocFolders((prev) => (prev.includes(picked) ? prev : [...prev, picked]));
@@ -9277,51 +9230,7 @@ export default function App() {
           <div className="pane-backdrop" onClick={() => setExpandedPane("")} />
         ) : null}
 
-        {pageAsk ? (
-          <div
-            className="page-ask-backdrop"
-            onMouseDown={(e) => { if (e.target === e.currentTarget) answerPageAsk(false); }}
-          >
-            <div
-              className="page-ask"
-              role="dialog"
-              aria-modal="true"
-              aria-label={pageAsk.title || "Question"}
-              onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); answerPageAsk(false); } }}
-            >
-              {pageAsk.title ? <h3>{pageAsk.title}</h3> : null}
-              {pageAsk.message ? <div className="page-ask-message">{pageAsk.message}</div> : null}
-              {pageAsk.rationale ? (
-                <textarea
-                  autoFocus
-                  rows={3}
-                  value={pageAsk.value}
-                  placeholder="Rationale (required; kept in the audit log)"
-                  aria-label="Rationale"
-                  onChange={(e) => { const v = e.target.value; setPageAsk((a) => (a ? { ...a, value: v } : a)); }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && pageAsk.value.trim()) {
-                      e.preventDefault();
-                      answerPageAsk(true, pageAsk.value.trim());
-                    }
-                  }}
-                />
-              ) : null}
-              <div className="page-ask-actions">
-                <button
-                  autoFocus={!pageAsk.rationale}
-                  disabled={pageAsk.rationale && !pageAsk.value.trim()}
-                  onClick={() => answerPageAsk(true, (pageAsk.value || "").trim())}
-                >
-                  {pageAsk.okLabel}
-                </button>
-                {!pageAsk.notice ? (
-                  <button className="ghost" onClick={() => answerPageAsk(false)}>{pageAsk.cancelLabel}</button>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        ) : null}
+        <PageAskHost />
 
         {igvPanel.open ? (
           <div

@@ -41,7 +41,12 @@ from typing import Dict, List, Optional
 # Longest first: "_zc.vcf.gz" must be tried before ".vcf.gz", or a sample would
 # keep a "_zc" tail. Every name-derivation in the app funnels through this
 # table so a new shape is added in exactly one place.
-_DB_SUFFIXES = ("_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf")
+# vsnp3 names a nanopore sample's zero-coverage VCF <sample>_nanopore_zc.vcf
+# (vsnp3_alignment_vcf.py, 3.37), so the read-type marker is part of the tail,
+# not of the sample name; without these two entries every ONT sample derived
+# as "<sample>_nanopore", matched no step1 folder and no exclusion, and Step 2
+# treated it as a foreign VCF.
+_DB_SUFFIXES = ("_nanopore_zc.vcf.gz", "_nanopore_zc.vcf", "_zc.vcf.gz", "_zc.vcf", ".vcf.gz", ".vcf")
 
 
 def is_db_vcf(name: str) -> bool:

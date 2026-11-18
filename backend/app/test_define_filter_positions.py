@@ -245,6 +245,89 @@ def main() -> int:
         path=str(tmp / "elsewhere.xlsx"), positions=["chr1:1"], rationale="x"))
     check("a path outside the project's Step 2 is refused", "Step 2" in why)
 
+    print("[a new defining SNP picked on a SNP table]")
+    # Requested 2026-11-18: like "Filter positions", but click a position and
+    # name a new group. One column at the end: row 1 the position, row 2 the
+    # name, rows 3+ the table group's filter list (what a subgroup holds).
+    g2_table = str(run / "G2" / "G2_cascade1_table.xlsx")
+    def new_group(name, pos, copy=True, path=g2_table):
+        return M.snp_table_new_group("p1", M.SnpTableNewGroupRequest(
+            path=path, position=pos, group=name, copy_filters=copy, rationale="new subgroup"))
+    ws = openpyxl.load_workbook(book).worksheets[0]
+    g2_filters = [v for v in column(book, 3)[2:] if v]
+    note_col = ws.max_column + 2                    # a note past the last group, below row 2
+    ws.cell(row=5, column=note_col, value="curator note: keep")
+    ws.parent.save(book)
+    out = new_group("G2a", "chr1:555")
+    wsn = openpyxl.load_workbook(book).worksheets[0]
+    new_col = [c for c in range(1, wsn.max_column + 1) if wsn.cell(row=2, column=c).value == "G2a"]
+    check("one new column, after the last group", len(new_col) == 1 and new_col[0] == 6
+          and out["column"] == "F")
+    check("row 1 the position, row 2 the name", wsn.cell(row=1, column=6).value == "chr1:555")
+    check("its filter list starts as G2's", [v for v in column(book, 6)[2:] if v] == g2_filters
+          and out["filters"] == len(g2_filters))
+    check("the curator's note past it is untouched",
+          wsn.cell(row=5, column=note_col).value == "curator note: keep")
+    defs = pd.read_excel(book).iloc[:, 1:].head(1).to_dict(orient="records")[0]
+    _, by_group = vsnp3_reads(book)
+    check("vsnp3 reads chr1:555 as defining G2a", defs.get("chr1:555") == "G2a")
+    check("...and G2a's filter list as the copy", by_group.get("G2a") == g2_filters)
+    log = [json.loads(l) for l in Path(out["audit_log"]).read_text().splitlines()]
+    check("the audit record names the group, position, copy and table",
+          log[-1]["action"] == "define_filter_add_group" and log[-1]["positions"] == ["chr1:555"]
+          and log[-1]["filters_copied_from"] == "G2"
+          and log[-1]["source"]["table"] == "G2_cascade1_table.xlsx")
+    ctx = M.snp_table_filter_context("p1", g2_table)
+    check("the table page now sees chr1:555 as defining G2a", ctx["defining"].get("chr1:555") == "G2a")
+
+    sha_now = sha(book)
+    for label, args, needle in [
+        ("a name that differs only in case", ("g2A", "chr1:556"), "already has a group named 'G2a'"),
+        ("the All column's name", ("Ref-All", "chr1:557"), "already has a group"),
+        ("a position that already defines a group", ("G9", "chr1:100"), "already defines 'G1'"),
+        ("a name that cannot be a folder", ("a/b", "chr1:558"), "cannot be a group name"),
+        ("a range", ("G9", "chr1:5-9"), "not a single position"),
+        ("a sequence the reference lacks", ("G9", "chrX:5"), "not a sequence"),
+    ]:
+        why = refused(new_group, *args)
+        check(f"{label}: refused", needle in why)
+    check("...and the file was never touched", sha(book) == sha_now)
+
+    out = new_group("G2b", "chr1:559", copy=False)
+    wsn = openpyxl.load_workbook(book).worksheets[0]
+    g2b = [c for c in range(1, wsn.max_column + 1) if wsn.cell(row=2, column=c).value == "G2b"][0]
+    check("the next group skips the column holding the note", g2b == note_col + 1)
+    check("without the copy, an empty filter list", out["filters"] == 0
+          and not [v for v in column(book, g2b)[2:] if v])
+    out = new_group("AllSub", "chr1:560", path=str(run / "Ref-All" / "Ref-All_cascade1_table.xlsx"))
+    check("from the All table nothing is copied (its list applies to every group)", out["filters"] == 0)
+
+    print("[samples picked on a SNP table go to the remove_from_analysis list]")
+    # Requested 2026-11-18: click sample names, add them to the remove list.
+    def remove(names, path=g2_table):
+        return M.snp_table_remove_samples("p1", M.SnpTableRemoveSamplesRequest(
+            path=path, samples=names, rationale="contaminated"))
+    why = refused(remove, ["S1"])
+    check("with no remove list yet, it says to create one", "Create one from template" in why)
+    rm = ref_dir / "Ref_remove_from_analysis.xlsx"
+    wb = openpyxl.Workbook(); wb.active["A1"] = "OLD-1"; wb.save(rm)
+    out = remove(["S7", "S8", "S7"])
+    col_a = [c.value for c in openpyxl.load_workbook(rm).worksheets[0]["A"] if c.value]
+    check("the names are appended to column A once each", col_a == ["OLD-1", "S7", "S8"]
+          and out["added"] == ["S7", "S8"])
+    log = [json.loads(l) for l in Path(out["audit_log"]).read_text().splitlines()]
+    check("the audit record names the table", log[-1]["action"] == "remove_from_analysis_add_sample"
+          and log[-1]["source"]["table"] == "G2_cascade1_table.xlsx")
+    ctx = M.snp_table_filter_context("p1", g2_table)
+    check("the table page sees who is on the list",
+          ctx["remove_file"] == rm.name and {"OLD-1", "S7", "S8"} <= set(ctx["removed"]))
+    out = remove(["S8"])
+    check("a name already on the list is skipped, not repeated",
+          out["added"] == [] and out["skipped"] == ["S8"])
+    out = remove(["S9"], path=str(run / "Gone" / "Gone_cascade1_table.xlsx"))
+    check("a table whose group the define_filter lacks can still remove samples",
+          out["added"] == ["S9"])
+
     print("[a download of the edited file is never a stale browser copy]")
     # Reported 2026-11-18: an edit, then Download, gave the workbook as it was.
     # With no Cache-Control a browser may reuse a held copy for a tenth of the

@@ -2402,6 +2402,16 @@ def view_controls(loci: dict, row_samples: "list[str]") -> str:
         'table and add them to this group&#39;s filter in the reference&#39;s '
         'defining-SNP file, so the next Step 2 run leaves them out.">'
         'Filter positions…</button>'
+        '<button type="button" id="xlsxDefBtn" class="xlsx-flt-btn" '
+        'aria-pressed="false" hidden title="Click one position header on this '
+        'table and name a new group: it is added to the reference&#39;s '
+        'defining-SNP file, and the next Step 2 run makes its tables.">'
+        'Add defining SNP…</button>'
+        '<button type="button" id="xlsxSmpBtn" class="xlsx-flt-btn" '
+        'aria-pressed="false" hidden title="Pick sample names on this table and '
+        'add them to the reference&#39;s remove_from_analysis list, so Step 2 '
+        'leaves them out.">'
+        'Filter samples…</button>'
     )
 
 
@@ -3135,7 +3145,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-flt .flt-why {{ flex: 1 1 320px; min-width: 200px; font: inherit; padding: 2px 6px; }}
   .xlsx-flt .flt-status {{ color: #1e3a1a; }}
   .xlsx-flt .flt-status.err {{ color: #9a2a12; }}
-  body.xlsx-flt-on #xlsxBody tr:first-child td.xlsx-hl-target {{ cursor: copy; }}
+  body.xlsx-flt-on #xlsxBody td.xlsx-hl-target {{ cursor: copy; }}
   /* Per-cell styles, deduplicated into classes — the same handful of fills and
      fonts repeat across every cell of these tables. */
   {style_css}
@@ -3332,10 +3342,9 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     if (!td) return;
     var tr = td.parentNode;
     if (tr.rowIndex === 0 && LOCI[String(td.cellIndex + 1)]) {{
-      if (fltOn) pickClick(td.cellIndex + 1, ev.shiftKey);
-      else toggleMark(hlCols, td.cellIndex + 1);
+      if (!headerPick(td.cellIndex + 1, ev.shiftKey)) toggleMark(hlCols, td.cellIndex + 1);
     }} else if (td.cellIndex === 0 && SAMPLES[tr.rowIndex]) {{
-      toggleMark(hlRows, tr.rowIndex);
+      if (!samplePick(tr.rowIndex, ev.shiftKey)) toggleMark(hlRows, tr.rowIndex);
     }}
   }});
 
@@ -3357,35 +3366,45 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     for (var r = Math.max(markedTo, 1); r < rows.length; r++) {{
       if (SAMPLES[r] && rows[r].cells.length) {{
         rows[r].cells[0].classList.add("xlsx-hl-target");
-        rows[r].cells[0].title = "Click to colour this sample";
+        rows[r].cells[0].title = sampleTitle(r);
       }}
     }}
     markedTo = rows.length;
   }}
   markTargets();
 
-  // ---- filter positions ---------------------------------------------------
-  // "Filter positions…" turns header clicks from colouring into picking. The
-  // picked positions go, in one edit, under this table's group in the
-  // reference's defining-SNP workbook (or under its All column), which vsnp3
-  // reads on the next Step 2 run. The server works out the group and the file
-  // from where this table sits; the page only says which positions.
+  // ---- edits to the reference from this table -----------------------------
+  // Three modes share one panel, picked with the buttons in the bar:
+  //   "filter"  — click position headers; they go under this table's group in
+  //               the reference's defining-SNP workbook (or under its All
+  //               column), so the next Step 2 run leaves them out.
+  //   "define"  — click ONE position header and name a new group; a new
+  //               column (row 1 the position, row 2 the name) is added.
+  //   "samples" — click sample names; they go on the reference's
+  //               remove_from_analysis list.
+  // The server works out the reference, file and group from where this table
+  // sits; the page only says what was picked. The rationale is typed into the
+  // panel, never asked for in a pop-up: a browser that declines to show one
+  // answers "cancelled" without showing anything, and the edit silently did
+  // nothing (2026-11-18).
   var fltBtn = document.getElementById("xlsxFltBtn");
+  var defBtn = document.getElementById("xlsxDefBtn");
+  var smpBtn = document.getElementById("xlsxSmpBtn");
   var fltBox = document.getElementById("xlsxFlt");
   var TABLE_PATH = new URL(window.location.href).searchParams.get("path") || "";
   var fltApi = "snp-table-filter";   // beside this page: /api/projects/<p>/
-  var fltOpen = false, fltOn = false, flt = null, fltToAll = false, fltLast = null;
+  var fltMode = "", fltOn = false, flt = null, fltToAll = false, fltLast = null;
   var fltBusy = false, fltTimer = null, fltStatus = "", fltStatusErr = false;
-  // The rationale is typed into the panel, never asked for in a pop-up: a
-  // browser that declines to show a prompt answers "cancelled" without
-  // showing anything, and the add silently did nothing (2026-11-18).
   var fltRationale = "", fltLock = "";
-  var picked = new Map();            // column (1-based) -> locus
-  var listedCols = [];
+  var picked = new Map();            // filter: column (1-based) -> locus
+  var defCol = null, defName = "", defCopy = true;          // define
+  var pickedRows = new Map();        // samples: row index -> {{stem, label}}
+  var listedCols = [], listedRows = [];
   var fltStyle = document.createElement("style");
   document.head.appendChild(fltStyle);
   var none = function() {{ return false; }};
-  var inGroup = none, inAll = none;
+  var inGroup = none, inAll = none, removedSet = {{}};
+  var MODE_TITLE = {{ filter: "Filter positions", define: "Add a defining SNP", samples: "Filter samples" }};
 
   function esc(s) {{
     return String(s == null ? "" : s).replace(/[&<>"]/g, function(ch) {{
@@ -3423,13 +3442,26 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       return false;
     }};
   }}
+  // vsnp3 drops a VCF named <name>, <name>.vcf or <name>_zc.vcf, so a sample is
+  // "on the list" when its name and an entry agree once those endings go.
+  function sampleKey(s) {{
+    return String(s || "").trim().replace(/\\.vcf(\\.gz)?$/i, "").replace(/_zc$/, "");
+  }}
+
   function listedWhy(c) {{
-    if (!fltOn) return "";
+    if (!fltOn || fltMode !== "filter") return "";
     var locus = LOCI[String(c)];
     if (!locus) return "";
     if (inAll(locus)) return "Already left out of every table (" + flt.all_name + ")";
     if (inGroup(locus)) return "Already in the " + flt.group + " filter";
     return "";
+  }}
+  function definesWhat(c) {{
+    var locus = LOCI[String(c)];
+    return (flt && flt.defining && locus && flt.defining[locus]) || "";
+  }}
+  function rowRemoved(r) {{
+    return !!(SAMPLES[r] && removedSet[sampleKey(SAMPLES[r])]);
   }}
   // A pick that would change nothing for the chosen target.
   function blocked(c) {{
@@ -3439,9 +3471,24 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     return !(flt.is_all || fltToAll) && inGroup(locus);
   }}
   function headerTitle(c) {{
-    if (!fltOn) return "Click to colour this position";
-    return listedWhy(c) || ("Click to pick " + LOCI[String(c)] + " for the filter. "
-      + "Shift-click picks every position from the last pick to here.");
+    if (fltOn && fltMode === "filter") {{
+      return listedWhy(c) || ("Click to pick " + LOCI[String(c)] + " for the filter. "
+        + "Shift-click picks every position from the last pick to here.");
+    }}
+    if (fltOn && fltMode === "define") {{
+      var g = definesWhat(c);
+      return g ? LOCI[String(c)] + " already defines " + g
+               : "Click to make " + LOCI[String(c)] + " the new group's defining SNP";
+    }}
+    return "Click to colour this position";
+  }}
+  function sampleTitle(r) {{
+    if (fltOn && fltMode === "samples") {{
+      return rowRemoved(r) ? "Already on the remove_from_analysis list"
+        : "Click to pick this sample for remove_from_analysis. "
+          + "Shift-click picks every sample from the last pick to here.";
+    }}
+    return "Click to colour this sample";
   }}
   function retitle() {{
     var rows = body.rows;
@@ -3450,19 +3497,36 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     for (var c = 0; c < hdr.length; c++) {{
       if (LOCI[String(c + 1)]) hdr[c].title = headerTitle(c + 1);
     }}
+    for (var r = 1; r < rows.length; r++) {{
+      if (SAMPLES[r] && rows[r].cells.length) rows[r].cells[0].title = sampleTitle(r);
+    }}
   }}
 
   function renderFltStyle() {{
     var css = [];
-    if (fltOn) {{
-      for (var j = 0; j < listedCols.length; j += 400) {{
-        css.push(listedCols.slice(j, j + 400).map(function(c) {{
-          return "#xlsxBody tr:first-child td:nth-child(" + c + ")";
-        }}).join(",") + " {{ text-decoration: line-through; opacity: 0.45; }}");
+    var chunked = function(list, sel, rule) {{
+      for (var j = 0; j < list.length; j += 400) {{
+        css.push(list.slice(j, j + 400).map(sel).join(",") + " {{ " + rule + " }}");
       }}
+    }};
+    if (fltOn && fltMode === "filter") {{
+      chunked(listedCols, function(c) {{ return "#xlsxBody tr:first-child td:nth-child(" + c + ")"; }},
+              "text-decoration: line-through; opacity: 0.45;");
       picked.forEach(function(_locus, c) {{
         css.push("#xlsxBody td:nth-child(" + c + ") {{ box-shadow: inset 2px 0 0 0 #b85a3e, inset -2px 0 0 0 #b85a3e; }}");
         css.push("#xlsxBody tr:first-child td:nth-child(" + c + ") {{ background-color: #f6d6cc; box-shadow: inset 0 0 0 2px #b85a3e; }}");
+      }});
+    }}
+    if (fltOn && fltMode === "define" && defCol !== null) {{
+      css.push("#xlsxBody td:nth-child(" + defCol + ") {{ box-shadow: inset 2px 0 0 0 #2e7d4f, inset -2px 0 0 0 #2e7d4f; }}");
+      css.push("#xlsxBody tr:first-child td:nth-child(" + defCol + ") {{ background-color: #d6eedd; box-shadow: inset 0 0 0 2px #2e7d4f; }}");
+    }}
+    if (fltOn && fltMode === "samples") {{
+      chunked(listedRows, function(r) {{ return "#xlsxBody tr:nth-child(" + (r + 1) + ") td:first-child"; }},
+              "text-decoration: line-through; opacity: 0.45;");
+      pickedRows.forEach(function(_s, r) {{
+        css.push("#xlsxBody tr:nth-child(" + (r + 1) + ") td {{ box-shadow: inset 0 2px 0 0 #b85a3e, inset 0 -2px 0 0 #b85a3e; }}");
+        css.push("#xlsxBody tr:nth-child(" + (r + 1) + ") td:first-child {{ background-color: #f6d6cc; box-shadow: inset 0 0 0 2px #b85a3e; }}");
       }});
     }}
     fltStyle.textContent = css.join(" ");
@@ -3494,23 +3558,48 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     renderPanel();
   }}
 
+  function rationaleRow() {{
+    return '<div class="flt-row"><label for="xlsxFltWhy">Rationale (required; kept in the audit log)</label>'
+      + '<input type="text" id="xlsxFltWhy" class="flt-why" value="' + esc(fltRationale) + '"></div>';
+  }}
+  function statusRow(addLabel) {{
+    if (!fltStatus) return "";
+    return '<div class="flt-row flt-status' + (fltStatusErr ? ' err' : '') + '">' + esc(fltStatus)
+      + (fltBusy ? ' <span id="xlsxFltTick"></span>' : '')
+      + (fltLock && !fltBusy ? ' <button type="button" data-flt="force">' + esc(addLabel) + ' anyway</button>' : '')
+      + '</div>';
+  }}
+  function chipsRow(items, emptyText) {{
+    return '<div class="flt-row flt-chips">' + (items.length ? items.join("")
+      : '<span class="xlsx-ctl-note">' + esc(emptyText) + '</span>') + '</div>';
+  }}
+  function chip(attr, key, text) {{
+    return '<span class="flt-chip" ' + attr + '="' + key + '" title="Click to un-pick">' + esc(text) + ' &times;</span>';
+  }}
+
   function renderPanel() {{
     if (!fltBox) return;
-    if (!fltOpen) {{ fltBox.hidden = true; fltBox.innerHTML = ""; return; }}
+    if (!fltMode) {{ fltBox.hidden = true; fltBox.innerHTML = ""; return; }}
     fltBox.hidden = false;
+    var title = MODE_TITLE[fltMode];
     var h = [];
     if (!flt) {{
-      h.push('<div class="flt-row"><strong>Filter positions</strong> <span>Reading the filter file… '
-        + '<span id="xlsxFltTick"></span></span></div>');
-      fltBox.innerHTML = h.join("");
+      fltBox.innerHTML = '<div class="flt-row"><strong>' + title + '</strong> <span>Reading the reference files… '
+        + '<span id="xlsxFltTick"></span></span></div>';
       return;
     }}
-    if (!flt.available) {{
-      h.push('<div class="flt-row"><strong>Filter positions</strong> <span class="flt-status err">'
-        + esc(flt.reason) + '</span> <button type="button" data-flt="done">Close</button></div>');
-      fltBox.innerHTML = h.join("");
+    if (!flt.available && !(fltMode === "samples" && flt.reference)) {{
+      fltBox.innerHTML = '<div class="flt-row"><strong>' + title + '</strong> <span class="flt-status err">'
+        + esc(flt.reason) + '</span> <button type="button" data-flt="done">Close</button></div>';
       return;
     }}
+    if (fltMode === "filter") renderFilter(h);
+    else if (fltMode === "define") renderDefine(h);
+    else renderSamples(h);
+    fltBox.innerHTML = h.join("");
+  }}
+
+  function renderFilter(h) {{
     var toAll = !!(flt.is_all || fltToAll);
     h.push('<div class="flt-row"><strong>Filter positions</strong><span>Click position headers to pick them; '
       + 'shift-click picks every position from the last pick to the one clicked. '
@@ -3527,14 +3616,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       h.push('<div class="flt-row">This is the ' + esc(flt.all_name) + ' table, so picked positions are left out of every table.</div>');
     }}
     var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
-    h.push('<div class="flt-row flt-chips">' + (cols.length
-      ? cols.map(function(c) {{
-          return '<span class="flt-chip" data-col="' + c + '" title="Click to un-pick">'
-            + esc(picked.get(c)) + ' &times;</span>';
-        }}).join("")
-      : '<span class="xlsx-ctl-note">No positions picked yet.</span>') + '</div>');
-    h.push('<div class="flt-row"><label for="xlsxFltWhy">Rationale (required; kept in the audit log)</label>'
-      + '<input type="text" id="xlsxFltWhy" class="flt-why" value="' + esc(fltRationale) + '"></div>');
+    h.push(chipsRow(cols.map(function(c) {{ return chip("data-col", c, picked.get(c)); }}), "No positions picked yet."));
+    h.push(rationaleRow());
     var canAdd = cols.length && flt.writable && !fltBusy;
     h.push('<div class="flt-row"><button type="button" data-flt="add"' + (canAdd ? '' : ' disabled') + '>Add '
       + cols.length + ' to the ' + esc(toAll ? flt.all_name + ' filter (every group)' : flt.group + ' filter')
@@ -3543,29 +3626,81 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       + '<button type="button" data-flt="done">Done</button> '
       + '<span class="xlsx-ctl-note">Writes to ' + esc(flt.file) + ' (reference ' + esc(flt.reference)
       + '). Takes effect the next time Step 2 runs; this table does not change.</span></div>');
-    if (!flt.writable) {{
-      h.push('<div class="flt-row flt-status err">' + esc(flt.not_writable_reason) + '</div>');
+    if (!flt.writable) h.push('<div class="flt-row flt-status err">' + esc(flt.not_writable_reason) + '</div>');
+    h.push(statusRow("Add"));
+  }}
+
+  function renderDefine(h) {{
+    var locus = defCol !== null ? LOCI[String(defCol)] : "";
+    h.push('<div class="flt-row"><strong>Add a defining SNP</strong><span>Click the position header '
+      + 'that defines the new group, then name the group.</span></div>');
+    h.push(chipsRow(locus ? [chip("data-defcol", defCol, locus)] : [], "No position picked yet."));
+    h.push('<div class="flt-row"><label for="xlsxDefName">New group name</label>'
+      + '<input type="text" id="xlsxDefName" class="flt-why" placeholder="e.g. '
+      + esc((flt.group || "Group") + "X") + '" value="' + esc(defName) + '"></div>');
+    var n = (flt.entries || []).length;
+    if (!flt.is_all && n) {{
+      h.push('<div class="flt-row"><label><input type="checkbox" id="xlsxDefCopy"' + (defCopy ? ' checked' : '')
+        + '> Start its filter list with ' + esc(flt.group) + '&#39;s ' + n + ' filtered position'
+        + (n === 1 ? '' : 's') + '</label></div>');
     }}
-    if (fltStatus) {{
-      h.push('<div class="flt-row flt-status' + (fltStatusErr ? ' err' : '') + '">' + esc(fltStatus)
-        + (fltBusy ? ' <span id="xlsxFltTick"></span>' : '')
-        + (fltLock && !fltBusy ? ' <button type="button" data-flt="force">Add anyway</button>' : '')
-        + '</div>');
+    h.push(rationaleRow());
+    var canAdd = locus && defName.trim() && flt.writable && !fltBusy;
+    h.push('<div class="flt-row"><button type="button" data-flt="add"' + (canAdd ? '' : ' disabled') + '>Add group'
+      + (defName.trim() ? ' ' + esc(defName.trim()) : '') + '</button> '
+      + '<button type="button" data-flt="done">Done</button> '
+      + '<span class="xlsx-ctl-note">Adds a column to ' + esc(flt.file) + ' (reference ' + esc(flt.reference)
+      + '): row 1 the position, row 2 the name. The group gets its own tables the next time Step 2 runs.</span></div>');
+    if (!flt.writable) h.push('<div class="flt-row flt-status err">' + esc(flt.not_writable_reason) + '</div>');
+    h.push(statusRow("Add"));
+  }}
+
+  function renderSamples(h) {{
+    h.push('<div class="flt-row"><strong>Filter samples</strong><span>Click sample names to pick them; '
+      + 'shift-click picks every sample from the last pick to the one clicked. '
+      + (listedRows.length ? listedRows.length + ' sample' + (listedRows.length === 1 ? '' : 's')
+         + ' in this table ' + (listedRows.length === 1 ? 'is' : 'are') + ' already on the list (struck through).'
+         : '') + '</span></div>');
+    h.push('<div class="flt-row xlsx-ctl-note">The remove_from_analysis list belongs to the reference: a sample on it '
+      + 'is left out of every Step 2 run on ' + esc(flt.reference) + ', in every project.</div>');
+    var rows = Array.from(pickedRows.keys()).sort(function(a, b) {{ return a - b; }});
+    h.push(chipsRow(rows.map(function(r) {{ return chip("data-row", r, pickedRows.get(r).label); }}),
+                    "No samples picked yet."));
+    h.push(rationaleRow());
+    var file = flt.remove_file || "";
+    var canAdd = rows.length && file && !fltBusy;
+    h.push('<div class="flt-row"><button type="button" data-flt="add"' + (canAdd ? '' : ' disabled') + '>Add '
+      + rows.length + ' to ' + esc(file || "remove_from_analysis") + '</button> '
+      + '<button type="button" data-flt="clear"' + (rows.length && !fltBusy ? '' : ' disabled') + '>Clear picks</button> '
+      + '<button type="button" data-flt="done">Done</button> '
+      + (file ? '<span class="xlsx-ctl-note">Takes effect the next time Step 2 runs; this table does not change.</span>' : '')
+      + '</div>');
+    if (!file) {{
+      h.push('<div class="flt-row flt-status err">This reference has no remove_from_analysis file yet. '
+        + 'Create one in the Reference Editor (Remove from Analysis, Create from Template), then pick again.</div>');
     }}
-    fltBox.innerHTML = h.join("");
+    h.push(statusRow("Add"));
   }}
 
   function dropBlockedPicks() {{
     picked.forEach(function(_locus, c) {{ if (blocked(c)) picked.delete(c); }});
+    pickedRows.forEach(function(_s, r) {{ if (rowRemoved(r)) pickedRows.delete(r); }});
+    if (defCol !== null && definesWhat(defCol)) defCol = null;
   }}
   function setCtx(d) {{
     flt = d;
-    fltOn = fltOpen && !!d.available;
+    fltOn = !!fltMode && (!!d.available || (fltMode === "samples" && !!d.reference));
     if (d.available && d.is_all) {{ inAll = coverTest(d.entries); inGroup = none; }}
     else if (d.available) {{ inGroup = coverTest(d.entries); inAll = coverTest(d.all_entries); }}
     else {{ inGroup = none; inAll = none; }}
+    removedSet = {{}};
+    (d.removed || []).forEach(function(n) {{ removedSet[sampleKey(n)] = true; }});
     listedCols = Object.keys(LOCI).map(Number).filter(function(c) {{ return !!listedWhy(c); }});
-    if (d.available && !fltRationale) {{
+    listedRows = [];
+    if (fltMode === "samples") {{
+      for (var r = 1; r < SAMPLES.length; r++) if (rowRemoved(r)) listedRows.push(r);
+    }}
+    if (!fltRationale) {{
       var nameEl = document.querySelector(".xlsx-bar .filename");
       fltRationale = "Picked on " + (nameEl ? nameEl.textContent : "a SNP table");
     }}
@@ -3582,31 +3717,76 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         }});
       }})
       .then(setCtx, function(e) {{
-        setCtx({{ available: false, reason: "Could not read the filter file (" + e.message + ")." }});
+        setCtx({{ available: false, reason: "Could not read the reference files (" + e.message + ")." }});
       }});
   }}
-  function openFlt() {{
-    fltOpen = true;
-    fltBtn.setAttribute("aria-pressed", "true");
-    flt = null;
+  function pressButtons() {{
+    [[fltBtn, "filter"], [defBtn, "define"], [smpBtn, "samples"]].forEach(function(p) {{
+      if (p[0]) p[0].setAttribute("aria-pressed", fltMode === p[1] ? "true" : "false");
+    }});
+  }}
+  function clearPicks() {{
+    picked.clear(); pickedRows.clear(); defCol = null; fltLast = null;
+  }}
+  function openMode(mode) {{
+    stopBusy();
+    fltMode = mode; fltOn = false; flt = null; fltStatus = ""; fltLock = "";
+    clearPicks();
+    pressButtons();
+    renderFltStyle();
     startBusy("");
     renderPanel();
     loadCtx().then(function() {{ stopBusy(); fltStatus = ""; renderPanel(); }});
   }}
   function closeFlt() {{
     stopBusy();
-    fltOpen = false; fltOn = false; flt = null; fltLast = null; fltStatus = "";
-    picked.clear(); listedCols = [];
-    inGroup = none; inAll = none;
-    fltBtn.setAttribute("aria-pressed", "false");
+    fltMode = ""; fltOn = false; flt = null; fltStatus = ""; fltLock = "";
+    clearPicks(); listedCols = []; listedRows = [];
+    inGroup = none; inAll = none; removedSet = {{}};
+    pressButtons();
     renderFltStyle();
     retitle();
     renderPanel();
   }}
 
+  // Header and sample-name clicks land here first; false means "not mine",
+  // and the click colours the column or row as usual.
+  function headerPick(c, shift) {{
+    if (!fltOn || fltBusy) return false;
+    if (fltMode === "filter") {{ pickClick(c, shift); return true; }}
+    if (fltMode === "define") {{
+      fltStatus = ""; fltLock = "";
+      var g = definesWhat(c);
+      if (g) fltStatus = LOCI[String(c)] + " already defines " + g + "; a position can define only one group.";
+      else defCol = (defCol === c) ? null : c;
+      renderFltStyle(); renderPanel();
+      return true;
+    }}
+    return false;
+  }}
+  function samplePick(r, shift) {{
+    if (!fltOn || fltBusy || fltMode !== "samples") return false;
+    fltStatus = ""; fltLock = "";
+    var label = function(k) {{
+      var row = body.rows[k];
+      return {{ stem: SAMPLES[k], label: (row && row.cells[0] ? row.cells[0].textContent.trim() : "") || SAMPLES[k] }};
+    }};
+    if (shift && fltLast !== null && fltLast !== r) {{
+      var lo = Math.min(fltLast, r), hi = Math.max(fltLast, r);
+      for (var k = lo; k <= hi; k++) if (SAMPLES[k] && !rowRemoved(k)) pickedRows.set(k, label(k));
+      fltLast = r;
+    }} else if (pickedRows.has(r)) {{
+      pickedRows.delete(r); fltLast = r;
+    }} else if (rowRemoved(r)) {{
+      fltStatus = label(r).label + " is already on the remove_from_analysis list.";
+    }} else {{
+      pickedRows.set(r, label(r)); fltLast = r;
+    }}
+    renderFltStyle(); renderPanel();
+    return true;
+  }}
   function pickClick(c, shift) {{
-    if (fltBusy) return;
-    fltStatus = "";
+    fltStatus = ""; fltLock = "";
     if (shift && fltLast !== null && fltLast !== c) {{
       var lo = Math.min(fltLast, c), hi = Math.max(fltLast, c), hidden = {{}};
       (hiddenCols || []).forEach(function(k) {{ hidden[k] = true; }});
@@ -3627,36 +3807,48 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     renderPanel();
   }}
 
-  function postAdd(payload) {{
-    return fetch(fltApi + "/add", {{
+  function postJson(url, payload) {{
+    return fetch(url, {{
       method: "POST",
       headers: {{ "Content-Type": "application/json", "Accept": "application/json" }},
       body: JSON.stringify(payload)
     }});
   }}
-  function addPicked(ignoreLock) {{
-    var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
-    var positions = cols.map(function(c) {{ return picked.get(c); }});
-    if (fltBusy) return;
-    if (!positions.length) {{ setStatus("Not added: pick at least one position header first.", true); return; }}
-    var toAll = !!(flt.is_all || fltToAll);
+  // One save for every mode: say why when it cannot go, offer "anyway" when the
+  // workbook looks open in Excel (a 409), and on success re-read the reference
+  // so what was just written shows as done.
+  function save(url, payload, describe) {{
     var rationale = (fltRationale || "").trim();
-    if (!rationale) {{ setStatus("Not added: write a rationale in the box above first.", true); return; }}
-    var payload = {{ path: TABLE_PATH, positions: positions, all_groups: toAll,
-                    rationale: rationale, ignore_lock: !!ignoreLock }};
+    if (!rationale) {{ setStatus("Not saved: write a rationale in the box above first.", true); return; }}
+    payload.rationale = rationale;
     fltLock = "";
     startBusy("Saving…");
-    postAdd(payload).then(function(r) {{
+    postJson(url, payload).then(function(r) {{
       return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
         if (r.status === 409) {{
           // The workbook looks open in Excel. Said here, with the choice
           // beside it, rather than in a dialog a browser may not show.
           stopBusy();
           fltLock = d.detail || "That file may be open in Excel.";
-          setStatus("Not added yet: " + fltLock, true);
+          setStatus("Not saved yet: " + fltLock, true);
           return;
         }}
-        if (!r.ok) {{ stopBusy(); setStatus("Not added: " + (d.detail || ("HTTP " + r.status)), true); return; }}
+        if (!r.ok) {{ stopBusy(); setStatus("Not saved: " + (d.detail || ("HTTP " + r.status)), true); return; }}
+        var msg = describe(d);
+        if (d.master) msg += " Written to the shared file " + d.master + ".";
+        clearPicks();
+        return loadCtx().then(function() {{ stopBusy(); setStatus(msg, false); }});
+      }});
+    }}).catch(function(e) {{ stopBusy(); setStatus("Not saved: " + e.message, true); }});
+  }}
+  function addPicked(ignoreLock) {{
+    if (fltBusy) return;
+    if (fltMode === "filter") {{
+      var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
+      if (!cols.length) {{ setStatus("Not added: pick at least one position header first.", true); return; }}
+      var toAll = !!(flt.is_all || fltToAll);
+      save(fltApi + "/add", {{ path: TABLE_PATH, all_groups: toAll, ignore_lock: !!ignoreLock,
+                              positions: cols.map(function(c) {{ return picked.get(c); }}) }}, function(d) {{
         var added = d.added || [], skipped = d.skipped || [];
         var msg = added.length
           ? "Added " + added.length + " to " + (toAll ? flt.all_name + " (every group)" : flt.group)
@@ -3667,20 +3859,47 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
         if (skipped.length) {{
           msg += " Skipped " + skipped.map(function(s) {{ return s.position + " (" + s.why + ")"; }}).join(", ") + ".";
         }}
-        if (d.master) msg += " Written to the shared file " + d.master + ".";
         if (added.length) msg += " They are left out the next time Step 2 runs.";
-        picked.clear();
-        fltLast = null;
-        return loadCtx().then(function() {{ stopBusy(); setStatus(msg, false); }});
+        return msg;
       }});
-    }}).catch(function(e) {{ stopBusy(); setStatus("Not added: " + e.message, true); }});
+    }} else if (fltMode === "define") {{
+      var locus = defCol !== null ? LOCI[String(defCol)] : "";
+      var name = defName.trim();
+      if (!locus) {{ setStatus("Not added: click the position header that defines the group first.", true); return; }}
+      if (!name) {{ setStatus("Not added: give the new group a name first.", true); return; }}
+      var copy = defCopy && !flt.is_all && (flt.entries || []).length > 0;
+      save(fltApi + "/add-group", {{ path: TABLE_PATH, position: locus, group: name,
+                                    copy_filters: copy, ignore_lock: !!ignoreLock }}, function(d) {{
+        defName = "";
+        return "Added group " + d.group + " defined by " + d.position + " (column " + d.column + " of "
+          + d.filename + ")" + (d.filters ? ", with " + d.filters + " filter position" + (d.filters === 1 ? "" : "s")
+          + " copied from " + d.filters_copied_from : "") + ". It gets its own tables the next time Step 2 runs.";
+      }});
+    }} else {{
+      var rows = Array.from(pickedRows.keys()).sort(function(a, b) {{ return a - b; }});
+      if (!rows.length) {{ setStatus("Not added: click at least one sample name first.", true); return; }}
+      save(fltApi + "/remove-samples", {{ path: TABLE_PATH, ignore_lock: !!ignoreLock,
+                                         samples: rows.map(function(r) {{ return pickedRows.get(r).stem; }}) }}, function(d) {{
+        var added = d.added || [], skipped = d.skipped || [];
+        var tr = Object.keys(d.translated || {{}});
+        var msg = added.length ? "Added " + added.length + " to " + d.filename + ": " + added.join(", ") + "."
+                               : "Nothing new to add.";
+        if (skipped.length) msg += " Already listed: " + skipped.join(", ") + ".";
+        if (tr.length) msg += " Written as the VCF file name vsnp3 matches: "
+          + tr.map(function(k) {{ return k + " → " + d.translated[k]; }}).join(", ") + ".";
+        if (added.length) msg += " They are left out of every Step 2 run on " + flt.reference + " from the next run.";
+        return msg;
+      }});
+    }}
   }}
 
   if (fltBox) {{
     fltBox.addEventListener("click", function(ev) {{
-      var chip = ev.target.closest ? ev.target.closest(".flt-chip") : null;
-      if (chip && !fltBusy) {{
-        picked.delete(parseInt(chip.getAttribute("data-col"), 10));
+      var chipEl = ev.target.closest ? ev.target.closest(".flt-chip") : null;
+      if (chipEl && !fltBusy) {{
+        if (chipEl.hasAttribute("data-col")) picked.delete(parseInt(chipEl.getAttribute("data-col"), 10));
+        if (chipEl.hasAttribute("data-row")) pickedRows.delete(parseInt(chipEl.getAttribute("data-row"), 10));
+        if (chipEl.hasAttribute("data-defcol")) defCol = null;
         renderFltStyle();
         renderPanel();
         return;
@@ -3689,17 +3908,29 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       if (!b || b.disabled) return;
       var what = b.getAttribute("data-flt");
       if (what === "done") closeFlt();
-      else if (what === "clear") {{ picked.clear(); fltLast = null; fltStatus = ""; renderFltStyle(); renderPanel(); }}
+      else if (what === "clear") {{ clearPicks(); fltStatus = ""; renderFltStyle(); renderPanel(); }}
       else if (what === "add") addPicked(false);
       else if (what === "force") addPicked(true);
     }});
     fltBox.addEventListener("input", function(ev) {{
       if (ev.target.id === "xlsxFltWhy") {{ fltRationale = ev.target.value; fltLock = ""; }}
+      if (ev.target.id === "xlsxDefName") {{
+        defName = ev.target.value; fltLock = "";
+        // The button names the group; refresh it without re-rendering the box being typed in.
+        var btn = fltBox.querySelector('button[data-flt="add"]');
+        if (btn) {{
+          btn.textContent = "Add group" + (defName.trim() ? " " + defName.trim() : "");
+          btn.disabled = !(defCol !== null && defName.trim() && flt && flt.writable && !fltBusy);
+        }}
+      }}
     }});
     fltBox.addEventListener("keydown", function(ev) {{
-      if (ev.target.id === "xlsxFltWhy" && ev.key === "Enter") {{ ev.preventDefault(); addPicked(false); }}
+      if ((ev.target.id === "xlsxFltWhy" || ev.target.id === "xlsxDefName") && ev.key === "Enter") {{
+        ev.preventDefault(); addPicked(false);
+      }}
     }});
     fltBox.addEventListener("change", function(ev) {{
+      if (ev.target.id === "xlsxDefCopy") {{ defCopy = ev.target.checked; return; }}
       if (ev.target.name !== "xlsxFltTo") return;
       fltToAll = ev.target.value === "all";
       dropBlockedPicks();
@@ -3708,9 +3939,12 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       renderPanel();
     }});
   }}
-  if (fltBtn && fltBox && PROJECT && TABLE_PATH && Object.keys(LOCI).length) {{
-    fltBtn.hidden = false;
-    fltBtn.addEventListener("click", function() {{ if (fltOpen) closeFlt(); else openFlt(); }});
+  if (fltBox && PROJECT && TABLE_PATH && Object.keys(LOCI).length) {{
+    [[fltBtn, "filter"], [defBtn, "define"], [smpBtn, "samples"]].forEach(function(p) {{
+      if (!p[0]) return;
+      p[0].hidden = false;
+      p[0].addEventListener("click", function() {{ if (fltMode === p[1]) closeFlt(); else openMode(p[1]); }});
+    }});
   }}
 
   // ---- the identical-position toggle --------------------------------------

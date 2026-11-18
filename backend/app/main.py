@@ -3815,6 +3815,16 @@ def ref_define_filter_add_positions(ref_name: str, payload: DefineFilterAddPosit
         payload.positions, payload.rationale, payload.ignore_lock)
 
 
+def _remove_list_summary(ref_dir: Path) -> Dict[str, Any]:
+    """The remove_from_analysis file's name and entries, for the table page."""
+    try:
+        info = _remove_list_entries(ref_dir)
+    except Exception:  # noqa: BLE001 — the page can still filter positions
+        return {"remove_file": "", "removed": []}
+    return {"remove_file": info.get("file", ""),
+            "removed": [e["name"] for e in info.get("entries", [])]}
+
+
 def _snp_table_filter_target(project: str, path: str) -> Dict[str, Any]:
     """Which reference, filter file and group a Step 2 SNP table belongs to.
 
@@ -3847,21 +3857,23 @@ def _snp_table_filter_target(project: str, path: str) -> Dict[str, Any]:
     if not ref_name or ref_dir is None:
         return {"available": False, "group": group,
                 "reason": "This project's reference folder could not be found."}
+    # Known from here on, whatever the define_filter holds: "Filter samples"
+    # needs only the reference and its remove list.
+    base = {"group": group, "reference": ref_name, "ref_dir": ref_dir,
+            "project_dir": project_dir, **_remove_list_summary(ref_dir)}
     target, why = sample_groups.define_filter_of(ref_dir)
     if target is None:
-        return {"available": False, "group": group, "reference": ref_name,
-                "reason": f"No filter file to add to: {why}."}
+        return {**base, "available": False, "reason": f"No filter file to add to: {why}."}
     try:
         layout = _define_filter_layout(target)
     except Exception as exc:  # noqa: BLE001 — say why instead of a bare 500
-        return {"available": False, "group": group, "reference": ref_name,
-                "file": target.name, "reason": f"{target.name} could not be read: {exc}"}
+        return {**base, "available": False, "file": target.name,
+                "reason": f"{target.name} could not be read: {exc}"}
     all_col = layout.get("all")
     is_all = bool(all_col and all_col["name"] and all_col["name"] == group)
     column = all_col if is_all else _define_filter_column(layout, group, False)
     if column is None:
-        return {"available": False, "group": group, "reference": ref_name,
-                "file": target.name,
+        return {**base, "available": False, "file": target.name,
                 "reason": (f"{target.name} has no group named '{group}' (vsnp3 names "
                            "the folder after the group, so the file may have changed "
                            "since this run).")}
@@ -3877,6 +3889,10 @@ def _snp_table_filter_target(project: str, path: str) -> Dict[str, Any]:
         "all_name": (all_col or {}).get("name") or "",
         "entries": column["entries"],
         "all_entries": [] if is_all else ((all_col or {}).get("entries") or []),
+        # Positions that already define a group, so "Add defining SNP" can say so.
+        "defining": _defining_positions(layout),
+        # The reference's remove list, so "Filter samples" can mark who is on it.
+        "remove_file": base["remove_file"], "removed": base["removed"],
         "writable": writable, "not_writable_reason": why_not,
     }
 
@@ -3909,6 +3925,235 @@ def snp_table_filter_add(project: str, payload: SnpTableFilterAddRequest):
     return _define_filter_add_positions(
         ctx["reference"], ctx["ref_dir"], ctx["group"], all_groups,
         payload.positions, payload.rationale, payload.ignore_lock,
+        source={"project": project, "table": str(Path(payload.path).name)})
+
+
+# ---------------------------------------------------------------------------
+# A new defining-SNP group, picked on a SNP table.
+#
+# One new column at the end of the workbook: row 1 the defining position, row
+# 2 the group's name, rows 3+ its filter positions. vsnp3 keeps groups by NAME
+# (groupings_dict[group]), so a second column with an existing name silently
+# replaces that group's samples; and pandas renames a repeated row-1 header
+# "pos.1", which then matches nothing. Both are refused. Names are compared
+# ignoring case too, because each group becomes a folder and two names that
+# differ only in case are one folder on macOS.
+# ---------------------------------------------------------------------------
+
+_DF_GROUP_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+
+
+def _defining_positions(layout: Dict[str, Any]) -> Dict[str, str]:
+    """Every single position that is (part of) a group's defining SNP -> group.
+
+    A row-1 header may hold "pos1, pos2" (all required) or "pos!" (must be
+    absent); each position in it counts."""
+    out: Dict[str, str] = {}
+    for g in layout["groups"]:
+        for header in g["defining"]:
+            for part in header.split(","):
+                p = part.strip().rstrip("!").strip()
+                if p:
+                    out.setdefault(p, g["name"])
+    return out
+
+
+# openpyxl mutator: one new column after the last used one. Re-checks the name
+# and the position against the live file so a concurrent edit cannot make a
+# duplicate.
+_DEFINE_FILTER_NEW_GROUP_CODE = _XLSX_GUARDED_SAVE + r"""
+import openpyxl, json, sys
+from openpyxl.utils import get_column_letter
+target = sys.argv[1]
+payload = json.load(open(sys.argv[2]))
+wb = openpyxl.load_workbook(target)
+ws = wb.worksheets[0]
+before = shape_of(wb)
+name, pos = payload['group'], payload['position']
+last = 0
+for c in range(1, ws.max_column + 1):
+    h = ws.cell(row=1, column=c).value
+    n = ws.cell(row=2, column=c).value
+    if n is not None and str(n).strip().lower() == name.lower():
+        sys.stderr.write('ERR:dup_name:' + str(n)); sys.exit(2)
+    if h is not None:
+        parts = [p.strip().rstrip('!').strip() for p in str(h).lstrip('#').split(',')]
+        if pos in parts:
+            sys.stderr.write('ERR:dup_position:' + ('' if n is None else str(n))); sys.exit(3)
+    if any(ws.cell(row=r, column=c).value not in (None, '') for r in (1, 2)):
+        last = c
+col = max(last, 1) + 1
+# A column past the last group may still hold something below row 2 (a note, a
+# stray cell): never write over it, take the first column that is empty.
+while any(ws.cell(row=r, column=col).value not in (None, '') for r in range(1, ws.max_row + 1)):
+    col += 1
+ws.cell(row=1, column=col, value=pos)
+ws.cell(row=2, column=col, value=name)
+for i, f in enumerate(payload['filters']):
+    ws.cell(row=3 + i, column=col, value=f)
+guarded_save(wb, target, before, rows_too=True)
+print(json.dumps({'column': get_column_letter(col), 'filters': len(payload['filters'])}))
+"""
+
+
+def _define_filter_new_group(ref_name: str, ref_dir: Path, group: str, position: str,
+                             copy_from: Optional[str], rationale: str, ignore_lock: bool,
+                             source: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Add a group defined by one position, optionally starting its filter list
+    as a copy of another group's (what a subgroup's column usually holds)."""
+    cfg = load_config()
+    group = (group or "").strip()
+    if not (rationale or "").strip():
+        raise HTTPException(status_code=400, detail="A rationale is required")
+    if not _DF_GROUP_NAME_RE.fullmatch(group):
+        raise HTTPException(status_code=400, detail=(
+            f"'{group}' cannot be a group name. Use letters, digits, '.', '_' and '-', "
+            "starting with a letter or digit (it becomes the group's folder name)."))
+    target, why = sample_groups.define_filter_of(ref_dir)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"No filter file to edit: {why}.")
+    layout = _define_filter_layout(target)
+    all_name = ((layout.get("all") or {}).get("name") or "").strip()
+    taken = {g["name"].strip().lower(): g["name"] for g in layout["groups"]}
+    if all_name:
+        taken.setdefault(all_name.lower(), all_name)
+    if group.lower() in taken:
+        raise HTTPException(status_code=400, detail=(
+            f"{target.name} already has a group named '{taken[group.lower()]}'. vsnp3 keeps "
+            "one group per name, so a second one would silently replace it. Pick another name."))
+
+    parsed = _parse_filter_entry(position or "")
+    if not parsed or parsed[1] != parsed[2]:
+        raise HTTPException(status_code=400, detail=(
+            f"'{position}' is not a single position (sequence:position)."))
+    chrom, pos_n, _ = parsed
+    contigs = ref_contigs.reference_contigs(ref_dir)
+    lengths = dict(contigs) if contigs else {}
+    if lengths and chrom not in lengths:
+        raise HTTPException(status_code=400, detail=(
+            f"{chrom} is not a sequence in this reference (it has {', '.join(lengths)})."))
+    if lengths and not (1 <= pos_n <= lengths[chrom]):
+        raise HTTPException(status_code=400, detail=(
+            f"{position} is past the end of {chrom} ({lengths[chrom]:,} bases)."))
+    canon = f"{chrom}:{pos_n}"
+    defining = _defining_positions(layout)
+    if canon in defining:
+        raise HTTPException(status_code=400, detail=(
+            f"{canon} already defines '{defining[canon]}'. A position can define only one "
+            "group: vsnp3 renames a repeated row-1 position and it then matches nothing."))
+
+    filters: List[str] = []
+    if copy_from:
+        col = _define_filter_column(layout, copy_from, False)
+        if col is None:
+            raise HTTPException(status_code=404, detail=f"{target.name} has no group named '{copy_from}'.")
+        filters = list(col["entries"])
+
+    master = _edit_target_or_403(ref_dir, target)
+    excel_lock = _warn_if_open_in_excel(target, ignore_lock)
+    _refuse_if_fragile(target)
+    old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False,
+                                     dir=str(ref_dir)) as tf:
+        json.dump({"group": group, "position": canon, "filters": filters}, tf)
+        tmp_json = tf.name
+    try:
+        result = subprocess.run(
+            conda_python_cmd(cfg, _DEFINE_FILTER_NEW_GROUP_CODE, [str(target), tmp_json]),
+            text=True, capture_output=True,
+        )
+    finally:
+        Path(tmp_json).unlink(missing_ok=True)
+    if result.returncode != 0:
+        if archived and _sha256_of_path(target) == old_sha:
+            Path(archived).unlink(missing_ok=True)
+        err = (result.stderr or "").strip()
+        if err.startswith("ERR:dup_name:"):
+            detail = (f"{target.name} already has a group named '{err.split(':', 2)[2]}' "
+                      "(added since this page loaded). Nothing was added.")
+        elif err.startswith("ERR:dup_position:"):
+            detail = (f"{canon} already defines '{err.split(':', 2)[2]}' (added since this "
+                      "page loaded). Nothing was added.")
+        elif err.startswith("ERR:shrank"):
+            detail = f"Refused: saving would have lost part of {target.name}. Nothing was changed."
+        else:
+            detail = f"Failed to add the group: {err[-400:]}"
+        raise HTTPException(status_code=400, detail=detail)
+    summary = json.loads(result.stdout.strip() or "{}")
+    new_sha = _sha256_of_path(target)
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": "define_filter_add_group",
+        "reference": ref_name,
+        "filename": target.name,
+        "user": _current_os_user(),
+        "rationale": rationale.strip(),
+        "group": group,
+        "positions": [canon],
+        "column": summary.get("column"),
+        "filters_copied_from": copy_from or "",
+        "filters": len(filters),
+        "old_sha256": old_sha,
+        "new_sha256": new_sha,
+        "archived_old": archived,
+        "target": str(target),
+        **({"source": source} if source else {}),
+        **_shared_master_fields(ref_dir, master),
+        **({"edited_over_excel_lock": excel_lock} if excel_lock else {}),
+    }
+    audit_path = _t39_audit_append(record, _archive_dir_for(ref_dir, master))
+    return {
+        "ok": True, "filename": target.name, "group": group, "position": canon,
+        "column": summary.get("column"), "filters": len(filters),
+        "filters_copied_from": copy_from or "",
+        "archived_old": archived, "audit_log": audit_path,
+        **_shared_master_fields(ref_dir, master),
+    }
+
+
+class SnpTableNewGroupRequest(BaseModel):
+    path: str
+    position: str
+    group: str
+    copy_filters: bool = True
+    rationale: str
+    ignore_lock: bool = False
+
+
+@app.post("/api/projects/{project}/snp-table-filter/add-group")
+def snp_table_new_group(project: str, payload: SnpTableNewGroupRequest):
+    """Add a defining-SNP group picked on a SNP table. Its filter list starts as
+    a copy of the table's own group's (unless asked not to, and never from the
+    All column, whose list already applies to every group)."""
+    ctx = _snp_table_filter_target(project, payload.path)
+    if not ctx.get("available"):
+        raise HTTPException(status_code=400, detail=ctx.get("reason") or "Not available")
+    copy_from = ctx["group"] if (payload.copy_filters and not ctx["is_all"]) else None
+    return _define_filter_new_group(
+        ctx["reference"], ctx["ref_dir"], payload.group, payload.position, copy_from,
+        payload.rationale, payload.ignore_lock,
+        source={"project": project, "table": str(Path(payload.path).name)})
+
+
+class SnpTableRemoveSamplesRequest(BaseModel):
+    path: str
+    samples: List[str]
+    rationale: str
+    ignore_lock: bool = False
+
+
+@app.post("/api/projects/{project}/snp-table-filter/remove-samples")
+def snp_table_remove_samples(project: str, payload: SnpTableRemoveSamplesRequest):
+    """Add samples picked on a SNP table to the reference's remove_from_analysis
+    list. That list is the REFERENCE's: it drops them from every Step 2 run on
+    this reference, in every project. A display name is written as the VCF file
+    name vsnp3 matches (see _remove_list_add_samples)."""
+    ctx = _snp_table_filter_target(project, payload.path)
+    if not ctx.get("reference") or not ctx.get("ref_dir"):
+        raise HTTPException(status_code=400, detail=ctx.get("reason") or "Not available")
+    return _remove_list_add_samples(
+        ctx["reference"], ctx["ref_dir"], payload.samples, payload.rationale,
+        payload.ignore_lock,
         source={"project": project, "table": str(Path(payload.path).name)})
 
 
@@ -3968,12 +4213,19 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
     vSNP3 reads column 1 (no header) as sample names to drop from analysis.
     Permanent edit to a shared reference file → backup + audit-log flow.
     """
+    return _remove_list_add_samples(ref_name, _ref_dir_or_404(ref_name), payload.samples,
+                                    payload.rationale, payload.ignore_lock)
+
+
+def _remove_list_add_samples(ref_name: str, ref_dir: Path, samples_given: List[str],
+                             rationale: str, ignore_lock: bool,
+                             source: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Shared by the Reference Editor and the SNP-table page's "Filter samples"."""
     cfg = load_config()
-    ref_dir = _ref_dir_or_404(ref_name)
-    given = [str(s).strip() for s in (payload.samples or []) if str(s).strip()]
+    given = [str(s).strip() for s in (samples_given or []) if str(s).strip()]
     if not given:
         raise HTTPException(status_code=400, detail="At least one sample name is required")
-    if not (payload.rationale or "").strip():
+    if not (rationale or "").strip():
         raise HTTPException(status_code=400, detail="A rationale is required")
     # vsnp3 applies this list to the VCF FILES, before any renaming: it looks
     # for <name>, <name>.vcf and <name>_zc.vcf in the working directory. A
@@ -4002,7 +4254,7 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
     target = remove_files[0]
 
     master = _edit_target_or_403(ref_dir, target)
-    excel_lock = _warn_if_open_in_excel(target, payload.ignore_lock)
+    excel_lock = _warn_if_open_in_excel(target, ignore_lock)
     _refuse_if_fragile(target)
     old_sha, archived = _backup_ref_file(ref_dir, target, _archive_dir_for(ref_dir, master))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=str(ref_dir)) as tf:
@@ -4030,7 +4282,8 @@ def ref_remove_add_sample(ref_name: str, payload: RemoveSampleAddRequest):
         "reference": ref_name,
         "filename": target.name,
         "user": _current_os_user(),
-        "rationale": payload.rationale.strip(),
+        "rationale": rationale.strip(),
+        **({"source": source} if source else {}),
         "added": summary.get("added", samples),
         "skipped": summary.get("skipped", []),
         "translated": translated,
@@ -10719,7 +10972,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "19"  # 19: the filter panel takes its rationale inline, no pop-ups (18: "Filter positions…" picks headers for the group's filter (17: column window)
+_XLSX_RENDER_VERSION = "20"  # 20: "Add defining SNP…" and "Filter samples…" (19: the filter panel takes its rationale inline, no pop-ups (18: "Filter positions…" picks headers for the group's filter (17: column window)
 #                                  (the windows themselves did not change — the ETag had to, so a
 #                                  browser holding the old page does not keep it on a 304)
 #                              16: windows record the rows drawn without reads; sample sets left the key

@@ -4627,7 +4627,11 @@ async def project_import_sequences_preview(
     if accs:
         lib_acc = seq_import.library_accessions(lib)
         proj_acc = seq_import.project_context_accessions(project_dir)
-        present = {a: lib_acc.get(a) or proj_acc.get(a) for a in accs if a in lib_acc or a in proj_acc}
+        # Context already held is not fetched again; a sample is, since the
+        # library's copy is an unnamed comparator and the project wants the
+        # record itself, typed and highlighted.
+        present = ({a: lib_acc.get(a) or proj_acc.get(a) for a in accs if a in lib_acc or a in proj_acc}
+                   if default_role == "context" else {})
         todo = [a for a in accs if a not in present]
         cache = lib / "genbank_cache"
         cached = {a for a in todo if (cache / f"{a}.gb").is_file()}
@@ -4645,7 +4649,8 @@ async def project_import_sequences_preview(
         fetched = failed = 0
         for a in accs:
             if a in present:
-                problems.append(f"{a}: already in the {present[a]}; nothing to import")
+                problems.append(f"{a}: already in the {present[a]}; nothing to add as context "
+                                "(import it as a sample to type and highlight it)")
                 continue
             r = results.get(a) or {"error": "not fetched"}
             if "path" in r:
@@ -5724,7 +5729,10 @@ def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
         except (OSError, ValueError):
             continue
         ref = str(d.get("reference") or "")
-        if sero and ref.split("-", 1)[0].split("_", 1)[0].upper() != sero:
+        # An imported sequence states its serotype; a reads sample's is in
+        # its reference name.
+        sample_sero = (str(d.get("serotype") or "") or ref.split("-", 1)[0].split("_", 1)[0]).upper()
+        if sero and sample_sero != sero:
             continue
         if float(d.get("vp1_called_percent") or 0.0) >= min_called:
             usable += 1

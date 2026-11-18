@@ -235,14 +235,18 @@ def test_locate_preview_commit():
 
         # A second import of the same accession is refused; so is a library one.
         pv2 = si.preview(si.records_from_genbank(gb_record(GENOME[:7000]), "MN000002"), project, lib, "context", blastn="/fake/blastn")
-        check("already in this project's context" in pv2["rows"][0]["exists"], True, "project duplicate flagged")
+        check("already in this project's context" in pv2["rows"][0]["in_context"], True, "project duplicate flagged")
         plan, errors = si.build_plan(pv2["token"], pv2["rows"], project, lib)
         check(any("already in this project" in e for e in errors), True, "project duplicate refused")
         r3 = si.records_from_fasta(f">KM268899\n{VP1_A}\n", "p.fasta")
         pv3 = si.preview(r3, project, lib, "context", blastn="/fake/blastn")
-        check("already in the library" in pv3["rows"][0]["exists"], True, "library accession flagged")
+        check("already in the library" in pv3["rows"][0]["in_context"], True, "library accession flagged")
         plan, errors = si.build_plan(pv3["token"], pv3["rows"], project, lib)
-        check(any("already in the library" in e for e in errors), True, "library accession refused")
+        check(any("already in the library" in e for e in errors), True, "library accession refused as context")
+        as_sample = [dict(pv3["rows"][0], role="sample", name="published-isolate")]
+        plan, errors = si.build_plan(pv3["token"], as_sample, project, lib)
+        check(errors, [], "the same accession is accepted as a sample")
+        check(plan["entries"][0]["name"], "published-isolate", "sample keeps its name")
 
         # No blastn: every record is refused with the reason, nothing crashes.
         pv4 = si.preview(si.records_from_fasta(f">x\n{VP1_A}\n", "x.fasta"), project, lib, "sample", blastn=None)

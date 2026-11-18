@@ -89,7 +89,7 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
       const r = {}; const p = {};
       for (const row of data.rows) {
         r[row.id] = { ...row };
-        p[row.id] = !row.problem && !row.exists;
+        p[row.id] = !row.problem && !row.exists && !(row.in_context && (row.role || "sample") === "context");
       }
       setRows(r); setPicked(p);
     } catch (e) {
@@ -242,6 +242,12 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
                           style={{ ...inputStyle, borderColor: dup ? "var(--danger, #b00)" : undefined }}
                           title={isCtx ? "A context record is named <SEROTYPE>-<lineage or NA>_<accession>; this name is used only when it has no accession." : "The sample name Step 1 and Step 2 will use. Underscores become dashes."} />
                         {r.exists ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>{r.exists}</div> : null}
+                        {r.in_context ? (
+                          <div style={{ fontSize: "10px", color: isCtx ? "var(--danger, #b00)" : undefined }} className={isCtx ? "" : "muted"}
+                            title="The library or this project already holds this accession as a context record. It cannot be added as context twice; as a sample it is typed and highlighted in the tree.">
+                            {r.in_context}{isCtx ? " (cannot be added as context again)" : ""}
+                          </div>
+                        ) : null}
                         {dup ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>name used twice</div> : null}
                       </td>
                       <td>

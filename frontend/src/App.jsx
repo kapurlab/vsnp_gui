@@ -7476,7 +7476,18 @@ export default function App() {
                     apiBase={API_BASE}
                     project={selectedProject}
                     enabled={!!selectedProject && settingsReady}
-                    onImported={() => { loadAll(); }}
+                    onImported={async () => {
+                      // An imported sequence is a new Step 1 folder with a
+                      // typing result: the Samples list, the Results rows
+                      // (rescanned, since the scanner lists folders) and the
+                      // VP1 typing table all change.
+                      loadStep1Status();
+                      loadQC({ refresh: true });
+                      try {
+                        const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`);
+                        if (res.ok) setFmdvInfo(await res.json());
+                      } catch { /* the next project switch reloads it */ }
+                    }}
                   />
                 ) : null}
                 <h3>SRA Download</h3>
@@ -8698,6 +8709,7 @@ export default function App() {
                       !s.in_vcfs_folder &&
                       s.status !== "not_started" &&
                       s.status !== "misfit" &&
+                      s.status !== "sequence" &&   // an imported sequence has no VCF to collect
                       s.status !== "running"
                     );
                     if (!notCollected.length) return null;
@@ -9063,7 +9075,10 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
-                                    {fmdvOn && sampleKey(row) && row._file ? (() => {
+                                    {fmdvOn && sampleKey(row) && row._file && row.read_type !== "sequence" ? (() => {
+                                      // An imported sequence has no report yet
+                                      // (the report scripts take folders with a
+                                      // chooser result), so no dead buttons.
                                       const dir = String(row._file).replace(/\/[^/]*$/, "");
                                       const stem = `${dir}/${sampleKey(row)}_FMDV_report`;
                                       return (<>

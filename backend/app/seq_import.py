@@ -575,13 +575,15 @@ def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str
         if seen[name] > 1:
             name = f"{name}-{seen[name]}"
         acc = ctx.bare_accession(m.get("accession", "")) if m.get("accession") else ""
-        exists = ""
-        if name in names:
-            exists = f"name already in {names[name]}"
-        elif acc and acc in lib_acc:
-            exists = f"accession already in the library ({lib_acc[acc]})"
+        exists = f"name already in {names[name]}" if name in names else ""
+        # An accession the library or the project already holds as context
+        # cannot be added as context twice; it can still be a SAMPLE (a
+        # published isolate to type and highlight beside the project's own).
+        in_context = ""
+        if acc and acc in lib_acc:
+            in_context = f"already in the library as {lib_acc[acc].split(' ', 2)[-1]}"
         elif acc and acc in proj_acc:
-            exists = f"accession already in this project's context ({proj_acc[acc]})"
+            in_context = f"already in this project's context as {proj_acc[acc].split(' ', 2)[-1]}"
         vp1 = r.get("vp1")
         rows.append({
             "id": i, "source": r["source"], "kind": r["kind"], "header": r["header"][:200],
@@ -595,7 +597,7 @@ def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str
             "vp1": ({k: v for k, v in vp1.items() if k != "sequence"} | {"length": len(vp1["sequence"]),
                     "called_percent": called_percent(vp1["sequence"])}) if vp1 else None,
             "problem": r.get("problem", ""), "serotype_note": r.get("serotype_note", ""),
-            "exists": exists,
+            "exists": exists, "in_context": in_context,
         })
     stash = _stash_dir(project_dir) / f"{token}.json"
     stash.write_text(json.dumps({"token": token, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -654,6 +656,8 @@ def build_plan(token: str, rows: List[Dict], project_dir: Path, lib: Path) -> Tu
                 "year": (row.get("year") or "").strip(), "host": (row.get("host") or "").strip(),
                 "accession": acc, "isolate": (row.get("isolate") or "").strip()}
         if role == "sample":
+            # A sample may repeat a library accession: the library holds it
+            # as an unnamed comparator, the project wants it typed and shown.
             name = safe_sample_name(row.get("name") or "")
             if not name:
                 errors.append(f"row {row.get('id')}: a sample needs a name")

@@ -245,6 +245,28 @@ def main() -> int:
         path=str(tmp / "elsewhere.xlsx"), positions=["chr1:1"], rationale="x"))
     check("a path outside the project's Step 2 is refused", "Step 2" in why)
 
+    print("[a download of the edited file is never a stale browser copy]")
+    # Reported 2026-11-18: an edit, then Download, gave the workbook as it was.
+    # With no Cache-Control a browser may reuse a held copy for a tenth of the
+    # time since Last-Modified (weeks, for a file last changed in 2025).
+    M._ref_entry = lambda _name: {"path": str(ref_dir)}
+    resp = M.ref_download_file("Ref", filename=book.name)
+    check("the reference download must be revalidated before reuse",
+          resp.headers.get("cache-control") == "no-cache")
+
+    print("[the table page asks for nothing in a pop-up]")
+    # Reported 2026-11-18: "it never asked for a rationale". A browser that
+    # declines to show window.prompt answers null, and the add returned without
+    # a word. The rationale is an input in the panel now.
+    import xlsx_html
+    from test_xlsx_filter import make_group_table
+    tbl = tmp / "t.xlsx"
+    make_group_table(tbl, ["S1_meta", "S2_meta"], 4, lambda i, c: "A" if i == 1 else "C")
+    page = xlsx_html.xlsx_to_html(tbl, project="p1")
+    check("no window.prompt / window.confirm in the page",
+          "window.prompt(" not in page and "window.confirm(" not in page)
+    check("the panel has a rationale box", 'id="xlsxFltWhy"' in page)
+
     print(f"\n{'ALL PASSED' if not FAILED else f'{FAILED} FAILED'}")
     return 1 if FAILED else 0
 

@@ -1337,6 +1337,7 @@ export default function App() {
   const [dfFilterGroup, setDfFilterGroup] = useState("");
   const [dfFilterPositions, setDfFilterPositions] = useState("");
   const [dfFilterStatus, setDfFilterStatus] = useState("");
+  const [dfFilterRationale, setDfFilterRationale] = useState("");
   // Cumulative VCF database (step2/vcf_database)
   const [vcfsFolderCount, setVcfsFolderCount] = useState(0);
   const [vcfsFolderPath, setVcfsFolderPath] = useState("");
@@ -2519,10 +2520,10 @@ export default function App() {
     const label = allGroups ? `every group (${(dfGroups && dfGroups.all && dfGroups.all.name) || "All"})` : dfFilterGroup;
     const positions = dfFilterPositions.split(/[\s,;]+/).map((p) => p.trim()).filter(Boolean);
     if (!positions.length) { setDfFilterStatus("Enter at least one position."); return; }
-    const rationale = window.prompt(
-      `Rationale for leaving ${positions.length} position(s) out of ${label}? Required.`
-    );
-    if (!rationale || !rationale.trim()) { setDfFilterStatus("Cancelled — rationale is required."); return; }
+    // Typed into the form, not asked for in a pop-up a browser may decline to
+    // show (and then answer "cancelled" without showing anything).
+    const rationale = dfFilterRationale;
+    if (!rationale.trim()) { setDfFilterStatus("Not added: write a rationale first."); return; }
     setDfFilterStatus("Saving…");
     const res = await postRefEdit(
       `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-positions`,
@@ -8035,9 +8036,16 @@ export default function App() {
                                     style={{width:"100%", boxSizing:"border-box", fontFamily:"monospace", fontSize:"0.85em", resize:"vertical"}}
                                     aria-label="Positions to filter"
                                   />
+                                  <input
+                                    placeholder="Rationale (required; kept in the audit log)"
+                                    value={dfFilterRationale}
+                                    onChange={(e) => setDfFilterRationale(e.target.value)}
+                                    style={{width:"100%", boxSizing:"border-box", marginTop:"0.3em"}}
+                                    aria-label="Rationale for filtering these positions"
+                                  />
                                   <button
                                     style={{marginTop:"0.3em"}}
-                                    disabled={!dfFilterGroup || !dfFilterPositions.trim()}
+                                    disabled={!dfFilterGroup || !dfFilterPositions.trim() || !dfFilterRationale.trim()}
                                     onClick={addFilterPositions}
                                   >
                                     Add to filter

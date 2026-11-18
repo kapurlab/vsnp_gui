@@ -4313,7 +4313,7 @@ def ref_preview_xlsx(ref_name: str, filename: str = Query(...), download: int = 
     if target.suffix.lower() not in (".xlsx", ".xlsm"):
         raise HTTPException(status_code=400, detail="Only .xlsx/.xlsm supported")
     if download:
-        return FileResponse(
+        return _fresh_file_response(
             target,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
@@ -4347,7 +4347,7 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
     headers = {}
     if not inline:
         headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
-    return FileResponse(target, media_type=media_type, headers=headers)
+    return _fresh_file_response(target, media_type=media_type, headers=headers)
 
 
 # T-39: re-upload reference xlsx to replace in place. Closes the offline-edit
@@ -4367,6 +4367,21 @@ def ref_download_file(ref_name: str, filename: str = Query(...), inline: int = 0
 _T39_ALLOWED_REF_FILENAMES = re.compile(r"^[A-Za-z0-9._-]+_(define_filter|remove_from_analysis|metadata)\.xlsx$")
 _T39_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _T39_SHARED_AUDIT_PATH = SITE_ROOT / "audit" / "reference-changes.jsonl"
+
+
+def _fresh_file_response(*args, **kwargs) -> FileResponse:
+    """A FileResponse the browser must check with the server before reusing.
+
+    With no Cache-Control, a browser may hand back a download it already holds
+    without asking: it treats a response as fresh for a tenth of the time since
+    its Last-Modified. A reference workbook last changed in March 2025 then
+    stays "fresh" for about two months, so the define_filter downloaded a minute
+    after an edit came back as it was before it (reproduced 2026-11-18).
+    no-cache makes the browser ask every time; these are small files, and the
+    answer is always the file as it is now."""
+    resp = FileResponse(*args, **kwargs)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 def _sha256_of_path(path: Path) -> str:
@@ -9492,7 +9507,7 @@ def _latest_step1_stats(project: str, sample: str) -> Path:
 @app.get("/api/projects/{project}/step1/samples/{sample}/stats/download")
 def step1_sample_stats_download(project: str, sample: str):
     target = _latest_step1_stats(project, sample)
-    return FileResponse(
+    return _fresh_file_response(
         target,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{sample}_stats.xlsx",
@@ -9508,7 +9523,7 @@ def step1_sample_stats_preview(project: str, sample: str, download: int = 0):
     spreadsheet work without leaving the preview."""
     target = _latest_step1_stats(project, sample)
     if download:
-        return FileResponse(
+        return _fresh_file_response(
             target,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=f"{sample}_stats.xlsx",
@@ -10682,7 +10697,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "18"  # 18: "Filter positions…" picks headers for the group's filter (17: column window)
+_XLSX_RENDER_VERSION = "19"  # 19: the filter panel takes its rationale inline, no pop-ups (18: "Filter positions…" picks headers for the group's filter (17: column window)
 #                                  (the windows themselves did not change — the ETag had to, so a
 #                                  browser holding the old page does not keep it on a 304)
 #                              16: windows record the rows drawn without reads; sample sets left the key
@@ -11331,7 +11346,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
     # BOTH — which is why "Download xlsx" from a clade view handed back the entire
     # group's table, all 35 MB and every sample in it.
     if download and not selection:
-        return FileResponse(
+        return _fresh_file_response(
             target,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename=target.name,
@@ -11583,7 +11598,7 @@ def preview_xlsx(request: Request, project: str, path: str = Query(...), downloa
             # filter did not apply at all (the sheet has no locus columns, so it
             # is not a SNP table and the page is showing it whole). The page's
             # download link should then hand back what the page is showing.
-            return FileResponse(
+            return _fresh_file_response(
                 target,
                 media_type="application/vnd.openxmlformats-officedocument"
                            ".spreadsheetml.sheet",
@@ -11708,13 +11723,13 @@ def download_file(project: str, path: str = Query(...), inline: int = 0, downloa
         # that we don't want to enumerate exhaustively.
         if media_type == "application/octet-stream":
             media_type = "text/plain"
-        return FileResponse(target, media_type=media_type)
+        return _fresh_file_response(target, media_type=media_type)
     filename = target.name
     if download_name:
         safe_name = Path(download_name).name
         if safe_name:
             filename = safe_name
-    return FileResponse(target, media_type=media_type, filename=filename)
+    return _fresh_file_response(target, media_type=media_type, filename=filename)
 
 
 @app.get("/api/download-file")
@@ -11726,7 +11741,7 @@ def download_file_global(path: str = Query(...)):
         raise HTTPException(status_code=400, detail="Path not allowed")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(target, media_type="application/octet-stream", filename=target.name)
+    return _fresh_file_response(target, media_type="application/octet-stream", filename=target.name)
 
 
 _IGV_SERVE_MEDIA_TYPES = {

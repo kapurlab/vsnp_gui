@@ -3132,6 +3132,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   .xlsx-flt .flt-chip {{ display: inline-block; margin: 1px 4px 1px 0; padding: 0 5px;
     font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; cursor: pointer;
     background: #f6d6cc; border: 1px solid #b85a3e; border-radius: 3px; }}
+  .xlsx-flt .flt-why {{ flex: 1 1 320px; min-width: 200px; font: inherit; padding: 2px 6px; }}
   .xlsx-flt .flt-status {{ color: #1e3a1a; }}
   .xlsx-flt .flt-status.err {{ color: #9a2a12; }}
   body.xlsx-flt-on #xlsxBody tr:first-child td.xlsx-hl-target {{ cursor: copy; }}
@@ -3375,6 +3376,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   var fltApi = "snp-table-filter";   // beside this page: /api/projects/<p>/
   var fltOpen = false, fltOn = false, flt = null, fltToAll = false, fltLast = null;
   var fltBusy = false, fltTimer = null, fltStatus = "", fltStatusErr = false;
+  // The rationale is typed into the panel, never asked for in a pop-up: a
+  // browser that declines to show a prompt answers "cancelled" without
+  // showing anything, and the add silently did nothing (2026-11-18).
+  var fltRationale = "", fltLock = "";
   var picked = new Map();            // column (1-based) -> locus
   var listedCols = [];
   var fltStyle = document.createElement("style");
@@ -3528,6 +3533,8 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
             + esc(picked.get(c)) + ' &times;</span>';
         }}).join("")
       : '<span class="xlsx-ctl-note">No positions picked yet.</span>') + '</div>');
+    h.push('<div class="flt-row"><label for="xlsxFltWhy">Rationale (required; kept in the audit log)</label>'
+      + '<input type="text" id="xlsxFltWhy" class="flt-why" value="' + esc(fltRationale) + '"></div>');
     var canAdd = cols.length && flt.writable && !fltBusy;
     h.push('<div class="flt-row"><button type="button" data-flt="add"' + (canAdd ? '' : ' disabled') + '>Add '
       + cols.length + ' to the ' + esc(toAll ? flt.all_name + ' filter (every group)' : flt.group + ' filter')
@@ -3541,7 +3548,9 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     }}
     if (fltStatus) {{
       h.push('<div class="flt-row flt-status' + (fltStatusErr ? ' err' : '') + '">' + esc(fltStatus)
-        + (fltBusy ? ' <span id="xlsxFltTick"></span>' : '') + '</div>');
+        + (fltBusy ? ' <span id="xlsxFltTick"></span>' : '')
+        + (fltLock && !fltBusy ? ' <button type="button" data-flt="force">Add anyway</button>' : '')
+        + '</div>');
     }}
     fltBox.innerHTML = h.join("");
   }}
@@ -3556,6 +3565,10 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     else if (d.available) {{ inGroup = coverTest(d.entries); inAll = coverTest(d.all_entries); }}
     else {{ inGroup = none; inAll = none; }}
     listedCols = Object.keys(LOCI).map(Number).filter(function(c) {{ return !!listedWhy(c); }});
+    if (d.available && !fltRationale) {{
+      var nameEl = document.querySelector(".xlsx-bar .filename");
+      fltRationale = "Picked on " + (nameEl ? nameEl.textContent : "a SNP table");
+    }}
     dropBlockedPicks();
     renderFltStyle();
     retitle();
@@ -3621,38 +3634,35 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       body: JSON.stringify(payload)
     }});
   }}
-  function addPicked() {{
+  function addPicked(ignoreLock) {{
     var cols = Array.from(picked.keys()).sort(function(a, b) {{ return a - b; }});
     var positions = cols.map(function(c) {{ return picked.get(c); }});
-    if (!positions.length || fltBusy) return;
+    if (fltBusy) return;
+    if (!positions.length) {{ setStatus("Not added: pick at least one position header first.", true); return; }}
     var toAll = !!(flt.is_all || fltToAll);
-    var where = toAll ? "every group (" + flt.all_name + ")" : flt.group;
-    var nameEl = document.querySelector(".xlsx-bar .filename");
-    var rationale = window.prompt(
-      "Leave " + positions.length + " position(s) out of " + where + "?\\n\\n"
-      + "They are added to " + flt.file + ", the reference's shared filter file "
-      + "(the previous copy is archived). Rationale (required):",
-      "Picked on " + (nameEl ? nameEl.textContent : "a SNP table"));
-    if (rationale === null) return;
-    if (!rationale.trim()) {{ setStatus("Not added: a rationale is required.", true); return; }}
-    var payload = {{ path: TABLE_PATH, positions: positions, all_groups: toAll, rationale: rationale.trim() }};
+    var rationale = (fltRationale || "").trim();
+    if (!rationale) {{ setStatus("Not added: write a rationale in the box above first.", true); return; }}
+    var payload = {{ path: TABLE_PATH, positions: positions, all_groups: toAll,
+                    rationale: rationale, ignore_lock: !!ignoreLock }};
+    fltLock = "";
     startBusy("Saving…");
     postAdd(payload).then(function(r) {{
-      if (r.status !== 409) return r;
       return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
-        if (!window.confirm((d.detail || "That file may be open in Excel.") + "\\n\\nEdit it anyway?")) return null;
-        payload.ignore_lock = true;
-        return postAdd(payload);
-      }});
-    }}).then(function(r) {{
-      if (!r) {{ stopBusy(); setStatus("Not added: cancelled.", false); return; }}
-      return r.json().catch(function() {{ return {{}}; }}).then(function(d) {{
+        if (r.status === 409) {{
+          // The workbook looks open in Excel. Said here, with the choice
+          // beside it, rather than in a dialog a browser may not show.
+          stopBusy();
+          fltLock = d.detail || "That file may be open in Excel.";
+          setStatus("Not added yet: " + fltLock, true);
+          return;
+        }}
         if (!r.ok) {{ stopBusy(); setStatus("Not added: " + (d.detail || ("HTTP " + r.status)), true); return; }}
         var added = d.added || [], skipped = d.skipped || [];
         var msg = added.length
           ? "Added " + added.length + " to " + (toAll ? flt.all_name + " (every group)" : flt.group)
             + " in " + d.filename + " (column " + d.column
-            + (d.rows ? ", rows " + d.rows[0] + "–" + d.rows[1] : "") + ")."
+            + (d.rows ? (d.rows[0] === d.rows[1] ? ", row " + d.rows[0]
+                                                 : ", rows " + d.rows[0] + "–" + d.rows[1]) : "") + ")."
           : "Nothing new to add.";
         if (skipped.length) {{
           msg += " Skipped " + skipped.map(function(s) {{ return s.position + " (" + s.why + ")"; }}).join(", ") + ".";
@@ -3680,7 +3690,14 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       var what = b.getAttribute("data-flt");
       if (what === "done") closeFlt();
       else if (what === "clear") {{ picked.clear(); fltLast = null; fltStatus = ""; renderFltStyle(); renderPanel(); }}
-      else if (what === "add") addPicked();
+      else if (what === "add") addPicked(false);
+      else if (what === "force") addPicked(true);
+    }});
+    fltBox.addEventListener("input", function(ev) {{
+      if (ev.target.id === "xlsxFltWhy") {{ fltRationale = ev.target.value; fltLock = ""; }}
+    }});
+    fltBox.addEventListener("keydown", function(ev) {{
+      if (ev.target.id === "xlsxFltWhy" && ev.key === "Enter") {{ ev.preventDefault(); addPicked(false); }}
     }});
     fltBox.addEventListener("change", function(ev) {{
       if (ev.target.name !== "xlsxFltTo") return;

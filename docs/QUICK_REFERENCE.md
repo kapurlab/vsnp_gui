@@ -68,6 +68,7 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 - ✅ **Show only flagged samples** - Filter poor samples
 - ✅ **Exclude** - Tick the box; it saves on its own (`Exclusions saved ✓`)
 - ✅ **View log** (Step 1 sample list) or **Files** → **Stats** - Sample-specific details
+- ✅ **Files** → **Edit VCF** - Correct one call; Step 2 compares the edited VCF from then on
 
 ---
 
@@ -91,6 +92,11 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 - **Phylogenetic Tree** (`*.tre`)
 - **HTML Summary** (interactive)
 - **Group Folders** (if defining SNPs exist)
+
+### Edit the reference from a SNP table (applies on the next Step 2 run)
+- **Filter positions…** - Click positions to drop them from this group's tables
+- **Add defining SNP…** - Click a position and name a new group it defines
+- **Filter samples…** - Click sample names to leave them out of every run on this reference
 
 ---
 

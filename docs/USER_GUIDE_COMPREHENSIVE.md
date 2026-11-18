@@ -624,6 +624,9 @@ The **Filter samples…** box and the **Run date** filter (**Today**, **Last 7d*
 - In Step 1 Results, click **Files** on a row for **Open Folder**, **IGV**, **Edit VCF** and **Stats**
 - Review processing steps and any warnings/errors
 
+**Correct a SNP Call (Edit VCF):**
+- In Step 1 Results, click **Files** → **Edit VCF**, enter the position, the correct base and a reason, then **Apply**. The original VCF is kept and the edited copy is the one Step 2 compares from then on.
+
 ---
 
 ## 7. Step 2: SNP Matrices & Trees
@@ -852,6 +855,12 @@ SNP Position  Sample1  Sample2  Sample3  Sample4  Count
   - Group-specific SNP tables
   - FASTA alignment files
   - Statistics and summaries
+
+**Edit the Reference from a SNP Table:**
+Each of these buttons asks for a reason, backs up and logs the file it changes, and takes effect on the next Step 2 run.
+- **Filter positions…** — click position columns to stop them showing in this group's tables (adds them to the group's list in `*_define_filter.xlsx`).
+- **Add defining SNP…** — click one position column and name a new group defined by it (a new column in `*_define_filter.xlsx`).
+- **Filter samples…** — click sample names to leave them out of every Step 2 run on this reference (adds them to the Remove from Analysis file).
 
 **Reproducibility Archive:**
 - **File:** `vcf_starting_files.zip`

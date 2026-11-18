@@ -20,6 +20,8 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
 import VirtualRows from "./VirtualRows.jsx";
 import TargetNamePicker, { useTargetNames } from "./TargetNames.jsx";
 import OntRunImport from "./OntRunImport.jsx";
+import { useAddons, addonById, pathogenCell, PathogenProjectFields, PathogenStep1Note,
+         PathogenPanel, CompareOnReference } from "./PathogenPanel.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -149,7 +151,9 @@ function referenceCellLabel(value) {
 // more than one location contributes, group by location so it's obvious
 // where each entry comes from.
 function ReferenceOptions({ references }) {
-  const refs = references || [];
+  // A pathogen add-on's references are chosen per sample by the add-on
+  // (PathogenPanel.jsx); they are not something to pick for a stock project.
+  const refs = (references || []).filter((r) => !r.addon);
   const roots = [];
   const byRoot = new Map();
   refs.forEach((r) => {
@@ -1010,6 +1014,13 @@ export default function App() {
   const [refLock, setRefLock] = useState({ references: [] });
   const [projectReference, setProjectReference] = useState("");
   const [newProjectReference, setNewProjectReference] = useState("");
+  // Pathogen add-on for a new project ("" = a stock vSNP project) and the
+  // scope its chooser keeps to. The site default (DEFAULT_PATHOGEN) preselects
+  // it until the user picks something themselves.
+  const [newProjectPathogen, setNewProjectPathogenState] = useState("");
+  const [newProjectScope, setNewProjectScope] = useState("");
+  const pathogenTouched = useRef(false);
+  const setNewProjectPathogen = (v) => { pathogenTouched.current = true; setNewProjectPathogenState(v); };
   const [step2Runs, setStep2Runs] = useState([]);
   const [step2SelectedRun, setStep2SelectedRun] = useState(null);
   const [step2Outputs, setStep2Outputs] = useState([]);
@@ -1577,6 +1588,16 @@ export default function App() {
     () => projects.find((p) => p.name === selectedProject),
     [projects, selectedProject]
   );
+  const addonInfo = useAddons(API_BASE, true);
+  const selectedPathogen = (selected && selected.pathogen) || "";
+  const selectedAddon = addonById(addonInfo.addons, selectedPathogen);
+  const pathogenColumns = (selectedAddon && selectedAddon.columns) || [];
+  useEffect(() => {
+    if (!pathogenTouched.current && addonInfo.default_pathogen
+        && addonById(addonInfo.addons, addonInfo.default_pathogen)) {
+      setNewProjectPathogenState(addonInfo.default_pathogen);
+    }
+  }, [addonInfo.default_pathogen, addonInfo.addons]);
 
   const posthocFilteredRows = useMemo(() => {
     if (!posthocRows.length) return [];
@@ -2094,7 +2115,9 @@ export default function App() {
     if (!selectedProject) return "Select a project first.";
     if (!settingsReady) return "Set the vSNP3 path and Projects root in Settings first.";
     if (!reference && !projectReference) {
-      return "This project has no reference set — choose one in the Projects panel.";
+      return selectedPathogen
+        ? "Choose the comparison reference (Compare on reference, above)."
+        : "This project has no reference set — choose one in the Projects panel.";
     }
     const inSet = step2VcfCount > 0 || Boolean(selected && selected.step2_vcfs > 0);
     if (!inSet) return "The comparison set is empty — press Build comparison set above.";
@@ -3346,7 +3369,11 @@ export default function App() {
   async function createProject() {
     if (!newProjectName.trim()) return;
     const body = { name: newProjectName.trim() };
-    if (newProjectReference) body.reference = newProjectReference;
+    if (newProjectPathogen) {
+      // The add-on chooses each sample's reference; no project reference.
+      body.pathogen = newProjectPathogen;
+      body.pathogen_scope = newProjectScope;
+    } else if (newProjectReference) body.reference = newProjectReference;
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3359,6 +3386,8 @@ export default function App() {
     }
     setNewProjectName("");
     setNewProjectReference("");
+    pathogenTouched.current = false;
+    setNewProjectScope("");
     await loadAll();
   }
 
@@ -5361,7 +5390,8 @@ export default function App() {
 
   async function step1Run() {
     const effectiveRef = reference || projectReference;
-    if (!selectedProject || !settingsReady || !effectiveRef) return;
+    // A pathogen project's references are chosen per sample by its add-on.
+    if (!selectedProject || !settingsReady || (!effectiveRef && !selectedPathogen)) return;
     if (step1JobStatus === "running") {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
@@ -6961,17 +6991,27 @@ export default function App() {
                 onChange={(e) => setNewProjectName(e.target.value.replace(/\s+/g, "_"))}
                 title="Spaces are auto-converted to underscores. Letters, digits, _ - . are allowed; other characters will be rejected."
               />
-              <select
-                value={newProjectReference}
-                onChange={(e) => setNewProjectReference(e.target.value)}
-                title="Optional: set the reference at project creation"
-                style={{ minWidth: "10rem" }}
-              >
-                <option value="">-- reference (optional) --</option>
-                <ReferenceOptions references={references} />
-              </select>
+              {newProjectPathogen ? null : (
+                <select
+                  value={newProjectReference}
+                  onChange={(e) => setNewProjectReference(e.target.value)}
+                  title="Optional: set the reference at project creation"
+                  style={{ minWidth: "10rem" }}
+                >
+                  <option value="">-- reference (optional) --</option>
+                  <ReferenceOptions references={references} />
+                </select>
+              )}
               <button onClick={createProject}>Create</button>
             </div>
+            <PathogenProjectFields
+              apiBase={API_BASE}
+              addons={addonInfo.addons}
+              pathogen={newProjectPathogen}
+              setPathogen={setNewProjectPathogen}
+              scope={newProjectScope}
+              setScope={setNewProjectScope}
+            />
             <div className="row" style={{ marginTop: "4px" }}>
               <input
                 type="search"
@@ -8319,7 +8359,9 @@ export default function App() {
             </div>
             <div className="block">
               <h3>Reference</h3>
-              {projectReference ? (
+              {selectedPathogen ? (
+                <PathogenStep1Note addon={selectedAddon} scope={selected && selected.pathogen_scope} info={null} />
+              ) : projectReference ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                   <span
                     style={{
@@ -8464,7 +8506,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running" || grabJobStatus === "running"}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference && !selectedPathogen) || step1JobStatus === "running" || grabJobStatus === "running"}
                   title={
                     step1JobStatus === "running"
                       ? "Step 1 batch is in progress — wait for it to finish"
@@ -8729,8 +8771,17 @@ export default function App() {
                   >
                     Post-hoc
                   </button>
+                  {selectedPathogen ? (
+                    <button
+                      className={step1ResultsTab === "pathogen" ? "active" : ""}
+                      onClick={() => setStep1ResultsTab("pathogen")}
+                      title="The pathogen add-on's results, reports and actions"
+                    >
+                      {selectedAddon ? selectedAddon.name : "Pathogen"}
+                    </button>
+                  ) : null}
                 </div>
-                {step1ResultsTab === "results" ? (
+                {step1ResultsTab === "pathogen" ? null : step1ResultsTab === "results" ? (
                   <>
                     <button onClick={() => loadQC({ refresh: true })} disabled={!selectedProject || qcLoading}>
                       {qcLoading ? (<>Loading… <Elapsed /></>) : "Refresh"}
@@ -8785,7 +8836,9 @@ export default function App() {
                 {paneExpand("step1-results", "Step 1 Results")}
               </div>
             </div>
-            {step1ResultsTab === "results" ? (
+            {step1ResultsTab === "pathogen" && selectedPathogen ? (
+              <PathogenPanel apiBase={API_BASE} project={selectedProject} onChanged={() => loadQC({ refresh: true })} />
+            ) : step1ResultsTab === "results" || step1ResultsTab === "pathogen" ? (
               <>
                 {qcScan ? (
                   <div className="note" style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
@@ -8889,6 +8942,9 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
                         <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                        {pathogenColumns.map((c) => (
+                          <QcSortTh key={`pathogen:${c.key}`} {...qcSortProps} sortKey={`pathogen:${c.key}`}>{c.label}</QcSortTh>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
@@ -8999,6 +9055,9 @@ export default function App() {
                               <td>{formatPercent(row["R2 Passing Q20"])}</td>
                               <td>{formatPercent(row["Genome with Coverage"])}</td>
                               <td>{row["Quality SNPs"] || "-"}</td>
+                              {pathogenColumns.map((c) => (
+                                <td key={`pathogen:${c.key}`}>{pathogenCell(row, c)}</td>
+                              ))}
                             </tr>
                           );
                         })}
@@ -9666,6 +9725,14 @@ export default function App() {
           <div className="row-grid row-grid-split">
           <section className="panel run-panel">
             <h2>Step 2</h2>
+            {selectedPathogen ? (
+              <CompareOnReference
+                apiBase={API_BASE}
+                project={selectedProject}
+                current={projectReference}
+                onChanged={(ref) => { setProjectReference(ref); setImportReference(ref); setReference(ref); loadAll(); }}
+              />
+            ) : null}
             <div className="block">
               <p className="muted" style={{marginTop:0, marginBottom:"0.5em", fontSize:"0.85em"}}>
                 Step 2 compares a set of VCFs to build the SNP matrix and tree. Tick the sources that go

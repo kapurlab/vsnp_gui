@@ -4202,7 +4202,11 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
     if not ref:
         raise HTTPException(status_code=404, detail=f"Reference not found: {ref_name}")
     ref_dir = Path(ref["path"])
-    template_dir = vsnp3_path / "dependencies"
+    # vsnp3 ships its templates in <install>/dependencies. This read a
+    # `vsnp3_path` that was never defined here, so every Create from Template
+    # was a NameError and a bare 500 (found 2026-11-18).
+    configured = (cfg.get("vsnp3_path") or "").strip()
+    template_dir = Path(configured) / "dependencies" if configured else None
     if payload.file_type == "define_filter":
         template_name = "template_define_filter.xlsx"
         dest_name = f"{ref_name}_define_filter.xlsx"
@@ -4214,8 +4218,8 @@ def ref_create_file(ref_name: str, payload: RefCreateFileRequest):
     dest = ref_dir / dest_name
     if dest.exists():
         raise HTTPException(status_code=400, detail=f"File already exists: {dest_name}")
-    template = template_dir / template_name
-    if template.exists():
+    template = template_dir / template_name if template_dir else None
+    if template is not None and template.exists():
         shutil.copy2(template, dest)
     else:
         # Create an empty xlsx if no template exists

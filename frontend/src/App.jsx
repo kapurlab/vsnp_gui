@@ -1273,6 +1273,32 @@ export default function App() {
   // which never land in download/ and so leave no other on-screen trace — stay
   // visible when working through hundreds of samples.
   const [sraReport, setSraReport] = useState({ downloaded: [], already_in_step1: [], failed: [] });
+  // In-page questions for the Reference Editor's edits. A browser may decline
+  // to show window.prompt / confirm / alert, and then answers "cancelled"
+  // without showing anything: an edit asked for its rationale that way and
+  // quietly did nothing (2026-11-18). A dialog the page draws itself cannot be
+  // suppressed. askOnPage resolves to the typed text (or null) when it asks for
+  // a rationale, otherwise true / false; notice: true shows a message with OK.
+  const [pageAsk, setPageAsk] = useState(null);
+  const pageAskPending = useRef(null);
+  function askOnPage({ title = "", message = "", rationale = false, okLabel = "OK",
+                       cancelLabel = "Cancel", notice = false }) {
+    return new Promise((resolve) => {
+      // A second question replaces the first, which counts as cancelled.
+      const prev = pageAskPending.current;
+      if (prev) prev.resolve(prev.rationale ? null : false);
+      pageAskPending.current = { resolve, rationale };
+      setPageAsk({ title, message, rationale, okLabel, cancelLabel, notice, value: "" });
+    });
+  }
+  function answerPageAsk(ok, value = "") {
+    const pending = pageAskPending.current;
+    pageAskPending.current = null;
+    setPageAsk(null);
+    if (!pending) return;
+    pending.resolve(pending.rationale ? (ok ? value : null) : !!ok);
+  }
+
   // Item 6: Reference Editor
   const [refEditorRef, setRefEditorRef] = useState("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
@@ -1291,10 +1317,12 @@ export default function App() {
 
   async function normalizeRemoveNames() {
     if (!refEditorRef || !rmEntries || !rmEntries.ineffective.length) return;
-    const rationale = window.prompt(
-      `Rewrite ${rmEntries.ineffective.length} remove_from_analysis entr${rmEntries.ineffective.length === 1 ? "y" : "ies"} from metadata names to the VCF file names vsnp3 matches? Rationale (required):`
-    );
-    if (!rationale || !rationale.trim()) return;
+    const rationale = await askOnPage({
+      title: "Rewrite as file names",
+      message: `Rewrite ${rmEntries.ineffective.length} remove_from_analysis entr${rmEntries.ineffective.length === 1 ? "y" : "ies"} from metadata names to the VCF file names vsnp3 matches?`,
+      rationale: true, okLabel: "Rewrite",
+    });
+    if (!rationale || !rationale.trim()) { setRmStatus("Cancelled — nothing was changed."); return; }
     setRmStatus("Rewriting…");
     const res = await postRefEdit(
       `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/normalize`,
@@ -2275,7 +2303,7 @@ export default function App() {
     const err = await res.json().catch(() => ({}));
     const detail = err.detail || `${fallback} (HTTP ${res.status})`;
     if (res.status === 403) await loadRefPaths();
-    window.alert(detail);
+    askOnPage({ title: "Reference location not changed", message: detail, notice: true });
   }
 
   async function addRefPath(dirPath) {
@@ -2488,10 +2516,12 @@ export default function App() {
       .filter(Boolean);
     if (!group) { setDfStatus("Enter a group name."); return; }
     if (!positions.length) { setDfStatus("Enter at least one position (chrom:position)."); return; }
-    const rationale = window.prompt(
-      `Rationale for adding group "${group}" (${positions.length} position(s)) to the define_filter file? Required.`
-    );
-    if (!rationale || !rationale.trim()) { setDfStatus("Cancelled — rationale is required."); return; }
+    const rationale = await askOnPage({
+      title: "Add defining SNP group",
+      message: `Add group "${group}" with ${positions.length} position(s) to the define_filter file?`,
+      rationale: true, okLabel: "Add group",
+    });
+    if (!rationale || !rationale.trim()) { setDfStatus("Cancelled — nothing was added."); return; }
     setDfStatus("Saving…");
     const res = await postRefEdit(
       `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/define-filter/add-group`,
@@ -2562,10 +2592,12 @@ export default function App() {
       .map((s) => s.trim())
       .filter(Boolean);
     if (!samples.length) { setRmStatus("Enter at least one sample name."); return; }
-    const rationale = window.prompt(
-      `Rationale for adding ${samples.length} sample name(s) to the remove_from_analysis file? Required.`
-    );
-    if (!rationale || !rationale.trim()) { setRmStatus("Cancelled — rationale is required."); return; }
+    const rationale = await askOnPage({
+      title: "Remove from analysis",
+      message: `Add ${samples.length} sample name(s) to the remove_from_analysis file?`,
+      rationale: true, okLabel: "Add",
+    });
+    if (!rationale || !rationale.trim()) { setRmStatus("Cancelled — nothing was added."); return; }
     setRmStatus("Saving…");
     const res = await postRefEdit(
       `${API_BASE}/api/references/${encodeURIComponent(refEditorRef)}/remove-from-analysis/add-sample`,
@@ -2636,9 +2668,11 @@ export default function App() {
     let res = await send(body);
     if (res.status === 409) {
       const err = await res.json().catch(() => ({}));
-      const ok = window.confirm(
-        `${err.detail || "That file may be open in Excel."}\n\nEdit it anyway?`
-      );
+      const ok = await askOnPage({
+        title: "This file may be open in Excel",
+        message: `${err.detail || "That file may be open in Excel."}\n\nEdit it anyway?`,
+        okLabel: "Edit anyway",
+      });
       if (!ok) return null;
       res = await send({ ...body, ignore_lock: true });
     }
@@ -2657,28 +2691,31 @@ export default function App() {
         const picked = input.files && input.files[0];
         if (!picked) return;
         if (picked.name !== expectedFilename) {
-          const ok = window.confirm(
-            `The file you picked is named "${picked.name}" but the slot expects "${expectedFilename}". ` +
-            `Continue anyway? The server will reject it if the filename doesn't match the allowed pattern.`
-          );
+          const ok = await askOnPage({
+            title: "Different file name",
+            message: `The file you picked is named "${picked.name}" but the slot expects "${expectedFilename}". ` +
+              `Continue anyway? The server will reject it if the filename doesn't match the allowed pattern.`,
+            okLabel: "Continue",
+          });
           if (!ok) return;
         }
-        const rationale = window.prompt(
-          `Rationale for replacing ${expectedFilename}? ` +
-          `(e.g. "added 12 newly characterised positions from Lingling 2026 panel"). Required.`
-        );
-        if (!rationale || !rationale.trim()) {
-          window.alert("Replace cancelled — rationale is required.");
-          return;
-        }
+        const rationale = await askOnPage({
+          title: `Replace ${expectedFilename}`,
+          message: `Why is ${expectedFilename} being replaced? ` +
+            `(e.g. "added 12 newly characterised positions from Lingling 2026 panel")`,
+          rationale: true, okLabel: "Replace",
+        });
+        if (!rationale || !rationale.trim()) return;
         // A shared master is not this reference's file to change quietly.
         const linkedTo = refFileLink(expectedFilename);
         if (linkedTo) {
-          const ok = window.confirm(
-            `${expectedFilename} is a link to a shared file:\n${linkedTo}\n\n` +
-            `Replacing it writes that file, so every reference linked to it changes too. ` +
-            `The link is kept and the file's permissions are preserved.\n\nContinue?`
-          );
+          const ok = await askOnPage({
+            title: "Shared file",
+            message: `${expectedFilename} is a link to a shared file:\n${linkedTo}\n\n` +
+              `Replacing it writes that file, so every reference linked to it changes too. ` +
+              `The link is kept and the file's permissions are preserved.\n\nContinue?`,
+            okLabel: "Replace shared file",
+          });
           if (!ok) return;
         }
         const fd = new FormData();
@@ -2687,9 +2724,11 @@ export default function App() {
         let res = await fetch(url, { method: "POST", body: fd });
         if (res.status === 409) {
           const lock = await res.json().catch(() => ({}));
-          const go = window.confirm(
-            `${lock.detail || "That file may be open in Excel."}\n\nReplace it anyway?`
-          );
+          const go = await askOnPage({
+            title: "This file may be open in Excel",
+            message: `${lock.detail || "That file may be open in Excel."}\n\nReplace it anyway?`,
+            okLabel: "Replace anyway",
+          });
           if (!go) return;
           // FormData is consumed by the first send; rebuild it for the retry.
           const again = new FormData();
@@ -2698,19 +2737,19 @@ export default function App() {
         }
         if (!res.ok) {
           const detail = await res.json().catch(() => ({}));
-          window.alert(`Replace failed: ${detail.detail || res.status}`);
+          askOnPage({ title: "Replace failed", message: String(detail.detail || res.status), notice: true });
           return;
         }
         const data = await res.json();
         const alsoUsedBy = (data.also_used_by || []).length
           ? `also used by: ${data.also_used_by.join(", ")}\n` : "";
-        window.alert(
+        askOnPage({ title: "Replaced", notice: true, message:
           `Replaced ${data.filename}.\n` +
           (data.master ? `written to shared file: ${data.master}\n${alsoUsedBy}` : "") +
           `new sha256: ${data.new_sha256.slice(0, 12)}…\n` +
           `old archived: ${data.archived_old || "(no previous file)"}\n` +
           `audit log: ${data.audit_log}`
-        );
+        });
         // Reload the reference editor's file list so the row reflects the new file.
         await loadRefEditorFiles(refName);
         // Slots with a separate preview loader (e.g. metadata) pass a refresh hook.
@@ -2731,8 +2770,9 @@ export default function App() {
     if (res.ok) {
       await loadRefEditorFiles(refName);
     } else {
-      const data = await res.json();
-      window.alert(data.detail || "Failed to create file");
+      const data = await res.json().catch(() => ({}));
+      askOnPage({ title: "Could not create the file", notice: true,
+                  message: data.detail || `The server answered ${res.status}; no file was created.` });
     }
   }
 
@@ -9235,6 +9275,52 @@ export default function App() {
 
         {expandedPaneShown ? (
           <div className="pane-backdrop" onClick={() => setExpandedPane("")} />
+        ) : null}
+
+        {pageAsk ? (
+          <div
+            className="page-ask-backdrop"
+            onMouseDown={(e) => { if (e.target === e.currentTarget) answerPageAsk(false); }}
+          >
+            <div
+              className="page-ask"
+              role="dialog"
+              aria-modal="true"
+              aria-label={pageAsk.title || "Question"}
+              onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); answerPageAsk(false); } }}
+            >
+              {pageAsk.title ? <h3>{pageAsk.title}</h3> : null}
+              {pageAsk.message ? <div className="page-ask-message">{pageAsk.message}</div> : null}
+              {pageAsk.rationale ? (
+                <textarea
+                  autoFocus
+                  rows={3}
+                  value={pageAsk.value}
+                  placeholder="Rationale (required; kept in the audit log)"
+                  aria-label="Rationale"
+                  onChange={(e) => { const v = e.target.value; setPageAsk((a) => (a ? { ...a, value: v } : a)); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && pageAsk.value.trim()) {
+                      e.preventDefault();
+                      answerPageAsk(true, pageAsk.value.trim());
+                    }
+                  }}
+                />
+              ) : null}
+              <div className="page-ask-actions">
+                <button
+                  autoFocus={!pageAsk.rationale}
+                  disabled={pageAsk.rationale && !pageAsk.value.trim()}
+                  onClick={() => answerPageAsk(true, (pageAsk.value || "").trim())}
+                >
+                  {pageAsk.okLabel}
+                </button>
+                {!pageAsk.notice ? (
+                  <button className="ghost" onClick={() => answerPageAsk(false)}>{pageAsk.cancelLabel}</button>
+                ) : null}
+              </div>
+            </div>
+          </div>
         ) : null}
 
         {igvPanel.open ? (

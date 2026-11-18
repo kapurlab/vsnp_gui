@@ -54,11 +54,14 @@ In the Settings panel:
 
 Then click **Save** and **Preflight**.
 
-## 4b) Sample data (VCF Lite Pack)
-For Step 2 testing, you can use the built‑in **VCF Lite Pack**:
-- Step 2 → **VCF Sources**
-- Preset: **“VCF Lite Pack (repo)”**
-- Build VCF set → Run
+## 4b) Sample data (bundled VCFs)
+For Step 2 testing without FASTQs, use the 8 MTBC VCFs in `sample_data/vcf_lite/` (needs the `mtbc0_v1.1` reference):
+- Projects → create a project with reference **mtbc0_v1.1** and select it
+- Step 2 → **Build the comparison set** tab → box 2 → **More options** → enter the full path to `sample_data/vcf_lite` → **Add**
+- **vcf_lite (8 samples)** appears in box 2, ticked → **Build comparison set** → **Run**
+- Afterwards, click the **x** next to `vcf_lite` so it isn't added to other `mtbc0_v1.1` projects
+
+Full walkthrough: [QUICKSTART.md](QUICKSTART.md), Part 3.
 
 ## Conda path (recommended if you already use conda)
 Create a conda environment and install dependencies:

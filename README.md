@@ -78,16 +78,15 @@ On first launch, a yellow banner appears and all actions are disabled until you 
 
 Click **Save** → **Preflight** (banner disappears, buttons enable)
 
-### 3. Try the demo (VCF Lite Pack)
+### 3. Try the demo (no FASTQ needed)
 
-No FASTQ files needed - jump straight to Step 2:
+The repo ships 8 MTBC VCFs in `sample_data/vcf_lite/`, so you can go straight to Step 2. The demo needs the `mtbc0_v1.1` reference: if it is not in the Projects panel's reference list, your vSNP3 install doesn't have it and the demo won't run.
 
-1. Create a project (e.g., "demo")
-2. **Step 2** → Select "Use custom VCF set"
-3. **Preset** → "VCF Lite Pack (repo)"
-4. **Build VCF set** → **Run**
+1. **Projects** → type `demo`, pick `mtbc0_v1.1` in the reference list, click **Create**, then click `demo` to select it
+2. **Step 2** → **Build the comparison set** tab → under box 2, open **More options** → enter the full path to the `sample_data/vcf_lite` folder (e.g. `/Users/you/vsnp_gui/sample_data/vcf_lite`) → **Add**. It appears in box 2 as **vcf_lite (8 samples)**, ticked
+3. **Build comparison set** → **Run**
 
-You'll get a phylogenetic tree and SNP matrices in ~30 seconds.
+You'll get a phylogenetic tree and SNP matrices in under a minute. Afterwards, click the **x** next to `vcf_lite` in box 2. Otherwise it stays ticked in every `mtbc0_v1.1` project and its 8 samples get added to your real comparisons.
 
 ## Full Workflow
 

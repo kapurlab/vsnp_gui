@@ -80,8 +80,10 @@ FASTQ Files → Step 1 (Align + Call SNPs) → QC Review → Step 2 (Build Trees
 2. **Compare a list of samples** tab: paste sample names → Run
 3. Verify: Single reference (no mixed references!)
 
-### VCF Lite Pack
-- Preset: **“VCF Lite Pack (repo)”** in Step 2 → VCF Sources
+### Demo VCFs (no FASTQ)
+- Project reference **mtbc0_v1.1** → Step 2 → **More options** (box 2) → add `sample_data/vcf_lite` → **vcf_lite** appears ticked → Build comparison set → Run
+- Remove it afterwards (**x** next to `vcf_lite`), or it stays ticked in every `mtbc0_v1.1` project
+- Details: [QUICKSTART.md](QUICKSTART.md), Part 3
 
 ### Outputs
 - **SNP Matrices** (3 versions):

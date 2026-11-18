@@ -114,43 +114,53 @@ conda install -n vsnp3 pandas biopython -y
 
 ---
 
-## Part 3: Demo Run (VCF Lite Pack)
+## Part 3: Demo Run (bundled VCFs)
 
 Let's verify everything works using the included sample data. No FASTQ files needed!
+
+The repo ships 8 MTBC VCFs in `sample_data/vcf_lite/` (see its [README](../sample_data/vcf_lite/README.md)). They were called against MTBC0, so the demo needs the `mtbc0_v1.1` reference. If `mtbc0_v1.1` is not in the reference list in Step 3.1, your vSNP3 install doesn't have that reference and this demo won't run; go on to Part 4.
 
 ### Step 3.1: Create a project
 
 1. In the **Projects** panel, type `demo` in the text field
-2. Click **Create**
-3. Click on `demo` to select it
+2. In the **-- reference (optional) --** list next to it, pick `mtbc0_v1.1`
+3. Click **Create**
+4. Click on `demo` to select it
 
-### Step 3.2: Build a VCF set
+### Step 3.2: Add the demo VCFs and build the comparison set
 
-1. Scroll to **Step 2** section
-2. Ensure **"Use custom VCF set"** is selected (default)
-3. In the **Preset** dropdown, select **"VCF Lite Pack (repo)"**
-   - This auto-fills the VCF sources path
-   - This sets the reference to `mtbc0_v1.1`
-4. Click **Build VCF set**
+1. Scroll to the **Step 2** section and stay on the **Build the comparison set** tab
+2. Box 2 (**Reference databases to compare against**) shows `Reference: mtbc0_v1.1`. Under it, open **More options — add your own folder, copy / link, duplicate handling**
+3. Enter the full path to the `sample_data/vcf_lite` folder, e.g. `/Users/you/vsnp_gui/sample_data/vcf_lite`, and click **Add**
+   - **Electron users**: click **Browse** and pick the folder instead
+   - The path is read on the machine running the backend, so on a server use the server's path to this repo
+4. Box 2 now lists **vcf_lite (8 samples)**, ticked
+   - If your site has shared databases for `mtbc0_v1.1` (they are tagged **shared**), untick them for the quickest run
+   - Leave box 1 (`vcf_database`) as it is. It is empty in a new project, which is fine
+5. In box 3, click **Build comparison set**
 
-You should see: `Imported 8 | Ref: mtbc0_v1.1`
+You should see: `Imported 8 | Ref: mtbc0_v1.1`, and below it `This run compares 8 of the 8 VCFs in the set — ready to Run`
 
 ### Step 3.3: Run Step 2
 
-1. Verify **Reference** shows `mtbc0_v1.1`
+1. Verify **Step 2 Options** shows **Reference:** `mtbc0_v1.1`
 2. Click **Run**
-3. Watch the **Logs** panel for progress
+3. Watch the **Live Logs** panel for progress
 
-**Expected time**: 20-60 seconds
+**Expected time**: 30-60 seconds
 
 ### Step 3.4: View results
 
-When complete, the **Step 2 Results** panel shows:
-- `*.html` - Interactive summary (click **Open**)
-- `*.zip` - Downloadable archive
-- Group folders with SNP matrices and tree files
+When complete, the **Step 2 Results** panel shows the new comparison with:
+- `vSNP_step2_summary-*.html` - Interactive summary (click **View**, or **DL** to download)
+- `vcf_starting_files.zip` - The VCFs that went into the comparison (**DL**)
+- Group folders (`MTBC0-All` plus lineage groups such as `Lineage-02`) with SNP matrices and tree files
 
 **Congratulations!** You've verified the GUI works.
+
+### Step 3.5: Remove the demo folder
+
+In box 2, click the **x** next to `vcf_lite`. An added folder stays in your list and stays ticked for every `mtbc0_v1.1` project, so leaving it there would add the 8 demo samples to your real comparisons. Removing it deletes no files.
 
 ---
 

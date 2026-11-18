@@ -13478,11 +13478,26 @@ def _stats_reference_name(raw: str, alias_map: Dict[str, str]) -> str:
 def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
     ref = ref.replace("file://", "").strip()
     lower_ref = ref.lower()
-    for name in alias_map.values():
-        if f"/{name.lower()}/" in lower_ref:
-            return name
     ref_path = Path(ref)
     candidate = ref_path.stem
+    # Every known reference whose name is a folder on the path. Usually one.
+    # A reference database built by calling one reference's genomes against
+    # another keeps each VCF under a folder named for the genome that was
+    # called, and that genome can itself be a known reference
+    # (<lib>/panel_build/SAT1-I_KM268899/SAT1-III_AY593843/SAT1-I_KM268899.fasta),
+    # so two names match and the first in dict order used to win. The FASTA
+    # stem names the file the calls were made against, so when it settles the
+    # tie, it decides.
+    matches = [name for name in alias_map.values() if f"/{name.lower()}/" in lower_ref]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        by_stem = alias_map.get(candidate)
+        if by_stem in matches:
+            return by_stem
+        if candidate in matches:
+            return candidate
+        return matches[0]
     if candidate in alias_map:
         return alias_map[candidate]
     return candidate.replace("_", " ").strip().replace(" ", "_")

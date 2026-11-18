@@ -19,6 +19,30 @@ if [ ! -d "${PREFIX}/bin" ]; then
   exit 1
 fi
 
+PYBIN="${PREFIX}/bin/python3"
+[ -x "${PYBIN}" ] || PYBIN="${PREFIX}/bin/python"
+[ -x "${PYBIN}" ] || PYBIN="$(command -v python3)"
+
+# Edit a file in place: edit_in_place <file> literal|regex <old> <new>.
+# Python, not `sed -i`: BSD sed (macOS) reads the script of `sed -i "s|..|..|"
+# file` as a backup suffix and fails -- and under set -e that ended this script
+# at its first edit, so on a Mac none of the fixes below (strandfix and
+# bootstrapfix included) ever applied. BSD sed also leaves \n in a replacement
+# as a literal n. Written through a temp file and a rename, so a conda
+# hard-linked file is replaced rather than edited under the package cache.
+edit_in_place() {
+  "${PYBIN}" -c 'import os, re, shutil, sys
+path, mode, old, new = sys.argv[1:5]
+s = open(path, encoding="utf-8").read()
+t = s.replace(old, new) if mode == "literal" else re.sub(old, new, s, flags=re.M)
+if t != s:
+    tmp = path + ".kapurlab-tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(t)
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)' "$@"
+}
+
 # Content-based fixes (applied before the line-context .patch loop below).
 # These target expressions that are IDENTICAL across vsnp3 point releases but
 # sit at different line numbers / next to different comments, so a line-context
@@ -32,10 +56,8 @@ fi
 # separator first, matching vsnp3's own max_len handling.
 STEP1_PY="${PREFIX}/bin/vsnp3_step1.py"
 if [ -f "${STEP1_PY}" ] && grep -qF "float(fastq_stats.R1.passQ20)" "${STEP1_PY}"; then
-  sed -i \
-    -e "s/float(fastq_stats\.R1\.passQ20)/float(str(fastq_stats.R1.passQ20).replace(',', ''))/g" \
-    -e "s/float(fastq_stats\.R1\.passQ30)/float(str(fastq_stats.R1.passQ30).replace(',', ''))/g" \
-    "${STEP1_PY}"
+  edit_in_place "${STEP1_PY}" literal "float(fastq_stats.R1.passQ20)" "float(str(fastq_stats.R1.passQ20).replace(',', ''))"
+  edit_in_place "${STEP1_PY}" literal "float(fastq_stats.R1.passQ30)" "float(str(fastq_stats.R1.passQ30).replace(',', ''))"
   echo "applied passQ comma fix to ${STEP1_PY}"
 fi
 
@@ -59,9 +81,8 @@ for CPU_FILE in vsnp3_step2.py vsnp3_group_on_defining_snps.py vsnp3_fasta_to_sn
       echo "warning: ${CPU_FILE} has no 'import os'; skipping CPU cap there" >&2
       continue
     fi
-    sed -i \
-      "s|int(multiprocessing\.cpu_count() / 1\.2)|max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))|g" \
-      "${TARGET}"
+    edit_in_place "${TARGET}" literal "int(multiprocessing.cpu_count() / 1.2)" \
+      "max(1, min(int(multiprocessing.cpu_count() / 1.2), int(os.environ.get('VSNP3_MAX_CPUS') or 32)))"
     echo "applied CPU cap to ${TARGET}"
   fi
 done
@@ -81,7 +102,8 @@ GROUP_PY="${PREFIX}/bin/vsnp3_group_on_defining_snps.py"
 if [ -f "${GROUP_PY}" ] \
    && grep -q "^        metadata_test = False$" "${GROUP_PY}" \
    && ! grep -qF "kapurlab: metadata is optional" "${GROUP_PY}"; then
-  sed -i "s|^        metadata_test = False$|        metadata_test = False\n        # kapurlab: metadata is optional; give metadata_df the same method-level\n        # default so a run without a worksheet cannot die on an unbound name.\n        metadata_df = None|" "${GROUP_PY}"
+  edit_in_place "${GROUP_PY}" regex "^        metadata_test = False$" \
+    $'        metadata_test = False\n        # kapurlab: metadata is optional; give metadata_df the same method-level\n        # default so a run without a worksheet cannot die on an unbound name.\n        metadata_df = None'
   echo "applied optional-metadata fix to ${GROUP_PY}"
 fi
 
@@ -94,9 +116,6 @@ fi
 # it refuses rather than guesses on an unrecognised release.
 ANNOT_PY="${PREFIX}/bin/vsnp3_annotation.py"
 if [ -f "${ANNOT_PY}" ]; then
-  PYBIN="${PREFIX}/bin/python3"
-  [ -x "${PYBIN}" ] || PYBIN="${PREFIX}/bin/python"
-  [ -x "${PYBIN}" ] || PYBIN="$(command -v python3)"
   "${PYBIN}" "${SCRIPT_DIR}/strandfix.py" "${ANNOT_PY}"
 fi
 

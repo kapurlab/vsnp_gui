@@ -148,6 +148,7 @@ from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
+from app import ont_import
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -1934,6 +1935,18 @@ class LinkLocalRequest(BaseModel):
     # path to a FASTQ (or a directory, treated the same as `path`). Kept
     # separate from `path` so existing single-path callers are unchanged.
     paths: List[str] = []
+
+
+class OntImportSample(BaseModel):
+    barcode: str
+    sample: str = ""          # empty: the barcode name is used
+
+
+class OntImportRequest(BaseModel):
+    """A MinKNOW run folder to import as one FASTQ per barcode (app.ont_import)."""
+    run_dir: str
+    samples: List[OntImportSample] = []   # commit only: the barcodes to import
+    include_unclassified: bool = False
 
 
 class ImportVcfRequest(BaseModel):
@@ -4979,6 +4992,70 @@ def project_link_local(project: str, payload: LinkLocalRequest):
         "missing": missing,
         "skipped_not_fastq": skipped_not_fastq,
     }
+
+
+def _ont_run_dir(raw: str) -> Path:
+    run_dir = Path((raw or "").strip()).expanduser()
+    if not raw or not run_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Run folder not found: {raw}")
+    return run_dir
+
+
+@app.post("/api/projects/{project}/import_run/preview")
+def project_import_run_preview(project: str, payload: OntImportRequest):
+    """What importing a MinKNOW run folder would write: one row per barcode
+    with its chunk count, size and the sample name the run's sample_sheet.csv
+    proposes. Nothing is written."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    run_dir = _ont_run_dir(payload.run_dir)
+    result = ont_import.preview(run_dir, project_dir / "download")
+    if not result["rows"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No barcode folders or barcode-named FASTQs found under {run_dir}. "
+                    "Expected fastq_pass/barcodeNN/*.fastq.gz, barcodeNN/ folders, or files named *barcodeNN*.fastq.gz."),
+        )
+    return result
+
+
+@app.post("/api/projects/{project}/import_run")
+def project_import_run(project: str, payload: OntImportRequest):
+    """Concatenate each chosen barcode's chunks into download/<sample>.fastq.gz
+    as a background job. The response carries the job id and the plan."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_dirs(project_dir)
+    run_dir = _ont_run_dir(payload.run_dir)
+    if not payload.samples and not payload.include_unclassified:
+        raise HTTPException(status_code=400, detail="No barcodes selected")
+    plan, errors = ont_import.build_plan(
+        run_dir, project_dir / "download",
+        [{"barcode": s.barcode, "sample": s.sample} for s in payload.samples],
+        payload.include_unclassified,
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail="Import refused: " + "; ".join(errors))
+    plan_path = _jobs_dir / f"ont_import_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{len(plan)}.json"
+    plan_path.write_text(json.dumps(plan, indent=1))
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.ont_import", "commit", str(plan_path),
+    ])
+    job_id = job_manager.start_job(name="import_run", command=command, cwd=backend_root)
+    return {"job_id": job_id, "run_dir": str(run_dir),
+            "samples": [{"barcode": e["barcode"], "sample": e["sample"], "files": len(e["files"])} for e in plan]}
+
+
+@app.get("/api/ont/sample_sheet_template")
+def ont_sample_sheet_template():
+    """The two-column sample_sheet.csv a MinKNOW run folder can carry."""
+    return Response(ont_import.SAMPLE_SHEET_TEMPLATE, media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="sample_sheet.csv"'})
 
 
 @app.post("/api/projects/{project}/import-vcfs")

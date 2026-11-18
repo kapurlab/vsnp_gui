@@ -19,6 +19,7 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
 import TargetNamePicker, { useTargetNames } from "./TargetNames.jsx";
+import OntRunImport from "./OntRunImport.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -7362,6 +7363,12 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                <OntRunImport
+                  apiBase={API_BASE}
+                  project={selectedProject}
+                  enabled={!!selectedProject && settingsReady}
+                  onImported={() => { setNanoporeMode(true); loadAll(); }}
+                />
                 <h3>SRA Download</h3>
                 <textarea
                   placeholder="SRR/SRX/SRS accessions (one per line)"

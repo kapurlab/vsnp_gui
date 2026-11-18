@@ -98,6 +98,37 @@ def main() -> int:
     assert_eq(v_default["level"], "pass", "60× passes default 30× threshold")
     assert_eq(v_strict["level"], "review", "60× reviews under strict 100× threshold")
 
+    print("\n[compute_verdict — depth with a thousands separator]")
+    strict = merge_thresholds({"coverage": {"pass_min": 100.0, "review_min": 20.0}})
+    row = {"Average Depth": "2,762.2", "Unmapped Percent": "0.0%"}
+    v = compute_verdict(row, strict)
+    assert_eq(v["signals"]["coverage"], 2762.2, "2,762.2 parses as depth")
+    assert_eq(v["level"], "pass", "deep sample passes the 100× line")
+    row = {"Average Depth": "1,050", "Unmapped Percent": "0.0%"}
+    v = compute_verdict(row, merge_thresholds({"coverage": {"pass_min": 2000.0, "review_min": 20.0}}))
+    assert_eq(v["level"], "review", "1,050 is compared to the threshold, not skipped")
+
+    print("\n[compute_verdict — genome covered, only when asked for]")
+    row = {"Average Depth": "400", "Unmapped Percent": "10%", "Genome with Coverage": "75.0%"}
+    v = compute_verdict(row, merge_thresholds())
+    assert_eq("genome_coverage" in v["signals"], False, "stock thresholds: no genome_coverage signal")
+    gc = merge_thresholds({"genome_coverage": {"pass_min": 90.0, "review_min": 70.0}})
+    v = compute_verdict(row, gc)
+    assert_eq(v["level"], "review", "75% covered reviews under a 90/70 block")
+    v = compute_verdict({**row, "Genome with Coverage": "60%"}, gc)
+    assert_eq(v["level"], "fail", "60% covered fails under a 90/70 block")
+
+    print("\n[compute_verdict — review_min null never fails]")
+    never = merge_thresholds({"mapping_rate": {"pass_min": 20.0, "review_min": None}})
+    v = compute_verdict({"Average Depth": "400", "Unmapped Percent": "95%"}, never)
+    assert_eq(v["level"], "review", "5% mapped reviews, never fails, when review_min is null")
+
+    print("\n[compute_verdict — an add-on's own contamination wording]")
+    v = compute_verdict({"Average Depth": "400", "Unmapped Percent": "1%", "_contamination": True,
+                         "_contamination_reason": "second serotype in the reads (SAT2 31%)"},
+                        merge_thresholds())
+    assert_eq(v["reasons"][-1], "second serotype in the reads (SAT2 31%)", "reason text comes from the row")
+
     print("\nAll qc_verdict smoke tests passed.")
     return 0
 

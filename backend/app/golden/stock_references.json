@@ -1,0 +1,25 @@
+[
+ {
+  "name": "Brucella_suis1",
+  "path": "<TMP>/ref locs/Brucella_suis1",
+  "root": "<TMP>/ref locs",
+  "shadowed": []
+ },
+ {
+  "name": "Mycobacterium_AF2122",
+  "path": "<TMP>/ref locs/Mycobacterium_AF2122",
+  "root": "<TMP>/ref locs",
+  "shadowed": [
+   {
+    "path": "<TMP>/second/Mycobacterium_AF2122",
+    "root": "<TMP>/second"
+   }
+  ]
+ },
+ {
+  "name": "mtbc0_v1.1",
+  "path": "<TMP>/second/mtbc0_v1.1",
+  "root": "<TMP>/second",
+  "shadowed": []
+ }
+]

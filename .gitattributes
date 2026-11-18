@@ -1,0 +1,2 @@
+# Golden outputs are compared byte for byte (the CSV export ends rows with CRLF).
+backend/app/golden/** -text

@@ -18,8 +18,20 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          exclusionReasons, blockReason, blocklistSummary, groupFilterMatch,
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
+import TargetNamePicker, { useTargetNames } from "./TargetNames.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
+
+// Kraken target names live with Kraken ID Parse (shipped list + names users
+// save in ~/.config/kraken_id_parse_gui/target_names.yaml); this GUI reads and
+// writes the same list through its /api/kraken/taxa routes. TargetNames.jsx is
+// shared with that tool, byte-identical.
+const KRAKEN_TARGET_ENDPOINTS = {
+  list: `${API_BASE}/api/kraken/taxa`,
+  add: `${API_BASE}/api/kraken/taxa`,
+  remove: `${API_BASE}/api/kraken/taxa/remove`,
+  reportTaxa: (project) => `${API_BASE}/api/projects/${encodeURIComponent(project)}/kraken/report-taxa?min_percent=0.01`,
+};
 
 // Step 1 Results rows are rendered in chunks: mounting one <tr> per sample
 // (with its Files buttons) for an 8000-sample project locks the browser for
@@ -948,16 +960,8 @@ export default function App() {
   // {current, databases} from /api/kraken/blast-dbs — the BLAST databases the
   // Kraken ID Parse tool has saved. Only a full identification run uses one.
   const [krakenBlastDbInfo, setKrakenBlastDbInfo] = useState({ current: "", databases: [] });
-  // Taxon presets are loaded from the shared kraken config/taxa.yaml via
-  // /api/kraken/taxa; this list is only a fallback if that fetch fails.
-  const [krakenTaxonPresets, setKrakenTaxonPresets] = useState([
-    "Mycobacterium tuberculosis complex",
-    "Mycobacterium bovis",
-    "Mycobacterium avium subsp. paratuberculosis",
-    "Brucella",
-  ]);
-  const [krakenNewTaxon, setKrakenNewTaxon] = useState("");
-  const [krakenAddingTaxon, setKrakenAddingTaxon] = useState(false);
+  // Kraken target names (shared with Kraken ID Parse; see TargetNames.jsx).
+  const krakenTargets = useTargetNames(KRAKEN_TARGET_ENDPOINTS);
   const [igvPanel, setIgvPanel] = useState({ open: false, project: "", referenceFastaPath: "", referenceFaiPath: "", tracks: [], status: "", height: 45, fullscreen: false });
   const [igvPopoutOpen, setIgvPopoutOpen] = useState(false);
   const igvBrowserRef = useRef(null);
@@ -2925,16 +2929,6 @@ export default function App() {
     }, 400);
     return () => { cancelled = true; clearTimeout(t); };
   }, [settings.projects_root]);
-
-  // Load the shared taxon search names (kraken repo's config/taxa.yaml).
-  useEffect(() => {
-    fetch(`${API_BASE}/api/kraken/taxa`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d && Array.isArray(d.taxa) && d.taxa.length) setKrakenTaxonPresets(d.taxa);
-      })
-      .catch(() => {});
-  }, []);
 
   // Auto-fill the "Download New Reference" output directory from the first
   // configured reference root once we have one. Under OOD the Browse button
@@ -6112,31 +6106,6 @@ export default function App() {
   }
 
   // --- Kraken ID Parse on a single Step 1 sample -------------------------
-
-  // Persist a new taxon search name to the shared kraken config/taxa.yaml and
-  // select it. Same list the Kraken ID Parse GUI reads/writes.
-  async function addKrakenTaxon() {
-    const name = krakenNewTaxon.trim();
-    if (!name || krakenAddingTaxon) return;
-    setKrakenAddingTaxon(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/kraken/taxa`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      if (res.ok) {
-        const d = await res.json();
-        if (Array.isArray(d.taxa)) setKrakenTaxonPresets(d.taxa);
-        setKrakenModal((m) => ({ ...m, taxon: name }));
-        setKrakenNewTaxon("");
-      }
-    } catch (_) {
-      /* leave input as-is for retry */
-    } finally {
-      setKrakenAddingTaxon(false);
-    }
-  }
 
   function openKrakenModal(project, sample) {
     if (!project || !sample) return;
@@ -9506,35 +9475,14 @@ export default function App() {
 
               {krakenModal.mode === "full" || krakenModal.mode === "parse_only" ? (
                 <div style={{ marginBottom: 8 }}>
-                  <label className="label">Target taxon</label>
-                  <select
+                  <label className="label">Target name</label>
+                  <TargetNamePicker
                     value={krakenModal.taxon}
+                    onChange={(name) => setKrakenModal((m) => ({ ...m, taxon: name }))}
                     disabled={krakenModal.running}
-                    onChange={(e) => setKrakenModal((m) => ({ ...m, taxon: e.target.value }))}
-                  >
-                    <option value="">Select a target taxon…</option>
-                    {krakenTaxonPresets.map((p) => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
-                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                    <input
-                      placeholder="Add a new taxon to the list…"
-                      value={krakenNewTaxon}
-                      disabled={krakenModal.running || krakenAddingTaxon}
-                      onChange={(e) => setKrakenNewTaxon(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKrakenTaxon(); } }}
-                      style={{ flex: 1 }}
-                    />
-                    <button type="button" className="ghost"
-                            onClick={addKrakenTaxon}
-                            disabled={krakenModal.running || krakenAddingTaxon || !krakenNewTaxon.trim()}>
-                      {krakenAddingTaxon ? (<>Adding… <Elapsed /></>) : "+ Add"}
-                    </button>
-                  </div>
-                  <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                    New taxa are saved to the shared list (the Kraken ID Parse install's config/taxa.yaml) and appear in this dropdown and the Kraken ID Parse GUI.
-                  </div>
+                    project={krakenModal.project}
+                    store={krakenTargets}
+                  />
                 </div>
               ) : null}
 

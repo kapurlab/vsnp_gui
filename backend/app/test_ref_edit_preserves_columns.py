@@ -14,9 +14,8 @@ ANYTHING, not past the last row holding a name; every edit archives first and
 lands in the audit log; and the guarded save is real — a mutator that shrinks
 the file is refused and the original put back.
 
-The shared `taxa.yaml` is the same doctrine in a text file: adding a taxon
-appends a line rather than rewriting the list, so the comments people keep
-beside an entry are still there afterwards.
+The same doctrine for the Kraken target-name list (notes kept beside an entry
+survive an add) is pinned in test_kraken_target_names.py.
 
 Run directly:  <conda>/bin/python backend/app/test_ref_edit_preserves_columns.py
 """
@@ -216,28 +215,6 @@ print(json.dumps({'added': [], 'updated': [], 'unchanged': [], 'rows_total': 0})
     check("...and the workbook is untouched", sha(charted) == charted_sha)
     charted.unlink()
     parked.rename(ref_dir / "H5N1_metadata.xlsx")
-
-    print("[taxa.yaml: adding a name does not rewrite the file over its comments]")
-    taxa = tmp / "taxa.yaml"
-    taxa.write_text(
-        "# Kraken ID Parse — taxon search names\n"
-        "#\n"
-        "# add by hand or via the GUI control.\n"
-        "\n"
-        "- Mycobacterium tuberculosis     # MTBC0 reference set\n"
-        "# added for the 2026 outbreak — remove after the season\n"
-        "- Brucella abortus\n"
-    )
-    M._KRAKEN_TAXA_YAML = taxa
-    M._append_kraken_taxon("Salmonella enterica")
-    text = taxa.read_text()
-    check("a standalone comment survived",
-          "# added for the 2026 outbreak — remove after the season" in text)
-    check("an inline comment survived", "# MTBC0 reference set" in text)
-    check("the new name is on the end", text.rstrip().endswith("- Salmonella enterica"))
-    check("and every name reads back",
-          M._read_kraken_taxa() == ["Mycobacterium tuberculosis", "Brucella abortus",
-                                    "Salmonella enterica"])
 
     print("PASS" if not FAILED else f"{FAILED} FAILURE(S)")
     return 1 if FAILED else 0

@@ -10007,74 +10007,19 @@ def kraken_samples(project: str):
 # ---------------------------------------------------------------------------
 _KRAKEN_GUI_ROOT = TOOLS_ROOT / "kraken_id_parse_gui"
 
-# Shared taxon search-name list, owned by the Kraken ID Parse repo. Both GUIs
-# read and append to this same file so the preset list stays in sync.
-_KRAKEN_TAXA_YAML = _KRAKEN_GUI_ROOT / "config" / "taxa.yaml"
+# Target names for a Kraken run (the "Target taxon" dropdown), shared with the
+# Kraken ID Parse GUI: the list that ships in that tool's config/taxa.yaml plus
+# the names users save, which live in ~/.config/kraken_id_parse_gui/
+# target_names.yaml — never in either checkout. kraken_target_names.py is a
+# byte-identical copy of that tool's backend/app/target_names.py
+# (test_kraken_target_names.py compares them).
+from app import kraken_target_names as _ktn  # noqa: E402
 
-_KRAKEN_TAXA_HEADER = (
-    "# Kraken ID Parse — taxon search names\n"
-    "#\n"
-    "# Single source of truth for the \"Target Taxon\" presets shown in BOTH the\n"
-    "# Kraken ID Parse GUI and the vSNP GUI. Each entry is a taxonomy\n"
-    "# classification name passed verbatim to the read parser (-t) and must match\n"
-    "# the name exactly as Kraken reports it. Plain YAML sequence; add by hand or\n"
-    "# via the \"Add search name\" control in either GUI.\n"
-)
+try:
+    _ktn.migrate_checkout_additions(_KRAKEN_GUI_ROOT)
+except Exception as _exc:  # a carry-over must never stop the app starting
+    logger.warning("Kraken target-name carry-over skipped: %s", _exc)
 
-
-def _read_kraken_taxa() -> List[str]:
-    """Read the shared taxon list. Dependency-free flat-YAML-sequence parser
-    (``- name`` per line) so it works whether or not PyYAML is installed."""
-    taxa: List[str] = []
-    try:
-        text = _KRAKEN_TAXA_YAML.read_text(encoding="utf-8")
-    except (OSError, FileNotFoundError):
-        return taxa
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("- "):
-            line = line[2:].strip()
-        elif line == "-":
-            continue
-        if line and line[0] not in "\"'" and " #" in line:
-            line = line.split(" #", 1)[0].strip()
-        if len(line) >= 2 and line[0] in "\"'" and line[-1] == line[0]:
-            line = line[1:-1]
-        if line:
-            taxa.append(line)
-    return taxa
-
-
-def _kraken_taxa_yaml_line(name: str) -> str:
-    """One taxon as a YAML sequence entry, quoted when the name needs it."""
-    name = name.strip()
-    if not name:
-        return ""
-    if name[0] in "-?:[]{}#&*!|>'\"%@`" or ": " in name or name.endswith(":"):
-        esc = name.replace("\\", "\\\\").replace('"', '\\"')
-        return f'- "{esc}"'
-    return f"- {name}"
-
-
-def _append_kraken_taxon(name: str) -> None:
-    """Add one taxon to the shared taxa.yaml, leaving the rest of the file alone.
-
-    This used to rewrite the file from the names the parser understood, which
-    deleted every comment in it — and the header above says entries may be
-    added "by hand", so the notes people keep beside one are real, and both
-    GUIs write this same file. An append keeps them: the existing bytes are
-    untouched and one line goes on the end.
-    """
-    _KRAKEN_TAXA_YAML.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        text = _KRAKEN_TAXA_YAML.read_text(encoding="utf-8")
-    except OSError:
-        text = _KRAKEN_TAXA_HEADER
-    if text and not text.endswith("\n"):
-        text += "\n"
-    _KRAKEN_TAXA_YAML.write_text(text + _kraken_taxa_yaml_line(name) + "\n", encoding="utf-8")
 
 def _kraken_gui_config() -> Dict[str, Any]:
     """Read the Kraken ID Parse GUI's own user config so the vSNP GUI inherits
@@ -10238,10 +10183,20 @@ def _import_parsed_reads(run_dir: Path, download_dir: Path) -> List[str]:
     return imported
 
 
+def _kraken_taxa_payload(**extra) -> Dict[str, Any]:
+    entries = _ktn.entries(_KRAKEN_GUI_ROOT)
+    saved = _ktn.saved_path()
+    try:
+        shown = "~/" + str(saved.relative_to(Path.home()))
+    except ValueError:
+        shown = str(saved)
+    return {"taxa": [e["name"] for e in entries], "entries": entries, "saved_file": shown, **extra}
+
+
 @app.get("/api/kraken/taxa")
 def kraken_taxa():
-    """Return the shared taxon search names (kraken repo's config/taxa.yaml)."""
-    return {"taxa": _read_kraken_taxa()}
+    """Every Kraken target name: shipped with Kraken ID Parse, then saved by users."""
+    return _kraken_taxa_payload()
 
 
 class KrakenTaxonPayload(BaseModel):
@@ -10250,19 +10205,62 @@ class KrakenTaxonPayload(BaseModel):
 
 @app.post("/api/kraken/taxa")
 def kraken_taxa_add(payload: KrakenTaxonPayload):
-    """Append a new taxon search name to the shared taxa.yaml (no duplicates)."""
-    name = (payload.name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="A taxon name is required.")
-    taxa = _read_kraken_taxa()
-    if any(name.lower() == t.lower() for t in taxa):
-        return {"taxa": taxa, "added": False}
-    taxa.append(name)
+    """Save a new target name (no duplicates, case-insensitive)."""
     try:
-        _append_kraken_taxon(name)
+        res = _ktn.add(_KRAKEN_GUI_ROOT, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not save taxon list: {exc}")
-    return {"taxa": taxa, "added": True}
+        raise HTTPException(status_code=500, detail=f"Could not save to {_ktn.saved_path()}: {exc}")
+    return _kraken_taxa_payload(name=res["name"], added=res["added"])
+
+
+@app.post("/api/kraken/taxa/remove")
+def kraken_taxa_remove(payload: KrakenTaxonPayload):
+    """Remove a saved target name. Names that ship with Kraken ID Parse stay."""
+    try:
+        res = _ktn.remove(_KRAKEN_GUI_ROOT, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save to {_ktn.saved_path()}: {exc}")
+    return _kraken_taxa_payload(removed=res["removed"])
+
+
+@app.get("/api/projects/{project}/kraken/report-taxa")
+def kraken_report_taxa(project: str, min_percent: float = 0.01):
+    """Taxon names Kraken reported in this project's runs, best evidence first,
+    so a new target name can be picked with Kraken's own spelling."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    best: Dict[str, Dict[str, Any]] = {}
+    kdir = project_dir / "kraken"
+    try:
+        sample_dirs = [d for d in kdir.iterdir() if d.is_dir() and not d.name.startswith(".")] if kdir.is_dir() else []
+    except OSError:
+        sample_dirs = []
+    for sdir in sample_dirs:
+        reports = sorted((sdir / "kraken").glob("*_reportkraken.txt")) if (sdir / "kraken").is_dir() else []
+        if not reports:
+            continue
+        report = max(reports, key=lambda r: r.stat().st_mtime)
+        seen_here = set()
+        for row in _ktn.report_names(report, max(0.0, min_percent)):
+            key = row["name"].lower()
+            if key in seen_here:
+                continue
+            seen_here.add(key)
+            cur = best.get(key)
+            if cur is None:
+                best[key] = {**row, "samples": 1, "best_sample": sdir.name}
+            else:
+                cur["samples"] += 1
+                if row["percent"] > cur["percent"]:
+                    cur.update(percent=row["percent"], reads=row["reads"], best_sample=sdir.name)
+    rows = sorted(best.values(), key=lambda r: (-r["percent"], r["name"].lower()))
+    return {"names": rows[:2000], "total": len(rows)}
 
 
 @app.get("/api/kraken/dbs")

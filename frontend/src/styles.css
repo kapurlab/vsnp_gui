@@ -2252,3 +2252,38 @@ th.qc-sorted .qc-sort-arrow { opacity: 1; }
   font-family: ui-monospace, Menlo, monospace;
   font-size: 0.85em;
 }
+
+/* ---- Kraken target names (TargetNames.jsx, shared with Kraken ID Parse) ----
+   The dropdown in the Kraken dialog and its Manage… panel. Same rules as that
+   tool's App.css, so the control looks the same in both GUIs. */
+.target-picker .row.tight { gap: 6px; margin: 0; align-items: center; }
+.target-picker .row.tight > input,
+.target-picker .row.tight > select { flex: 1 1 auto; min-width: 0; }
+.target-picker .form-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.target-manager {
+  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel-2); display: flex; flex-direction: column; gap: 6px;
+}
+.tm-head { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-top: 6px; }
+.tm-head:first-child { margin-top: 0; }
+.tm-head .muted { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.tm-check { font-size: 12px; color: var(--muted); padding-left: 2px; }
+.tm-check.ok { color: #2f7a46; }
+.tm-check.warn { color: #9a5b12; }
+html[data-theme="dark"] .tm-check.ok { color: #9ed9ad; }
+html[data-theme="dark"] .tm-check.warn { color: #efca8d; }
+.tm-msg { font-size: 12px; color: var(--accent); }
+.tm-msg.error { color: var(--danger); }
+.tm-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.tm-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); font-size: 12px; font-weight: 600;
+}
+.tm-chip:hover:not(:disabled) { border-color: var(--accent); transform: none; box-shadow: none; }
+.tm-chip-pct { font-size: 10.5px; color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.tm-saved { display: flex; flex-wrap: wrap; gap: 5px; }
+.tm-saved-item {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 9px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--border); font-size: 12px; max-width: 100%;
+}
+.target-manager code { font-size: 11px; overflow-wrap: anywhere; }

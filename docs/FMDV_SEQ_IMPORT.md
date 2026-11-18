@@ -23,9 +23,10 @@ samples that came from reads.
 A **context sequence** is a comparator: a GenBank record that should stand
 in the tree with the library's 9,177 VP1 records, labelled
 `lineage|country|year|accession` like them, and be a candidate when a
-sample is typed. It is not reported on. It belongs with the other context
-sequences, in the library at `~/fmdv_refs`, so every project on the server
-sees it.
+sample is typed. It is not reported on. It lives in the project, under
+`fmdv_context/`, so the project carries its own comparators and the shared
+context sets in the library at `~/fmdv_refs` are never changed by an
+import (the library keeps only a cache of fetched GenBank records, below).
 
 The import panel asks for the role once per import. FASTA files default to
 sample; accessions default to context. Either can be switched per row in
@@ -92,32 +93,44 @@ sequence rather than for reads. Both are tractable (refuse FASTA mode above
 a small N count; choose the reference as the best panel VP1 hit of the
 slice), and both belong to a second cut.
 
-## Context sequences in the library
+## Context sequences in the project
 
-The context sets are `~/fmdv_refs/vp1_context/<SEROTYPE>.fasta` and
-`.tsv`, built once from NanoFMDV's collection. User additions go beside
-them as `<SEROTYPE>.added.fasta` and `<SEROTYPE>.added.tsv`, same record
+The library's context sets are `~/fmdv_refs/vp1_context/<SEROTYPE>.fasta`
+and `.tsv`, built once from NanoFMDV's collection and shared by every
+project on the server. A project's own additions go under
+`<project>/fmdv_context/<SEROTYPE>.fasta` and `<SEROTYPE>.tsv`, same record
 names (`<SEROTYPE>-<topotype or NA>_<accession>`), same TSV columns, with
 `region_source` set to `imported_vp1` or `imported_sliced_from_genome` and
-a `source` column naming the accession fetch or the file. The typer already
-globs every `*.fasta` and `*.tsv` under `vp1_context/`, so an added
-sequence enters the typing database on the next rebuild (the database is
-rebuilt when any source is newer than it). The tree and the tables read
-`<SEROTYPE>.fasta` and `.tsv` by name and gain the `.added` pair. Added
-sequences are never pruned by the backbone selection: whoever added them
-wants them in the tree.
+a `source` column naming the accession fetch or the file. The folder sits
+beside `step1/` and `step2/` and travels with the project.
+
+The tree and the tables read the library set by name and gain the project
+set: `fmdv_vp1_tree.py` already takes `--project`, so it reads
+`<project>/fmdv_context/` without a new flag, merges the records with the
+library's for the serotype, and never prunes them from the backbone, since
+whoever added them wants them in the tree. `fmdv_vp1_tables.py` reads the
+project TSV beside the library TSVs so the neighborhood table and the leaf
+labels carry the metadata. The typer gains `--project-context <dir>`: the
+project set is small, so it is made into its own BLAST database at import
+(under `fmdv_context/_typing/`, rebuilt when a set is newer), the sample is
+searched against both databases and the hits are merged by bitscore. A
+project's context is then a candidate when its samples are typed, and the
+library's typing database is untouched.
 
 An accession already in the library (the 79 panel genomes, the 9,177
 context records, the `genomes_context` set) is reported as present and not
-fetched or added twice. The TSVs carry the accession column that makes
-this a lookup.
+fetched or added: it is in the tree and the typing database already. The
+TSVs carry the accession column that makes this a lookup. An accession
+already in the project's own set is reported the same way.
 
-The alternative, a per-project context folder, keeps the library untouched
-and travels with the project, but it means the same Ethiopian deposit is
-added to every project that needs it and is never typed against. The
-library is written to already (reference folders, the typing database),
-and one shared set is what an outbreak lab wants. Rejected for the first
-cut; a project-level set can come later if a site asks for it.
+The alternative, writing additions into the library beside the collection
+as `<SEROTYPE>.added.fasta`, would share a deposit across projects and
+enter the typing database with no code change, since the typer globs the
+directory. It was rejected (Vivek, 18 November 2026): the library is the
+site's shared, versioned asset, built once and carried to AHI on a drive,
+and an import from one project should not change what every other project
+sees. Promoting a project's context into the library is a deliberate,
+separate step and is out of scope here.
 
 ## Accessions, and what happens offline
 
@@ -225,8 +238,7 @@ code and is listed, not made, here.
 - Imported genomes in the whole-genome Step 2 (the `vsnp3_step1.py -f`
   path with an N rule and a reference chosen from the slice).
 - Importing reads by accession; SRA Download does that.
-- A per-project context set, or promoting a project's samples into the
-  library's context set.
+- Promoting a project's context or samples into the library's context set.
 - Editing metadata after import; delete and import again.
 - Protein sequences, multi-segment or concatenated records, IUPAC codes
   other than N in the VP1 called figure.
@@ -247,12 +259,16 @@ Backend:
   `POST /api/projects/{p}/import_sequences` (rows in, job out),
   `GET /api/fmdv/sequence_sheet_template`; `step1_status` rows for
   `fmdv_import.json` folders; `_step1_dispatch_plan` skips them silently;
-  `fmdv_project_get` returns `imports` for the preview's existence check.
+  `fmdv_project_get` returns `imports` and the project context counts for
+  the preview's existence check and the VP1 tab.
 - `bin/fmdv_vp1_tree.py`: `collect_samples` reads `serotype` from
   `fmdv_consensus.json` when present; `collect_panel` reads
-  `<SEROTYPE>.added.fasta` and `.tsv` and exempts them from pruning.
-- `bin/fmdv_vp1_tables.py`: `load_meta` reads the `.added.tsv` files.
-- `bin/fmdv_vp1_type.py`: no change (globs the directory already).
+  `<project>/fmdv_context/<SEROTYPE>.fasta` and `.tsv` and exempts those
+  records from pruning.
+- `bin/fmdv_vp1_tables.py`: `load_meta` reads the project TSVs too.
+- `bin/fmdv_vp1_type.py`: `--project-context <dir>`, a second database
+  built from the project set, hits merged by bitscore; the Step 1 batch
+  and the retype route pass it.
 - `bin/fmdv_sample_report.py`, `bin/fmdv_run_report.py`: include
   `fmdv_import.json` folders. Report code, flagged for its owner.
 - `backend/app/test_seq_import.py` (new): header and flat-file parsing,

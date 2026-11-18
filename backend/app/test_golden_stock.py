@@ -38,6 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from openpyxl import Workbook  # noqa: E402
 
 from app import main as m  # noqa: E402
+from app import addons  # noqa: E402
+
+# No pathogen add-on is visible to a stock project's goldens, whatever this
+# machine has installed beside the checkout.
+addons.ROOTS_OVERRIDE = []
 
 GOLDEN = Path(__file__).resolve().parent / "golden"
 UPDATE = "--update" in sys.argv

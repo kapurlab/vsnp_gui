@@ -149,6 +149,7 @@ from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
 from app import ont_import
+from app import addons
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -314,16 +315,10 @@ def _project_dir_for(cfg_in: Dict, name: str) -> Path:
 
 
 def _resolve_qc_thresholds(cfg: Dict, project_dir: Path | None = None) -> Dict:
-    """Merge thresholds: module DEFAULTS < user cfg < project.json override."""
-    project_layer = None
-    if project_dir is not None:
-        pj = project_dir / "project.json"
-        if pj.is_file():
-            try:
-                project_layer = json.loads(pj.read_text()).get("qc_thresholds")
-            except (json.JSONDecodeError, OSError):
-                project_layer = None
-    return qc_verdict.merge_thresholds(cfg.get("qc_thresholds"), project_layer)
+    """Merge thresholds: module DEFAULTS < user cfg < the project's pathogen
+    add-on < project.json override (addons.merged_thresholds). A stock project
+    has no add-on layer, so its thresholds are what they always were."""
+    return addons.merged_thresholds(cfg, project_dir)
 
 
 def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
@@ -332,6 +327,89 @@ def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
         if isinstance(row, dict):
             row["_qc_verdict"] = qc_verdict.compute_verdict(row, thresholds)
     return rows
+
+
+_LEVELS = {"pass": 0, "review": 1, "fail": 2}
+
+
+def _addon_results(project_dir: Path) -> Tuple[Optional[Any], Dict[str, Dict[str, Any]]]:
+    """(add-on, {sample folder: result.json}) for a project that names a
+    pathogen add-on; (None, {}) for a stock project, which reads nothing."""
+    addon_id = addons.project_pathogen(project_dir)
+    if not addon_id:
+        return None, {}
+    addon = addons.get(addon_id)
+    base = addons.pathogen_dir(project_dir, addon_id) / "samples"
+    out: Dict[str, Dict[str, Any]] = {}
+    try:
+        dirs = [d for d in base.iterdir() if d.is_dir()]
+    except OSError:
+        dirs = []
+    for d in dirs:
+        r = addons.read_json(d / "result.json")
+        if r is not None:
+            out[d.name] = r
+    return addon, out
+
+
+def _row_sample_folder(row: Dict[str, Any]) -> str:
+    f = row.get("_file") or ""
+    return Path(f).parent.name if f else str(row.get("sample") or "")
+
+
+def _apply_addon_rows(rows: list, project_dir: Path, verdicts: bool = True) -> list:
+    """Merge each sample's pathogen add-on row (app.addon_run's result.json)
+    into its Step 1 Results row, in place: the add-on's metrics as
+    "pathogen:<key>" (the columns its manifest names), its files, and — with
+    `verdicts` — its flags into the QC verdict, the more severe level winning
+    and its reasons added. A result written for another alignment of the
+    sample (its stamp names a different stats workbook) is not shown beside
+    this one: the row says the add-on step is pending instead. A stock project
+    is returned untouched."""
+    addon, results = _addon_results(project_dir)
+    if not results and addon is None:
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        res = results.get(_row_sample_folder(row))
+        stamp = (res or {}).get("_stamp") or {}
+        if res is None or (stamp.get("stats_workbook") and row.get("_file")
+                           and os.path.realpath(stamp["stats_workbook"]) != os.path.realpath(row["_file"])):
+            row["pathogen:_status"] = "pending"
+            continue
+        row["pathogen:_status"] = res.get("status") or "ok"
+        for k, v in (res.get("metrics") or {}).items():
+            row[f"pathogen:{k}"] = v if isinstance(v, (str, int, float, bool)) or v is None else str(v)
+        row["pathogen:_files"] = res.get("files") or []
+        flags = res.get("flags") or {}
+        if verdicts and isinstance(row.get("_qc_verdict"), dict):
+            v = row["_qc_verdict"]
+            lvl = flags.get("level")
+            if lvl in _LEVELS and _LEVELS[lvl] > _LEVELS.get(v.get("level"), 0):
+                v["level"] = lvl
+            label = addon.name if addon is not None else "pathogen add-on"
+            v["reasons"] = list(v.get("reasons") or []) + [f"{label}: {r}" for r in flags.get("reasons") or []]
+    return rows
+
+
+def _addon_export_rows(rows: List[Dict[str, Any]], project_dir: Path) -> List[Dict[str, Any]]:
+    """Copies of the export rows with the pathogen add-on's metrics, under the
+    column labels its manifest gives them. Stock projects: the rows as given."""
+    addon_id = addons.project_pathogen(project_dir)
+    if not addon_id:
+        return rows
+    out = _apply_addon_rows([dict(r) for r in rows], project_dir, verdicts=False)
+    addon = addons.get(addon_id)
+    labels = {c.get("key"): c.get("label") for c in ((addon.manifest.get("columns") if addon else None) or [])}
+    for r in out:
+        for k in [k for k in r if k.startswith("pathogen:")]:
+            val = r.pop(k)
+            key = k.split(":", 1)[1]
+            if key.startswith("_"):
+                continue
+            r[f"{addon_id}: {labels.get(key) or key}"] = val
+    return out
 
 
 def _project_reference(project_dir: Path) -> str:
@@ -1026,27 +1104,46 @@ def _step1_outputs_complete(
     return zc_vcf is not None or bool(vcf and nodup)
 
 
+def _sample_pathogen(sample_dir: Path) -> Optional[str]:
+    """The pathogen add-on id of the project a Step 1 sample folder belongs to
+    (<project>/step1/<sample>), or None for a stock project."""
+    return addons.project_pathogen(sample_dir.parent.parent)
+
+
 def _step1_is_complete(sample_dir: Path) -> bool:
     """True if a sample already finished Step 1 successfully — the same signal
     the status endpoint uses: a `.provenance/exit_code` of 0, or the finished
     outputs of _step1_outputs_complete. Used to skip re-aligning samples that
     are already Complete when a batch is re-run after adding new samples
-    (re-running would delete alignment_* and redo the slow alignment)."""
+    (re-running would delete alignment_* and redo the slow alignment).
+
+    In a project that names a pathogen add-on, the add-on's own step must have
+    run for this alignment too (.provenance/addon_done, app.addon_run): a batch
+    stopped between vsnp3 and the add-on left a vsnp3 result with no pathogen
+    row, and treating it as done would never produce one."""
     ec = sample_dir / ".provenance" / "exit_code"
     if ec.exists():
         try:
-            return ec.read_text(encoding="utf-8").strip() == "0"
+            ok = ec.read_text(encoding="utf-8").strip() == "0"
         except OSError:
             return False
-    return _step1_outputs_complete(*_step1_output_files(_AlignListing(sample_dir)))
+    else:
+        ok = _step1_outputs_complete(*_step1_output_files(_AlignListing(sample_dir)))
+    if ok and _sample_pathogen(sample_dir):
+        return (sample_dir / ".provenance" / "addon_done").exists()
+    return ok
 
 
 def _step1_errored(sample_dir: Path) -> bool:
     """True if the sample has a terminal non-zero exit_code sentinel — it ran and
-    failed. Used to skip auto-retrying it on a plain Run (Force re-run overrides)."""
+    failed. Used to skip auto-retrying it on a plain Run (Force re-run overrides).
+    A pathogen add-on that could choose no reference for the sample counts the
+    same way (.provenance/addon_choose_failed): it stays out of a plain Run
+    until Force re-run, with the reason shown."""
     ec = sample_dir / ".provenance" / "exit_code"
     if not ec.exists():
-        return False
+        return ((sample_dir / ".provenance" / "addon_choose_failed").exists()
+                and bool(_sample_pathogen(sample_dir)))
     try:
         return ec.read_text(encoding="utf-8").strip() not in ("", "0")
     except OSError:
@@ -1659,7 +1756,7 @@ def _resolved_vcf_db_folders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     result: List[Dict[str, Any]] = []
     seen: set = set()
 
-    def _emit(path: Path, reference: str, scope: str, enabled: bool):
+    def _emit(path: Path, reference: str, scope: str, enabled: bool, addon: str = ""):
         p = str(path.resolve())
         if p in seen:
             return
@@ -1670,6 +1767,7 @@ def _resolved_vcf_db_folders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             "sample_count": _count_vcfs(path),
             "enabled": enabled,
             "scope": scope,
+            **({"addon": addon} if addon else {}),
         })
         seen.add(p)
 
@@ -1701,6 +1799,21 @@ def _resolved_vcf_db_folders(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         p = Path(raw).expanduser()
         _emit(p, reference=reference, scope="user", enabled=bool(enabled))
+
+    # A pathogen add-on's Step 2 reference databases: <library>/vcf_db_folders/
+    # <reference>/<db>/, the shared root's layout, ticked and unticked the same
+    # way (disabled_vcf_db_paths). The folder under vcf_db_folders/ is the
+    # reference folder's exact name, which is how Step 2 matches them.
+    try:
+        addon_roots = addons.vcf_db_roots()
+    except Exception as e:  # noqa: BLE001 — an add-on must never break Step 2's list
+        logger.warning("pathogen add-on reference databases not listed: %s", e)
+        addon_roots = []
+    for aid, aroot in addon_roots:
+        for ref_dir in sorted(d for d in aroot.iterdir() if d.is_dir()):
+            for db_dir in sorted(d for d in ref_dir.iterdir() if d.is_dir()):
+                _emit(db_dir, reference=ref_dir.name, scope="addon",
+                      enabled=str(db_dir.resolve()) not in disabled_shared, addon=aid)
     return result
 
 
@@ -1744,6 +1857,11 @@ def _find_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
 def _discover_vcf_refs_csv(cfg: Dict[str, str]) -> Optional[Path]:
     candidates: List[Path] = []
     for folder in _resolved_vcf_db_folders(cfg):
+        # One csv relabels every tree, so it must come from the site's own
+        # databases: a pathogen add-on's library is listed here too, and a csv
+        # in it could otherwise rename the tips of a TB or Brucella tree.
+        if folder.get("scope") == "addon":
+            continue
         path = Path(folder["path"])
         candidates.append(path / "VCF_refs.csv")
         candidates.append(path / "vcf_refs.csv")
@@ -1916,6 +2034,22 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     scope: Optional[str] = None  # "personal" (default) or "shared"
     reference: Optional[str] = None
+    # A pathogen add-on id (addons.py), or empty for a stock project, and the
+    # scope its chooser keeps to (a token from the add-on's scopes file).
+    pathogen: Optional[str] = None
+    pathogen_scope: Optional[str] = None
+
+
+class PathogenSettings(BaseModel):
+    """Set or clear a project's pathogen add-on, its scope, and (for Step 2)
+    the comparison reference. Fields left out are unchanged; pathogen "" clears."""
+    pathogen: Optional[str] = None
+    scope: Optional[str] = None
+    comparison_reference: Optional[str] = None
+
+
+class AddonActionRequest(BaseModel):
+    params: Dict[str, Any] = {}
 
 
 class SraRequest(BaseModel):
@@ -4871,15 +5005,223 @@ def project_create(payload: ProjectCreate):
     cfg = load_config()
     scope = getattr(payload, "scope", None) or SCOPE_PERSONAL
     reference = (payload.reference or "").strip()
+    pathogen = (payload.pathogen or "").strip()
+    pathogen_scope = (payload.pathogen_scope or "").strip()
+    if pathogen:
+        _require_installed_addon(pathogen)
+        if not addons.valid_scope(pathogen_scope):
+            raise HTTPException(status_code=400, detail=f"Not a usable scope: {pathogen_scope!r}")
+        # The add-on chooses each sample's reference; a reference given here
+        # would only be the Step 2 comparison reference, chosen later.
+        reference = ""
     try:
         project_dir = create_project(_project_roots(cfg), payload.name, scope=scope, reference=reference)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except OSError as e:  # a root this account cannot write: say so, not HTTP 500
         raise HTTPException(status_code=403, detail=f"Project not created: {os_error_text(e)}")
+    if pathogen:
+        update_project_meta(project_dir, {"pathogen": pathogen, "pathogen_scope": pathogen_scope})
     # Return the actual (normalized) directory name so the frontend can
     # update its state if the name differs from what the user typed.
-    return {"path": str(project_dir), "name": project_dir.name, "scope": scope, "reference": reference}
+    return {"path": str(project_dir), "name": project_dir.name, "scope": scope, "reference": reference,
+            "pathogen": pathogen or None}
+
+
+# ---- Pathogen add-ons (addons.py) -----------------------------------------
+def _require_installed_addon(addon_id: str):
+    if not addons.ID_RE.fullmatch(addon_id or ""):
+        raise HTTPException(status_code=400, detail=f"Not a pathogen add-on id: {addon_id!r}")
+    addon = addons.get(addon_id)
+    if addon is None:
+        raise HTTPException(status_code=400, detail=(
+            f"No pathogen add-on '{addon_id}' is installed here (bdtools install {addon_id}_addon)."))
+    return addon
+
+
+@app.get("/api/addons")
+def addons_list(refresh: int = 0):
+    """The pathogen add-ons installed beside this vsnp_gui, and the site's
+    default for new projects (bdtools site.conf DEFAULT_PATHOGEN)."""
+    found = addons.discover(refresh=bool(refresh))
+    return {"addons": [a.public() for a in sorted(found.values(), key=lambda a: a.name.lower())],
+            "default_pathogen": addons.default_pathogen(), "contract": addons.CONTRACT}
+
+
+@app.get("/api/addons/{addon_id}/scopes")
+def addon_scopes(addon_id: str):
+    return addons.scopes(_require_installed_addon(addon_id))
+
+
+def _step1_batch_running(step1_dir: Path) -> bool:
+    jid_path = step1_dir / ".step1_job_id"
+    try:
+        jid = jid_path.read_text(encoding="utf-8").strip() if jid_path.exists() else ""
+    except OSError:
+        jid = ""
+    job = job_manager.get_job(jid) if jid else None
+    if job and job.get("status") in ("running", "queued"):
+        return True
+    script = step1_dir / "run_step1.sh"
+    return script.exists() and _wrapper_process_alive(script)
+
+
+def _addon_runs(project_dir: Path, addon_id: str) -> List[Dict[str, Any]]:
+    base = addons.runs_dir(project_dir, addon_id)
+    out: List[Dict[str, Any]] = []
+    try:
+        dirs = sorted((d for d in base.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
+    except OSError:
+        return out
+    for d in dirs:
+        meta = addons.read_json(d / "run_metadata.json") or {}
+        ans = addons.read_json(d / "action.json") or {}
+        out.append({"id": d.name, "path": str(d), "action": meta.get("action"),
+                    "params": meta.get("params") or {}, "status": meta.get("status", "unknown"),
+                    "started_at": meta.get("started_at"), "finished_at": meta.get("finished_at"),
+                    "summary": ans.get("summary") or meta.get("summary") or "",
+                    "files": ans.get("files") or [], "views": ans.get("views") or []})
+    return out
+
+
+@app.get("/api/projects/{project}/pathogen")
+def project_pathogen_get(project: str):
+    """Everything the Pathogen tab shows: the add-on, the project's scope and
+    comparison reference, each sample's add-on row, the run summary and
+    report, and the action runs with their files."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    addon_id = addons.project_pathogen(project_dir)
+    if not addon_id:
+        return {"pathogen": None}
+    addon = addons.get(addon_id)
+    pdir = addons.pathogen_dir(project_dir, addon_id)
+    _a, results = _addon_results(project_dir)
+    rows = []
+    for folder, r in sorted(results.items()):
+        prov = addons.read_json(project_dir / "step1" / folder / ".provenance" / "addon.json") or {}
+        ref = prov.get("reference") or {}
+        rows.append({"sample": folder, "status": r.get("status") or "ok", "flags": r.get("flags") or {},
+                     "metrics": r.get("metrics") or {}, "files": r.get("files") or [],
+                     "reference": ref.get("name"), "reference_path": ref.get("path")})
+    failed = []
+    step1_dir = project_dir / "step1"
+    try:
+        for d in sorted(x for x in step1_dir.iterdir() if x.is_dir() and not x.name.startswith(("_", "."))):
+            f = d / ".provenance" / "addon_choose_failed"
+            if f.exists():
+                failed.append({"sample": d.name, "reason": f.read_text(encoding="utf-8").strip()})
+    except OSError:
+        pass
+    by_ref: Dict[str, List[str]] = {}
+    for r in rows:
+        if r.get("reference"):
+            by_ref.setdefault(r["reference"], []).append(r["sample"])
+    summary = addons.read_json(pdir / "summary.json") or {}
+    return {
+        "pathogen": addon_id,
+        "addon": addon.public() if addon is not None else None,
+        "installed": addon is not None,
+        "scope": addons.project_scope(project_dir),
+        "comparison_reference": _project_reference(project_dir) or None,
+        "pathogen_dir": str(pdir),
+        "rows": rows,
+        "no_reference": failed,
+        "samples_by_reference": by_ref,
+        "summary": summary,
+        "runs": _addon_runs(project_dir, addon_id),
+        "step1_running": _step1_batch_running(step1_dir),
+    }
+
+
+@app.put("/api/projects/{project}/pathogen")
+def project_pathogen_set(project: str, payload: PathogenSettings):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    updates: Dict[str, Any] = {}
+    if payload.pathogen is not None:
+        pid = payload.pathogen.strip()
+        if pid:
+            _require_installed_addon(pid)
+        if _step1_batch_running(project_dir / "step1"):
+            raise HTTPException(status_code=409, detail="Step 1 is running; change the pathogen when it has finished.")
+        updates["pathogen"] = pid or None
+    if payload.scope is not None:
+        if not addons.valid_scope(payload.scope.strip()):
+            raise HTTPException(status_code=400, detail=f"Not a usable scope: {payload.scope!r}")
+        updates["pathogen_scope"] = payload.scope.strip()
+    if payload.comparison_reference is not None:
+        ref = payload.comparison_reference.strip()
+        if ref:
+            _require_ref_token(ref, "comparison reference")
+            if _reference_dir_named(cfg, ref) is None:
+                raise HTTPException(status_code=400, detail=unresolved_reference_message(cfg, ref))
+        updates["reference"] = ref
+    if updates:
+        update_project_meta(project_dir, updates)
+    return project_pathogen_get(project)
+
+
+def _addon_job_command(args: List[str]) -> str:
+    backend_root = Path(__file__).resolve().parent.parent
+    return (f"PYTHONPATH={shlex.quote(str(backend_root))} "
+            + " ".join(shlex.quote(a) for a in [sys.executable, "-u", "-m", "app.addon_run", *args]))
+
+
+@app.post("/api/projects/{project}/pathogen/actions/{action_id}")
+def project_pathogen_action(project: str, action_id: str, payload: AddonActionRequest):
+    """Start one of the add-on's actions (a tree, a retype...) as a job, in a
+    run folder of its own under pathogen/<id>/runs/."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    addon = _project_addon_or_400(project_dir)
+    if addon is None:
+        raise HTTPException(status_code=400, detail="This project names no pathogen add-on.")
+    spec = next((a for a in addon.manifest.get("actions") or [] if a.get("id") == action_id), None)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"{addon.name} has no action {action_id!r}")
+    params = payload.params or {}
+    for k, v in params.items():
+        if not addons.ID_RE.fullmatch(str(k)) or not addons.valid_scope(str(v)):
+            raise HTTPException(status_code=400, detail=f"Not a usable parameter: {k}={v!r}")
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    suffix = "-".join(str(v) for v in params.values() if v)
+    run_dir = addons.runs_dir(project_dir, addon.id) / (f"{stamp}_{action_id}" + (f"-{suffix}" if suffix else ""))
+    run_dir = Path(re.sub(r"[^A-Za-z0-9_./-]", "-", str(run_dir)))
+    threads = max(1, min(8, os.cpu_count() or 2))
+    command = _addon_job_command(["action", "--project-dir", str(project_dir), "--action", action_id,
+                                  "--params", json.dumps(params), "--run-dir", str(run_dir),
+                                  "--threads", str(threads)])
+    job_id = job_manager.start_job(name=f"{addon.id}:{action_id}", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent)
+    return {"job_id": job_id, "run_dir": str(run_dir), "action": action_id}
+
+
+@app.post("/api/projects/{project}/pathogen/rerun")
+def project_pathogen_rerun(project: str):
+    """The add-on's after_sample for every finished sample, then after_run —
+    its results again without re-aligning anything (a fixed or updated add-on,
+    or a batch stopped between vsnp3 and the add-on)."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    addon = _project_addon_or_400(project_dir)
+    if addon is None:
+        raise HTTPException(status_code=400, detail="This project names no pathogen add-on.")
+    if _step1_batch_running(project_dir / "step1"):
+        raise HTTPException(status_code=409, detail="Step 1 is running; re-run the add-on steps when it has finished.")
+    threads = max(1, min(8, os.cpu_count() or 2))
+    command = _addon_job_command(["rerun", "--project-dir", str(project_dir), "--threads", str(threads)])
+    job_id = job_manager.start_job(name=f"{addon.id}:rerun", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent)
+    return {"job_id": job_id}
 
 
 @app.post("/api/projects/{project}/archive")
@@ -5940,6 +6282,97 @@ def _dispatch_trim_phase(
     }
 
 
+def _project_addon_or_400(project_dir: Path):
+    """The pathogen add-on a project names (addons.py), or None for a stock
+    project. A project that names one this install cannot run is refused with
+    the reason, never run as if it named none: its samples would be aligned
+    to whatever reference project.json happens to hold."""
+    addon_id = addons.project_pathogen(project_dir)
+    if not addon_id:
+        return None
+    addon = addons.get(addon_id)
+    if addon is None:
+        raise HTTPException(status_code=400, detail=(
+            f"This project's pathogen is '{addon_id}', and no add-on with that id is installed "
+            f"here. Install it with bdtools (bdtools install {addon_id}_addon), or set the "
+            f"project's pathogen to none."))
+    if not addon.ready:
+        raise HTTPException(status_code=400, detail=(
+            f"The {addon.name} add-on cannot run here: " + "; ".join(addon.problems)))
+    return addon
+
+
+def _addon_batch_lines(addon, project_dir: Path, max_parallel: int) -> Dict[str, List[str]]:
+    """The run_step1.sh lines that run a pathogen add-on's hooks (app.addon_run)
+    around each sample's vsnp3 call. Empty for a stock project, so its script
+    is byte-for-byte what it was (test_golden_stock.py)."""
+    keys = ("head", "before_vsnp3", "run_args", "after_vsnp3", "after_batch")
+    out: Dict[str, List[str]] = {k: [] for k in keys}
+    if addon is None:
+        return out
+    threads = max(1, min(8, (os.cpu_count() or 2) // max(1, max_parallel)))
+    q = shlex.quote
+    helper = '"$ADDON_PY" -m app.addon_run'
+    out["head"] = [
+        f"# Pathogen add-on: {addon.name} {addon.version} ({addon.dir})",
+        f"ADDON_PY={q(sys.executable)}",
+        f"export PYTHONPATH={q(str(Path(__file__).resolve().parent.parent))}",
+        f"PROJECT_DIR={q(str(project_dir))}",
+        f"ADDON_THREADS={threads}",
+    ]
+    before = [
+        "  SAMPLE_NAME=$(basename \"$d\")",
+        "  READ_TYPE=$(cat .provenance/read_type 2>/dev/null || echo \"\")",
+        "  R1=\"$(pwd)/$R1\"",
+        "  if [ -n \"$R2\" ]; then R2=\"$(pwd)/$R2\"; fi",
+        # The add-on chooses this sample's reference. A failure stops the
+        # sample here, with the reason in .provenance/addon_choose_failed
+        # (shown in Step 1 Results): no reference is guessed for it.
+        f"  REF_DIR=$({helper} choose_reference --project-dir \"$PROJECT_DIR\" --sample-dir \"$(pwd)\" "
+        "--sample \"$SAMPLE_NAME\" --r1 \"$R1\" --r2 \"$R2\" --read-type \"$READ_TYPE\" "
+        "--threads \"$ADDON_THREADS\")",
+        "  CHOOSE_RC=$?",
+        "  if [ \"$CHOOSE_RC\" -ne 0 ] || [ -z \"$REF_DIR\" ] || [ ! -d \"$REF_DIR\" ]; then",
+        "    echo \"No reference chosen for $SAMPLE_NAME; not aligned (see the pathogen add-on lines above)\" | tee -a \"$LOG\"",
+        "    touch . 2>/dev/null || true",
+        "    cd ..",
+        "    return 0",
+        "  fi",
+        "  echo \"Reference (chosen by the pathogen add-on): $REF_DIR\" | tee -a \"$LOG\"",
+    ]
+    if addon.hook_path("prepare_reads") is not None:
+        before += [
+            f"  PREP=$({helper} prepare_reads --project-dir \"$PROJECT_DIR\" --sample-dir \"$(pwd)\" "
+            "--sample \"$SAMPLE_NAME\" --r1 \"$R1\" --r2 \"$R2\" --read-type \"$READ_TYPE\" "
+            "--reference-dir \"$REF_DIR\" --threads \"$ADDON_THREADS\")",
+            "  R1N=$(printf '%s\\n' \"$PREP\" | sed -n 1p)",
+            "  R2N=$(printf '%s\\n' \"$PREP\" | sed -n 2p)",
+            "  if [ -n \"$R1N\" ]; then R1=\"$R1N\"; fi",
+            "  if [ -n \"$R2\" ] && [ -n \"$R2N\" ]; then R2=\"$R2N\"; fi",
+        ]
+    out["before_vsnp3"] = before
+    run_args = ["  RUN_ARGS+=(-t \"$REF_DIR\")"]
+    if addon.manifest.get("sample_naming", "folder") == "folder":
+        # The sample is named after its folder, not whatever vsnp3 reads off
+        # the FASTQ name before its first underscore: a run's barcode import
+        # names the folder, and every add-on output is keyed on it.
+        run_args.append("  RUN_ARGS+=(-n \"$SAMPLE_NAME\")")
+    out["run_args"] = run_args
+    out["after_vsnp3"] = [
+        # Before exit_code: the sample is not Complete until the add-on's row
+        # exists for this alignment (addon_done), so Collect never sees a
+        # finished vsnp3 run whose pathogen result is still being written.
+        "  if [ \"$STATUS\" -eq 0 ]; then",
+        f"    {helper} after_sample --project-dir \"$PROJECT_DIR\" --sample-dir \"$(pwd)\" "
+        "--sample \"$SAMPLE_NAME\" --reference-dir \"$REF_DIR\" --threads \"$ADDON_THREADS\" || true",
+        "  fi",
+    ]
+    out["after_batch"] = [
+        f"{helper} after_run --project-dir \"$PROJECT_DIR\" --threads \"$ADDON_THREADS\" --log \"$OVERALL_LOG\" || true",
+    ]
+    return out
+
+
 def _step1_dispatch(
     project: str, payload: Step1Request, cfg: Dict[str, Any],
     project_dir: Path, step1_dir: Path,
@@ -6023,25 +6456,35 @@ def _step1_dispatch(
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
-    # Auto-populate reference from project.json if not supplied in payload
-    if not payload.reference:
-        payload.reference = _project_reference(project_dir)
-    # Validated even when it came from project.json rather than the request: on a
-    # shared project that file is writable by every member, so it is untrusted
-    # input too. Quoted as well as validated — the value lands inside a bash
-    # string that is later re-parsed.
-    payload.reference = _require_ref_token(payload.reference, "reference")
-    # vsnp3 is handed the reference FOLDER, resolved from this app's reference
-    # locations, never a name for it to look up in its own install's list (see
-    # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
-    # does that itself from its install (_auto_detect_preflight).
-    ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
-               else _auto_detect_preflight(cfg))
-    if payload.reference:
-        update_project_meta(project_dir, {
-            "reference": payload.reference,
-            "display_name": f"{project}_{payload.reference}"
-        })
+    # A project that names a pathogen add-on (project.json "pathogen") has its
+    # reference chosen per sample, inside the batch, by the add-on's
+    # choose_reference hook (app.addon_run); project.json's "reference" then
+    # names the Step 2 comparison reference only, and is neither used here nor
+    # overwritten. A project that names none runs exactly as before.
+    addon = _project_addon_or_400(project_dir)
+    if addon is not None:
+        payload.reference = None
+        ref_arg = ""
+    else:
+        # Auto-populate reference from project.json if not supplied in payload
+        if not payload.reference:
+            payload.reference = _project_reference(project_dir)
+        # Validated even when it came from project.json rather than the request: on a
+        # shared project that file is writable by every member, so it is untrusted
+        # input too. Quoted as well as validated — the value lands inside a bash
+        # string that is later re-parsed.
+        payload.reference = _require_ref_token(payload.reference, "reference")
+        # vsnp3 is handed the reference FOLDER, resolved from this app's reference
+        # locations, never a name for it to look up in its own install's list (see
+        # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
+        # does that itself from its install (_auto_detect_preflight).
+        ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
+                   else _auto_detect_preflight(cfg))
+        if payload.reference:
+            update_project_meta(project_dir, {
+                "reference": payload.reference,
+                "display_name": f"{project}_{payload.reference}"
+            })
     max_parallel = cfg.get("step1_max_parallel", 1) or 1
     try:
         max_parallel = max(1, int(max_parallel))
@@ -6082,6 +6525,7 @@ def _step1_dispatch(
     # user has no way to see or correct the one that won. Step 2 already
     # refuses that fallback (_require_vsnp3_script).
     step1_exe = shlex.quote(str(_require_vsnp3_script(cfg, "vsnp3_step1.py")))
+    addon_lines = _addon_batch_lines(addon, project_dir, max_parallel)
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -6091,6 +6535,7 @@ def _step1_dispatch(
             "OVERALL_START=$(date +%s)",
             "OVERALL_LOG=\"step1_run_summary.log\"",
             "echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
+            *addon_lines["head"],
             "run_sample() {",
             "  local d=\"$1\"",
             "  if [ ! -d \"$d\" ]; then",
@@ -6149,6 +6594,7 @@ def _step1_dispatch(
             # ont (nanopore alignment — auto-detected or forced), else single.
             "  if [ -n \"$R2\" ]; then echo paired > .provenance/read_type; elif [ -n \"$NP\" ]; then echo ont > .provenance/read_type; else echo single > .provenance/read_type; fi",
             "  date -u +%s.%N > .provenance/started_at",
+            *addon_lines["before_vsnp3"],
             # Build the command as an ARRAY, not a string, and run the array
             # directly. The predecessor built one string and ran it through
             # `eval`, which re-parsed it — so a FASTQ filename containing
@@ -6167,6 +6613,7 @@ def _step1_dispatch(
             f"  RUN_ARGS=({step1_exe} -r1 \"$R1\")",
             "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
             f"  RUN_ARGS+=({ref_arg} {debug_flag} {assemble_unmap_flag} $NP)",
+            *addon_lines["run_args"],
             "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
             "  PROV_SAMPLE=$(basename \"$d\")",
             "  PROV_CWD=$(pwd)",
@@ -6185,6 +6632,7 @@ def _step1_dispatch(
             "  } >> .provenance/vsnp_gui_step1_run_cmd.txt 2>/dev/null || true",
             "  \"${RUN_ARGS[@]}\" >> \"$LOG\" 2>&1",
             "  STATUS=$?",
+            *addon_lines["after_vsnp3"],
             "  echo $STATUS > .provenance/exit_code",
             "  date -u +%s.%N > .provenance/finished_at",
             # The status caches are keyed on the sample directory's mtime
@@ -6225,6 +6673,7 @@ def _step1_dispatch(
             "for p in \"${pids[@]}\"; do",
             "  wait \"$p\" || FAIL=1",
             "done",
+            *addon_lines["after_batch"],
             "OVERALL_END=$(date +%s)",
             "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",
             "echo \"End: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
@@ -6242,7 +6691,7 @@ def _step1_dispatch(
     # no reference is set (legacy/unconfigured runs) — the bash still runs.
     prov_finalize_cb = None
     provenance_warning = ""
-    if payload.reference:
+    if payload.reference or addon is not None:
         if samples:
             # A capture failure must NOT stop the batch — the record describes
             # the run, it is not a precondition for it (this used to 500 the
@@ -6253,6 +6702,7 @@ def _step1_dispatch(
                     cfg, project_dir, samples, payload.reference,
                     user=_current_user(),
                     ood_session_id=_ood_session_id(),
+                    per_sample_by=(f"{addon.id} {addon.version}" if addon is not None else None),
                 )
             except provenance_writer.DispatchFailed as e:
                 provenance_warning = (
@@ -6354,6 +6804,10 @@ def step1_status(project: str):
     # are left out so they don't surface as "Unknown" samples in the GUI.
     lst = step1_index.listing(step1_dir)
     sample_entries = lst.regular()
+    # A project that names a pathogen add-on (addons.py) has two more sample
+    # states: no reference chosen (addon_choose_failed), and vsnp3 finished but
+    # the add-on step not yet (no addon_done). Read once, not per sample.
+    pathogen = addons.project_pathogen(project_dir)
 
     disk_cache = _step1_status_disk_load(step1_dir)
     disk_updates: Dict[str, list] = {}
@@ -6462,6 +6916,19 @@ def step1_status(project: str):
             reason = input_issue
         else:
             reason = _step1_status_reason(status, sample_dir, min_bytes)
+        if pathogen:
+            prov = sample_dir / ".provenance"
+            if status == "complete" and not (prov / "addon_done").exists():
+                status = "running" if job_status == "running" else "unknown"
+                reason = ("vsnp3 finished; the pathogen add-on step has not. Re-run the add-on "
+                          "steps from the Pathogen tab, or Force re-run the sample.")
+            elif status in ("not_started", "unknown", "misfit") and (prov / "addon_choose_failed").exists():
+                try:
+                    why = (prov / "addon_choose_failed").read_text(encoding="utf-8").strip()
+                except OSError:
+                    why = ""
+                status = "error"
+                reason = "No reference chosen by the pathogen add-on" + (f": {why}" if why else "")
 
         entry = {
             "sample": sample,
@@ -6936,6 +7403,7 @@ def step2_setup(project: str):
     # tier B (Step 1 exclusions). Both are always filtered out of the comparison
     # at run time. Tier C (build-list) is per-run and shown live in the UI.
     project_reference = _project_reference(project_dir)
+    addon_project = bool(addons.project_pathogen(project_dir))
     ref_aliases = _reference_alias_map(cfg) if project_reference else {}
     # Kept apart so the count can say WHERE an exclusion came from. One number
     # labelled "excluded above" sent the user hunting through Step 1 Results
@@ -7153,7 +7621,10 @@ def step2_setup(project: str):
                 # compared — but it does not come back onto the worklist. Before
                 # this, Build rewrote the record from scratch and every dismissal
                 # was undone by the next press.
-                "samples": sorted(set(ref_skipped_samples) - prior_ignored),
+                # A pathogen add-on project holds samples on several lineage
+                # references by design: those are not outstanding work.
+                "samples": ([] if addon_project else sorted(set(ref_skipped_samples) - prior_ignored)),
+                "other_reference": (sorted(ref_skipped_samples) if addon_project else []),
                 # Only what Build still skips stays dismissed. A dismissed
                 # sample that now collects — recognised under a renamed FASTA,
                 # or re-run — is in the comparison set, not outstanding work,
@@ -7240,7 +7711,10 @@ def step2_setup(project: str):
         "edits_not_applied": edits_not_applied,
         # Samples left out because every VCF they have was called against a
         # different reference than this project's.
-        "ref_skipped": len(ref_skipped_samples),
+        "ref_skipped": 0 if addon_project else len(ref_skipped_samples),
+        # Pathogen add-on projects: samples whose reference is another lineage,
+        # left out of this comparison set on purpose.
+        "other_reference": len(ref_skipped_samples) if addon_project else 0,
         # kept for back-compat with older callers:
         "skipped_excluded": excluded,
         "preserved": preserved,
@@ -7451,6 +7925,16 @@ def step2_run(project: str, payload: Step2Request):
     # elsewhere in the database, and the samples named in the error are always
     # samples the run would actually have compared.
     audit = _step2_reference_audit(cfg, project_dir)
+    other_reference: List[str] = []
+    if audit["project_reference"] and addons.project_pathogen(project_dir):
+        # A pathogen add-on chooses each sample's reference, so a project holds
+        # samples on several lineage references by design. A run compares the
+        # ones on its comparison reference; the others are left out of it
+        # (tier D) and listed in the answer — not refused, and never offered
+        # for deletion.
+        other_reference = sorted({d["sample"] for d in
+                                  [*audit["recoverable"], *audit["removable"], *audit["orphans"]]})
+        effective_removals = sorted(set(effective_removals) | set(other_reference))
     if audit["project_reference"]:
         removal_set = set(effective_removals)
         offenders = [
@@ -7890,6 +8374,9 @@ def step2_run(project: str, payload: Step2Request):
         # comparison, not the step2/ folder it sits in.
         "run_dir": str(run_dir),
         "status": snap.get("status", "running"),
+        # Pathogen add-on projects: samples on another lineage reference,
+        # left out of this comparison (tier D above). Stock: always empty.
+        "other_reference": other_reference,
         "excluded_count": excluded_count,
         "blocklist_count": len(ref_block),
         "panel_exempt_count": panel_exempt_count,
@@ -8467,6 +8954,7 @@ def qc_summary(project: str, refresh: int = 0):
     rows = [{k: v for k, v in r.items() if not k.startswith("_sa")}
             for r in state["rows"] or []]
     _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
+    _apply_addon_rows(rows, project_dir)
     return {
         "status": "ready",
         "rows": rows,
@@ -8493,8 +8981,8 @@ def qc_summary_csv(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
-                             aliases=_project_aliases(project_dir, cfg))
+    rows = _addon_export_rows(_qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+                                                 aliases=_project_aliases(project_dir, cfg)), project_dir)
     if not rows:
         return Response(content="", media_type="text/csv")
     header, data = _qc_table(rows)
@@ -8518,8 +9006,8 @@ def qc_summary_xlsx(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
-                             aliases=_project_aliases(project_dir, cfg))
+    rows = _addon_export_rows(_qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+                                                 aliases=_project_aliases(project_dir, cfg)), project_dir)
     header, data = _qc_table(rows)
     from openpyxl import Workbook  # ships with the env's pandas
 
@@ -14465,7 +14953,14 @@ def step2_reference_audit(project: str):
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
-    return _step2_reference_audit(cfg, project_dir)
+    audit = _step2_reference_audit(cfg, project_dir)
+    if addons.project_pathogen(project_dir):
+        # Samples on another lineage reference are expected in a pathogen
+        # project: list them, do not offer to re-collect or drop them.
+        others = [*audit["recoverable"], *audit["removable"], *audit["orphans"]]
+        audit = dict(audit, recoverable=[], removable=[], orphans=[], mixed=False,
+                     other_reference=sorted(others, key=lambda d: (d.get("reference") or "", d.get("sample") or "")))
+    return audit
 
 
 class ReferenceAuditFix(BaseModel):

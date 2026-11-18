@@ -65,6 +65,12 @@ PERSONAL_KEY = "reference_locations"
 SITE = "site"
 PERSONAL = "personal"
 INSTALL = "install"   # vsnp3's own list, shown only until the site list is seeded
+# A pathogen add-on's library (addons.py): <library>/reference_options. Listed
+# LAST, so a site's own reference of the same name always wins (addon_check
+# refuses such a name), never removable here (it belongs to the add-on's
+# install), and tagged "addon" in the reference list so the stock pickers can
+# leave it out: these references are chosen per sample by their add-on.
+ADDON = "addon"
 
 INSTALL_LIST = Path("dependencies") / "reference_options_paths.txt"
 
@@ -390,6 +396,15 @@ def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
         _take([p for p in _install_candidates(lines or [])[0]
                if _shared_entry_visible(cfg, p)], INSTALL)
     _take(personal_locations(cfg), PERSONAL)
+    try:
+        from app import addons as _addons
+        for aid, path in _addons.reference_locations():
+            k = _norm(str(path))
+            if k not in seen:
+                seen.add(k)
+                out.append({"path": str(path), "source": ADDON, "addon": aid})
+    except Exception as e:  # noqa: BLE001 — an add-on must never break the reference list
+        notes.append(f"Pathogen add-on reference libraries could not be listed: {e}")
     return out, notes
 
 
@@ -1183,6 +1198,8 @@ def survey(cfg: Dict) -> Dict:
             if entry is None:
                 by_name[child.name] = {"name": child.name, "path": str(child),
                                        "root": str(parent), "shadowed": []}
+                if e.get("source") == ADDON:
+                    by_name[child.name]["addon"] = e.get("addon")
                 order.append(child.name)
             elif not _same_dir(child, Path(entry["path"])):
                 # Same dir reached twice (a listed symlink of a listed location)
@@ -1207,7 +1224,7 @@ def survey(cfg: Dict) -> Dict:
             "reason": reason,
             "provides": wins.get(key, 0),
             "shadowed": dups.get(key, 0),
-            "removable": e["source"] == PERSONAL or status["writable"],
+            "removable": e["source"] != ADDON and (e["source"] == PERSONAL or status["writable"]),
             "implicit": False,
             "fix": location_fix(cfg, Path(e["path"])) if state == "cannot_open" else None,
         })

@@ -906,6 +906,28 @@ def capture_reference_state(cfg: dict[str, Any], reference_name: str) -> dict[st
             "searched_locations": searched,
         }
 
+    return _capture_reference_folder(folder, reference_name)
+
+
+def capture_reference_state_at(folder: Path, reference_name: str | None = None) -> dict[str, Any]:
+    """The same record as capture_reference_state, for a folder known by PATH.
+
+    A pathogen add-on chooses each sample's reference from its own library
+    (main._step1_dispatch, app.addon_run); looking it up again by name would
+    take the first location holding that name, which need not be the folder
+    the chooser returned."""
+    folder = Path(folder)
+    name = reference_name or folder.name
+    try:
+        if not folder.is_dir():
+            return {"name": name, "path": str(folder),
+                    "capture_error": "reference folder does not exist"}
+    except OSError as e:
+        return {"name": name, "path": str(folder), "capture_error": str(e)}
+    return _capture_reference_folder(folder, name)
+
+
+def _capture_reference_folder(folder: Path, reference_name: str) -> dict[str, Any]:
     folder_resolved = folder.resolve()
     resolved_via_symlink = (folder_resolved != folder)
 
@@ -1240,14 +1262,20 @@ def dispatch_step1_batch(
     cfg: dict[str, Any],
     project_dir: Path,
     samples: list[str],
-    reference_name: str,
+    reference_name: str | None,
     *,
     user: str,
     ood_session_id: str | None,
+    per_sample_by: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Pre-create per-sample run_metadata.json + batch roll-up at step1 dispatch.
 
     Returns (batch_run_id, {sample: per_sample_run_id}).
+
+    `per_sample_by` names the pathogen add-on that chooses each sample's
+    reference inside the batch (reference_name is then None): the dispatch
+    record says so, and app.addon_run adds the folder it chose, by path and
+    with its manifest hash, to each sample's record (the "addon" block).
 
     Failure to capture state or write any metadata file raises DispatchFailed;
     caller should not start the underlying job. Per the locked policy:
@@ -1267,7 +1295,12 @@ def dispatch_step1_batch(
     vsnp_gui_state = capture_vsnp_gui_state(deploy_path)
     vsnp3_state = capture_vsnp3_state(vsnp3_path)
     env_shared = capture_env_snapshot(cfg)
-    reference = capture_reference_state(cfg, reference_name)
+    if per_sample_by:
+        reference = {"name": None, "path": None, "chosen_per_sample_by": per_sample_by,
+                     "note": ("each sample's reference is chosen by the pathogen add-on "
+                              "before alignment; see the sample record's addon.reference")}
+    else:
+        reference = capture_reference_state(cfg, reference_name)
     actor = _build_actor(user, ood_session_id)
 
     started_at = datetime.now(tz=timezone.utc)
@@ -1291,8 +1324,9 @@ def dispatch_step1_batch(
         provenance_dir = sample_dir / "_provenance"
         env_for_sample = copy_env_snapshot_into_run(env_shared, provenance_dir)
 
-        cli = _build_step1_per_sample_cli(cfg, sample, reference_name, sample_dir,
-                                          reference.get("path"))
+        cli = _build_step1_per_sample_cli(cfg, sample,
+                                          reference_name or f"<chosen per sample by {per_sample_by}>",
+                                          sample_dir, reference.get("path"))
 
         dispatch_state = _build_dispatch_state(
             actor=actor,
@@ -1319,7 +1353,7 @@ def dispatch_step1_batch(
     # Batch roll-up
     batch_provenance_dir = step1_dir / "_provenance"
     env_for_batch = copy_env_snapshot_into_run(env_shared, batch_provenance_dir)
-    batch_cli = _build_step1_batch_cli(cfg, samples, reference_name)
+    batch_cli = _build_step1_batch_cli(cfg, samples, reference_name or f"chosen per sample by {per_sample_by}")
     batch_dispatch_state = _build_dispatch_state(
         actor=actor,
         vsnp_gui=vsnp_gui_state,

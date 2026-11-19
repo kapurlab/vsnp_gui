@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import Response, FileResponse, HTMLResponse, JSONResponse
 from fastapi.responses import StreamingResponse
 from fastapi.encoders import jsonable_encoder
@@ -148,6 +148,8 @@ from app.request_safety import install_request_safety
 from app import qc_verdict
 from app import provenance_writer
 from app import step1_staging
+from app import ont_import
+from app import seq_import
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -325,12 +327,160 @@ def _resolve_qc_thresholds(cfg: Dict, project_dir: Path | None = None) -> Dict:
     return qc_verdict.merge_thresholds(cfg.get("qc_thresholds"), project_layer)
 
 
+def _int_or_none(value) -> Optional[int]:
+    """"7,269" or 7269 -> 7269; anything else -> None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
+    """FMDV mode: the per-sample chooser's flags become the QC engine's
+    contamination signal (review, never fail). `distant` means the closest
+    available lineage genome is still far from the reads, so the consensus
+    step and a closer reference are needed before the SNPs are trusted; it is
+    not a fault of the sample. `mixed` means a second serotype holds 5% or
+    more of the VP1 reads, above the 1 to 2% of barcode crosstalk."""
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # Three long-read figures the FMDV table shows as numbers. The stats
+        # workbook has them as prose: "7,269" reads, "2.12% (0.0212 measured
+        # by samtools stats ...)" and "0 of 610 (...); 40 thin calls raised to
+        # the N floor; ...". Parsed here so the columns sort numerically.
+        row["fmdv_reads"] = _int_or_none(row.get("R1 Read Count"))
+        m = re.match(r"\s*([0-9.]+)\s*%", str(row.get("Long-read Error Rate") or ""))
+        row["fmdv_error_rate"] = float(m.group(1)) if m else None
+        m = re.search(r"(\d[\d,]*) thin calls", str(row.get("Long-read Calls Limited to N") or ""))
+        row["fmdv_thin_calls"] = int(m.group(1).replace(",", "")) if m else None
+        sample_dir = step1_dir / str(row.get("sample") or "")
+        # A sample whose reads were simulated from an imported sequence
+        # (app.seq_import): the row keeps vsnp3's numbers, badged so nobody
+        # reads depth or mapping rate as a measurement.
+        imp = sample_dir / "fmdv_import.json"
+        if imp.is_file() and row.get("read_type") != "sequence":
+            try:
+                ij = json.loads(imp.read_text())
+            except (OSError, ValueError):
+                ij = {}
+            if ij.get("reads") == "simulated":
+                row["read_type"] = "simulated"
+                row["fmdv_source"] = ij.get("kind") or "fasta"
+                row["fmdv_import_source"] = ij.get("source") or ""
+                row["fmdv_import_class"] = ij.get("class") or ""
+                row["fmdv_import_length"] = ij.get("length")
+        # The consensus block's numbers: how much of the genome and of VP1
+        # was called (depth >= 10 and an unambiguous base), the two figures
+        # a reader needs before trusting a Step 2 group or a VP1 tree.
+        c = sample_dir / "fmdv_consensus.json"
+        if c.is_file():
+            try:
+                cj = json.loads(c.read_text())
+            except (OSError, ValueError):
+                cj = {}
+            row["fmdv_genome_called"] = cj.get("called_percent")
+            row["fmdv_vp1_called"] = cj.get("vp1_called_percent")
+            row["fmdv_consensus_length"] = cj.get("length")
+        # VP1 typing (bin/fmdv_vp1_type.py): the lineage name from the nearest
+        # annotated GenBank VP1, which the reads vote over 79 genomes cannot give.
+        t = sample_dir / "fmdv_vp1_type.json"
+        if t.is_file():
+            try:
+                tj = json.loads(t.read_text())
+            except (OSError, ValueError):
+                tj = {}
+            best = tj.get("best") or {}
+            row["fmdv_vp1_status"] = tj.get("status")
+            row["fmdv_vp1_serotype"] = tj.get("serotype")
+            row["fmdv_topotype"] = tj.get("topotype")
+            row["fmdv_vp1_lineage"] = tj.get("lineage")
+            row["fmdv_vp1_identity"] = tj.get("identity")
+            row["fmdv_vp1_nearest"] = " ".join(x for x in (best.get("accession"), best.get("isolate"), best.get("country"), str(best.get("year") or "")) if x)
+            row["fmdv_vp1_note"] = tj.get("note")
+        p = sample_dir / "fmdv_reference.json"
+        if not p.is_file():
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        reasons = []
+        if d.get("distant"):
+            ident = d.get("identity")
+            reasons.append("distant reference" + (f", identity {ident:.2f}" if isinstance(ident, (int, float)) else ""))
+        if d.get("mixed"):
+            share = d.get("serotype_share") or {}
+            top = ", ".join(f"{k} {v:.0%}" for k, v in list(share.items())[:3])
+            reasons.append("mixed serotypes" + (f" ({top})" if top else ""))
+        if reasons:
+            row["_contamination"] = True
+            row["_contamination_reason"] = "; ".join(reasons)
+        # The chooser's own answer, for the Results table. Without these the
+        # table showed only the Illumina QC columns and nothing about which
+        # lineage reference the sample was put on or how well it fitted.
+        chosen = d.get("chosen") or {}
+        row["fmdv_serotype"] = chosen.get("serotype")
+        row["fmdv_lineage"] = chosen.get("lineage")
+        row["fmdv_chosen"] = chosen.get("safe")
+        row["fmdv_f_match"] = d.get("f_match")
+        row["fmdv_distant"] = bool(d.get("distant"))
+        row["fmdv_mixed"] = bool(d.get("mixed"))
+        # "vp1" when the serotype composition and the mixture flag rest on
+        # VP1 reads; "undetermined" when too few reads reached any VP1.
+        row["fmdv_composition_basis"] = d.get("composition_basis") or ("vp1" if d.get("serotype_share") else "")
+        row["fmdv_identity"] = d.get("identity")
+        row["fmdv_serotype_share"] = d.get("serotype_share")
+
+
 def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
     """Attach `_qc_verdict` to each row in place. Returns the same list."""
     for row in rows:
         if isinstance(row, dict):
+            if row.get("read_type") in ("sequence", "simulated"):
+                # An imported sequence: no reads, or perfect simulated ones.
+                # Nothing was measured, so no threshold applies. Not a pass.
+                why = ("imported sequence, simulated reads: depth, mapping and coverage describe the simulation, QC does not apply"
+                       if row.get("read_type") == "simulated" else "imported sequence, no reads: QC does not apply")
+                row["_qc_verdict"] = {"level": "na", "reasons": [why], "signals": {}}
+                continue
             row["_qc_verdict"] = qc_verdict.compute_verdict(row, thresholds)
     return rows
+
+
+def _fmdv_import_rows(rows: list, step1_dir: Path) -> List[Dict[str, Any]]:
+    """Results rows for the samples imported as sequences (app.seq_import):
+    no stats workbook, so the scanner never sees them. Read columns stay
+    blank; the typing columns are filled by _fmdv_flag_qc_rows afterwards."""
+    present = {str(r.get("sample") or r.get("_sample") or "") for r in rows if isinstance(r, dict)}
+    out: List[Dict[str, Any]] = []
+    if not step1_dir.is_dir():
+        return out
+    for p in sorted(step1_dir.glob("*/fmdv_import.json")):
+        sample = p.parent.name
+        if sample in present:
+            continue
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        meta = d.get("metadata") or {}
+        out.append({
+            "sample": sample, "_sample": sample, "_file": str(p),
+            # simulated reads not yet run show as such; once Step 1 has run
+            # the workbook row takes over (see _fmdv_flag_qc_rows).
+            "read_type": "simulated" if d.get("reads") == "simulated" else "sequence",
+            "_run_date": (d.get("imported") or "")[:10], "Reference": "",
+            "fmdv_source": d.get("kind") or "fasta", "fmdv_import_source": d.get("source") or "",
+            "fmdv_import_class": d.get("class") or "", "fmdv_import_length": d.get("length"),
+            "fmdv_serotype": meta.get("serotype") or "", "fmdv_lineage": meta.get("topotype") or "",
+            "fmdv_country": meta.get("country") or "", "fmdv_year": meta.get("year") or "",
+        })
+    return out
 
 
 def _project_reference(project_dir: Path) -> str:
@@ -1135,6 +1285,11 @@ def _step1_dispatch_plan(
     for p in sorted(step1_dir.iterdir()):
         if not p.is_dir() or p.name.startswith(("_", ".")):
             continue
+        if (p / "fmdv_import.json").is_file() and next(p.glob("*.fastq.gz"), None) is None:
+            # A sequence imported without reads (app.seq_import): nothing to
+            # align, and not a skip worth reporting. One imported as
+            # simulated reads has a FASTQ once Grabbed and runs like any sample.
+            continue
         if not force_rerun and _step1_is_complete(p):
             skipped.append({
                 "sample": p.name,
@@ -1471,6 +1626,58 @@ def _step2_run_shape(run_dir: Path) -> Dict[str, Any]:
                 shape["has_results"] = True
                 break
     return shape
+
+
+_VP1_TREE_STALE_S = 15 * 60.0
+
+
+def _vp1_tree_run_state(run_dir: Path, run_id: str) -> str:
+    """"running" or "interrupted" for a VP1 tree folder that has no tree yet;
+    "" for any other folder, including a finished tree.
+
+    The job manager forgets a job when the backend restarts, and the RAxML it
+    started keeps going on its own, so liveness cannot come from the job. The
+    log RAxML appends to does the job instead: a write within the last fifteen
+    minutes is a build still running (a bootstrap replicate on 2,000 VP1
+    sequences takes about 30 s), anything older is a build that died."""
+    if "_VP1-tree" not in run_id:
+        return ""
+    vp1 = run_dir / "VP1"
+    try:
+        if not vp1.is_dir() or any(vp1.glob("*.tre")):
+            return ""
+        newest = max((p.stat().st_mtime for p in vp1.iterdir()), default=0.0)
+    except OSError:
+        return ""
+    if newest and time.time() - newest < _VP1_TREE_STALE_S:
+        return "running"
+    # RAxML writes nothing during its final search after the bootstraps,
+    # which on a large alignment is longer than the staleness window, so a
+    # quiet folder is only interrupted when no process names it any more.
+    return "running" if _process_names_path(vp1) else "interrupted"
+
+
+def _process_names_path(path: Path) -> bool:
+    """True when a live process has this path on its command line (the
+    mafft or RAxML a tree build started, found again after a backend restart
+    that forgot the job). Linux /proc first; pgrep -f elsewhere."""
+    needle = str(path)
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            if needle.encode() in cmdline:
+                return True
+        return False
+    try:
+        return subprocess.run(["pgrep", "-f", needle], capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _step2_run_state(shape: Dict[str, Any], is_live: bool) -> str:
@@ -1936,6 +2143,37 @@ class LinkLocalRequest(BaseModel):
     paths: List[str] = []
 
 
+class OntImportSample(BaseModel):
+    barcode: str
+    sample: str = ""          # empty: the barcode name is used
+
+
+class OntImportRequest(BaseModel):
+    """A MinKNOW run folder to import as one FASTQ per barcode (app.ont_import)."""
+    run_dir: str
+    samples: List[OntImportSample] = []   # commit only: the barcodes to import
+    include_unclassified: bool = False
+
+
+class SeqImportRow(BaseModel):
+    """One edited row of a sequence-import preview (app.seq_import)."""
+    id: int
+    name: str = ""
+    role: str = "sample"        # sample | context
+    serotype: str = ""
+    lineage: str = ""
+    country: str = ""
+    year: str = ""
+    host: str = ""
+    accession: str = ""
+    isolate: str = ""
+
+
+class SeqImportCommitRequest(BaseModel):
+    token: str
+    rows: List[SeqImportRow] = []
+
+
 class ImportVcfRequest(BaseModel):
     source_paths: List[str] = []
     include_step1: bool = False
@@ -1960,6 +2198,72 @@ class Step1Request(BaseModel):
     # which is what every existing project expects.
     trim: bool = False
     trim_mb: Optional[int] = 200
+    # FMDV mode only: bounds the per-sample reference choice. "FMDV" (any
+    # lineage), a serotype such as "SAT1", a lineage such as "SAT1/I", or a
+    # pinned "genome:<safe>". Ignored unless project.json has "mode": "fmdv".
+    fmdv_scope: Optional[str] = None
+
+
+# ---- FMDV mode -------------------------------------------------------------
+# A project whose project.json carries "mode": "fmdv" chooses its reference
+# PER SAMPLE inside the Step 1 batch (bin/fmdv_choose_reference.py), because
+# FMDV topotypes within one serotype differ by up to 21% and nanopore reads
+# stop mapping past roughly 10 to 15%. Everything from -t onwards is the
+# ordinary vsnp3 path. See docs/FMDV_MODE.md.
+_FMDV_SCOPE_RE = re.compile(r"^(FMDV|[A-Za-z0-9]+(?:/[A-Za-z0-9.+-]+)?|genome:[A-Za-z0-9._-]+)$")
+
+
+def _project_mode(project_dir: Path) -> str:
+    try:
+        return str(json.loads((project_dir / "project.json").read_text()).get("mode", "") or "").strip().lower()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def _require_fmdv_scope(value: Optional[str]) -> str:
+    v = (value or "FMDV").strip()
+    if not _FMDV_SCOPE_RE.match(v):
+        raise HTTPException(status_code=400, detail=f"Invalid FMDV reference scope: {v!r}")
+    return v
+
+
+def _project_fmdv_scope(project_dir: Path) -> str:
+    """The Step 1 scope lives in its own project.json key. The ordinary
+    `reference` key keeps vsnp_gui's meaning, the reference a Step 2
+    comparison is made on, so Build's filter and Run's veto work unchanged."""
+    try:
+        return str(json.loads((project_dir / "project.json").read_text()).get("fmdv_scope", "") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+
+
+def _fmdv_primer_set(lib: Path, project_dir: Path) -> str:
+    """Path of the amplicon primer FASTA for this project, or "" for none."""
+    try:
+        want = str(json.loads((project_dir / "project.json").read_text()).get("fmdv_primers", "") or "").strip()
+    except (OSError, ValueError):
+        want = ""
+    if want.lower() == "none":
+        return ""
+    pdir = lib / "primers"
+    if want:
+        cand = pdir / Path(want).name
+        return str(cand) if cand.is_file() else ""
+    sets = sorted(pdir.glob("*.fasta")) if pdir.is_dir() else []
+    default = pdir / "default.fasta"
+    if default.is_file():
+        return str(default)
+    return str(sets[0]) if len(sets) == 1 else ""
+
+
+def _fmdv_is_lib_reference(cfg: Dict, name: str) -> bool:
+    """True when `name` is a genome in the FMDV library (a safe name)."""
+    lib = Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+    try:
+        idx = json.loads((lib / "lineages.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return any(g.get("safe") == name for g in idx.get("genomes", []))
 
 
 class Step2Request(BaseModel):
@@ -5010,6 +5314,233 @@ def project_link_local(project: str, payload: LinkLocalRequest):
     }
 
 
+def _ont_run_dir(raw: str) -> Path:
+    run_dir = Path((raw or "").strip()).expanduser()
+    if not raw or not run_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"Run folder not found: {raw}")
+    return run_dir
+
+
+@app.post("/api/projects/{project}/import_run/preview")
+def project_import_run_preview(project: str, payload: OntImportRequest):
+    """What importing a MinKNOW run folder would write: one row per barcode
+    with its chunk count, size and the sample name the run's sample_sheet.csv
+    proposes. Nothing is written."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    run_dir = _ont_run_dir(payload.run_dir)
+    result = ont_import.preview(run_dir, project_dir / "download")
+    if not result["rows"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"No barcode folders or barcode-named FASTQs found under {run_dir}. "
+                    "Expected fastq_pass/barcodeNN/*.fastq.gz, barcodeNN/ folders, or files named *barcodeNN*.fastq.gz."),
+        )
+    return result
+
+
+@app.post("/api/projects/{project}/import_run")
+def project_import_run(project: str, payload: OntImportRequest):
+    """Concatenate each chosen barcode's chunks into download/<sample>.fastq.gz
+    as a background job. The response carries the job id and the plan."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    ensure_project_dirs(project_dir)
+    run_dir = _ont_run_dir(payload.run_dir)
+    if not payload.samples and not payload.include_unclassified:
+        raise HTTPException(status_code=400, detail="No barcodes selected")
+    plan, errors = ont_import.build_plan(
+        run_dir, project_dir / "download",
+        [{"barcode": s.barcode, "sample": s.sample} for s in payload.samples],
+        payload.include_unclassified,
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail="Import refused: " + "; ".join(errors))
+    plan_path = _jobs_dir / f"ont_import_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{len(plan)}.json"
+    plan_path.write_text(json.dumps(plan, indent=1))
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.ont_import", "commit", str(plan_path),
+    ])
+    job_id = job_manager.start_job(name="import_run", command=command, cwd=backend_root)
+    return {"job_id": job_id, "run_dir": str(run_dir),
+            "samples": [{"barcode": e["barcode"], "sample": e["sample"], "files": len(e["files"])} for e in plan]}
+
+
+@app.get("/api/ont/sample_sheet_template")
+def ont_sample_sheet_template():
+    """The two-column sample_sheet.csv a MinKNOW run folder can carry."""
+    return Response(ont_import.SAMPLE_SHEET_TEMPLATE, media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="sample_sheet.csv"'})
+
+
+# ---- FMDV mode: sequences that are not reads (docs/FMDV_SEQ_IMPORT.md) -----
+async def _run_blocking(fn, *args):
+    """A blocking call (blastn, an NCBI fetch) off the event loop."""
+    import asyncio
+    return await asyncio.to_thread(fn, *args)
+
+
+def _seq_import_blastn() -> Optional[str]:
+    env = _fmdv_tree_env()
+    return shutil.which("blastn", path=env["path"]) or shutil.which("blastn")
+
+
+def _seq_import_fetch_settings(cfg: Dict) -> Tuple[str, str]:
+    """(email, api key) for NCBI: the config's ncbi block, else the environment."""
+    ncbi = cfg.get("ncbi") or {}
+    email = str(ncbi.get("email") or os.environ.get("NCBI_EMAIL", "")).strip()
+    key = str(ncbi.get("api_key") or os.environ.get("NCBI_API_KEY", "")).strip()
+    return email, key
+
+
+@app.post("/api/projects/{project}/import_sequences/preview")
+async def project_import_sequences_preview(
+    project: str,
+    files: List[UploadFile] = File([]),
+    accessions: str = Form(""),
+    role: str = Form("sample"),
+):
+    """One editable row per record of the uploaded FASTA or GenBank files and
+    of the accessions, with VP1 found (blastn) and the sequences stashed for
+    the commit. Nothing lands in step1/ or fmdv_context/ yet. Accessions not in
+    the library or the cache are fetched from NCBI; when NCBI cannot be
+    reached the response says so per accession and the rows that could be
+    served from disk are still returned."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    lib = _fmdv_lib(cfg)
+    default_role = "context" if (role or "").strip().lower() == "context" else "sample"
+    records: List[Dict] = []
+    problems: List[str] = []
+    sidecar: Dict[str, Dict[str, str]] = {}
+    texts: List[Tuple[str, str]] = []
+    for f in files:
+        if not f.filename:
+            continue
+        raw = await f.read()
+        if len(raw) > 200 * 1024 * 1024:
+            problems.append(f"{f.filename}: over 200 MB, not read")
+            continue
+        text = raw.decode("utf-8", "replace")
+        low = f.filename.lower()
+        if low.endswith((".tsv", ".csv", ".txt")) and not text.lstrip().startswith((">", "LOCUS")):
+            side, sp = seq_import.read_sidecar_tsv(text)
+            sidecar.update(side)
+            problems.extend(f"{f.filename}: {x}" for x in sp)
+        else:
+            texts.append((Path(f.filename).name, text))
+    for fname, text in texts:
+        if seq_import.is_genbank_text(text):
+            recs = seq_import.records_from_genbank(text, fname)
+        else:
+            recs = seq_import.records_from_fasta(text, fname, sidecar)
+        if not recs:
+            problems.append(f"{fname}: no FASTA or GenBank record found")
+        records.extend(recs)
+    accs, bad = seq_import.parse_accessions(accessions)
+    problems.extend(f"not an accession: {b}" for b in bad)
+    ncbi: Dict[str, Any] = {}
+    if accs:
+        lib_acc = seq_import.library_accessions(lib)
+        proj_acc = seq_import.project_context_accessions(project_dir)
+        # Context already held is not fetched again; a sample is, since the
+        # library's copy is an unnamed comparator and the project wants the
+        # record itself, typed and highlighted.
+        present = ({a: lib_acc.get(a) or proj_acc.get(a) for a in accs if a in lib_acc or a in proj_acc}
+                   if default_role == "context" else {})
+        todo = [a for a in accs if a not in present]
+        cache = lib / "genbank_cache"
+        cached = {a for a in todo if (cache / f"{a}.gb").is_file()}
+        need_net = [a for a in todo if a not in cached]
+        reachable = True
+        if need_net:
+            reachable = seq_import.ncbi_reachable()
+        results: Dict[str, Dict] = {}
+        if reachable:
+            email, key = _seq_import_fetch_settings(cfg)
+            results = await _run_blocking(seq_import.fetch_genbank, todo, cache, email, key)
+        else:
+            results = {a: {"path": str(cache / f"{a}.gb"), "cached": True} for a in cached}
+            results.update({a: {"error": "NCBI is unreachable from this server"} for a in need_net})
+        fetched = failed = 0
+        for a in accs:
+            if a in present:
+                problems.append(f"{a}: already in the {present[a]}; nothing to add as context "
+                                "(import it as a sample to type and highlight it)")
+                continue
+            r = results.get(a) or {"error": "not fetched"}
+            if "path" in r:
+                fetched += 1
+                recs = seq_import.records_from_genbank(Path(r["path"]).read_text(), a)
+                for rec in recs:
+                    rec["role"] = default_role
+                    rec["raw"] = Path(r["path"]).read_text()
+                records.extend(recs)
+            else:
+                failed += 1
+                problems.append(f"{a}: {r['error']}")
+        ncbi = {"reachable": reachable, "requested": len(accs), "present": len(present),
+                "fetched": fetched, "failed": failed, "cache": str(cache)}
+        if not reachable and need_net:
+            ncbi["message"] = (
+                f"NCBI cannot be reached from this server, so {len(need_net)} accession(s) were not fetched. "
+                "Download each GenBank record on a connected machine (Send to > File > GenBank (full)) and import "
+                "that file here, or import the sequence as FASTA and fill in the metadata by hand.")
+    if not records:
+        raise HTTPException(status_code=400, detail="; ".join(problems) or "No sequences or accessions given")
+    seq_import.prune_stash(project_dir)
+    blastn = _seq_import_blastn()
+    result = await _run_blocking(seq_import.preview, records, project_dir, lib, default_role, blastn, 4)
+    result["problems"] = problems
+    result["ncbi"] = ncbi
+    return result
+
+
+@app.post("/api/projects/{project}/import_sequences")
+def project_import_sequences(project: str, payload: SeqImportCommitRequest):
+    """Write the chosen rows as samples (step1/<name>/) or context
+    (fmdv_context/<SEROTYPE>.*) and type the samples, as a background job."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    ensure_project_dirs(project_dir)
+    if not re.fullmatch(r"[0-9]{8}_[0-9]{6}_[0-9a-f]{8}", payload.token or ""):
+        raise HTTPException(status_code=400, detail="Invalid preview token")
+    plan, errors = seq_import.build_plan(payload.token, [r.dict() for r in payload.rows], project_dir, _fmdv_lib(cfg))
+    if errors:
+        raise HTTPException(status_code=400, detail="Import refused: " + "; ".join(errors))
+    plan_path = _jobs_dir / f"seq_import_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{len(plan['entries'])}.json"
+    plan_path.write_text(json.dumps(plan, indent=1))
+    backend_root = Path(__file__).resolve().parent.parent
+    command = " ".join(shlex.quote(part) for part in [
+        sys.executable, "-u", "-m", "app.seq_import", "commit", str(plan_path),
+    ])
+    env = _fmdv_tree_env()
+    job_id = job_manager.start_job(name=f"import_sequences:{project}", command=command, cwd=backend_root,
+                                   env={"PATH": env["path"]})
+    return {"job_id": job_id,
+            "entries": [{"name": e["name"], "role": e["role"], "serotype": e["meta"]["serotype"]} for e in plan["entries"]]}
+
+
+@app.get("/api/fmdv/sequence_sheet_template")
+def fmdv_sequence_sheet_template():
+    """The sidecar sheet a FASTA import can carry: one row per sample name."""
+    return Response(seq_import.SIDECAR_TEMPLATE, media_type="text/tab-separated-values",
+                    headers={"Content-Disposition": 'attachment; filename="sequence_sheet.tsv"'})
+
+
 @app.post("/api/projects/{project}/import-vcfs")
 def project_import_vcfs(project: str, payload: ImportVcfRequest):
     cfg = load_config()
@@ -5623,6 +6154,21 @@ def _require_valid_accessions(accessions) -> None:
     which would be a confusing thing to tell someone who simply typed a stray
     character.
     """
+    # A GenBank nucleotide accession (EU448369, PX113531, NC_039210) is not a
+    # sequencing run and no SRA mirror will have reads for it. Refused here
+    # with the right pointer, before a five-minute job fails on every one.
+    genbank = [a for a in (accessions or []) if str(a).strip()
+               and re.fullmatch(r"[A-Z]{1,2}_?\d{5,8}(\.\d+)?", str(a).strip().upper())
+               and not re.match(r"^(SRR|ERR|DRR|SRX|ERX|DRX|SRS|ERS|DRS|SRP|ERP|DRP|SAM|PRJ|GS[EM])", str(a).strip().upper())]
+    if genbank:
+        shown = ", ".join(genbank[:5]) + (f" (+{len(genbank) - 5} more)" if len(genbank) > 5 else "")
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{shown}: these look like GenBank nucleotide accessions (sequences), not SRA runs. "
+                    "SRA Download fetches reads for run, experiment or sample accessions (SRR, SRX, SRS, PRJNA). "
+                    "To bring in published sequences, switch the project to FMDV mode and use the Sequences tab, "
+                    "which fetches the GenBank records and imports them as samples or as context."),
+        )
     bad = [a for a in (accessions or []) if str(a).strip()
            and not sra_is_valid_accession(str(a))]
     if bad:
@@ -5816,6 +6362,269 @@ def step1_setup_status(project: str):
     }
 
 
+# ---- FMDV mode: what the picker needs -------------------------------------
+def _fmdv_lib(cfg: Dict) -> Path:
+    return Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+
+
+@app.get("/api/fmdv/lineages")
+def fmdv_lineages():
+    """The reference hierarchy (FMDV > serotype > lineage > genome) from the
+    library's lineages.json, for the Step 1 scope picker. 404 until
+    `fmdv_reflib.py build` has been run."""
+    lib = _fmdv_lib(load_config())
+    path = lib / "lineages.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No FMDV reference library at {lib}. "
+                            f"Run bin/fmdv_reflib.py build first.")
+    try:
+        idx = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=f"lineages.json unreadable: {e}")
+    return {"lib": str(lib), "n_genomes": idx.get("n_genomes"), "tree": idx.get("tree", {}),
+            "genomes": [{k: g.get(k) for k in ("safe", "serotype", "lineage", "accession", "year", "isolate")}
+                        for g in idx.get("genomes", [])]}
+
+
+# QC thresholds an FMDV project gets in project.json when the mode is switched
+# on (editable there afterwards, like any project's). Rationale, and what the
+# 14 November 2026 test set reads as under them, in docs/FMDV_MODE.md: genome
+# covered is the first thing to look at for an 8 kb amplicon genome; depth on
+# amplicons is normally in the hundreds; a low mapping rate describes a field
+# sample (host reads dominate), not the result, so it reviews and never fails.
+FMDV_QC_THRESHOLDS: Dict = {
+    "genome_coverage": {"pass_min": 90.0, "review_min": 70.0},
+    "coverage": {"pass_min": 100.0, "review_min": 20.0},
+    "mapping_rate": {"pass_min": 20.0, "review_min": None},
+    "contamination_review": True,
+}
+
+
+class FmdvModePayload(BaseModel):
+    mode: Optional[str] = None             # "fmdv" to switch on, "" to switch off
+    scope: Optional[str] = None            # Step 1 scope, stored as project.json fmdv_scope
+    step2_reference: Optional[str] = None  # comparison reference, stored as project.json reference
+
+
+@app.get("/api/projects/{project}/fmdv")
+def fmdv_project_get(project: str):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    mode = _project_mode(project_dir)
+    chosen: Dict[str, Dict] = {}
+    step1 = project_dir / "step1"
+    if step1.is_dir():
+        for p in step1.glob("*/fmdv_reference.json"):
+            try:
+                d = json.loads(p.read_text())
+                c = d.get("chosen") or {}
+                chosen[p.parent.name] = {"safe": c.get("safe"), "serotype": c.get("serotype"),
+                                         "lineage": c.get("lineage"), "f_match": d.get("f_match"),
+                                         "distant": bool(d.get("distant")), "scope": d.get("scope"),
+                                         "identity": d.get("identity"), "mixed": bool(d.get("mixed")),
+                                         "serotype_share": d.get("serotype_share")}
+            except (OSError, ValueError):
+                continue
+    # Two different references in an FMDV project: the Step 1 SCOPE that
+    # bounds the per-sample choice (fmdv_scope) and the reference a Step 2
+    # comparison is made on (vsnp_gui's ordinary `reference`). Both reported.
+    typing: Dict[str, Dict] = {}
+    if step1.is_dir():
+        for p in step1.glob("*/fmdv_vp1_type.json"):
+            try:
+                tj = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            best = tj.get("best") or {}
+            typed_by = tj.get("typed_by") or {}
+            typing[p.parent.name] = {
+                "status": tj.get("status"), "serotype": tj.get("serotype"), "topotype": tj.get("topotype"),
+                "lineage": tj.get("lineage"), "identity": tj.get("identity"), "coverage": tj.get("coverage"),
+                "lineage_identity": tj.get("lineage_identity"), "agreement": tj.get("agreement"),
+                "vp1_called_percent": tj.get("vp1_called_percent"), "note": tj.get("note"),
+                "nearest": {k: best.get(k) for k in ("accession", "isolate", "country", "year", "identity", "source")},
+                "typed_by": {k: typed_by.get(k) for k in ("accession", "isolate", "country", "year", "identity")} if typed_by else None,
+            }
+    imports: Dict[str, Dict] = {}
+    if step1.is_dir():
+        for p in step1.glob("*/fmdv_import.json"):
+            try:
+                d = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            imports[p.parent.name] = {"kind": d.get("kind"), "source": d.get("source"), "class": d.get("class"),
+                                      "reads": d.get("reads") or "none",
+                                      "serotype": (d.get("metadata") or {}).get("serotype"), "imported": d.get("imported")}
+    return {"mode": mode,
+            "scope": (_project_fmdv_scope(project_dir) or "FMDV") if mode == "fmdv" else "",
+            "step2_reference": _project_reference(project_dir) if mode == "fmdv" else "",
+            "lib": str(_fmdv_lib(cfg)), "chosen": chosen, "vp1_typing": typing,
+            # Sequences imported without reads, and the project's own VP1
+            # context records per serotype (app.seq_import).
+            "imports": imports, "project_context": seq_import.project_context_counts(project_dir),
+            "vp1_typing_ready": bool(shutil.which("blastn") or _fmdv_tree_env().get("env_bin") and Path(_fmdv_tree_env()["env_bin"], "blastn").exists()),
+            # Whether the VP1 tree button has its tools (mafft plus a builder).
+            "vp1_tree": {k: v for k, v in _fmdv_tree_env().items() if k in ("ready", "tree_tool", "env_bin")},
+            # The thresholds this project's verdicts actually use (defaults <
+            # user config < project.json), so the criteria widget can show them.
+            "qc_thresholds": _resolve_qc_thresholds(cfg, project_dir)}
+
+
+def _fmdv_tree_env() -> Dict[str, Any]:
+    """Where mafft and a tree builder live for the VP1 tree.
+
+    The fork's own conda env (conda_setup/environment.yml, name fmdv_gui)
+    carries mafft and iqtree; raxmlHPC ships with the vsnp3 env this backend
+    runs in. The job's PATH is that env's bin, then this interpreter's bin,
+    then the inherited PATH; bin/fmdv_vp1_tree.py takes raxmlHPC, iqtree or
+    FastTree from it in that order. FMDV_GUI_TREE_ENV names the env outright."""
+    candidates: List[Path] = []
+    want = os.environ.get("FMDV_GUI_TREE_ENV", "").strip()
+    if want:
+        candidates.append(Path(want))
+    bases: List[Path] = []
+    conda_exe = os.environ.get("CONDA_EXE", "").strip()
+    if conda_exe:
+        bases.append(Path(conda_exe).parent.parent)
+    bases += [Path.home() / b for b in ("miniforge3", "miniconda3", "anaconda3", "mambaforge")]
+    candidates += [b / "envs" / "fmdv_gui" for b in bases]
+    env_bin = next((c / "bin" for c in candidates if (c / "bin" / "mafft").exists()), None)
+    dirs = ([str(env_bin)] if env_bin else []) + [str(Path(sys.executable).parent)]
+    path = os.pathsep.join(dirs + [os.environ.get("PATH", "")])
+
+    def which(*names: str) -> str:
+        for n in names:
+            w = shutil.which(n, path=path)
+            if w:
+                return w
+        return ""
+
+    mafft = which("mafft")
+    tree_tool = which("raxmlHPC-PTHREADS-AVX2", "raxmlHPC-PTHREADS", "raxmlHPC", "iqtree2", "iqtree", "FastTree", "fasttree")
+    return {"path": path, "env_bin": str(env_bin) if env_bin else "", "mafft": mafft,
+            "tree_tool": Path(tree_tool).name if tree_tool else "", "ready": bool(mafft and tree_tool)}
+
+
+class FmdvVp1TreeRequest(BaseModel):
+    serotype: Optional[str] = None   # one serotype, or empty for every sample with VP1
+    bootstraps: int = 100
+    min_called: float = 50.0         # skip samples with less of VP1 called
+
+
+class FmdvVp1TypeRequest(BaseModel):
+    force: bool = True               # retype samples that already have a result
+
+
+@app.post("/api/projects/{project}/fmdv/vp1_type")
+def fmdv_vp1_type(project: str, payload: FmdvVp1TypeRequest):
+    """Type every sample's VP1 consensus (bin/fmdv_vp1_type.py --project) as
+    a background job: the way to type samples run before typing existed,
+    or after the context sets change. Step 1 types each new sample itself."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    env = _fmdv_tree_env()
+    path_parts = [env["env_bin"]] if env.get("env_bin") else []
+    path_parts += [str(Path(sys.executable).parent), os.environ.get("PATH", "")]
+    script = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
+    command = " ".join(shlex.quote(p) for p in [
+        sys.executable, "-u", script, "--project", str(project_dir), "--lib", str(_fmdv_lib(cfg)),
+        "--project-context", str(project_dir / "fmdv_context"),
+        "--threads", "8"] + (["--force"] if payload.force else []))
+    command = "PATH=" + shlex.quote(":".join(p for p in path_parts if p)) + " " + command
+    job_id = job_manager.start_job(name=f"fmdv_vp1_type:{project}", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent)
+    return {"job_id": job_id}
+
+
+@app.post("/api/projects/{project}/fmdv/vp1_tree")
+def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
+    """Build the VP1 tree (bin/fmdv_vp1_tree.py) as a background job. The
+    tree lands under step2/<stamp>_VP1-tree[-SEROTYPE]/ where the Step 2
+    Results list and tree viewer pick it up."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_mode(project_dir) != "fmdv":
+        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    env = _fmdv_tree_env()
+    if not env["ready"]:
+        missing = [n for n, v in (("mafft", env["mafft"]), ("a tree builder (raxmlHPC, iqtree or FastTree)", env["tree_tool"])) if not v]
+        raise HTTPException(status_code=400, detail=(
+            "VP1 tree: " + " and ".join(missing) + " not found. Create the fmdv_gui conda env from "
+            "conda_setup/environment.yml, or point FMDV_GUI_TREE_ENV at an env that has them."))
+    sero = (payload.serotype or "").strip().upper()
+    if sero and not re.fullmatch(r"[A-Z0-9]+", sero):
+        raise HTTPException(status_code=400, detail="serotype must be letters and digits, e.g. SAT1")
+    min_called = max(0.0, min(100.0, float(payload.min_called)))
+    usable = 0
+    for p in (project_dir / "step1").glob("*/fmdv_consensus.json"):
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        ref = str(d.get("reference") or "")
+        # An imported sequence states its serotype; a reads sample's is in
+        # its reference name.
+        sample_sero = (str(d.get("serotype") or "") or ref.split("-", 1)[0].split("_", 1)[0]).upper()
+        if sero and sample_sero != sero:
+            continue
+        if float(d.get("vp1_called_percent") or 0.0) >= min_called:
+            usable += 1
+    if not usable:
+        raise HTTPException(status_code=400, detail=(
+            f"No {sero + ' ' if sero else ''}sample has {min_called:g}% or more of VP1 called. "
+            "Run Step 1 first; samples with little VP1 coverage are left out of the tree."))
+    script = Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_tree.py"
+    (project_dir / "step2").mkdir(parents=True, exist_ok=True)
+    parts = [sys.executable, "-u", str(script), "--project", str(project_dir), "--lib", str(_fmdv_lib(cfg)),
+             "--threads", str(max(1, min(8, os.cpu_count() or 1))),
+             "--bootstraps", str(max(0, int(payload.bootstraps))), "--min-called", f"{min_called:g}"]
+    if sero:
+        parts += ["--serotype", sero]
+    command = " ".join(shlex.quote(part) for part in parts)
+    job_id = job_manager.start_job(name="fmdv_vp1_tree", command=command,
+                                   cwd=Path(__file__).resolve().parent.parent, env={"PATH": env["path"]})
+    return {"job_id": job_id, "serotype": sero, "samples": usable, "tree_tool": env["tree_tool"]}
+
+
+@app.post("/api/projects/{project}/fmdv")
+def fmdv_project_set(project: str, payload: FmdvModePayload):
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    updates: Dict = {}
+    if payload.mode is not None:
+        m = (payload.mode or "").strip().lower()
+        if m not in ("", "fmdv"):
+            raise HTTPException(status_code=400, detail="mode must be 'fmdv' or empty")
+        updates["mode"] = m
+        if m == "fmdv":
+            updates["qc_thresholds"] = FMDV_QC_THRESHOLDS
+        elif _project_mode(project_dir) == "fmdv":
+            updates["qc_thresholds"] = None   # back to the user's defaults
+    if payload.scope is not None:
+        updates["fmdv_scope"] = _require_fmdv_scope(payload.scope)
+    if payload.step2_reference is not None:
+        # The comparison reference: one of the lineage references samples were
+        # actually mapped to (a safe name in the library). Stored under the
+        # ordinary `reference` key so Build filters and Run vetoes on it.
+        r = _require_ref_token(payload.step2_reference, "step2_reference") if payload.step2_reference.strip() else ""
+        if r and not _fmdv_is_lib_reference(cfg, r):
+            raise HTTPException(status_code=400, detail=f"{r} is not a genome in the FMDV reference library")
+        updates["reference"] = r
+    if updates:
+        update_project_meta(project_dir, updates)
+    return fmdv_project_get(project)
+
+
 @app.post("/api/projects/{project}/step1/run")
 def step1_run(project: str, payload: Step1Request):
     cfg = load_config()
@@ -5975,20 +6784,86 @@ def _step1_dispatch(
     debug_flag = "--debug" if payload.debug else ""
     assemble_unmap_flag = "-assemble_unmap" if payload.assemble_unmap else ""
     nanopore_flag = "--nanopore" if payload.nanopore else ""
-    # Auto-populate reference from project.json if not supplied in payload
-    if not payload.reference:
-        payload.reference = _project_reference(project_dir)
-    # Validated even when it came from project.json rather than the request: on a
-    # shared project that file is writable by every member, so it is untrusted
-    # input too. Quoted as well as validated — the value lands inside a bash
-    # string that is later re-parsed.
-    payload.reference = _require_ref_token(payload.reference, "reference")
-    # vsnp3 is handed the reference FOLDER, resolved from this app's reference
-    # locations, never a name for it to look up in its own install's list (see
-    # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
-    # does that itself from its install (_auto_detect_preflight).
-    ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
-               else _auto_detect_preflight(cfg))
+    fmdv_mode = _project_mode(project_dir) == "fmdv"
+    fmdv_choose_lines: List[str] = []
+    if fmdv_mode:
+        # The project-level reference token becomes a SCOPE that bounds the
+        # per-sample choice; the folder itself is decided inside the batch,
+        # one sample at a time, and passed as -t there (see fmdv_choose_lines).
+        fmdv_scope = _require_fmdv_scope(payload.fmdv_scope or _project_fmdv_scope(project_dir))
+        fmdv_lib = str(Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser())
+        chooser = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_choose_reference.py")
+        clipper = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_clip_primers.py")
+        # The primer set: project.json fmdv_primers (a file name under
+        # <lib>/primers/, or "none"), else the library's default.fasta or
+        # its only set, else "" and reads go to vsnp3 unclipped.
+        fmdv_primers = _fmdv_primer_set(Path(fmdv_lib), project_dir)
+        ref_arg = ""
+        payload.reference = None
+        update_project_meta(project_dir, {"fmdv_scope": fmdv_scope,
+                                          "display_name": (f"{project}_FMDV" if fmdv_scope == "FMDV"
+                                                           else f"{project}_{fmdv_scope.replace('/', '-')}")})
+        consensus_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_consensus.py")
+        # After vsnp3_step1.py returns 0: the reference-anchored consensus and
+        # its VP1 slice, written beside the alignment. Never fails the sample.
+        typer_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_type.py")
+        report_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_sample_report.py")
+        run_report_py = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_run_report.py")
+        fmdv_run_report_line = (
+            "python3 " + shlex.quote(run_report_py) + " --project " + shlex.quote(str(project_dir))
+            + " --lib " + shlex.quote(fmdv_lib) + " >>\"$OVERALL_LOG\" 2>&1 || echo \"FMDV: run report failed\" >> \"$OVERALL_LOG\""
+        )
+        fmdv_consensus_line = (
+            "    python3 " + shlex.quote(consensus_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: consensus failed for $d\" | tee -a \"$LOG\""
+            # VP1 typing (blastn of the VP1 consensus against the GenBank
+            # VP1 sets): the serotype, topotype and lineage name. Needs
+            # BLAST+; without it the sample is left untyped, not failed.
+            + "\n    python3 " + shlex.quote(typer_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " --project-context " + shlex.quote(str(project_dir / "fmdv_context"))
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: VP1 typing failed for $d\" | tee -a \"$LOG\""
+            # The sample's report (HTML and PDF): the call, QC, neighbourhood
+            # and sequences. Rewritten when a VP1 tree includes the sample.
+            + "\n    python3 " + shlex.quote(report_py) + " --sample-dir \"$(pwd)\" --lib " + shlex.quote(fmdv_lib)
+            + " >>\"$LOG\" 2>&1 || echo \"FMDV: report failed for $d\" | tee -a \"$LOG\""
+        )
+        fmdv_choose_lines = [
+            "  REF_DIR=$(python3 " + shlex.quote(chooser) + " --reads \"$R1\" ${R2:+\"$R2\"}"
+            + " --lib " + shlex.quote(fmdv_lib) + " --scope " + shlex.quote(fmdv_scope)
+            + " --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
+            "  if [ -z \"$REF_DIR\" ] || [ ! -d \"$REF_DIR\" ]; then",
+            "    echo \"FMDV: no reference could be chosen for $d (see fmdv_reference.json)\" | tee -a \"$LOG\"",
+            "    cd ..",
+            "    return 0",
+            "  fi",
+            "  echo \"FMDV reference: $REF_DIR\" | tee -a \"$LOG\"",
+            # Amplicon primers, clipped from the reads before vsnp3 (after
+            # NanoFMDV): the BED is found on the chosen reference. Only when
+            # the library carries a primer set; unmapped reads drop out here.
+            "  FMDV_PRIMERS=" + shlex.quote(fmdv_primers),
+            "  if [ -n \"$FMDV_PRIMERS\" ] && [ -f \"$FMDV_PRIMERS\" ]; then",
+            "    CLIPPED=$(python3 " + shlex.quote(clipper) + " --reads \"$R1\" --ref-dir \"$REF_DIR\""
+            + " --primers \"$FMDV_PRIMERS\" --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
+            "    if [ -n \"$CLIPPED\" ] && [ -s \"$CLIPPED\" ]; then R1=\"$CLIPPED\"; echo \"FMDV primers clipped: $CLIPPED\" | tee -a \"$LOG\";",
+            "    else echo \"FMDV: primer clipping failed for $d, running on unclipped reads\" | tee -a \"$LOG\"; fi",
+            "  fi",
+        ]
+    else:
+        fmdv_run_report_line = ":"
+        # Auto-populate reference from project.json if not supplied in payload
+        if not payload.reference:
+            payload.reference = _project_reference(project_dir)
+        # Validated even when it came from project.json rather than the request: on a
+        # shared project that file is writable by every member, so it is untrusted
+        # input too. Quoted as well as validated — the value lands inside a bash
+        # string that is later re-parsed.
+        payload.reference = _require_ref_token(payload.reference, "reference")
+        # vsnp3 is handed the reference FOLDER, resolved from this app's reference
+        # locations, never a name for it to look up in its own install's list (see
+        # _vsnp3_reference_arg). Auto-detect has no folder to hand over; vsnp3
+        # does that itself from its install (_auto_detect_preflight).
+        ref_arg = (_vsnp3_reference_arg(cfg, payload.reference) if payload.reference
+                   else _auto_detect_preflight(cfg))
     if payload.reference:
         update_project_meta(project_dir, {
             "reference": payload.reference,
@@ -6029,6 +6904,11 @@ def _step1_dispatch(
     # samples reaching here are ordinary samples and the batch knows nothing
     # about it. See _dispatch_trim_phase.
     samples_bash = " ".join(shlex.quote(s) for s in samples)
+    # The install Settings chose, by absolute path. A bare "vsnp3_step1.py"
+    # is resolved by the job's PATH, which need not be that install, and a
+    # user has no way to see or correct the one that won. Step 2 already
+    # refuses that fallback.
+    step1_exe = shlex.quote(str(_require_vsnp3_script(cfg, "vsnp3_step1.py")))
     script_path.write_text(
         "\n".join([
             "#!/bin/bash",
@@ -6111,13 +6991,21 @@ def _step1_dispatch(
             # ref_arg/debug_flag/assemble_unmap_flag/$NP are unquoted on purpose:
             # they are server-built option tokens that must word-split into
             # separate argv entries, and each is now validated or a fixed literal.
-            "  RUN_ARGS=(vsnp3_step1.py -r1 \"$R1\")",
+            f"  RUN_ARGS=({step1_exe} -r1 \"$R1\")",
+            # The sample name is the folder name, not whatever vsnp3 reads off
+            # the file before its first underscore.
+            "  RUN_ARGS+=(-n \"$(basename \"$d\")\")",
             "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
+        ] + fmdv_choose_lines + [
+            # FMDV mode: -t is the per-sample folder the chooser just printed,
+            # passed as two quoted array entries. Otherwise ref_arg is the
+            # run-wide token resolved above and this line is a no-op.
+            ("  RUN_ARGS+=(-t \"$REF_DIR\")" if fmdv_mode else "  :"),
             f"  RUN_ARGS+=({ref_arg} {debug_flag} {assemble_unmap_flag} $NP)",
             "  PROV_TS=$(date '+%Y-%m-%d %H:%M:%S %z')",
             "  PROV_SAMPLE=$(basename \"$d\")",
             "  PROV_CWD=$(pwd)",
-            "  PROV_VSNP3=$(command -v vsnp3_step1.py 2>/dev/null || echo vsnp3_step1.py)",
+            f"  PROV_VSNP3={step1_exe}",
             "  {",
             "    echo \"# ================================================================\"",
             "    echo \"# vsnp_gui - Step 1 (per-sample alignment)\"",
@@ -6144,6 +7032,7 @@ def _step1_dispatch(
             "    DURATION=$((END_TS-START_TS))",
             "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
             "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
+            (fmdv_consensus_line if fmdv_mode else "    :"),
             "  else",
             "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
             "    FAIL=1",
@@ -6176,6 +7065,9 @@ def _step1_dispatch(
             "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",
             "echo \"End: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
             "echo \"Duration: ${OVERALL_DURATION}s\" >> \"$OVERALL_LOG\"",
+            # FMDV mode: the run report for the outbreak team, once every
+            # sample has its call. Never changes the batch's exit code.
+            (fmdv_run_report_line if fmdv_mode else ":"),
             "exit $FAIL",
         ]),
         encoding="utf-8"
@@ -6293,7 +7185,7 @@ def step1_status(project: str):
     in_vcfs_folder: set = set()
     if vcfs_dir.exists():
         for vf in vcfs_dir.glob("*_zc.vcf*"):
-            stem = vf.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            stem = sample_of(vf.name)
             in_vcfs_folder.add(stem)
 
     # One listing of step1/, shared with every other request of this switch
@@ -6399,12 +7291,24 @@ def step1_status(project: str):
         input_issue = ""
         if status == "not_started":
             input_issue = _step1_input_issue(sample_dir, min_bytes) or ""
-            if input_issue:
+            if input_issue.startswith("no fastq") and listing.exists("fmdv_import.json"):
+                # An imported sequence (app.seq_import) with no reads in its
+                # folder: sequence-only (typed and placed on the VP1 tree,
+                # never aligned), or simulated reads still in download/
+                # waiting for Grab. Not a misfit either way.
+                status = "sequence"
+                try:
+                    mode = json.loads((sample_dir / "fmdv_import.json").read_text()).get("reads")
+                except (OSError, ValueError):
+                    mode = ""
+                input_issue = ("imported sequence: simulated reads in download/, Grab then Run"
+                               if mode == "simulated" else "imported sequence, no reads")
+            elif input_issue:
                 status = "misfit"
 
         if legacy_complete:
             reason = "aligned before this GUI (legacy alignment/ layout)"
-        elif status in ("not_started", "misfit"):
+        elif status in ("not_started", "misfit", "sequence"):
             # Already computed above — don't re-glob the sample dir for it.
             reason = input_issue
         else:
@@ -6695,7 +7599,7 @@ def project_vcfs_list(project: str):
     vcfs = sorted([*vcfs_dir.glob("*_zc.vcf"), *vcfs_dir.glob("*_zc.vcf.gz")], key=lambda p: p.name)
     samples = []
     for v in vcfs:
-        stem = v.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        stem = sample_of(v.name)
         samples.append({"filename": v.name, "sample": stem})
     return {"count": len(samples), "path": str(vcfs_dir), "folder_name": vcfs_dir.name, "samples": samples}
 
@@ -7056,6 +7960,34 @@ def step2_setup(project: str):
     # cleanup: once a wrong-reference VCF has been dropped from the set, the
     # sample disappears from the set's own contents, and with it the user's
     # list of what still has to be re-run or deleted at the command line.
+    # The ticked reference databases for this reference come in with the same
+    # Build. The GUI used to post import-vcfs for them straight after setup;
+    # a caller of the API alone then had Run refuse every panel name as "not
+    # in the comparison set". Only folders tagged with a reference that
+    # matches are copied: an untagged legacy folder is left to the importer,
+    # which asks before it mixes references. A name already in the database
+    # is kept, so a project sample wins over a panel copy of the same name.
+    panel_copied = 0
+    if project_reference:
+        for folder in _resolved_vcf_db_folders(cfg):
+            if not folder.get("enabled"):
+                continue
+            fref = folder.get("reference", "") or ""
+            if not fref or not _refs_match(fref, project_reference, True):
+                continue
+            folder_path = Path(folder.get("path", ""))
+            if not folder_path.is_dir():
+                continue
+            for src in sorted(list(folder_path.glob("*_zc.vcf")) + list(folder_path.glob("*_zc.vcf.gz"))):
+                if src.name in in_db:
+                    continue
+                try:
+                    shutil.copy2(src, step2_dir / src.name)
+                except OSError as e:
+                    logger.warning("step2/setup: could not copy panel VCF %s: %s", src, e)
+                    continue
+                in_db[src.name] = False
+                panel_copied += 1
     prior_ignored: set = set()
     try:
         prior = json.loads((step2_dir / _REF_SKIPPED_BASENAME).read_text(encoding="utf-8"))
@@ -7163,6 +8095,7 @@ def step2_setup(project: str):
         # kept for back-compat with older callers:
         "skipped_excluded": excluded,
         "preserved": preserved,
+        "panel_copied": panel_copied,
     }
 
 
@@ -7261,7 +8194,16 @@ def step2_run(project: str, payload: Step2Request):
         raise HTTPException(status_code=400, detail=f"Reference mismatch: expected {refs[0]}")
     # The folder vsnp3 will be handed, resolved now so an unknown reference is
     # refused before anything is staged.
-    ref_arg = _vsnp3_reference_arg(cfg, _require_ref_token(payload.reference, "reference"))
+    if _project_mode(project_dir) == "fmdv" and _fmdv_is_lib_reference(cfg, payload.reference or ""):
+        # FMDV mode: the comparison reference is a lineage genome in the FMDV
+        # library, whose folder is made on demand and is not one of the
+        # configured reference locations. Same -t <folder> contract as below.
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "bin"))
+        import fmdv_reflib  # noqa: E402
+        folder = fmdv_reflib.materialize(_fmdv_lib(cfg), _require_ref_token(payload.reference, "reference"))
+        ref_arg = f"-t {shlex.quote(str(folder))}"
+    else:
+        ref_arg = _vsnp3_reference_arg(cfg, _require_ref_token(payload.reference, "reference"))
     # Store the resolved reference back into project.json
     update_project_meta(project_dir, {"reference": payload.reference})
 
@@ -7633,8 +8575,8 @@ def step2_run(project: str, payload: Step2Request):
 
     # Run the vsnp3 configured in Settings, by absolute path. A bare
     # "vsnp3_step2.py" resolves through PATH, which need not be that install,
-    # and when the two differ nothing says so. (Step 1 has always used an
-    # absolute <vsnp3_path>/bin path; Step 2 had not.) ref_arg is `-t <folder>`,
+    # and when the two differ nothing says so. Step 1 does the same.
+    # ref_arg is `-t <folder>`,
     # resolved above from this app's reference locations.
     step2_exe = _require_vsnp3_script(cfg, "vsnp3_step2.py")
     cmd = f"{shlex.quote(str(step2_exe))} -wd {shlex.quote(str(run_dir))} {flags_str} {ref_arg}{remove_arg}"
@@ -8333,6 +9275,17 @@ def _qc_apply_filters(
     return [r for r in rows if _keep(r)]
 
 
+def _qc_rows_for_export(project_dir: Path, step1_dir: Path) -> List[Dict[str, Any]]:
+    """The finished rows for the CSV/XLSX exports, with the FMDV columns the
+    Results table shows (serotype, lineage, identity, genome and VP1 called)
+    added in FMDV mode. A copy: the cached rows stay as the scanner left them."""
+    rows = [dict(r) for r in _qc_rows_blocking(step1_dir)]
+    if _project_mode(project_dir) == "fmdv":
+        rows.extend(_fmdv_import_rows(rows, step1_dir))
+        _fmdv_flag_qc_rows(rows, step1_dir)
+    return rows
+
+
 def _qc_table(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[List[Any]]]:
     """Rows as a rectangular table for the CSV/XLSX exports: columns in
     first-seen order (what pandas.DataFrame produced), _file dropped,
@@ -8383,6 +9336,9 @@ def qc_summary(project: str, refresh: int = 0):
     # keys its rows on `sample`.
     rows = [{k: v for k, v in r.items() if not k.startswith("_sa")}
             for r in state["rows"] or []]
+    if _project_mode(project_dir) == "fmdv":
+        rows.extend(_fmdv_import_rows(rows, step1_dir))
+        _fmdv_flag_qc_rows(rows, step1_dir)
     _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
     return {
         "status": "ready",
@@ -8410,7 +9366,7 @@ def qc_summary_csv(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+    rows = _qc_apply_filters(_qc_rows_for_export(project_dir, step1_dir), start, end, q,
                              aliases=_project_aliases(project_dir, cfg))
     if not rows:
         return Response(content="", media_type="text/csv")
@@ -8435,7 +9391,7 @@ def qc_summary_xlsx(
     step1_dir = project_dir / "step1"
     if not step1_dir.exists():
         raise HTTPException(status_code=404, detail="Step1 directory not found")
-    rows = _qc_apply_filters(_qc_rows_blocking(step1_dir), start, end, q,
+    rows = _qc_apply_filters(_qc_rows_for_export(project_dir, step1_dir), start, end, q,
                              aliases=_project_aliases(project_dir, cfg))
     header, data = _qc_table(rows)
     from openpyxl import Workbook  # ships with the env's pandas
@@ -8748,7 +9704,7 @@ def step2_vcf_count(project: str):
     comparison_stems: List[str] = []
     excluded = 0
     for name in vcf_names:
-        stem = name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "").replace(".vcf.gz", "").replace(".vcf", "")
+        stem = sample_of(name)
         if stem in excluded_names:
             excluded += 1
         else:
@@ -8901,6 +9857,16 @@ def step2_runs_list(project: str):
                 shape = _step2_run_shape(run_entry)
                 state = _step2_run_state(shape, run_id == live_run_id)
                 parts = _step2_split_run_name(run_id) or {}
+                tree_state = _vp1_tree_run_state(run_entry, run_id)
+                if tree_state:
+                    # A VP1 tree build writes its alignment and RAxML files into
+                    # VP1/ while it runs, which the shape reads as results. Until
+                    # the Newick exists the folder is a build in progress (or
+                    # one that died), not a comparison with one group.
+                    state = tree_state
+                    shape = {**shape, "groups": 0, "has_results": False}
+                    if meta["status"] in ("unknown", "ok", "running"):
+                        meta = {**meta, "status": tree_state}
                 return {
                     "run_id": run_id,
                     # Where the comparison is, for the results pane to show and
@@ -9204,7 +10170,7 @@ def step2_panels_get(project: str):
             if not p.is_dir():
                 continue
             samples = sorted(
-                f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+                sample_of(f.name)
                 for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
             )
             panels.append({
@@ -9374,7 +10340,7 @@ def _reference_panel_accessions(cfg: Dict, reference: Optional[str]) -> set:
         if not p.is_dir():
             continue
         for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz")):
-            names.add(f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", ""))
+            names.add(sample_of(f.name))
     return names
 
 
@@ -9401,7 +10367,7 @@ def _reference_panels_by_name(cfg: Dict, reference: Optional[str]) -> List[tuple
         if not p.is_dir():
             continue
         accs = {
-            f.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+            sample_of(f.name)
             for f in list(p.glob("*_zc.vcf")) + list(p.glob("*_zc.vcf.gz"))
         }
         if accs:
@@ -9659,7 +10625,26 @@ def _resolve_sample_dir(step1_dir: Path, sample: str) -> Optional[Path]:
         found = _direct(stored)
         if found is not None:
             return found
-    return _direct(sample)
+    found = _direct(sample)
+    if found is None and sample.endswith("_nanopore"):
+        # vsnp3 3.37 names an ONT sample's VCF <sample>_nanopore_zc.vcf, and
+        # every Step 2 table labels the sample by that stem. The Step 1 folder
+        # is <sample>. Without this, a click on an ONT sample in a Step 2
+        # table opened IGV with "no Step 1 folder" although Step 1 had run.
+        found = _direct(sample[: -len("_nanopore")])
+    return found
+
+
+def _step1_file_stem(sample_dir: Path, sample: str) -> str:
+    """The name Step 1's files inside ``sample_dir`` start with.
+
+    That is the sample name, except when the caller holds a Step 2 label
+    <sample>_nanopore (see _resolve_sample_dir): the stats, BAM and VCFs are
+    named after the folder, so the label would match none of them.
+    """
+    if sample.endswith("_nanopore") and sample_dir.name == sample[: -len("_nanopore")]:
+        return sample_dir.name
+    return sample
 
 
 def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
@@ -9697,6 +10682,35 @@ def _resolve_kraken_sample_dir(kraken_dir: Path, sample: str) -> Optional[Path]:
     return None
 
 
+def _fmdv_library_alignment(cfg: Dict, project_dir: Path, sample: str) -> Optional[Dict[str, Optional[Path]]]:
+    """The FASTA-mode alignment the FMDV library kept for a reference-database
+    genome: <lib>/panel_build/<ref>/<sample>/alignment_*/<sample>_nodup.bam
+    with its index and the reference copy beside it (fmdv_panel_build.sh and
+    fmdv_genome_db.py both leave that layout). The project's reference is
+    tried first; a project with none yet is searched across every build.
+    None when the project is not in FMDV mode or nothing matches."""
+    if _project_mode(project_dir) != "fmdv":
+        return None
+    build_root = _fmdv_lib(cfg) / "panel_build"
+    if not build_root.is_dir():
+        return None
+    ref = _project_reference(project_dir) or ""
+    try:
+        refs = [build_root / ref] if ref else sorted(d for d in build_root.iterdir() if d.is_dir())
+    except OSError:
+        return None
+    for ref_dir in refs:
+        for bam in sorted((ref_dir / sample).glob(f"alignment_*/{sample}_nodup.bam")):
+            if not Path(f"{bam}.bai").is_file():
+                continue
+            fastas = sorted(bam.parent.glob("*.fasta"))
+            if not fastas:
+                continue
+            gff = _fmdv_lib(cfg) / "reference_options" / ref_dir.name / f"{ref_dir.name}.gff"
+            return {"bam": bam, "fasta": fastas[0], "gff": gff if gff.is_file() else None}
+    return None
+
+
 @app.get("/api/projects/{project}/step1/files")
 def step1_files(project: str, sample: str = Query(...)):
     cfg = load_config()
@@ -9717,6 +10731,30 @@ def step1_files(project: str, sample: str = Query(...)):
                     imported_vcf = cand
                     break
         if imported_vcf is not None:
+            lib_hit = _fmdv_library_alignment(cfg, project_dir, sample)
+            if lib_hit:
+                # FMDV mode: the sample is a reference-database genome whose VCF
+                # was called by vsnp3 in FASTA mode when the library was built.
+                # That build kept the alignment, so the viewer can show it: reads
+                # simulated from the genome's own sequence, uniform in depth,
+                # which at a variant site shows the genome's base against the
+                # reference. reads_window stays off because the windowed path
+                # (reads_ticket) looks only under the project's step1/.
+                return {
+                    "stats": "",
+                    "bam": str(lib_hit["bam"]),
+                    "reads_window": False,
+                    "alignment_dir": str(lib_hit["bam"].parent),
+                    "reference_fasta": str(lib_hit["fasta"]),
+                    "reference_gff": str(lib_hit["gff"]) if lib_hit["gff"] else "",
+                    "annotated_vcf": "",
+                    "sample_dir": str(lib_hit["bam"].parent.parent),
+                    "source_vcf": str(imported_vcf),
+                    "patched_vcf": "",
+                    "edit_log": "",
+                    "edited": False,
+                    "kind": "library_genome",
+                }
             ref_fasta, ref_gff = _project_reference_fasta_and_gff(project_dir, cfg)
             if not ref_fasta:
                 # No way to anchor the VCF — surface as a clearly-distinct error.
@@ -9736,6 +10774,7 @@ def step1_files(project: str, sample: str = Query(...)):
                 "kind": "imported_vcf",
             }
         raise HTTPException(status_code=404, detail="no_step1")
+    sample = _step1_file_stem(sample_dir, sample)
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     stats_path = str(stats_files[-1]) if stats_files else ""
     bam = _step1_bam(sample_dir, sample)
@@ -9796,6 +10835,7 @@ def _latest_step1_stats(project: str, sample: str) -> Path:
     sample_dir = _resolve_sample_dir(step1_dir, sample) if step1_dir.is_dir() else None
     if not sample_dir:
         raise HTTPException(status_code=404, detail="Sample not found")
+    sample = _step1_file_stem(sample_dir, sample)
     stats_files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
     if not stats_files:
         stats_files = sorted(
@@ -12221,6 +13261,12 @@ def _serve_roots(project: str) -> List[set]:
     configured_refs = str(cfg.get("vsnp3_reference_options_root", "") or "").strip()
     if configured_refs:
         roots.append(Path(configured_refs))
+    # FMDV mode: reference folders are made on demand inside the library, and
+    # a database genome's alignment lives in its panel_build/, neither of which
+    # is a configured reference location.
+    fmdv_lib = _fmdv_lib(cfg)
+    if fmdv_lib.is_dir():
+        roots.append(fmdv_lib)
     forms = _serve_root_forms(roots)
     if len(_SERVE_ROOTS_MEMO) > 64:
         _SERVE_ROOTS_MEMO.clear()
@@ -12256,6 +13302,7 @@ def _step1_bam(sample_dir: Path, sample: str) -> Optional[Path]:
     the `**/<sample>_nodup.bam` glob always did, at the same cost under the
     shared-storage model, so v1 support costs nothing. A separate look for the
     v1 file was one more stat on every sample with no vsnp3 BAM."""
+    sample = _step1_file_stem(sample_dir, sample)
     vsnp3, v1 = f"{sample}_nodup.bam", f"{sample}-nodup.bam"
     found = [p for p in sample_dir.glob("**/*nodup.bam") if p.name in (vsnp3, v1)]
     bams = sorted((p for p in found if p.name == vsnp3), key=lambda p: p.stat().st_mtime)
@@ -13414,6 +14461,7 @@ def _scan_vcf_first_record(path: Optional[Path]) -> Optional[Dict[str, object]]:
 
 
 def _find_source_vcf(sample_dir: Path, sample: str) -> Optional[Path]:
+    sample = _step1_file_stem(sample_dir, sample)
     candidates = []
     for vcf in sample_dir.glob(f"**/{sample}*zc.vcf*"):
         if vcf.suffix == ".tbi":
@@ -13484,11 +14532,25 @@ def _stats_reference_name(raw: str, alias_map: Dict[str, str]) -> str:
 def _normalize_reference(ref: str, alias_map: Dict[str, str]) -> str:
     ref = ref.replace("file://", "").strip()
     lower_ref = ref.lower()
-    for name in alias_map.values():
-        if f"/{name.lower()}/" in lower_ref:
-            return name
     ref_path = Path(ref)
     candidate = ref_path.stem
+    # Every known reference whose name is a folder on the path. Usually one.
+    # The FMDV panel builds put one reference genome's VCFs under a folder named
+    # for the GENOME that was called, and that genome is itself a reference in
+    # the library (panel_build/SAT1-I_KM268899/SAT1-III_AY593843/SAT1-I_KM268899
+    # .fasta), so two names match and the first in dict order used to win. The
+    # FASTA stem names the file the calls were made against, so when it settles
+    # the tie, it decides.
+    matches = [name for name in alias_map.values() if f"/{name.lower()}/" in lower_ref]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        by_stem = alias_map.get(candidate)
+        if by_stem in matches:
+            return by_stem
+        if candidate in matches:
+            return candidate
+        return matches[0]
     if candidate in alias_map:
         return alias_map[candidate]
     return candidate.replace("_", " ").strip().replace(" ", "_")
@@ -14150,6 +15212,19 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     # ever being offered to the check that exists to catch it.
     entries = [step2_dir / e.filename for e in db_entries(step2_dir)]
 
+    # FMDV mode: samples are mapped to their own lineage references, so a
+    # project's database is mixed by design and a run is a per-reference
+    # subset. VCFs the run will not see (excluded in Step 1 Results, or
+    # unticked for the build) are not audited; step2_run removes exactly
+    # these before vsnp3 is handed the set. Stock projects are audited whole.
+    excluded_from_audit = 0
+    if _project_mode(project_dir) == "fmdv":
+        left_out = (set(_read_step1_exclusions(project_dir / "step2"))
+                    | set(_read_step2_build_exclusions(project_dir / "step2")))
+        kept = [e for e in entries if sample_of(e.name) not in left_out]
+        excluded_from_audit = len(entries) - len(kept)
+        entries = kept
+
     by_ref_cache: Dict[str, Dict[str, List[Path]]] = {}
 
     def alignment_refs(sample: str) -> Dict[str, List[Path]]:
@@ -14179,7 +15254,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
     wrong: List[Tuple[str, Path, str]] = []   # (sample, entry, its reference)
 
     def _resolve(entry: Path) -> Optional[Tuple[str, Path, List[int], str]]:
-        sample = entry.name.replace("_zc.vcf.gz", "").replace("_zc.vcf", "")
+        sample = sample_of(entry.name)
         try:
             st = entry.stat()
         except OSError:
@@ -14214,10 +15289,16 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
 
     matcher.prefetch([(e, (sig[0], sig[1])) for _s, e, sig, ref in named if _misnamed(ref)])
     renamed: Dict[str, int] = {}
+    fmdv_project = _project_mode(project_dir) == "fmdv"
     for sample, entry, sig, ref in named:
         if _misnamed(ref) and matcher.matches(entry, (sig[0], sig[1])):
             shown = _resolve_reference_name(ref, alias_map)
-            renamed[shown] = renamed.get(shown, 0) + 1
+            # FMDV mode: a VCF whose recorded name is another library genome
+            # but whose contigs are this reference's is a panel genome called
+            # on this reference (bin/fmdv_panel_build.sh). Expected, not a
+            # note: the page said "renamed copy" once per topotype genome.
+            if not (fmdv_project and _fmdv_is_lib_reference(cfg, shown)):
+                renamed[shown] = renamed.get(shown, 0) + 1
             ref = project_reference
         if ref:
             _note_ref(ref)
@@ -14324,6 +15405,7 @@ def _step2_reference_audit(cfg: Dict, project_dir: Path) -> Dict[str, Any]:
         # set at all, more than one is all we can go on.
         "mixed": bool(wrong) or len(db_refs) > 1,
         "total": len(entries),
+        "excluded_from_audit": excluded_from_audit,
         "unknown": unknown,
         "recoverable": sorted(recoverable, key=key),
         "removable": sorted(removable, key=key),

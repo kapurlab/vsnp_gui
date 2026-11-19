@@ -19,6 +19,12 @@ import { selectStep2Run, comparisonSamples, unclaimedSamples, listTokens, resolv
          resolveBlocklist } from "./step2Selection.js";
 import VirtualRows from "./VirtualRows.jsx";
 import TargetNamePicker, { useTargetNames } from "./TargetNames.jsx";
+import FmdvScopePicker from "./FmdvScopePicker.jsx";
+import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
+import FmdvVp1Results from "./FmdvVp1Results.jsx";
+import OntRunImport from "./OntRunImport.jsx";
+import SeqImport from "./SeqImport.jsx";
+import { InputTabs, InputHelp, useInputTab } from "./InputsTabs.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -178,11 +184,11 @@ function ReferenceOptions({ references }) {
    the whole header row on every keystroke in the Step 1 filter box — which
    threw away keyboard focus on a resize grip after a single nudge. Taking the
    sort state as props keeps the type stable and the DOM in place. */
-function QcSortTh({ sortKey, children, sort, onSort }) {
+function QcSortTh({ sortKey, children, sort, onSort, title }) {
   return (
     <th className={`qc-sortable ${sort.key === sortKey ? "qc-sorted" : ""}`}>
       <button type="button" className="qc-sort-btn" onClick={() => onSort(sortKey)}
-              title="Sort by this column">
+              title={title ? `${title} Click to sort.` : "Sort by this column"}>
         {/* Wrapped so a narrowed column truncates the label with an ellipsis:
             a bare text node inside a flex row cannot be given one. */}
         <span className="rt-th-label">{children}</span>
@@ -817,6 +823,16 @@ export default function App() {
   const [projects, setProjects] = useState([]);
   const [references, setReferences] = useState([]);
   const [selectedProject, setSelectedProject] = useState("");
+  // FMDV mode (project.json "mode": "fmdv"): the reference is chosen per
+  // sample inside Step 1, bounded by a scope the picker sets. fmdvInfo comes
+  // from GET /api/projects/{p}/fmdv; the lineage hierarchy from
+  // GET /api/fmdv/lineages (loaded once). See docs/FMDV_MODE.md.
+  const [fmdvInfo, setFmdvInfo] = useState(null);
+  const [fmdvLineages, setFmdvLineages] = useState(null);
+  const [fmdvScope, setFmdvScope] = useState("FMDV");
+  const fmdvOn = fmdvInfo?.mode === "fmdv";
+  // The Inputs panel shows one source at a time (InputsTabs.jsx).
+  const [inputTab, setInputTab] = useInputTab(fmdvOn);
   const [newProjectName, setNewProjectName] = useState("");
   const [settings, setSettings] = useState({
     vsnp3_path: "",
@@ -1033,6 +1049,11 @@ export default function App() {
   //   "list"  — paste a list of sample names and compare just those (optionally
   //             on top of the reference databases ticked on the Build tab).
   const [step2Mode, setStep2Mode] = useState("build");
+  // In FMDV mode Step 2 leads with VP1 (typing and tree); the whole-genome
+  // comparison is the second tab. Leaving FMDV mode drops back to Build.
+  useEffect(() => {
+    setStep2Mode((m) => (fmdvOn ? (m === "build" ? "vp1" : m) : (m === "vp1" ? "build" : m)));
+  }, [fmdvOn]);
   // Build tab, box 1: include this project's own Step 1 samples. On by default —
   // this is what nearly every comparison is built on. Unticking it compares the
   // ticked reference databases alone.
@@ -1401,6 +1422,12 @@ export default function App() {
       paired: { label: "Paired", bg: "#e3f0e6", fg: "#256029" },
       single: { label: "Single", bg: "#e6eef7", fg: "#1f4e79" },
       ont: { label: "ONT", bg: "#f3e8f7", fg: "#6b2d7a" },
+      // An imported sequence (FMDV mode): no reads at all, typed from the
+      // sequence it was given.
+      sequence: { label: "Sequence", bg: "#fdf2e9", fg: "#8a4b08" },
+      // Reads simulated from an imported genome and run through Step 1: the
+      // numbers are vsnp3's, the reads are not a sample's.
+      simulated: { label: "Simulated", bg: "#fdf2e9", fg: "#8a4b08" },
     };
     const s = map[rt];
     if (!s) return <span className="muted">-</span>;
@@ -1448,7 +1475,7 @@ export default function App() {
   /* Step 1 Results column sorting. null key = the order the scanner returned,
      which is the sensible default; a header click takes over, and a third
      click gives that default back. */
-  const QC_LEVEL_RANK = { fail: 0, review: 1, pass: 2 };
+  const QC_LEVEL_RANK = { fail: 0, review: 1, pass: 2, na: 3 };
   function qcSortValue(row, key) {
     switch (key) {
       case "qc": return QC_LEVEL_RANK[qcLevel(row)] ?? 9;
@@ -1493,6 +1520,17 @@ export default function App() {
   }
   // Sort state for the header component, which lives at module scope.
   const qcSortProps = { sort: qcSort, onSort: toggleQcSort };
+  // FMDV mode shows the long-read figures (error rate, thin calls) only when
+  // a long-read sample is on the table, and Dup % only when a short-read one
+  // is: an Illumina FMDV project read "-" down two columns otherwise.
+  const fmdvLongRead = useMemo(
+    () => visibleQcRows.some((r) => r.read_type === "ont" || r["Long-read Error Rate"]),
+    [visibleQcRows]
+  );
+  const fmdvShortRead = useMemo(
+    () => visibleQcRows.some((r) => r.read_type && r.read_type !== "ont"),
+    [visibleQcRows]
+  );
 
   /* Column widths for the two wide QC tables, remembered per browser. Owned
      here rather than inside ResizableTable so the panel header can offer a
@@ -1596,7 +1634,7 @@ export default function App() {
   // above the samples that are. The backend returns samples alphabetically;
   // sort is stable so alphabetical order is preserved within each group.
   const step1StatusSorted = useMemo(() => {
-    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4, misfit: 6 };
+    const rank = { not_started: 0, running: 1, unknown: 2, error: 3, complete: 4, sequence: 5, misfit: 6 };
     return [...step1Status].sort(
       (a, b) => (rank[a.status] ?? 5) - (rank[b.status] ?? 5)
     );
@@ -2140,7 +2178,17 @@ export default function App() {
     // different references carry different coordinates, and a matrix built
     // across them is meaningless rather than merely imperfect. An audit that
     // could not run (`error`) is NOT a veto — see loadStep2ReferenceAudit.
-    if (step2RefAudit && step2RefAudit.mixed) {
+    // FMDV mode: samples legitimately sit on several lineage references, and
+    // the question is whether THIS run's samples share one. When every sample
+    // the run would compare is on the chosen comparison reference, the set's
+    // other references are not a veto.
+    const fmdvRunOnOneRef = fmdvOn && fmdvInfo?.step2_reference
+      && step2ComparisonSamples.length > 0
+      && (() => {
+        const onRef = new Set((refLock.samples_by_reference || {})[fmdvInfo.step2_reference] || []);
+        return step2ComparisonSamples.every((s) => onRef.has(typeof s === "string" ? s : s.sample));
+      })();
+    if (step2RefAudit && step2RefAudit.mixed && !fmdvRunOnOneRef) {
       const n = (step2RefAudit.recoverable || []).length
         + (step2RefAudit.removable || []).length
         + (step2RefAudit.orphans || []).length;
@@ -2160,6 +2208,7 @@ export default function App() {
     selectedProject, settingsReady, reference, projectReference, selected,
     step2VcfCount, step2RunSelection, step2ComparisonSamples, step2Mode,
     step2RefAudit, step2RefAuditBusy, step2AmbiguousSamples, vcfsFolderName, step2Load,
+      fmdvOn, fmdvInfo, refLock,
   ]);
 
   // The samples the browse list hides: physically in vcf_database, but left out
@@ -3021,6 +3070,54 @@ export default function App() {
     runPreflight();
   }, [settings.vsnp3_path]);
 
+  // FMDV mode state follows the selected project; the lineage library is
+  // fetched the first time an FMDV project is opened.
+  useEffect(() => {
+    let cancelled = false;
+    setFmdvInfo(null);
+    if (!selectedProject) return () => { cancelled = true; };
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`);
+        if (!res.ok || cancelled) return;
+        const info = await res.json();
+        if (cancelled) return;
+        setFmdvInfo(info);
+        if (info.mode === "fmdv") {
+          setFmdvScope(info.scope || "FMDV");
+          // The Step 2 comparison reference is vsnp_gui's ordinary project
+          // reference; seed the run's reference state from it.
+          if (info.step2_reference) setReference(info.step2_reference);
+          if (!fmdvLineages) {
+            const lr = await fetch(`${API_BASE}/api/fmdv/lineages`);
+            if (lr.ok && !cancelled) setFmdvLineages(await lr.json());
+          }
+        }
+      } catch { /* not an FMDV project, or no library: the panel says so */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProject]);
+
+  async function setFmdvMode(on, scope) {
+    if (!selectedProject) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: on ? "fmdv" : "", ...(scope !== undefined ? { scope } : {}) }),
+      });
+      if (!res.ok) { setStep1StatusError(`FMDV mode: ${(await res.text()).slice(0, 300)}`); return; }
+      const info = await res.json();
+      setFmdvInfo(info);
+      if (info.mode === "fmdv") {
+        setFmdvScope(info.scope || "FMDV");
+        if (!fmdvLineages) {
+          const lr = await fetch(`${API_BASE}/api/fmdv/lineages`);
+          if (lr.ok) setFmdvLineages(await lr.json());
+        }
+      }
+    } catch (e) { setStep1StatusError(`FMDV mode: ${e.message || e}`); }
+  }
+
   useEffect(() => {
     if (!jobId) return;
     setLogs([]);
@@ -3213,9 +3310,14 @@ export default function App() {
   // database filtering and import tagging always use the project's reference
   // without the user having to re-select it in the VCF Databases panel.
   useEffect(() => {
-    const projectRef = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    // An FMDV project has no single project reference; its Step 2 comparison
+    // reference plays that part, and it is what box 2 must filter the
+    // reference databases by when the project is reopened.
+    const projectRef = projectReference
+      || (fmdvInfo?.mode === "fmdv" ? (fmdvInfo.step2_reference || "") : "")
+      || (refLock.references.length === 1 ? refLock.references[0] : "");
     if (projectRef) setImportReference(projectRef);
-  }, [projectReference, refLock.references]);
+  }, [projectReference, refLock.references, fmdvInfo]);
 
   // The Reference Editor opens on the selected project's reference. It follows
   // once per project + reference, so a manual pick in the dropdown stays put
@@ -3381,7 +3483,11 @@ export default function App() {
   async function createProject() {
     if (!newProjectName.trim()) return;
     const body = { name: newProjectName.trim() };
-    if (newProjectReference) body.reference = newProjectReference;
+    // FMDV mode is chosen where the project is made: the reference is then
+    // picked per sample at Step 1, and the Inputs panel offers the
+    // Sequences tab from the start instead of after a tick further down.
+    const fmdv = newProjectReference === "__fmdv__";
+    if (newProjectReference && !fmdv) body.reference = newProjectReference;
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3391,6 +3497,17 @@ export default function App() {
       const detail = await res.json().catch(() => ({}));
       askOnPage({ notice: true, message: `Could not create project: ${detail.detail || res.status}` });
       return;
+    }
+    if (fmdv) {
+      try {
+        const r2 = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(body.name)}/fmdv`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "fmdv", scope: "FMDV" }),
+        });
+        if (!r2.ok) window.alert(`Project created, but FMDV mode could not be set: ${(await r2.text()).slice(0, 200)}`);
+      } catch (e) {
+        window.alert(`Project created, but FMDV mode could not be set: ${e.message || e}`);
+      }
     }
     setNewProjectName("");
     setNewProjectReference("");
@@ -3711,7 +3828,7 @@ export default function App() {
           className={`qc-badge qc-badge-${level}`}
           title={reasons.length ? reasons.join("\n") : "All thresholds met"}
         >
-          {level}
+          {level === "na" ? "n/a" : level}
         </span>
         {reasons.length > 0 ? (
           <span className="qc-reason" title={reasons.join("\n")}>
@@ -3729,25 +3846,36 @@ export default function App() {
   // are not reflected here yet — surfacing the resolved-per-project view
   // would need a /api/projects/<p>/qc_thresholds endpoint we haven't built.
   function QcCriteriaWidget() {
-    const t = config?.qc_thresholds;
+    // In FMDV mode the project carries its own thresholds layer; the /fmdv
+    // route returns the resolved set, which is what the verdicts use.
+    const t = (fmdvOn && fmdvInfo?.qc_thresholds) || config?.qc_thresholds;
     if (!t) return null;
     const cov = t.coverage || {};
     const mr = t.mapping_rate || {};
+    const gc = t.genome_coverage;
+    const failPart = (c, unit) => (c.review_min == null ? " · never fails" : ` · ≥${c.review_min}${unit} review · <${c.review_min}${unit} fail`);
     return (
       <details className="qc-criteria">
-        <summary>QC criteria</summary>
+        <summary>QC criteria{fmdvOn ? " (FMDV mode)" : ""}</summary>
         <ul>
+          {gc ? (
+            <li>
+              <strong>Genome covered</strong> (Genome with Coverage):
+              {" "}≥{gc.pass_min}% pass{failPart(gc, "%")}
+            </li>
+          ) : null}
           <li>
             <strong>Coverage</strong> (Avg Depth):
-            {" "}≥{cov.pass_min}× pass · ≥{cov.review_min}× review · &lt;{cov.review_min}× fail
+            {" "}≥{cov.pass_min}× pass{failPart(cov, "×")}
           </li>
           <li>
             <strong>Mapping rate</strong> (1 − Unmapped %):
-            {" "}≥{mr.pass_min}% pass · ≥{mr.review_min}% review · &lt;{mr.review_min}% fail
+            {" "}≥{mr.pass_min}% pass{failPart(mr, "%")}
           </li>
           <li>
-            <strong>Contamination</strong> flag (sourmash, when available):
-            {" "}{t.contamination_review ? "any positive value forces review" : "ignored"}
+            <strong>{fmdvOn ? "Reference distance / mixed serotypes" : "Contamination"}</strong>
+            {fmdvOn ? " (per-sample chooser: identity < 0.90, or a second serotype ≥ 5% of VP1 reads)" : " flag (sourmash, when available)"}:
+            {" "}{t.contamination_review ? "forces review" : "ignored"}
           </li>
         </ul>
         <div className="muted">
@@ -3937,6 +4065,21 @@ export default function App() {
              + (r.group_count > 0 ? ` (${r.group_count} groups)` : "");
     }
   }
+
+  // FMDV mode splits the comparisons by kind: VP1 tree runs belong to the VP1
+  // tab, vsnp3 comparisons to the Genome SNPs tabs. The selected run follows
+  // the tab, newest of its kind.
+  const isVp1Run = (r) => /_VP1-tree(?:-|$)/.test(r?.run_id || "");
+  const vp1Runs = useMemo(() => step2Runs.filter(isVp1Run), [step2Runs]);
+  const genomeRuns = useMemo(() => (fmdvOn ? step2Runs.filter((r) => !isVp1Run(r)) : step2Runs), [step2Runs, fmdvOn]);
+  useEffect(() => {
+    if (!fmdvOn || !step2Runs.length) return;
+    const cur = step2Runs.find((r) => r.run_id === step2SelectedRun);
+    const wantVp1 = step2Mode === "vp1";
+    if (cur && isVp1Run(cur) === wantVp1) return;
+    const pool = wantVp1 ? vp1Runs : genomeRuns;
+    if (pool.length) setStep2SelectedRun(pool[0].run_id);
+  }, [fmdvOn, step2Mode, step2Runs, step2SelectedRun, vp1Runs, genomeRuns]);
 
   function pickDefaultRun(runs) {
     const live = runs.find((r) => r.live);
@@ -4960,6 +5103,16 @@ export default function App() {
     const fastqBadge = kind === "kraken"
       ? { text: "parsed reads", title: "Kraken-parsed reads — import to run through Step 1", bg: "var(--badge-warning-bg)", fg: "var(--badge-warning-fg)" }
       : { text: "input reads", title: "Input reads — the FASTQs staged for this sample's Step 1 run", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" };
+    // The two kinds of report a sample folder holds look alike by name. The
+    // FMDV report is the one with the call, the neighbourhood and the tree;
+    // vsnp3's is its own Step 1 alignment report and says nothing of FMDV.
+    const fileBadge = /_FMDV_report\.(html|pdf)$/.test(f.name)
+      ? { text: "FMDV sample report", title: "The FMDV report: call, flags, QC, neighbourhood, tree, VP1 differences and sequence. Rewritten after each VP1 tree.", bg: "var(--badge-success-bg)", fg: "var(--badge-success-fg)" }
+      : /_report\.(html|pdf)$/.test(f.name)
+        ? { text: "vsnp3 step 1 report", title: "vsnp3's own alignment report for this Step 1 run; no FMDV content.", bg: "var(--badge-neutral-bg, #eee)", fg: "var(--badge-neutral-fg, #555)" }
+        : /_VP1\.fasta$/.test(f.name) ? { text: "VP1 consensus", title: "The VP1 slice of the consensus; what the typing and the VP1 tree use.", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" }
+        : /_consensus\.fasta$/.test(f.name) ? { text: "consensus genome", title: "Reference-anchored consensus: substitutions called, N below depth 10 or where reads disagree, no indels.", bg: "var(--badge-info-bg)", fg: "var(--badge-info-fg)" }
+        : null;
     return (
       <div key={f.path} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.path}>
@@ -4967,6 +5120,7 @@ export default function App() {
             <a href={`${base}&inline=1`} target="_blank" rel="noopener noreferrer" title={`Open ${f.relpath}`}>{f.relpath}</a>
           ) : f.relpath}
           {isFastq ? <span title={fastqBadge.title} style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: fastqBadge.bg, color: fastqBadge.fg, fontWeight: 600 }}>{fastqBadge.text}</span> : null}
+          {fileBadge ? <span title={fileBadge.title} style={{ marginLeft: 6, fontSize: "10px", padding: "0 5px", borderRadius: 8, background: fileBadge.bg, color: fileBadge.fg, fontWeight: 600 }}>{fileBadge.text}</span> : null}
         </span>
         <span className="muted" style={{ fontSize: "10.5px" }}>{_formatBytes(f.size)}</span>
         {isFastq ? (
@@ -5227,14 +5381,16 @@ export default function App() {
     setSraJobId(data.job_id);
   }
 
-  async function importVcfs() {
+  // `folders` is the database list to build from. Build passes the list it
+  // just fetched; the state copy can be a tick behind (see buildComparisonSet).
+  async function importVcfs(folders = vcfDbFolders) {
     if (!selectedProject || !settingsReady) return;
     // Auto-populate from enabled vcfDbFolders matching the selected reference.
     // The picker UI already filters to importReference for display, but the
     // underlying state holds every shared+user DB. Without the reference
     // filter here, e.g. selecting NC_045512_wuhan-hu-1 still pulls in the
     // mtbc0_v1.1 DBs because they're "enabled by default."
-    const enabledPaths = vcfDbFolders
+    const enabledPaths = folders
       .filter((f) => f.enabled && (f.reference || "") === importReference)
       .map((f) => f.path);
     const manualPaths = parseAccessions(importSourcesText);
@@ -5396,7 +5552,9 @@ export default function App() {
 
   async function step1Run() {
     const effectiveRef = reference || projectReference;
-    if (!selectedProject || !settingsReady || !effectiveRef) return;
+    // FMDV mode needs no project-wide reference: each sample chooses its own
+    // inside the batch, bounded by fmdvScope.
+    if (!selectedProject || !settingsReady || (!effectiveRef && !fmdvOn)) return;
     if (step1JobStatus === "running") {
       setStep1StatusError("Step 1 is already running for this project. Wait for it to finish before starting a new run.");
       return;
@@ -5424,7 +5582,7 @@ export default function App() {
       res = await fetch(`${API_BASE}/api/projects/${selectedProject}/step1/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reference: refValue, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun, trim: trimFastq, trim_mb: trimFastq ? mb : null })
+        body: JSON.stringify({ reference: fmdvOn ? null : refValue, fmdv_scope: fmdvOn ? fmdvScope : undefined, debug: debugMode, assemble_unmap: assembleUnmap, nanopore: nanoporeMode, force_rerun: forceRerun, trim: trimFastq, trim_mb: trimFastq ? mb : null })
       });
     } catch (e) {
       step1DispatchingRef.current = false;
@@ -5652,7 +5810,24 @@ export default function App() {
   // no database compares the project alone.
   async function buildComparisonSet() {
     if (!selectedProject || !settingsReady) return;
-    const dbPaths = step2AvailablePanels.filter((p) => p.enabled).map((p) => p.path);
+    // Ask the backend which databases are ticked instead of trusting the
+    // page's copy. A tick is saved by its own request, and Build pressed
+    // right behind it read the list from before the tick, so the database
+    // just ticked added nothing until Build was pressed a second time.
+    let folders = vcfDbFolders;
+    try {
+      const res = await fetch(`${API_BASE}/api/vcf-db-folders`);
+      if (res.ok) {
+        folders = (await res.json()) || [];
+        setVcfDbFolders(folders);
+      }
+    } catch (e) {
+      // Unreachable backend: fall through with the page's list; the import
+      // call below reports the failure.
+    }
+    const dbPaths = folders
+      .filter((f) => f.enabled !== false && (f.reference || "") === importReference)
+      .map((f) => f.path);
     if (!step2UseVcfDb && !dbPaths.length && !parseAccessions(importSourcesText).length) {
       setImportStatus("Nothing selected — tick this project's samples, a reference database, or both.");
       return;
@@ -5660,7 +5835,7 @@ export default function App() {
     setImportStatus("");
     if (step2UseVcfDb) await step2Setup();
     if (dbPaths.length || parseAccessions(importSourcesText).length) {
-      await importVcfs();
+      await importVcfs(folders);
     } else {
       setStep2BuiltAt(new Date().toISOString());
       await loadVcfSourceSamples();
@@ -6982,10 +7157,11 @@ export default function App() {
               <select
                 value={newProjectReference}
                 onChange={(e) => setNewProjectReference(e.target.value)}
-                title="Optional: set the reference at project creation"
+                title="Optional: set the reference at project creation. FMDV mode chooses the lineage reference per sample at Step 1 and adds the Sequences tab to Inputs."
                 style={{ minWidth: "10rem" }}
               >
                 <option value="">-- reference (optional) --</option>
+                <option value="__fmdv__">FMDV mode (reference chosen per sample)</option>
                 <ReferenceOptions references={references} />
               </select>
               <button onClick={createProject}>Create</button>
@@ -7184,7 +7360,10 @@ export default function App() {
                                     const s1 = sampleStep1Files[key];
                                     if (!s1 || s1.loading) return <span className="muted" style={{ fontSize: "11px" }}>Loading… <Elapsed /></span>;
                                     if (!(s1.files || []).length) return <span className="muted" style={{ fontSize: "11px" }}>No Step 1 outputs yet — run Step 1 for this sample.</span>;
-                                    return s1.files.map((f) => sampleFileRow(p.name, f));
+                                    // The FMDV report first, then the sequences, then the rest as listed.
+                                    const rank = (f) => /_FMDV_report\.pdf$/.test(f.name) ? 0 : /_FMDV_report\.html$/.test(f.name) ? 1
+                                      : /_VP1\.fasta$/.test(f.name) ? 2 : /_consensus\.fasta$/.test(f.name) ? 3 : 9;
+                                    return s1.files.slice().sort((a, b) => rank(a) - rank(b)).map((f) => sampleFileRow(p.name, f));
                                   })()}
                                 </div>
                                 {krakenDir ? (
@@ -7222,7 +7401,16 @@ export default function App() {
             </div>
             <div className="input-columns">
               <div className="input-column">
-                <h3>Add local FASTQ</h3>
+                <InputTabs value={inputTab} onChange={setInputTab} fmdvOn={fmdvOn} disabled={!selectedProject} />
+                {inputTab === "fastq" ? (
+                <div className="input-tab-body">
+                <InputHelp line="Link a folder on the server, or upload files; paired reads are matched by _R1 and _R2.">
+                  <p>Browse the server for FASTQ files or a folder, pick another project&apos;s <code>download/</code>,
+                  or type a path. Linked files stay where they are; uploads are copied into this project&apos;s{" "}
+                  <code>download/</code>.</p>
+                  <p>A sample is named from the file up to its first underscore, so <code>Mg_280_R1.fastq.gz</code>
+                  becomes <code>Mg-280</code>. Pairs are recognised by <code>_R1</code>/<code>_R2</code> or <code>_1</code>/<code>_2</code>.</p>
+                </InputHelp>
                 {window?.vsnp?.selectPath ? (
                   <button
                     onClick={async () => {
@@ -7381,7 +7569,47 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
-                <h3>SRA Download</h3>
+                </div>
+                ) : null}
+                {inputTab === "minknow" ? (
+                <OntRunImport
+                  apiBase={API_BASE}
+                  project={selectedProject}
+                  enabled={!!selectedProject && settingsReady}
+                  onImported={() => { loadAll(); loadInputs(selectedProject); }}
+                />
+                ) : null}
+                {fmdvOn && inputTab === "sequences" ? (
+                  <SeqImport
+                    apiBase={API_BASE}
+                    project={selectedProject}
+                    enabled={!!selectedProject && settingsReady}
+                    onImported={async () => {
+                      // An imported sequence is a new Step 1 folder with a
+                      // typing result: the Samples list, the Results rows
+                      // (rescanned, since the scanner lists folders) and the
+                      // VP1 typing table all change.
+                      loadAll();
+                      loadInputs(selectedProject);   // Ready to run: simulated reads land in download/
+                      loadStep1Status();
+                      loadQC({ refresh: true });
+                      try {
+                        const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`);
+                        if (res.ok) setFmdvInfo(await res.json());
+                      } catch { /* the next project switch reloads it */ }
+                    }}
+                  />
+                ) : null}
+                {inputTab === "sra" ? (
+                <div className="input-tab-body">
+                <InputHelp line="Run, experiment or sample accessions, one per line; the reads download in the background.">
+                  <p>SRR, ERR, DRR run accessions, or SRX/SRS/PRJNA which are expanded through NCBI first.
+                  Downloads land in this project&apos;s <code>download/</code> (or the subfolder you name) and
+                  appear under Ready to run. Accessions already run in Step 1 are skipped, and the crosswalk
+                  records which run accessions each submitted one resolved to.</p>
+                  <p>Needs a working link to NCBI and ENA; set <code>NCBI_API_KEY</code> on the backend for a
+                  higher request rate.</p>
+                </InputHelp>
                 <textarea
                   placeholder="SRR/SRX/SRS accessions (one per line)"
                   value={sraText}
@@ -7449,6 +7677,8 @@ export default function App() {
                     <span className="muted"> — sample/study accessions you submitted → run accessions actually downloaded.</span>
                   </div>
                 ) : null}
+                </div>
+                ) : null}
               </div>
               <div className="input-column">
                 {/* T-07-adjacent: file list in <project>/download/ so users can see what
@@ -7456,15 +7686,29 @@ export default function App() {
                     partial files left behind by a cancelled upload. */}
                 {selectedProject ? (
                   <div className="block">
-                    <h3 style={{display:"flex", alignItems:"center", gap:"8px"}}>
-                      <span style={{flex:1}}>
+                    <h3 style={{display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap", rowGap:"6px"}}>
+                      <span style={{flex:"1 0 auto", whiteSpace:"nowrap"}}>
                         Ready to run
                         {shownDownloadGroups.length > 0 ? (
-                          <span className="muted" style={{marginLeft:"6px", fontWeight:"normal", fontSize:"12px"}}>
-                            ({shownDownloadGroups.length} sample{shownDownloadGroups.length === 1 ? "" : "s"}, {_formatBytes(shownDownloadBytes)})
+                          <span className="count-badge" title={`${shownDownloadGroups.length} sample${shownDownloadGroups.length === 1 ? "" : "s"}, ${_formatBytes(shownDownloadBytes)}, not yet in Step 1`}>
+                            {shownDownloadGroups.length}
                           </span>
                         ) : null}
                       </span>
+                      {/* Every source lands here, so the step that takes it on
+                          sits here too. The same Grab as the Step 1 panel's. */}
+                      <button
+                        type="button"
+                        onClick={step1Setup}
+                        disabled={!selectedProject || !settingsReady || grabJobStatus === "running" || step1JobStatus === "running" || shownDownloadGroups.length === 0}
+                        title={grabJobStatus === "running" ? "A Grab is in progress — watch it in Live Logs below"
+                          : step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish before grabbing"
+                          : shownDownloadGroups.length === 0 ? "Nothing waiting: every downloaded sample is already in Step 1"
+                          : "Stage these into Step 1 as samples, ready to Run"}
+                        style={{fontSize:"12px", padding:"3px 10px"}}
+                      >
+                        {grabJobStatus === "running" ? (<>Grabbing… <Elapsed /></>) : "Grab into Step 1"}
+                      </button>
                       {inputs.files.some((f) => f.name === "sra_crosswalk.tsv") ? (
                         <button
                           type="button"
@@ -7510,7 +7754,7 @@ export default function App() {
                       </div>
                     ) : null}
                     {!inputsLoading && inputs.files.length === 0 ? (
-                      <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
+                      <div className="muted" style={{fontSize:"12px"}}>Nothing yet. Add reads or sequences on the left; they appear here.</div>
                     ) : null}
                     {!inputsLoading && inputs.files.length > 0 && shownDownloadGroups.length === 0 ? (
                       <div className="muted" style={{fontSize:"12px"}}>All downloaded samples have been run in Step 1 (or are in Quarantine).</div>
@@ -7565,14 +7809,11 @@ export default function App() {
                     })() : null}
                   </div>
                 ) : null}
-                <div className="quarantine-panel" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>
-                  <h3 style={{ marginBottom: "4px" }}>
+                <details className="quarantine-panel" open={quarantine.length > 0} style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: "14px", marginBottom: "4px" }}
+                    title="Samples removed from Step 1. Nothing is deleted until you say so: Restore puts the reads back in download/, Delete erases them for good.">
                     Quarantine <span className="muted" style={{ fontSize: "12px", fontWeight: "normal" }}>({quarantine.length})</span>
-                  </h3>
-                  <div className="muted" style={{ fontSize: "11px", marginBottom: "8px" }}>
-                    Samples removed from Step 1 land here — nothing is deleted until you say so.
-                    Restore puts the reads back in download/ (then Setup re-adds it); Delete erases them for good.
-                  </div>
+                  </summary>
                   {quarantine.length ? (
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px", maxHeight: "300px", overflowY: "auto" }}>
                       {quarantine.map((q) => (
@@ -7592,7 +7833,7 @@ export default function App() {
                   ) : (
                     <div className="muted" style={{ fontSize: "11px" }}>No removed samples. Use “Remove” on a Step 1 sample to move it here.</div>
                   )}
-                </div>
+                </details>
               </div>
             </div>
           </section>
@@ -8337,7 +8578,25 @@ export default function App() {
             </div>
             <div className="block">
               <h3>Reference</h3>
-              {projectReference ? (
+              <label className="checkbox" style={{ marginBottom: "0.4em" }} title="FMDV topotypes within a serotype differ by up to 21%, so the lineage reference is chosen per sample. See docs/FMDV_MODE.md.">
+                <input
+                  type="checkbox"
+                  checked={fmdvOn}
+                  disabled={!selectedProject || step1JobStatus === "running"}
+                  onChange={(e) => setFmdvMode(e.target.checked, e.target.checked ? fmdvScope : undefined)}
+                />
+                FMDV mode: choose the lineage reference per sample
+              </label>
+              {fmdvOn ? (
+                <>
+                  <FmdvScopePicker
+                    lineages={fmdvLineages}
+                    scope={fmdvScope}
+                    disabled={step1JobStatus === "running"}
+                    onChange={(s) => { setFmdvScope(s); setFmdvMode(true, s); }}
+                  />
+                </>
+              ) : projectReference ? (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
                   <span
                     style={{
@@ -8482,7 +8741,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={step1Run}
-                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference) || step1JobStatus === "running" || grabJobStatus === "running"}
+                  disabled={!selectedProject || !settingsReady || (!reference && !projectReference && !fmdvOn) || step1JobStatus === "running" || grabJobStatus === "running"}
                   title={
                     step1JobStatus === "running"
                       ? "Step 1 batch is in progress — wait for it to finish"
@@ -8558,7 +8817,9 @@ export default function App() {
                         title={
                           s.status === "misfit"
                             ? "Held out of every Run — this folder has no usable reads, so vsnp3 has nothing to align. Fix the folder, or Remove it to file it in Quarantine."
-                            : ""
+                            : s.status === "sequence"
+                              ? "An imported sequence. With simulated reads: Grab, then Run, and it goes through Step 1 like any sample. Without: typed from its VP1 and placed on the VP1 tree, never aligned."
+                              : ""
                         }
                       >
                         {s.status.replace("_", " ")}
@@ -8660,6 +8921,7 @@ export default function App() {
                       !s.in_vcfs_folder &&
                       s.status !== "not_started" &&
                       s.status !== "misfit" &&
+                      s.status !== "sequence" &&   // an imported sequence has no VCF to collect
                       s.status !== "running"
                     );
                     if (!notCollected.length) return null;
@@ -8873,6 +9135,18 @@ export default function App() {
                 </div>
                 {qcError ? <div className="note error">{qcError}</div> : null}
                 <QcCriteriaWidget />
+                {fmdvOn && selectedProject ? (() => {
+                  // The run report for the outbreak team sits at the project root:
+                  // every sample's call on one page, with the serotype trees.
+                  const root = `${selected?._root || settings.projects_root}/${selectedProject}`;
+                  return (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.4em", marginLeft: "0.8em" }}>
+                      <span className="muted" style={{ fontSize: "0.85em" }} title="One page for the outbreak team: every sample's call, the notes that change how a call is read, and the serotype trees. Rewritten at the end of each Step 1 and after each VP1 tree.">FMDV run report:</span>
+                      <button className="ghost" onClick={() => viewInline(`${root}/FMDV_run_report.html`)}>HTML</button>
+                      <button className="ghost" onClick={() => downloadOutput(`${root}/FMDV_run_report.pdf`, `${selectedProject}_FMDV_run_report.pdf`)}>PDF</button>
+                    </span>
+                  );
+                })() : null}
                 <div className="qc-table scrollable">
                   <ResizableTable widths={step1ColWidths}>
                     <thead>
@@ -8897,16 +9171,46 @@ export default function App() {
                         <QcSortTh {...qcSortProps} sortKey="run_date">Run date</QcSortTh>
                         <th><span className="rt-th-label">Files</span><Grip label="Files" /></th>
                         <QcSortTh {...qcSortProps} sortKey="Reference">Reference</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="read_length">Avg Read Len</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
-                        <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                        {fmdvOn ? (
+                          <>
+                            {/* FMDV mode, long reads: the chooser's answer, the
+                                consensus numbers and the long-read calling
+                                figures. Dup %, read length and Q20 are left
+                                out: for ONT they read "not marked" or sit at
+                                80% on every sample. Groups goes last, since
+                                it reads "No defining SNPs" until a topotype
+                                database exists. */}
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_serotype" title="Serotype of the lineage reference the chooser put the sample on.">Serotype</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_lineage" title="Topotype or lineage of that reference.">Lineage</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_lineage" title="VP1 typing: the lineage of the nearest annotated GenBank VP1 to the sample's VP1 consensus (blastn). Named by GenBank, not by the 79-genome library.">Topotype (VP1)</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_identity" title="Identity of the reads to the chosen reference. Divergence of the sample from the library genome plus, for ONT, the read error.">Identity</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_reads" title="Reads in the sample's FASTQ.">Reads</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Average Depth" title="Mean read depth over the reference.">Avg Depth</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="mapping" title="Reads mapped to the chosen reference. Host and other reads make up the rest; the FMDV pass line is 20%.">Mapping %</QcSortTh>
+                            {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_error_rate" title="Long reads only: mismatches and indels per aligned base. About 2% is clean; 6% or more points to a mixed sample or a distant reference.">Error rate</QcSortTh> : null}
+                            {fmdvShortRead ? <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads" title="Short reads only: mapped reads marked duplicate and set aside before calling.">Dup %</QcSortTh> : null}
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage" title="Percent of reference positions covered by at least one read.">Genome covered %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_genome_called" title="Percent of reference positions with a called base in the consensus: depth 10 or more and an unambiguous call. The FMDV QC lines are 90% pass and 70% fail.">Genome called %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="fmdv_vp1_called" title="Percent of VP1 positions with a called base in the consensus. The VP1 tree takes samples at 50% or more.">VP1 called %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs" title="vsnp3's quality SNP calls against the chosen lineage reference. Hundreds are normal for a sample a few percent from the library genome; this is distance from the reference, not a quality figure.">SNPs vs reference</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Ambiguous SNPs" title="Sites where the reads disagree with each other (vsnp3 AC=1). Hundreds on one sample against single digits on the rest is a mixed infection.">Mixed sites</QcSortTh>
+                            {fmdvLongRead ? <QcSortTh {...qcSortProps} sortKey="fmdv_thin_calls" title="Long reads only: calls raised to the N floor by the long-read model; the consensus masks these sites.">Thin calls</QcSortTh> : null}
+                            <QcSortTh {...qcSortProps} sortKey="Groups" title="Defining-SNP groups, once a topotype database exists for the reference.">Groups</QcSortTh>
+                          </>
+                        ) : (
+                          <>
+                            <QcSortTh {...qcSortProps} sortKey="Groups">Groups</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Average Depth">Avg Depth</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="mapping">Mapping %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Percent Ref with Zero Coverage">Zero Cov %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Duplicate Percent of Mapped Reads">Dup %</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="read_length">Avg Read Len</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="R1 Passing Q20">R1 Q20</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="R2 Passing Q20">R2 Q20</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Genome with Coverage">Genome Cov</QcSortTh>
+                            <QcSortTh {...qcSortProps} sortKey="Quality SNPs">Quality SNPs</QcSortTh>
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -8983,6 +9287,17 @@ export default function App() {
                                     {sampleKey(row) ? (
                                       <button onClick={() => viewStep1Stats(selectedProject, sampleKey(row))}>Stats</button>
                                     ) : null}
+                                    {fmdvOn && sampleKey(row) && row._file && row.read_type !== "sequence" ? (() => {
+                                      // An imported sequence has no report yet
+                                      // (the report scripts take folders with a
+                                      // chooser result), so no dead buttons.
+                                      const dir = String(row._file).replace(/\/[^/]*$/, "");
+                                      const stem = `${dir}/${sampleKey(row)}_FMDV_report`;
+                                      return (<>
+                                        <button onClick={() => viewInline(`${stem}.html`)} title="This sample's FMDV report: call, flags, QC, neighbourhood, tree, VP1 differences and sequence.">FMDV report</button>
+                                        <button onClick={() => downloadOutput(`${stem}.pdf`, `${sampleKey(row)}_FMDV_report.pdf`)} title="The same report as a PDF, for printing or sending.">PDF</button>
+                                      </>);
+                                    })() : null}
                                     {sampleKey(row) && hasKrakenRun(selectedProject, sampleKey(row)) ? (
                                       <a
                                         className="ghost action"
@@ -9007,16 +9322,76 @@ export default function App() {
                                 </details>
                               </td>
                               <td title={row.Reference || undefined}>{row.Reference ? referenceCellLabel(row.Reference) : "-"}</td>
-                              <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
-                              <td>{row["Average Depth"] || "-"}</td>
-                              <td>{fmtPercent1(qcMappingRate(row))}</td>
-                              <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
-                              <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
-                              <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
-                              <td>{formatPercent(row["R1 Passing Q20"])}</td>
-                              <td>{formatPercent(row["R2 Passing Q20"])}</td>
-                              <td>{formatPercent(row["Genome with Coverage"])}</td>
-                              <td>{row["Quality SNPs"] || "-"}</td>
+                              {fmdvOn ? (
+                                <>
+                                  <td title={row.read_type === "sequence"
+                                    ? "Serotype as entered at import (from the nearest panel VP1, or the record's own label)."
+                                    : row.fmdv_mixed && row.fmdv_serotype_share
+                                    ? "Mixed serotypes: " + Object.entries(row.fmdv_serotype_share).map(([k, v]) => `${k} ${Math.round(v * 100)}%`).join(", ")
+                                    : row.fmdv_composition_basis === "undetermined"
+                                      ? "Serotype of the lineage reference the chooser put this sample on. Too few reads reached any VP1 to say whether a second serotype is present."
+                                      : "Serotype of the lineage reference the chooser put this sample on (competitive mapping to the VP1 panel)."}>
+                                    {row.fmdv_serotype || "-"}{row.fmdv_mixed ? " ⚠" : row.fmdv_composition_basis === "undetermined" ? " ?" : ""}
+                                  </td>
+                                  <td title={row.read_type === "sequence" ? "Lineage as entered at import; the Topotype (VP1) column is what the typing says." : (row.fmdv_chosen || "Topotype or lineage of the chosen reference.")}>{row.fmdv_lineage || "-"}</td>
+                                  <td title={row.fmdv_vp1_status === "typed"
+                                    ? `Nearest VP1 record: ${row.fmdv_vp1_nearest || "-"} at ${typeof row.fmdv_vp1_identity === "number" ? row.fmdv_vp1_identity.toFixed(1) + "%" : "-"}.` + (row.fmdv_vp1_note ? " " + row.fmdv_vp1_note : "")
+                                    : (row.fmdv_vp1_status || "Not typed: Step 1 types each sample as its consensus is written; the Step 2 VP1 tab retypes a project.")}>
+                                    {row.fmdv_vp1_status === "typed" ? `${row.fmdv_vp1_serotype || ""} ${row.fmdv_vp1_lineage || "unassigned"}`.trim() : "-"}
+                                    {row.fmdv_vp1_note ? " ⚠" : ""}
+                                  </td>
+                                  <td title={row.fmdv_distant
+                                    ? "Distant: the closest library genome is still far from the reads (identity under 0.90)."
+                                    : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
+                                    {typeof row.fmdv_identity === "number" ? row.fmdv_identity.toFixed(3) : "-"}{row.fmdv_distant ? " ⚠" : ""}
+                                  </td>
+                                  <td title={row.read_type === "sequence" ? `Imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): ${row.fmdv_import_class || "record"} of ${typeof row.fmdv_import_length === "number" ? row.fmdv_import_length.toLocaleString() : "?"} nt, no reads.`
+                                    : row.read_type === "simulated" ? `SIMULATED reads from an imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): perfect, uniform, none over N. Depth and mapping describe the simulation.`
+                                    : "Reads in the sample's FASTQ."}>
+                                    {row.read_type === "sequence" ? <span className="muted">none</span> : typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}{row.read_type === "simulated" ? <span className="muted"> sim</span> : null}
+                                  </td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: depth describes the simulation and is not shown." : undefined}>{row.read_type === "simulated" ? "-" : (row["Average Depth"] || "-")}</td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: mapping rate describes the simulation and is not shown." : undefined}>{row.read_type === "simulated" ? "-" : fmtPercent1(qcMappingRate(row))}</td>
+                                  {fmdvLongRead ? (
+                                    <td title={row["Long-read Error Rate"] || (row.read_type === "ont" ? "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference." : "Long reads only.")}>
+                                      {row.read_type === "simulated" ? "-" : typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
+                                    </td>
+                                  ) : null}
+                                  {fmdvShortRead ? (
+                                    <td title={row.read_type === "ont" ? "Not marked for long reads." : "Mapped reads marked duplicate and set aside before calling."}>
+                                      {row.read_type === "ont" || row.read_type === "simulated" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
+                                    </td>
+                                  ) : null}
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: coverage describes the simulation and is not shown." : "Percent of reference positions covered by at least one read."}>{row.read_type === "simulated" ? "-" : formatPercent(row["Genome with Coverage"])}</td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: not a measurement." : "Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous)."}>
+                                    {row.read_type === "simulated" ? "-" : typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
+                                  </td>
+                                  <td title="Percent of VP1 with a called base in the consensus. The VP1 tree takes samples at 50% or more.">
+                                    {typeof row.fmdv_vp1_called === "number" ? `${row.fmdv_vp1_called.toFixed(1)}%` : "-"}
+                                  </td>
+                                  <td title="Quality SNP calls against the chosen lineage reference: distance from the reference, not a quality figure.">{row["Quality SNPs"] || "-"}</td>
+                                  <td title="vsnp3's AC=1 calls: sites where the reads disagree. Hundreds on one sample, against single digits on the rest, is a mixed infection.">{row["Ambiguous SNPs"] ?? "-"}</td>
+                                  {fmdvLongRead ? (
+                                    <td title={row["Long-read Calls Limited to N"] || (row.read_type === "ont" ? "Calls raised to the N floor by the long-read model; the consensus masks these sites." : "Long reads only.")}>
+                                      {row.read_type === "simulated" ? "-" : typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
+                                    </td>
+                                  ) : null}
+                                  <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
+                                </>
+                              ) : (
+                                <>
+                                  <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>
+                                  <td>{row["Average Depth"] || "-"}</td>
+                                  <td>{fmtPercent1(qcMappingRate(row))}</td>
+                                  <td>{formatPercent(row["Percent Ref with Zero Coverage"])}</td>
+                                  <td>{formatPercent(row["Duplicate Percent of Mapped Reads"])}</td>
+                                  <td title="Average read length per mate (R1 / R2), as reported in the stats workbook">{fmtReadLengths(row)}</td>
+                                  <td>{formatPercent(row["R1 Passing Q20"])}</td>
+                                  <td>{formatPercent(row["R2 Passing Q20"])}</td>
+                                  <td>{formatPercent(row["Genome with Coverage"])}</td>
+                                  <td>{row["Quality SNPs"] || "-"}</td>
+                                </>
+                              )}
                             </tr>
                           );
                         })}
@@ -9690,28 +10065,113 @@ export default function App() {
                 into the comparison, build the set, then Run.
               </p>
               <div className="mode-toggle">
+                {fmdvOn ? (
+                  <button
+                    className={step2Mode === "vp1" ? "active" : ""}
+                    onClick={() => setStep2Mode("vp1")}
+                    title="Serotype, topotype and lineage by VP1, and the VP1 tree: the first question for an FMDV sample."
+                  >
+                    VP1
+                  </button>
+                ) : null}
                 <button
                   className={step2Mode === "build" ? "active" : ""}
                   onClick={() => setStep2Mode("build")}
                 >
-                  Build the comparison set
+                  {fmdvOn ? "Genome SNPs: build" : "Build the comparison set"}
                 </button>
                 <button
                   className={step2Mode === "list" ? "active" : ""}
                   onClick={() => setStep2Mode("list")}
                 >
-                  Compare a list of samples
+                  {fmdvOn ? "Genome SNPs: list" : "Compare a list of samples"}
                 </button>
               </div>
               <p className="muted" style={{marginTop:"0.5em", marginBottom:0, fontSize:"0.8em"}}>
-                {step2Mode === "build"
+                {step2Mode === "vp1"
+                  ? "Each sample's VP1 consensus typed against the GenBank VP1 sets, and a VP1 tree per serotype with the panel and context genomes. Whole-genome SNPs are for samples already known to share a lineage: the second tab."
+                  : step2Mode === "build"
                   ? "The normal path: this project's own samples, plus any reference database you want them compared against."
                   : "Paste sample names to compare just those samples out of this project — optionally alongside the reference databases ticked on the Build tab."}
               </p>
             </div>
 
-            {step2Mode === "build" ? (
+            {step2Mode === "vp1" ? (
+              <FmdvVp1Panel
+                apiBase={API_BASE}
+                project={selectedProject}
+                fmdvInfo={fmdvInfo}
+                disabled={step1JobStatus === "running"}
+                onInfo={setFmdvInfo}
+                onTreeDone={() => refreshStep2Results()}
+              />
+            ) : step2Mode === "build" ? (
               <div className="block">
+                {fmdvOn ? (
+                  <div className="step2-src" title="In FMDV mode each sample was mapped to its own lineage reference. A comparison is made on one reference at a time; Build collects only that reference's VCFs and Run refuses a mixed set.">
+                    <div className="step2-src-head">
+                      <span className="step2-src-num">0</span>
+                      Compare on reference
+                    </div>
+                    <select
+                      value={fmdvInfo?.step2_reference || ""}
+                      disabled={step2Running}
+                      onChange={async (e) => {
+                        const v = e.target.value;
+                        setReference(v);
+                        // Box 2 filters the reference databases by
+                        // importReference, which outside FMDV mode comes from
+                        // the project's single reference. An FMDV project has
+                        // none, so without this the databases box stays on
+                        // "not set - select a reference in the Projects panel"
+                        // however the comparison reference is chosen, and the
+                        // ticking below happens where the user cannot see it.
+                        setImportReference(v);
+                        // The comparison is this reference's samples: untick
+                        // the rest in the build list (persisted, so the
+                        // Reference check and Run read the same selection).
+                        const byRef = refLock.samples_by_reference || {};
+                        const onRef = new Set(byRef[v] || []);
+                        const others = Object.entries(byRef).filter(([r]) => r !== v).flatMap(([, ss]) => ss);
+                        if (v) {
+                          setStep2BuildExcludedMany(others, true);
+                          setStep2BuildExcludedMany([...onRef], false);
+                          setTimeout(() => loadStep2ReferenceAudit(), 1200);
+                          // Box 2: of the databases built on this reference,
+                          // tick the one named for its serotype (SAT1 for a
+                          // SAT1-I comparison) and untick the rest, FMDV_all
+                          // included: across serotypes only the recombining
+                          // half of the genome aligns, so that tree says
+                          // nothing about serotype (docs/FMDV_MODE.md).
+                          const sero = v.split("-")[0].toUpperCase();
+                          for (const f of vcfDbFolders.filter((f) => (f.reference || "") === v)) {
+                            const name = (f.path || "").split("/").filter(Boolean).pop() || "";
+                            const want = name.toUpperCase() === sero;
+                            if ((f.enabled !== false) !== want) await toggleVcfDbFolder(f.path);
+                          }
+                        }
+                        await setFmdvMode(true, undefined);
+                        try {
+                          const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`, {
+                            method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ step2_reference: v }),
+                          });
+                          if (res.ok) setFmdvInfo(await res.json());
+                          else setStep2SetupMsg(`Comparison reference: ${(await res.text()).slice(0, 300)}`);
+                        } catch (err) { setStep2SetupMsg(`Comparison reference: ${err.message || err}`); }
+                      }}
+                    >
+                      <option value="">Choose the lineage reference to compare on…</option>
+                      {Object.entries(refLock.samples_by_reference || {}).sort().map(([r, ss]) => (
+                        <option key={r} value={r}>{r} ({ss.length} sample{ss.length === 1 ? "" : "s"})</option>
+                      ))}
+                    </select>
+                    <div className="step2-src-hint">
+                      Samples mapped to other lineage references stay in Step 1 and are left out of this
+                      comparison. Run Step 2 once per reference you want a tree and SNP matrix for.
+                    </div>
+                  </div>
+                ) : null}
                 <div className="step2-src">
                   <div className="step2-src-head">
                     <span className="step2-src-num">1</span>
@@ -10279,6 +10739,7 @@ export default function App() {
               </div>
             )}
 
+            {step2Mode !== "vp1" ? (<>
             <div className="block">
                 {importCollisions && importCollisions.samples.length > 0 ? (
                   // Two very different pieces of news share this shape. "A database's
@@ -11382,6 +11843,7 @@ export default function App() {
                 )
               ) : null}
             </div>
+            </>) : null}
           </section>
 
           <section className={paneClass("panel results-panel", "step2-results")}>
@@ -11400,7 +11862,31 @@ export default function App() {
                 {paneExpand("step2-results", "Step 2 Results")}
               </div>
             </div>
-            {step2Runs.length > 0 ? (
+            {fmdvOn ? (
+              <div className="mode-toggle" style={{ marginBottom: "0.6em" }}>
+                <button className={step2Mode === "vp1" ? "active" : ""} onClick={() => setStep2Mode("vp1")}
+                  title="VP1 typing, neighbourhoods, site tables and the VP1 tree.">VP1</button>
+                <button className={step2Mode !== "vp1" ? "active" : ""} onClick={() => { if (step2Mode === "vp1") setStep2Mode("build"); }}
+                  title="The whole-genome SNP comparisons on one lineage reference.">Genome SNPs</button>
+              </div>
+            ) : null}
+            {fmdvOn && step2Mode === "vp1" ? (
+              <FmdvVp1Results
+                apiBase={API_BASE}
+                project={selectedProject}
+                runs={vp1Runs}
+                selectedRun={step2SelectedRun}
+                onSelectRun={(id) => setStep2SelectedRun(id)}
+                groups={step2Groups}
+                loading={!!selectedProject && step2OutputsFor !== selectedProject}
+                fmdvInfo={fmdvInfo}
+                previewXlsx={previewXlsx}
+                viewInline={viewInline}
+                downloadOutput={downloadOutput}
+                treeUrlFor={(path) => `${window.location.pathname.replace(/[^/]*$/, "")}?view=tree&project=${encodeURIComponent(selectedProject)}&path=${encodeURIComponent(path)}`}
+              />
+            ) : (<>
+            {genomeRuns.length > 0 ? (
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
                 <label style={{ fontWeight: 600, whiteSpace: "nowrap", fontSize: "0.9em" }}>Comparison:</label>
                 <select
@@ -11408,7 +11894,7 @@ export default function App() {
                   onChange={(e) => setStep2SelectedRun(e.target.value || null)}
                   style={{ flex: 1 }}
                 >
-                  {step2Runs.map((r) => (
+                  {genomeRuns.map((r) => (
                     <option key={r.run_id} value={r.run_id}>
                       {step2RunTitle(r)}
                       {step2RunStateSuffix(r)}
@@ -11744,6 +12230,7 @@ export default function App() {
                 </>
               );
             })()}
+            </>)}
           </section>
         </div>
         ) : null}

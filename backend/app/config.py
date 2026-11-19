@@ -196,7 +196,11 @@ def site_path_defaults(vsnp3_effective: str = "") -> Dict[str, str]:
         "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
         "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
         "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
-        "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
+        # The checkout this backend is running from, not the site's stock
+        # install: a fork or a development copy under another path otherwise
+        # writes the stock deployment's commit and path into every run's
+        # provenance. For the site deployment the two are the same folder.
+        "vsnp_gui_deploy_path": str(Path(__file__).resolve().parents[2]),
         "audit_root": str(_SITE_ROOT / "audit"),
         "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
         # The site's list of reference locations (refs.py). In a folder of its

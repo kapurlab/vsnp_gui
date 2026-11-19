@@ -56,6 +56,8 @@ done
 
 say()  { printf '[fmdv library] %s\n' "$*"; }
 fail() { printf '[fmdv library] %s\n' "$*" >&2; exit 1; }
+# A step that dies says where, so a stop is never silent.
+trap 'printf "[fmdv library] stopped at line %s (exit %s). Fix the cause and run the same command again.\n" "${LINENO}" "$?" >&2' ERR
 
 # The env this checkout runs from, when it has one of its own.
 if [[ -x "${HERE}/../env/bin/python" ]]; then
@@ -134,7 +136,10 @@ fi
 # ---- 4. annotations, the one step that needs NCBI ------------------------------
 ANNOT="done"
 n_genomes="$(find "${LIB}/genomes" -maxdepth 1 -name '*.fasta' | wc -l | tr -d ' ')"
-n_annot="$(find "${LIB}/annotations" -maxdepth 1 -name '*.gbk' 2> /dev/null | wc -l | tr -d ' ')"
+n_annot=0
+if [[ -d "${LIB}/annotations" ]]; then
+  n_annot="$(find "${LIB}/annotations" -maxdepth 1 -name '*.gbk' | wc -l | tr -d ' ')"
+fi
 if [[ ${FORCE} -eq 0 && "${n_annot}" -ge "${n_genomes}" && "${n_genomes}" -gt 0 ]]; then
   say "4/4 GenBank annotations: present"
 elif [[ ${OFFLINE} -eq 1 ]]; then

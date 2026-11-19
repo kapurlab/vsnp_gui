@@ -238,14 +238,12 @@ if command -v curl >/dev/null 2>&1; then
 else
   echo "[MISSING] curl — Method 3 (ENA HTTPS/FTP) will be skipped"
 fi
-# ENA answers some file requests with 403 under load, and plain --retry does
-# not retry an HTTP error. --retry-all-errors does, where this curl has it
-# (7.71+; an older curl rejects the option outright, so it is only added
-# when the help text lists it).
-CURL_RETRY="--retry 3 --retry-delay 5"
-if [ "$HAS_CURL" -eq 1 ] && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
-  CURL_RETRY="$CURL_RETRY --retry-all-errors"
-fi
+# A transfer that stops moving has to end. curl sets no limit of its own: a
+# connection that goes quiet midway is waited on for ever, and the job then
+# says "Downloading" until someone kills it (Ames HPC, 2026-11-19: SRR34371563
+# stopped at 12.2 of 50.3 MB and sat there). Under 1 KB/s for 60 s is a stall;
+# curl ends with exit 28 and fetch_resumable carries on from the bytes it has.
+CURL_STALL="--connect-timeout 30 --speed-limit 1024 --speed-time ${{SRA_STALL_SECONDS:-60}}"
 
 if command -v pigz >/dev/null 2>&1; then
   HAS_PIGZ=1; echo "[OK] pigz found (fast compression)"
@@ -380,6 +378,48 @@ method2() {{
 
 # ── Method 3: ENA curl (HTTPS then FTP fallback) ───────────────
 
+size_of() {{
+  if [ -f "$1" ]; then echo $(( $(wc -c < "$1") )); else echo 0; fi
+}}
+
+# Fetch one URL into "<name>.part" and give it its real name only when it is
+# whole, so a file still arriving (or abandoned) is never listed as ready to
+# run. A try that added bytes is followed by another that resumes where it
+# stopped (-C -), up to 30 of them; three tries in a row that add nothing end
+# it, which is what covers ENA's 403-under-load and a dead link alike. curl's
+# own --retry is not used: it starts the file again from the beginning.
+fetch_resumable() {{
+  local url="$1" out="$2" part="$2.part"
+  local before after try=0 idle=0
+  while [ "$try" -lt 30 ]; do
+    try=$((try + 1))
+    before=$(size_of "$part")
+    if curl -f -C - $CURL_STALL {curl_insecure} "$url" -o "$part" 2>&1; then
+      if ! gzip -t "$part" 2>/dev/null; then
+        echo "  [FAILED] $out arrived damaged (gzip test) — discarded"
+        rm -f "$part"
+        return 1
+      fi
+      mv -f "$part" "$out"
+      return 0
+    fi
+    after=$(size_of "$part")
+    if [ "$after" -gt "$before" ]; then
+      idle=0
+      echo "  $out stopped at $after bytes (try $try) — resuming"
+    else
+      idle=$((idle + 1))
+      if [ "$idle" -ge 3 ]; then break; fi
+      echo "  $out: nothing received (try $try) — trying again"
+    fi
+    sleep 5
+  done
+  # Nothing is kept from a transfer that ended without progress: a leftover
+  # the server will not extend would fail every later Download the same way.
+  rm -f "$part"
+  return 1
+}}
+
 method3() {{
   local acc="$1"
   if [ "$CAN_METHOD3" -eq 0 ]; then return 1; fi
@@ -394,7 +434,7 @@ method3() {{
   # again before giving up.
   local urls="" attempt
   for attempt in 1 2 3 4; do
-    urls=$(curl -s {curl_insecure} "$api_url" | awk -F'\\t' -v a="$acc" '$1 == a {{print $2; exit}}')
+    urls=$(curl -s --connect-timeout 30 --max-time 60 {curl_insecure} "$api_url" | awk -F'\\t' -v a="$acc" '$1 == a {{print $2; exit}}')
     case "$urls" in
       *fastq*) break ;;
     esac
@@ -416,11 +456,11 @@ method3() {{
     local filename
     filename=$(basename "$url")
     echo "  Downloading $filename"
-    # Try HTTPS first, then FTP. The retries cover the transient errors a
-    # 26-sample batch reliably meets somewhere (CURL_RETRY, set above).
-    if curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "https://$url" -o "$filename" 2>&1; then
+    # Try HTTPS first, then FTP. fetch_resumable retries the transient errors
+    # a 26-sample batch reliably meets somewhere, and resumes a stalled file.
+    if fetch_resumable "https://$url" "$filename"; then
       echo "  [OK] $filename downloaded via HTTPS"
-    elif curl -f ${{CURL_RETRY:---retry 3 --retry-delay 5}} {curl_insecure} "ftp://$url" -o "$filename" 2>&1; then
+    elif fetch_resumable "ftp://$url" "$filename"; then
       echo "  [OK] $filename downloaded via FTP"
     else
       echo "  [FAILED] Could not download $filename"
@@ -434,6 +474,13 @@ method3() {{
     # aligned as if it were the whole sample.
     for url in "${{url_array[@]}}"; do rm -f "$(basename "$url")"; done
     return 1
+  fi
+  # A run ENA serves as ONE file is a single-read run whatever the file is
+  # called, and for Nanopore runs it is called <acc>_1.fastq.gz (SRR34371563).
+  # already_have reads a lone _1 as half of a pair, so that finished download
+  # was reported as failed. Give it the name fasterq-dump gives the same run.
+  if [ "${{#url_array[@]}}" -eq 1 ] && [ -f "${{acc}}_1.fastq.gz" ] && [ ! -f "${{acc}}.fastq.gz" ]; then
+    mv "${{acc}}_1.fastq.gz" "${{acc}}.fastq.gz"
   fi
   return 0
 }}
@@ -478,7 +525,8 @@ download_one() {{
 
 # xargs subshells need our functions and the HAS_*/CAN_* state.
 export -f download_one already_have already_in_step1 compress_fastqs method1 method2 method3
-export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ CURL_RETRY
+export -f size_of fetch_resumable
+export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ CURL_STALL
 export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
 export STEP1_DIR
 

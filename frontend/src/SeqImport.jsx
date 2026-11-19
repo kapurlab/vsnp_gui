@@ -255,8 +255,26 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
           <div className="muted" style={{ fontSize: "12px" }}>
             {preview.rows.length} record{preview.rows.length === 1 ? "" : "s"}
             {preview.ncbi?.requested ? ` · ${preview.ncbi.fetched} of ${preview.ncbi.requested} accession${preview.ncbi.requested === 1 ? "" : "s"} fetched${preview.ncbi.present ? `, ${preview.ncbi.present} already in the library or this project` : ""}` : ""}
-            {preview.blastn === false ? " · blastn is not on the backend's PATH, so VP1 cannot be checked" : ""}
           </div>
+          {/* A missing blastn refuses every record at once. As a clause on the
+              grey count line it read as a footnote, and the page then showed
+              unticked, greyed rows and "Import 0 records" with no visible cause
+              (Ames HPC, 2026-11-19: the code arrived by a site sync, the env
+              never got BLAST+). The backend looks for blastn on every preview,
+              so no restart is needed once it is installed. */}
+          {preview.blastn === false ? (
+            <div className="note warning" style={{ fontSize: "12px" }}>
+              <strong>Nothing can be imported yet: BLAST+ (blastn) is missing from the environment vSNP3 runs in.</strong>{" "}
+              An FMDV project checks each record's VP1 with blastn before it imports it. To add BLAST+, run one of these
+              from the suite folder, then press Preview again:
+              <div style={{ marginTop: "4px" }}>
+                <code>bin/bdtools install vsnp_gui</code> on your own computer
+              </div>
+              <div>
+                <code>bin/bdtools update-packages vsnp_gui</code> on a shared install (a site administrator runs it)
+              </div>
+            </div>
+          ) : null}
           {preview.ncbi?.message ? (
             <div className="note error" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{preview.ncbi.message}</div>
           ) : null}
@@ -284,9 +302,11 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
                   const dup = picked[r.id] && nameCounts[nm] > 1;
                   const isCtx = (e.role || "sample") === "context";
                   return (
-                    <tr key={r.id} style={refused ? { opacity: 0.6 } : undefined}>
+                    <tr key={r.id}>
                       <td><input type="checkbox" checked={!!picked[r.id]} disabled={refused} onChange={(ev) => setPicked({ ...picked, [r.id]: ev.target.checked })} /></td>
-                      <td title={`${r.header}\n${r.source}`} style={{ maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {/* The dimming is on this cell, not the row: row opacity
+                          also faded the reason the record was refused. */}
+                      <td title={`${r.header}\n${r.source}`} style={{ maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: refused ? 0.6 : undefined }}>
                         <span style={{ fontFamily: "monospace" }}>{r.header.split(" ")[0]}</span>
                         <div className="muted" style={{ fontSize: "10px" }}>
                           {r.kind} · {r.class} · {r.length.toLocaleString()} nt{r.n_count ? ` · ${r.n_count} N` : ""}
@@ -304,7 +324,10 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
                           </div>
                         ) : null}
                         {dup ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>name used twice</div> : null}
-                        {!fmdvOn && r.problem ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>{r.problem}</div> : null}
+                        {/* Under the name in every mode: the VP1 column, where an
+                            FMDV project used to say this, is scrolled out of
+                            sight at the Inputs panel's usual width. */}
+                        {r.problem ? <div style={{ fontSize: "11px", color: "var(--danger, #b00)", whiteSpace: "normal" }}>Cannot be imported: {r.problem}</div> : null}
                       </td>
                       {fmdvOn ? (
                         <td>
@@ -343,7 +366,7 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
                             <div className="muted" style={{ fontSize: "10px" }}>nearest {r.vp1.template} {r.vp1.identity}%</div>
                           </>
                         ) : (
-                          <span style={{ color: "var(--danger, #b00)" }}>{r.problem}</span>
+                          <span className="muted">—</span>
                         )}
                       </td>
                       ) : null}
@@ -358,6 +381,11 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
               Import {nPicked} record{nPicked === 1 ? "" : "s"}
             </button>
             <button type="button" className="ghost" onClick={() => { setPreview(null); setMsg(""); }}>Cancel</button>
+            {preview.rows.length > 0 && preview.rows.every((r) => r.problem) ? (
+              <span style={{ fontSize: "12px", color: "var(--danger, #b00)" }}>
+                None of these can be imported; the reason is under each name.
+              </span>
+            ) : null}
           </div>
         </div>
       ) : null}

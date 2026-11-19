@@ -12,17 +12,29 @@ became the "URL" list and the accession failed outright — observed on 1 of 26
 runs in a training batch, on a run ENA does serve. These tests run the real
 generated method3 in bash against a fake curl.
 
+A transfer can also stop moving partway. curl waits on a quiet connection for
+ever unless told otherwise, so the job said "Downloading" until it was killed
+(Ames HPC, 2026-11-19: SRR34371563 stopped at 12.2 of 50.3 MB), and the partial
+file sat in download/ under its final name, listed as ready to run. The stall
+tests run the generated fetch_resumable with the real curl against a local
+server that stops sending. And a Nanopore run arrives from ENA as one file
+named <acc>_1.fastq.gz, which already_have took for half of a pair.
+
 Run directly:  python test_sra_ena_fallback.py
 """
 
 from __future__ import annotations
 
+import gzip
+import http.server
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,7 +58,7 @@ out=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2;;
-    --retry|--retry-delay) shift 2;;
+    --connect-timeout|--speed-limit|--speed-time|--max-time|-C) shift 2;;
     -*) shift;;
     *) url="$1"; shift;;
   esac
@@ -58,9 +70,9 @@ case "$url" in
     cat "$REPLIES/$n"; rm -f "$REPLIES/$n";;
   *_1.fastq.gz)
     if [ -n "${FAIL_R1:-}" ]; then echo "curl: (22) The requested URL returned error: 403" >&2; exit 22; fi
-    echo "$url" >> "$FETCHED"; echo fastq > "$out";;
+    echo "$url" >> "$FETCHED"; echo fastq | gzip > "$out";;
   *)
-    echo "$url" >> "$FETCHED"; echo fastq > "$out";;
+    echo "$url" >> "$FETCHED"; echo fastq | gzip > "$out";;
 esac
 """
 
@@ -74,7 +86,95 @@ def function_source(name: str) -> str:
 
 
 def method3_source() -> str:
-    return function_source("method3")
+    """method3 and the two functions it calls."""
+    return "\n".join(function_source(n) for n in ("size_of", "fetch_resumable", "method3"))
+
+
+def stall_setting() -> str:
+    """The script's own CURL_STALL line, so the test runs the shipped limits
+    (SRA_STALL_SECONDS only shortens the wait)."""
+    script = sra.build_download_script(Path("/nonexistent"), [ACC], allow_insecure_https=False)
+    m = re.search(r"^CURL_STALL=.*$", script, re.M)
+    if not m:
+        raise AssertionError("CURL_STALL not set in the generated script")
+    return m.group(0)
+
+
+PAYLOAD = gzip.compress(os.urandom(400_000))
+
+
+class _Stalling(http.server.BaseHTTPRequestHandler):
+    """/stall: the first request sends half the file and goes quiet; later ones
+    honour Range. /dead: headers, then nothing, every time. /damaged: bytes
+    that are not gzip. Requests are recorded on the server as (path, Range)."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        rng = self.headers.get("Range", "")
+        self.server.seen.append((self.path, rng))
+        if self.path.startswith("/damaged"):
+            body = b"this is not a gzip file\n" * 50
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/dead"):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(PAYLOAD)))
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(15)
+            self.close_connection = True
+            return
+        first = sum(1 for path, _ in self.server.seen if path == self.path) == 1
+        if first:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(PAYLOAD)))
+            self.end_headers()
+            self.wfile.write(PAYLOAD[: len(PAYLOAD) // 2])
+            self.wfile.flush()
+            time.sleep(15)
+            self.close_connection = True
+            return
+        start = int(re.match(r"bytes=(\d+)-", rng).group(1)) if rng else 0
+        body = PAYLOAD[start:]
+        self.send_response(206 if rng else 200)
+        if rng:
+            self.send_header("Content-Range", f"bytes {start}-{len(PAYLOAD) - 1}/{len(PAYLOAD)}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def run_fetch(path: str) -> tuple[int, str, dict, list, float]:
+    """The generated fetch_resumable, real curl, against the local server.
+    Returns (exit status, log, {file name: bytes}, requests seen, seconds)."""
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Stalling)
+    srv.daemon_threads = True
+    srv.seen = []
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    work = Path(tempfile.mkdtemp(prefix="stall-"))
+    try:
+        harness = (
+            "set -u\nsleep() { :; }\n" + stall_setting() + "\n"
+            + function_source("size_of") + function_source("fetch_resumable")
+            + f'\nfetch_resumable "http://127.0.0.1:{srv.server_address[1]}{path}" out.fastq.gz\n'
+        )
+        env = dict(os.environ, SRA_STALL_SECONDS="2", NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+        t0 = time.time()
+        p = subprocess.run(["bash", "-c", harness], cwd=work, env=env,
+                           capture_output=True, text=True, timeout=120)
+        took = time.time() - t0
+        files = {f.name: f.read_bytes() for f in work.iterdir()}
+        return p.returncode, p.stdout + p.stderr, files, list(srv.seen), took
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def already_have(files: list[str]) -> int:
@@ -102,7 +202,7 @@ def run_method3(replies: list[str], fail_r1: bool = False) -> tuple[int, str, li
         work = tmp / "work"
         work.mkdir()
         harness = (
-            "set -u\nCAN_METHOD3=1\nsleep() { :; }\n" + method3_source()
+            "set -u\nCAN_METHOD3=1\nCURL_STALL=\"\"\nsleep() { :; }\n" + method3_source()
             + f'\nmethod3 "{ACC}"\n'
         )
         env = dict(os.environ, PATH=f"{tmp/'bin'}:{os.environ['PATH']}",
@@ -158,6 +258,43 @@ def main() -> int:
     rc, out, files, fetched = run_method3([TABLE], fail_r1=True)
     check(rc == 1, "method3 reports the accession as failed")
     check(files == [], f"no lone mate left in download/ ({files})")
+
+    print("\n[a run ENA serves as one file named _1 is a single-read run]")
+    single = f"run_accession\tfastq_ftp\n{ACC}\tftp.sra.ebi.ac.uk/vol1/fastq/SRR338/087/{ACC}/{ACC}_1.fastq.gz\n"
+    rc, out, files, fetched = run_method3([single])
+    check(rc == 0, "method3 succeeds")
+    check(files == [f"{ACC}.fastq.gz"], f"saved under the single-read name ({files})")
+    check(already_have(files) == 0, "and already_have counts it, so the run is reported downloaded")
+
+    print("\n[no download is left under a .part name, and none is written straight to its final name]")
+    rc, out, files, fetched = run_method3([TABLE])
+    check(not any(f.endswith(".part") for f in files), f"no .part left after a clean run ({files})")
+    check('-o "$part"' in function_source("fetch_resumable"), "curl writes to the .part file")
+
+    if shutil.which("curl"):
+        print("\n[a transfer that goes quiet halfway is ended and resumed, not waited on]")
+        rc, out, files, seen, took = run_fetch("/stall.fastq.gz")
+        check(rc == 0, f"fetch_resumable succeeds ({out.strip()[-200:]})")
+        check(files.get("out.fastq.gz") == PAYLOAD, "the file is whole and byte-identical")
+        check(list(files) == ["out.fastq.gz"], f"no .part left ({sorted(files)})")
+        check(len(seen) == 2 and seen[1][1] == f"bytes={len(PAYLOAD) // 2}-",
+              f"the second request resumed at the byte the first stopped on ({seen})")
+        check("resuming" in out, "the resume is visible in the log")
+        check(took < 30, f"ended by the stall limit, not by the server giving up ({took:.0f}s)")
+
+        print("\n[a link that sends nothing fails after three tries and leaves nothing behind]")
+        rc, out, files, seen, took = run_fetch("/dead.fastq.gz")
+        check(rc == 1, "fetch_resumable reports failure")
+        check(files == {}, f"nothing left in download/ ({sorted(files)})")
+        check(len(seen) == 3, f"three tries ({len(seen)})")
+        check(took < 40, f"it ends ({took:.0f}s)")
+
+        print("\n[a file that is not gzip is discarded, not named as a FASTQ]")
+        rc, out, files, seen, took = run_fetch("/damaged.fastq.gz")
+        check(rc == 1 and files == {}, f"refused and removed ({sorted(files)})")
+        check("gzip test" in out, "says why")
+    else:
+        print("\nSKIP stall tests: no curl")
 
     print("\n[already_have: a pair needs both mates]")
     check(already_have([f"{ACC}_1.fastq.gz", f"{ACC}_2.fastq.gz"]) == 0, "both mates: have")

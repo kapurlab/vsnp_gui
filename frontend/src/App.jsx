@@ -1294,6 +1294,10 @@ export default function App() {
   // Item 5: SRA download feedback
   const [sraJobId, setSraJobId] = useState("");
   const [sraStatus, setSraStatus] = useState("");
+  // When Download was clicked. The counter beside "Downloading…" used to count
+  // from its own mount, so opening another Inputs tab and coming back set a
+  // ten-minute wait back to 0s.
+  const [sraStartedAt, setSraStartedAt] = useState(0);
   // Persistent outcome of the last SRA download (from sra_download_report.tsv).
   // Buckets survive a reload, so skipped-because-already-in-Step-1 accessions —
   // which never land in download/ and so leave no other on-screen trace — stay
@@ -5355,6 +5359,8 @@ export default function App() {
     const accessions = parseAccessions(sraText);
     if (!accessions.length) return;
     setSraStatus(`Downloading ${accessions.length} accession${accessions.length > 1 ? "s" : ""}...`);
+    setSraStartedAt(Date.now());
+    setSraJobId("");
     setShowRowLogs(true);
     let res;
     try {
@@ -5379,6 +5385,21 @@ export default function App() {
     }
     setJobId(data.job_id);
     setSraJobId(data.job_id);
+  }
+
+  // Stop the running download. The job's whole process group is ended, so no
+  // curl or fasterq-dump is left behind; a file that was arriving stays as
+  // <name>.part and the next Download carries on from it.
+  async function sraStop() {
+    if (!sraJobId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${sraJobId}/stop`, { method: "POST" });
+      if (res.ok || res.status === 409) setSraStatus("Download stopped");
+      else setSraStatus(`Stop failed: HTTP ${res.status}`);
+    } catch (e) {
+      setSraStatus(`Stop failed: ${e.message || "network error"}`);
+    }
+    if (selectedProject) loadInputs(selectedProject);
   }
 
   // `folders` is the database list to build from. Build passes the list it
@@ -7630,7 +7651,14 @@ export default function App() {
                       <span className="pulse-dot" />
                     ) : null}
                     {sraStatus}
-                    {sraStatus.includes("Downloading") ? <> <Elapsed /></> : null}
+                    {sraStatus.includes("Downloading") ? <> <Elapsed since={sraStartedAt || undefined} /></> : null}
+                    {sraStatus.includes("Downloading") && sraJobId ? (
+                      <button type="button" className="ghost" onClick={sraStop}
+                        style={{ fontSize: "11px", padding: "2px 8px", marginLeft: "8px" }}
+                        title="End this download. Files already complete are kept; one that was arriving is resumed by the next Download.">
+                        Stop
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
                 {/* Persistent outcome of the last download. The skipped bucket is

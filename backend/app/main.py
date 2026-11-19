@@ -6376,7 +6376,8 @@ def fmdv_lineages():
     path = lib / "lineages.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"No FMDV reference library at {lib}. "
-                            f"Run bin/fmdv_reflib.py build first.")
+                            f"Build it once with bin/fmdv_library_build.sh "
+                            f"(a bdtools install: bin/bdtools setup-databases fmdv).")
     try:
         idx = json.loads(path.read_text())
     except (OSError, ValueError) as e:
@@ -6475,7 +6476,7 @@ def fmdv_project_get(project: str):
 def _fmdv_tree_env() -> Dict[str, Any]:
     """Where mafft and a tree builder live for the VP1 tree.
 
-    The fork's own conda env (conda_setup/environment.yml, name fmdv_gui)
+    The fork's own conda env (conda_setup/fmdv_environment.yml, name fmdv_gui)
     carries mafft and iqtree; raxmlHPC ships with the vsnp3 env this backend
     runs in. The job's PATH is that env's bin, then this interpreter's bin,
     then the inherited PATH; bin/fmdv_vp1_tree.py takes raxmlHPC, iqtree or
@@ -6558,7 +6559,7 @@ def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
         missing = [n for n, v in (("mafft", env["mafft"]), ("a tree builder (raxmlHPC, iqtree or FastTree)", env["tree_tool"])) if not v]
         raise HTTPException(status_code=400, detail=(
             "VP1 tree: " + " and ".join(missing) + " not found. Create the fmdv_gui conda env from "
-            "conda_setup/environment.yml, or point FMDV_GUI_TREE_ENV at an env that has them."))
+            "conda_setup/fmdv_environment.yml, or point FMDV_GUI_TREE_ENV at an env that has them."))
     sero = (payload.serotype or "").strip().upper()
     if sero and not re.fullmatch(r"[A-Z0-9]+", sero):
         raise HTTPException(status_code=400, detail="serotype must be letters and digits, e.g. SAT1")

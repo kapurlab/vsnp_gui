@@ -16,7 +16,7 @@ now lives inside vsnp_gui, and the standalone pipeline is not deployed.
 | bdtools suite at `/srv/ahi` | about 21 GB, all nine tools | built at Penn State in an Apptainer sandbox bound to `/srv/ahi` | the dashboard, the installs, the tests, the updates |
 | vsnp3 env (vsnp3 3.37 with the site patches) | 2.1 GB | bdtools, from bioconda | Step 1, Step 2, minimap2, samtools, bcftools, raxmlHPC, openpyxl, and weasyprint, which the vsnp3 package pulls in, so the reports need nothing more |
 | vsnp_gui on the `fmdv-mode` branch | the checkout | bdtools, pinned to a tag cut from the branch | the GUI; FMDV mode is a project flag, stock projects run unchanged |
-| the fork's own env `fmdv_gui` | 96 MB | `conda_setup/environment.yml`: mafft, iqtree, seqkit, BLAST+ | VP1 alignment, trees when raxmlHPC is absent, VP1 context slicing and typing |
+| the fork's own env `fmdv_gui` | 96 MB | `conda_setup/fmdv_environment.yml`: mafft, iqtree, seqkit, BLAST+ | VP1 alignment, trees when raxmlHPC is absent, VP1 context slicing and typing |
 | the FMDV reference library | 5.0 GB, of which the `panel_build/` alignments are 4.4 GB | built at Penn State from a NanoFMDV checkout (40 MB) and NCBI, once | 79 lineage genomes with GenBank annotations, VP1 panel, per-serotype GenBank VP1 sets (9,177 records), the typing database, the Step 2 reference databases per lineage reference, the defining-SNP sheets |
 | test data with answer keys | SYN2 189 MB; the Pirbright MinKNOW folder 6.6 GB; the SAT1 SRA reads | WGS3 | `bdtools test` for the suite, and an FMDV smoke test that proves the install on site, offline |
 
@@ -111,7 +111,7 @@ On WGS3, which is the same platform as the AHI workstation.
    says, and the AHI manifest pinning `vsnp_gui` to the fork tag.
 2. In the Apptainer sandbox bound to `/srv/ahi`: `bdtools install` for the
    suite, then `mamba env create -p /srv/ahi/envs/fmdv_gui -f
-   conda_setup/environment.yml`.
+   conda_setup/fmdv_environment.yml`.
 3. The library: `fmdv_library_build.sh` with a NanoFMDV checkout, online
    for the GenBank annotations and the context sets; then
    `fmdv_panel_build.sh` and `fmdv_genome_db.py` for the lineage references

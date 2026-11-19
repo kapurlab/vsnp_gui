@@ -676,7 +676,7 @@ disagrees with the reads vote gets a note: a mixed sample, or a consensus
 built on the wrong serotype.
 
 Needs BLAST+ (blastn, makeblastdb) on the backend's PATH; the fork's
-`conda_setup/environment.yml` carries it, and the development server has
+`conda_setup/fmdv_environment.yml` carries it, and the development server has
 the system copy.
 
 ## Step 2 in FMDV mode leads with VP1
@@ -745,8 +745,8 @@ back to iqtree then FastTree. Output goes to
 run list and the tree viewer shows it like any other group.
 
 mafft is not in the vsnp3 env and that env is not changed. The fork has its
-own `conda_setup/environment.yml` (mafft, iqtree, seqkit):
-`mamba env create -f conda_setup/environment.yml`, then put that env's
+own `conda_setup/fmdv_environment.yml` (mafft, iqtree, seqkit):
+`mamba env create -f conda_setup/fmdv_environment.yml`, then put that env's
 `bin` on PATH before running the script. Without mafft the script stops
 with that instruction.
 

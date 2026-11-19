@@ -48,7 +48,7 @@ export default function FmdvScopePicker({ lineages, scope, onChange, disabled })
   const lineageToken = (lin) => (lin === "(unassigned)" ? "" : lin);
 
   if (!lineages) {
-    return <div className="muted" style={{ fontSize: "0.9em" }}>FMDV reference library not found. Run <code>bin/fmdv_reflib.py build</code>.</div>;
+    return <div className="muted" style={{ fontSize: "0.9em" }}>FMDV reference library not found. Build it once: <code>bin/bdtools setup-databases fmdv</code> on a bdtools install, or <code>bin/fmdv_library_build.sh</code> in this checkout.</div>;
   }
 
   return (

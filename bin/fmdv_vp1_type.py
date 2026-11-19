@@ -291,7 +291,7 @@ def main() -> int:
     lib = Path(a.lib).expanduser().resolve()
     blastn, makeblastdb = shutil.which("blastn"), shutil.which("makeblastdb")
     if not (blastn and makeblastdb):
-        _err("vp1_type: blastn and makeblastdb must be on PATH (BLAST+; conda_setup/environment.yml has it)")
+        _err("vp1_type: blastn and makeblastdb must be on PATH (BLAST+; conda_setup/fmdv_environment.yml has it)")
         return 2
     project_context = Path(a.project_context).expanduser() if a.project_context else None
     try:

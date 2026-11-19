@@ -82,7 +82,7 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
   const running = status === "running" || status === "queued";
   const noSamples = serotypes.length === 0;
   const why = !tools.ready
-    ? "mafft or a tree builder is missing: create the fmdv_gui conda env from conda_setup/environment.yml."
+    ? "mafft or a tree builder is missing. A bdtools install adds mafft with bin/bdtools install vsnp_gui; elsewhere create the fmdv_gui conda env from conda_setup/fmdv_environment.yml."
     : noSamples ? "Run Step 1 first; the tree uses each sample's VP1 consensus."
     : running ? "A VP1 tree is being built." : "";
 

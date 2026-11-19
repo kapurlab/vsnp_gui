@@ -195,7 +195,7 @@ New, FMDV only, nothing in stock mode calls them:
 | `frontend/src/FmdvVp1Results.jsx` | the VP1 half of Step 2 Results: run pills; Typing, Tree, Neighbours, Sites, Files; report links |
 | `backend/app/test_fmdv_*.py`, `test_ont_import.py`, `test_vcf_reference_detect.py` | tests in the stock script style |
 | `docs/FMDV_WALKTHROUGH_PRJNA693428.md`, `docs/SYN_synthetic_run1_answer_key/` | the walkthrough on public data, and the synthetic run's key |
-| `conda_setup/environment.yml` | the fork's own tools beside the vsnp3 env: mafft, iqtree, seqkit, BLAST+ |
+| `conda_setup/fmdv_environment.yml` | the fork's own tools beside the vsnp3 env: mafft, iqtree, seqkit, BLAST+ |
 | `docs/FMDV_MODE.md`, this file | design, measurements, state |
 
 Edits to stock files, every one gated on the mode flag or on an FMDV
@@ -239,12 +239,21 @@ is not redistributed here).
 
 ## How to run it
 
+On a bdtools install (vsnp_gui v0.4.154 and later) none of the prerequisites
+below is done by hand. `bin/bdtools install vsnp_gui` puts mafft and BLAST+
+into the env the backend runs in, where the backend looks first, and
+`bin/bdtools setup-databases fmdv` builds the library with
+`bin/fmdv_library_build.sh` (which fetches NanoFMDV itself) and links it as
+`<site>/refs/fmdv`, where the GUI finds it without a config key. What follows
+is the same thing by hand, for an install outside bdtools; the four library
+commands are what `bin/fmdv_library_build.sh --lib ~/fmdv_refs` runs.
+
 Prerequisites beyond a working vsnp_gui:
 
 1. The vsnp3 env on PATH when the backend starts, as for stock. The FMDV
    scripts use its `minimap2`, `samtools`, `bcftools` and `raxmlHPC`.
 2. The fork's own env for mafft, iqtree, seqkit and BLAST+:
-   `mamba env create -f conda_setup/environment.yml`, then put its `bin` on
+   `mamba env create -f conda_setup/fmdv_environment.yml`, then put its `bin` on
    PATH as well. (BLAST+ was added to the file on 15 November and that
    install has not been exercised; on the development server BLAST+ came
    from the system.)

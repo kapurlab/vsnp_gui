@@ -126,7 +126,7 @@ export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onI
         <div style={{ display: "flex", alignItems: "center", gap: "0.6em", marginTop: "0.5em", flexWrap: "wrap" }}>
           <button onClick={retype} disabled={disabled || running || !samples.length || fmdvInfo?.vp1_typing_ready === false}
             title={fmdvInfo?.vp1_typing_ready === false
-              ? "blastn is not on the backend's PATH: BLAST+ is in conda_setup/environment.yml."
+              ? "blastn is not on the backend's PATH. A bdtools install adds it with bin/bdtools install vsnp_gui; elsewhere BLAST+ is in conda_setup/fmdv_environment.yml."
               : "Type every sample's VP1 consensus again against the library's GenBank VP1 sets (blastn). A few seconds."}>
             {running ? "Typing…" : "Type VP1"}
           </button>

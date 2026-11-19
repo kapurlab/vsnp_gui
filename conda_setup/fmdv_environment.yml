@@ -1,0 +1,23 @@
+# FMDV mode's own tools, for an install that keeps them in an env of their own
+# beside the vsnp3 env:
+#   mamba env create -f conda_setup/fmdv_environment.yml
+#   export PATH=$HOME/miniforge3/envs/fmdv_gui/bin:$PATH
+# mafft aligns VP1 sequences for bin/fmdv_vp1_tree.py; the tree itself uses
+# raxmlHPC from the vsnp3 env when it is on PATH, else iqtree2 from here.
+# blast (blastn, makeblastdb) is for the VP1 typing, the sequence import and
+# bin/fmdv_vp1_context.py.
+#
+# A bdtools install does not read this file. There mafft and blast are pinned
+# in the suite's tools.yml and installed into the env the backend runs in,
+# where the backend looks first (the folder of its own interpreter). The file
+# is not named environment.yml on purpose: bdtools builds a tool's whole env
+# from conda_setup/environment.yml when it finds one, and this is not that.
+name: fmdv_gui
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - mafft
+  - iqtree
+  - seqkit
+  - blast

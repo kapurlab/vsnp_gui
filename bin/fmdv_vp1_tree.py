@@ -28,7 +28,7 @@ Output, under <project>/step2/<stamp>_VP1-tree[-SEROTYPE]/VP1/: the input sequen
 the mafft alignment, VP1.tre (Newick) and vp1_tree.json. The folder sits
 where the Step 2 tree viewer looks for .tre files.
 
-Tools: mafft (the fork's own env, conda_setup/environment.yml); the tree
+Tools: mafft (the fork's own env, conda_setup/fmdv_environment.yml); the tree
 from raxmlHPC (vsnp3 env) when on PATH, else iqtree2 or iqtree, else
 FastTree. Nothing in a shared environment is changed.
 """
@@ -363,7 +363,7 @@ def main() -> int:
     mafft = shutil.which("mafft")
     if not mafft:
         _err("vp1_tree: mafft is not on PATH. It is in the fork's own env: "
-             "mamba env create -f conda_setup/environment.yml, then add that env's bin to PATH.")
+             "mamba env create -f conda_setup/fmdv_environment.yml, then add that env's bin to PATH.")
         return 2
 
     samples, report = collect_samples(project, serotype, a.min_called)

@@ -16,9 +16,9 @@
 #
 #   Example (the Anthracis pilot):
 #     ./roar_import.sh \
-#       /storage/group/vxk1/default/Projects/Anthracis/vsnp/Bacillus_anthracis_ames_ancestor \
+#       /storage/group/<group>/default/Projects/Anthracis/vsnp/Bacillus_anthracis_ames_ancestor \
 #       Bacillus_anthracis_ames \
-#       --name Anthracis_ames_ancestor --fastq-filter 'OUAT|SVVU|IAH'
+#       --name Anthracis_ames_ancestor --fastq-filter 'PREFIX1|PREFIX2'
 #
 #   Arguments:
 #     <roar_project_path>  source dir on Roar containing step1/ + step2/

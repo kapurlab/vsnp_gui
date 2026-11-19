@@ -1,8 +1,22 @@
-"""Import sequences that are not reads into an FMDV project.
+"""Import sequences that are not reads: a FASTA or GenBank record as a sample.
 
 Two inputs the reads path does not cover: a FASTA somebody already has (a
-consensus genome or a VP1 sequence from another lab or pipeline) and GenBank
-accessions. Each imported record plays one of two roles (docs/FMDV_SEQ_IMPORT.md):
+consensus genome from another lab or pipeline, an assembly, a published
+genome) and GenBank accessions.
+
+IN ANY PROJECT a record long enough to make reads from becomes simulated
+paired reads in <project>/download/<name>_R1/_R2.fastq.gz and a sample folder
+step1/<name>/, and goes through Grab and Step 1 like any sample: alignment,
+VCF, and Step 2 beside the project's own samples. That is how a published
+genome joins a comparison. The reads are perfect and uniform, skip every run
+of N (vsnp3's own simulator turns N into random bases, which a masked
+consensus must not do), are made at `depth` fold (100 by default, the caller's
+to change), and are marked simulated in every read header and in
+step1/<name>/imported_sequence.json, so the Results table badges the row and
+QC does not apply to it.
+
+IN AN FMDV PROJECT the same import also types the record, and a record plays
+one of two roles (docs/FMDV_SEQ_IMPORT.md):
 
   sample   a GENOME (7,000 nt or more) becomes simulated paired reads in
            <project>/download/<name>_R1/_R2.fastq.gz and goes through Grab and
@@ -10,11 +24,10 @@ accessions. Each imported record plays one of two roles (docs/FMDV_SEQ_IMPORT.md
            report, whole-genome Step 2. The reads are perfect and uniform, skip
            every run of N (vsnp3's own simulator turns N into random bases,
            which the FMDV doc forbids for a masked consensus), and are marked
-           simulated in every header and in step1/<name>/fmdv_import.json, so
-           the Results table badges the row and QC does not apply.
+           simulated in every header, plus the typing and the VP1 tree.
            A shorter record (VP1, P1, a fragment) has nothing for the
            whole-genome workflow and lands sequence-only in step1/<name>/ with
-           <name>_imported.fasta, <name>_VP1.fasta, fmdv_import.json and
+           <name>_imported.fasta, <name>_VP1.fasta, imported_sequence.json and
            fmdv_consensus.json (what the tree reads): no reads, no alignment,
            Grab and the batch skip the folder, the typer and the tree take it.
   context  lands in <project>/fmdv_context/<SEROTYPE>.fasta and .tsv, named
@@ -71,6 +84,32 @@ from app.ont_import import safe_sample_name  # noqa: E402
 VP1_MIN, VP1_MAX = ctx.VP1_MIN, ctx.VP1_MAX
 MIN_RECORD = 600            # under this a record is refused: partial VP1 makes gappy alignments
 MIN_VP1_COVERAGE = ctx.MIN_VP1_COVERAGE
+# The per-sample record of an import, in step1/<name>/. Written under the
+# neutral name since v0.4.155, when importing stopped being FMDV-only; the
+# legacy name is still read, so projects imported on v0.4.154 keep working.
+IMPORT_JSON = "imported_sequence.json"
+LEGACY_IMPORT_JSON = "fmdv_import.json"
+# The simulated reads made from an imported sequence. 100-fold is the default
+# depth; a caller may ask for another (MIN_DEPTH..MAX_DEPTH). Perfect reads at
+# any depth are still perfect: depth changes how much evidence each position
+# carries, not whether it is right, so it matters only where a tool has a
+# minimum-depth rule (vsnp3 calls a position N under 10).
+READ_LEN = 250
+FRAGMENT = 400
+SIM_DEPTH = 100
+MIN_DEPTH, MAX_DEPTH = 1, 1000
+COMPLEMENT = str.maketrans("ACGT", "TGCA")
+
+
+def clamp_depth(value, default: int = SIM_DEPTH) -> int:
+    """A depth a caller asked for, held to MIN_DEPTH..MAX_DEPTH. Anything that
+    is not a number is the default: a bad box in the browser must not decide
+    how much evidence a sample appears to carry."""
+    try:
+        d = int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_DEPTH, min(MAX_DEPTH, d))
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EUTILS_HOST = "eutils.ncbi.nlm.nih.gov"
 FETCH_BATCH = 50            # efetch takes up to 200 ids; 50 keeps a batch small on a slow link
@@ -412,7 +451,42 @@ def fetch_genbank(accessions: List[str], cache_dir: Path, email: str = "", api_k
 
 # ------------------------------------------------------------ the records --
 
-def classify(length: int) -> str:
+def import_json_path(sample_dir: Path) -> Optional[Path]:
+    """The import record of a sample folder, under either name, or None."""
+    for name in (IMPORT_JSON, LEGACY_IMPORT_JSON):
+        p = sample_dir / name
+        if p.is_file():
+            return p
+    return None
+
+
+def read_import_json(sample_dir: Path) -> Dict:
+    """The import record as a dict; {} when there is none or it is unreadable."""
+    p = import_json_path(sample_dir)
+    if p is None:
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def import_json_files(step1_dir: Path) -> List[Path]:
+    """One import record per sample folder that has one, in sample order."""
+    found: Dict[str, Path] = {}
+    if not step1_dir.is_dir():
+        return []
+    for name in (IMPORT_JSON, LEGACY_IMPORT_JSON):
+        for p in step1_dir.glob(f"*/{name}"):
+            found.setdefault(p.parent.name, p)
+    return [found[k] for k in sorted(found)]
+
+
+def classify(length: int, mode: str = "fmdv") -> str:
+    """What kind of record this is. Outside FMDV mode the only question is
+    whether reads can be made from it, so there is one class, "sequence"."""
+    if mode != "fmdv":
+        return "sequence" if length >= READ_LEN else "short"
     if length < MIN_RECORD:
         return "short"
     if VP1_MIN <= length <= VP1_MAX:
@@ -422,6 +496,34 @@ def classify(length: int) -> str:
     if 1200 <= length < 2500:
         return "P1"
     return "other"
+
+
+def simulatable_bases(seq: str, read_len: int = READ_LEN) -> int:
+    """Bases simulate_reads would actually sample: the runs of called bases
+    at least one read long. Everything else gets no reads and reads back as
+    zero coverage, so this is what a depth setting applies to."""
+    return sum(len(m.group(0)) for m in re.finditer(r"[ACGT]+", seq.upper()) if len(m.group(0)) >= read_len)
+
+
+def describe_records(records: List[Dict], mode: str = "fmdv") -> None:
+    """class, N count, called percent and the problem that stops a record
+    being imported at all. In place, for both modes; locate_vp1 adds the
+    FMDV-only answers on top."""
+    for r in records:
+        seq = r["sequence"]
+        r["class"] = classify(len(seq), mode)
+        r["n_count"] = sum(1 for c in seq if c not in "ACGT")
+        r["called_percent"] = called_percent(seq)
+        r.setdefault("problem", "")
+        r["vp1"] = None
+        r["simulatable"] = simulatable_bases(seq)
+        if r["class"] == "short":
+            r["problem"] = (f"{len(seq)} nt is under {MIN_RECORD}: partial VP1 makes gappy alignments"
+                            if mode == "fmdv" else
+                            f"{len(seq)} nt is under {READ_LEN}: too short to make a read from")
+        elif mode != "fmdv" and not r["simulatable"]:
+            r["problem"] = (f"no run of {READ_LEN} called bases: every part of this record is too short "
+                            "or masked, so no read can be made from it")
 
 
 def called_percent(seq: str) -> float:
@@ -474,14 +576,7 @@ def locate_vp1(records: List[Dict], lib: Path, project_dir: Optional[Path], blas
     stated), `vp1` (the whole record or the slice, with coordinates) and
     `problem` (why it cannot be imported). In place."""
     panel = panel_vp1(lib)
-    for r in records:
-        r["class"] = classify(len(r["sequence"]))
-        r["n_count"] = sum(1 for c in r["sequence"] if c not in "ACGT")
-        r["called_percent"] = called_percent(r["sequence"])
-        r.setdefault("problem", "")
-        r["vp1"] = None
-        if r["class"] == "short":
-            r["problem"] = f"{len(r['sequence'])} nt is under {MIN_RECORD}: partial VP1 makes gappy alignments"
+    describe_records(records, "fmdv")
     live = [r for r in records if not r["problem"]]
     if not live:
         return
@@ -566,13 +661,21 @@ def existing_names(project_dir: Path) -> Dict[str, str]:
 
 
 def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str = "sample",
-            blastn: Optional[str] = None, threads: int = 4) -> Dict:
-    """One editable row per record, with VP1 found and the sequences stashed
-    under <project>/.seq_import/<token>.json for the commit."""
-    locate_vp1(records, lib, project_dir, blastn, threads)
+            blastn: Optional[str] = None, threads: int = 4, mode: str = "fmdv",
+            depth: int = SIM_DEPTH) -> Dict:
+    """One editable row per record, with the reads it would make (and, in an
+    FMDV project, the VP1 found and the metadata read), and the sequences
+    stashed under <project>/.seq_import/<token>.json for the commit."""
+    fmdv = mode == "fmdv"
+    if fmdv:
+        locate_vp1(records, lib, project_dir, blastn, threads)
+    else:
+        # Nothing to look up outside FMDV mode: a record is a sample, and the
+        # only question is whether reads can be made from it.
+        describe_records(records, mode)
     names = existing_names(project_dir)
-    lib_acc = library_accessions(lib)
-    proj_acc = project_context_accessions(project_dir)
+    lib_acc = library_accessions(lib) if fmdv else {}
+    proj_acc = project_context_accessions(project_dir) if fmdv else {}
     token = time.strftime("%Y%m%d_%H%M%S") + "_" + hashlib.sha1(
         "".join(r["sequence"] for r in records).encode()).hexdigest()[:8]
     rows: List[Dict] = []
@@ -596,13 +699,19 @@ def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str
         vp1 = r.get("vp1")
         rows.append({
             "id": i, "source": r["source"], "kind": r["kind"], "header": r["header"][:200],
-            "name": name, "role": r.get("role") or default_role,
+            "name": name, "role": (r.get("role") or default_role) if fmdv else "sample",
             "serotype": m.get("serotype", ""), "lineage": m.get("topotype", ""),
             "country": m.get("country", ""), "year": m.get("year", ""), "host": m.get("host", ""),
             "accession": acc, "isolate": m.get("isolate", ""),
             "definition": r.get("definition", ""),
             "length": len(r["sequence"]), "n_count": r.get("n_count"), "called_percent": r.get("called_percent"),
             "class": r.get("class"),
+            # What Step 1 will have to work with: perfect paired reads over
+            # the called runs of the record, or nothing (an FMDV record too
+            # short for the whole-genome workflow is typed without reads).
+            "reads": reads_mode(r),
+            "simulated": ({"covered_bases": r.get("simulatable") or 0, "read_length": READ_LEN}
+                          if reads_mode(r) == "simulated" else None),
             "vp1": ({k: v for k, v in vp1.items() if k != "sequence"} | {"length": len(vp1["sequence"]),
                     "called_percent": called_percent(vp1["sequence"])}) if vp1 else None,
             "problem": r.get("problem", ""), "serotype_note": r.get("serotype_note", ""),
@@ -615,7 +724,8 @@ def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str
                                               "vp1": r.get("vp1"), "class": r.get("class"),
                                               "panel_hit": r.get("panel_hit"), "raw": r.get("raw", "")}
                                              for i, r in enumerate(records)]}))
-    return {"token": token, "rows": rows, "blastn": bool(blastn),
+    return {"token": token, "rows": rows, "blastn": bool(blastn), "mode": mode,
+            "depth": clamp_depth(depth), "min_depth": MIN_DEPTH, "max_depth": MAX_DEPTH,
             "project_context": project_context_counts(project_dir)}
 
 
@@ -628,9 +738,12 @@ def project_context_counts(project_dir: Path) -> Dict[str, int]:
 
 # -------------------------------------------------------------- the commit --
 
-def build_plan(token: str, rows: List[Dict], project_dir: Path, lib: Path) -> Tuple[Dict, List[str]]:
+def build_plan(token: str, rows: List[Dict], project_dir: Path, lib: Path,
+               mode: str = "fmdv", depth: int = SIM_DEPTH) -> Tuple[Dict, List[str]]:
     """Resolve the edited rows against the stash. Returns (plan, errors);
     nothing is written."""
+    fmdv = mode == "fmdv"
+    depth = clamp_depth(depth)
     stash = _stash_dir(project_dir) / f"{Path(token).name}.json"
     if not stash.is_file():
         return {}, ["the preview has expired; run Preview again"]
@@ -647,15 +760,20 @@ def build_plan(token: str, rows: List[Dict], project_dir: Path, lib: Path) -> Tu
         if rec is None:
             errors.append(f"row {row.get('id')} is not in the preview")
             continue
-        role = (row.get("role") or "sample").strip().lower()
+        # Outside FMDV mode there is one role and no typing: a record is a
+        # sample, and what it needs is reads.
+        role = (row.get("role") or "sample").strip().lower() if fmdv else "sample"
         if role not in ("sample", "context"):
             errors.append(f"row {row.get('id')}: role must be sample or context")
             continue
-        if not rec.get("vp1"):
+        if fmdv and not rec.get("vp1"):
             errors.append(f"{row.get('name') or rec['header'][:40]}: no VP1 was found in the preview")
             continue
+        if not fmdv and reads_mode(rec) != "simulated":
+            errors.append(f"{row.get('name') or rec['header'][:40]}: no reads can be made from this record")
+            continue
         sero = (row.get("serotype") or "").strip().upper()
-        if not re.fullmatch(r"[A-Z0-9]+", sero or ""):
+        if fmdv and not re.fullmatch(r"[A-Z0-9]+", sero or ""):
             errors.append(f"{row.get('name')}: serotype must be letters and digits (SAT1, O, ASIA1)")
             continue
         acc = (row.get("accession") or "").strip().upper()
@@ -697,7 +815,7 @@ def build_plan(token: str, rows: List[Dict], project_dir: Path, lib: Path) -> Tu
     if not entries and not errors:
         errors.append("nothing selected")
     plan = {"project": str(project_dir), "lib": str(lib), "token": token, "entries": entries,
-            "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            "mode": mode, "depth": depth, "created": time.strftime("%Y-%m-%dT%H:%M:%S")}
     return plan, errors
 
 
@@ -706,12 +824,6 @@ def _write_fasta(path: Path, name: str, seq: str, width: int = 70) -> None:
         fh.write(f">{name}\n")
         for i in range(0, len(seq), width):
             fh.write(seq[i:i + width] + "\n")
-
-
-READ_LEN = 250
-FRAGMENT = 400
-SIM_DEPTH = 100
-COMPLEMENT = str.maketrans("ACGT", "TGCA")
 
 
 def simulate_reads(seq: str, name: str, r1: Path, r2: Path, read_len: int = READ_LEN,
@@ -759,54 +871,67 @@ def simulate_reads(seq: str, name: str, r1: Path, r2: Path, read_len: int = READ
 
 
 def reads_mode(entry: Dict) -> str:
-    """simulated for a genome-class record, none for anything shorter."""
-    return "simulated" if entry.get("class") == "genome" else "none"
+    """simulated when reads will be made from the record, none when not.
+
+    A whole genome in an FMDV project, and any record long enough outside
+    one ("sequence"). An FMDV record shorter than a genome is typed and put
+    on the VP1 tree instead, which needs no reads."""
+    return "simulated" if entry.get("class") in ("genome", "sequence") else "none"
 
 
-def write_sample(entry: Dict, project_dir: Path) -> Path:
-    """The sample folder of one imported record. Nothing in it is a read."""
+def write_sample(entry: Dict, project_dir: Path, mode: str = "fmdv", depth: int = SIM_DEPTH) -> Path:
+    """The sample folder of one imported record, and its simulated reads in
+    <project>/download/ when reads can be made from it."""
     name = entry["name"]
+    fmdv = mode == "fmdv"
     d = project_dir / "step1" / name
     d.mkdir(parents=True, exist_ok=True)
-    seq, vp1 = entry["sequence"], entry["vp1"]
+    seq, vp1 = entry["sequence"], entry.get("vp1")
     _write_fasta(d / f"{name}_imported.fasta", entry["header"].split()[0] if entry["header"] else name, seq)
-    _write_fasta(d / f"{name}_VP1.fasta", f"{name} VP1 {vp1['start']}-{vp1['end']}({vp1['strand']}) of imported record", vp1["sequence"])
+    if vp1:
+        _write_fasta(d / f"{name}_VP1.fasta", f"{name} VP1 {vp1['start']}-{vp1['end']}({vp1['strand']}) of imported record", vp1["sequence"])
     if entry.get("raw"):
         (d / f"{name}_imported.gb").write_text(entry["raw"])
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     meta = entry["meta"]
-    mode = reads_mode(entry)
+    reads = reads_mode(entry)
     sim = None
-    if mode == "simulated":
+    if reads == "simulated":
         dl = project_dir / "download"
-        sim = simulate_reads(seq, name, dl / f"{name}_R1.fastq.gz", dl / f"{name}_R2.fastq.gz")
-    (d / "fmdv_import.json").write_text(json.dumps({
-        "sample": name, "role": "sample", "imported": now,
+        sim = simulate_reads(seq, name, dl / f"{name}_R1.fastq.gz", dl / f"{name}_R2.fastq.gz",
+                             depth=clamp_depth(depth))
+    record = {
+        "sample": name, "role": "sample", "imported": now, "mode": mode,
         # simulated: paired reads in download/, run through Step 1 like any
         # sample; none: sequence-only, typed and placed on the VP1 tree.
-        "reads": mode, "simulated_reads": sim,
+        "reads": reads, "simulated_reads": sim,
         "source": entry["source"], "kind": entry["kind"], "header": entry["header"],
         "sha256": hashlib.sha256(seq.encode()).hexdigest(),
         "length": len(seq), "n_count": sum(1 for c in seq if c not in "ACGT"),
         "called_percent": called_percent(seq), "class": entry.get("class"),
-        "vp1": {k: v for k, v in vp1.items() if k != "sequence"} | {"length": len(vp1["sequence"])},
         "panel_hit": entry.get("panel_hit"),
         "metadata": meta,
-        "note": ("Imported sequence. The reads in download/ are SIMULATED from it (perfect, uniform, none over N): "
-                 "depth, mapping rate and QC describe the simulation, not a sample."
-                 if mode == "simulated" else
+        "note": ("Imported sequence. The reads in download/ are SIMULATED from it (perfect, uniform, none over N, "
+                 f"{sim['depth'] if sim else depth}-fold): depth, mapping rate and QC describe the simulation, "
+                 "not a sample."
+                 if reads == "simulated" else
                  "Imported sequence, no reads. Typed and placed on the VP1 tree like a sample; "
                  "no alignment, QC or whole-genome SNPs."),
-    }, indent=1))
+    }
+    if vp1:
+        record["vp1"] = {k: v for k, v in vp1.items() if k != "sequence"} | {"length": len(vp1["sequence"])}
+    (d / IMPORT_JSON).write_text(json.dumps(record, indent=1))
     # What the VP1 tree reads (collect_samples): serotype, and how much of
-    # VP1 is called. `reference` is empty because nothing was mapped.
-    (d / "fmdv_consensus.json").write_text(json.dumps({
-        "sample": name, "source": "imported", "reference": "", "serotype": meta["serotype"],
-        "length": len(seq), "called_percent": called_percent(seq),
-        "vp1_start": vp1["start"], "vp1_end": vp1["end"], "vp1_length": len(vp1["sequence"]),
-        "vp1_called_percent": called_percent(vp1["sequence"]),
-        "written": now,
-    }, indent=1))
+    # VP1 is called. `reference` is empty because nothing was mapped. FMDV
+    # mode only: outside it there is no VP1 and no tree to read it.
+    if fmdv and vp1:
+        (d / "fmdv_consensus.json").write_text(json.dumps({
+            "sample": name, "source": "imported", "reference": "", "serotype": meta["serotype"],
+            "length": len(seq), "called_percent": called_percent(seq),
+            "vp1_start": vp1["start"], "vp1_end": vp1["end"], "vp1_length": len(vp1["sequence"]),
+            "vp1_called_percent": called_percent(vp1["sequence"]),
+            "written": now,
+        }, indent=1))
     return d
 
 
@@ -845,23 +970,29 @@ def append_context(entry: Dict, project_dir: Path) -> Path:
 def run_commit(plan_path: Path) -> int:
     plan = json.loads(plan_path.read_text())
     project_dir, lib = Path(plan["project"]), Path(plan["lib"])
+    mode = plan.get("mode") or "fmdv"
+    depth = clamp_depth(plan.get("depth"))
     failed = 0
     samples: List[str] = []
     for e in plan["entries"]:
         try:
             if e["role"] == "sample":
-                d = write_sample(e, project_dir)
+                d = write_sample(e, project_dir, mode, depth)
                 samples.append(e["name"])
-                how = "simulated paired reads in download/, Grab then Run" if reads_mode(e) == "simulated" else "sequence only"
-                print(f"sample {e['name']}: {e['class']} {len(e['sequence'])} nt, VP1 {e['vp1']['start']}-{e['vp1']['end']} -> {d} ({how})", flush=True)
+                how = (f"simulated paired reads at {depth}x in download/, Grab then Run"
+                       if reads_mode(e) == "simulated" else "sequence only")
+                where = f", VP1 {e['vp1']['start']}-{e['vp1']['end']}" if e.get("vp1") else ""
+                print(f"sample {e['name']}: {e['class']} {len(e['sequence'])} nt{where} -> {d} ({how})", flush=True)
             else:
                 d = append_context(e, project_dir)
                 print(f"context {e['name']}: {e['class']} {len(e['sequence'])} nt, VP1 {e['vp1']['start']}-{e['vp1']['end']} -> {d / (e['meta']['serotype'] + '.fasta')}", flush=True)
         except (OSError, KeyError, ValueError) as exc:
             failed += 1
             print(f"{e.get('role')} {e.get('name')}: FAILED ({exc})", flush=True)
+    # Typing is FMDV's answer to "what is this": outside an FMDV project
+    # there is no VP1 database to ask, and the sample is simply reads now.
     typer = _BIN / "fmdv_vp1_type.py"
-    if samples and typer.is_file():
+    if mode == "fmdv" and samples and typer.is_file():
         if shutil.which("blastn"):
             for s in samples:
                 cmd = [sys.executable, str(typer), "--sample-dir", str(project_dir / "step1" / s), "--lib", str(lib),

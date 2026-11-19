@@ -64,7 +64,9 @@ def main() -> int:
         s = d.name
         ref = load_json(d / "fmdv_reference.json"); typ = load_json(d / "fmdv_vp1_type.json")
         cons = load_json(d / "fmdv_consensus.json"); srow = R.stats_row(d, s)
-        imp = load_json(d / "fmdv_import.json")
+        # The import record, under the name of today and the v0.4.154 one.
+        imp = (load_json(d / "imported_sequence.json")
+               or load_json(d / "fmdv_import.json"))
         simulated = imp.get("reads") == "simulated"
         chosen = ref.get("chosen") or {}
         verdict = None

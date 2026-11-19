@@ -346,7 +346,9 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
     # An imported sequence (app.seq_import): the "reads" vsnp3 saw were
     # simulated from a FASTA or GenBank record. Nothing about depth, coverage
     # or mapping is a measurement, and the report must say so first.
-    imp = load_json(sample_dir / "fmdv_import.json")
+    # The import record, under the name of today and the v0.4.154 one.
+    imp = (load_json(sample_dir / "imported_sequence.json")
+           or load_json(sample_dir / "fmdv_import.json"))
     simulated = imp.get("reads") == "simulated"
     row = stats_row(sample_dir, sample)
     proj = load_json(project / "project.json")

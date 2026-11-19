@@ -5,14 +5,18 @@ import { useEffect, useState } from "react";
 // the same status strip under every source. Four ways in used to stand in
 // one column, each with its paragraph beside its controls, and nothing said
 // which to reach for first. See docs/FMDV_MODE.md, "The Inputs panel".
+//
+// `fmdvOnly` is false for every tab since v0.4.155: a sequence can be brought
+// into any project, where reads are simulated from it so that it runs through
+// Step 1 like a sample (app.seq_import). The flag stays: the shape is useful.
 
 export const INPUT_TABS = [
   { id: "minknow", label: "MinKNOW run", icon: "▤", fmdvOnly: false,
     line: "A run folder from the sequencer: one FASTQ per barcode, named from the sample sheet." },
   { id: "fastq", label: "FASTQ files", icon: "▦", fmdvOnly: false,
     line: "Read files you already have, on this computer or on the server." },
-  { id: "sequences", label: "Sequences", icon: "≋", fmdvOnly: true,
-    line: "A FASTA or GenBank record, or an accession, as a sample or as a comparator." },
+  { id: "sequences", label: "Sequences", icon: "≋", fmdvOnly: false,
+    line: "A FASTA or GenBank record, or an accession: reads are made from it so it runs like a sample." },
   { id: "sra", label: "SRA", icon: "☁", fmdvOnly: false,
     line: "Public reads by run, experiment or sample accession." },
 ];

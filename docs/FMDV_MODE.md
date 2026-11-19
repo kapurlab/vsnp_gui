@@ -294,6 +294,12 @@ gave three samples named as the sheet said, each choosing SAT1/I at
 
 ## Importing sequences that are not reads
 
+(Since v0.4.155 the Sequences tab is in every project, not only an FMDV one:
+elsewhere a record becomes a sample with simulated reads and nothing else is
+read from it. The typing, the metadata and the context role below are what
+FMDV mode adds. The read depth, 100x by default, is set beside the preview in
+both.)
+
 The Inputs page in FMDV mode has an "Import sequences" block under the
 MinKNOW importer (`frontend/src/SeqImport.jsx`, `backend/app/seq_import.py`;
 the design and the alternatives rejected are in `FMDV_SEQ_IMPORT.md`). It

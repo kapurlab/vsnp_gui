@@ -1,13 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { InputHelp } from "./InputsTabs.jsx";
 
-// FMDV mode: import sequences that are not reads. FASTA or GenBank files
-// (dropped or chosen) and GenBank accessions (typed) go through one preview:
-// one editable row per record with the VP1 the backend found, the metadata
-// it read, and a role. A SAMPLE lands in step1/<name>/ and is typed and
-// placed on the VP1 tree like any sample; a CONTEXT record joins the
-// project's own comparator set (fmdv_context/<SEROTYPE>.*) and stands in the
-// tree labelled lineage|country|year|accession. Commit is a background job.
+// Import sequences that are not reads. FASTA or GenBank files (dropped or
+// chosen) and GenBank accessions (typed) go through one preview: one editable
+// row per record, then a commit that runs as a background job.
+//
+// IN ANY PROJECT a record becomes a sample: perfect paired reads are
+// simulated from it at the chosen depth (100x by default) into download/, so
+// it goes through Grab and Step 1 like any sample and stands in Step 2 beside
+// the project's own. That is how a published genome joins a comparison.
+//
+// IN AN FMDV PROJECT the preview also shows the VP1 the backend found and the
+// metadata it read, and a record may be imported as CONTEXT instead: it joins
+// the project's comparator set (fmdv_context/<SEROTYPE>.*) and stands in the
+// VP1 tree labelled lineage|country|year|accession.
+//
 // Backend: app.seq_import; design: docs/FMDV_SEQ_IMPORT.md.
 
 const FIELDS = [
@@ -20,10 +27,13 @@ const FIELDS = [
   ["isolate", "Isolate", 120],
 ];
 
-export default function SeqImport({ apiBase, project, enabled, onImported }) {
+export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, onImported }) {
   const [files, setFiles] = useState([]);
   const [accText, setAccText] = useState("");
   const [role, setRole] = useState("sample");
+  // How deep the simulated reads are made. 100x is the default everywhere;
+  // the backend holds whatever arrives to 1..1000 (seq_import.clamp_depth).
+  const [depth, setDepth] = useState(100);
   const [preview, setPreview] = useState(null);
   const [rows, setRows] = useState({});     // id -> edited row
   const [picked, setPicked] = useState({}); // id -> bool
@@ -50,7 +60,9 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
           clearInterval(pollRef.current);
           pollRef.current = null;
           if (job.status === "succeeded") {
-            setMsg("Imported. Samples are in Step 1 and typed; context records are in the project's VP1 set. Build a VP1 tree to place them.");
+            setMsg(fmdvOn
+              ? "Imported. Samples are in Step 1 and typed; context records are in the project's VP1 set. Build a VP1 tree to place them."
+              : "Imported. The simulated reads are under Ready to run: Grab into Step 1, then Run, and the sample is compared like any other.");
             setPreview(null); setFiles([]); setAccText("");
           } else {
             setMsg(`Import ${job.status}. The job log says which record failed.`);
@@ -81,6 +93,7 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
       for (const f of files) fd.append("files", f, f.name);
       fd.append("accessions", accText);
       fd.append("role", role);
+      fd.append("depth", String(depth));
       const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences/preview`, {
         method: "POST", body: fd,
       });
@@ -115,7 +128,7 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
     try {
       const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: preview.token, rows: chosen }),
+        body: JSON.stringify({ token: preview.token, rows: chosen, depth }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) { setMsg(data.detail || `Import failed (HTTP ${res.status})`); return; }
@@ -129,6 +142,15 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
   }
 
   const edit = (id, key, value) => setRows({ ...rows, [id]: { ...(rows[id] || {}), [key]: value } });
+  // What the backend will make: one pair per `read_len * 2` of called
+  // sequence per fold (app.seq_import.simulate_reads). Worked out here so the
+  // number follows the depth box without another round trip.
+  const estPairs = (r) => {
+    const cov = r.simulated?.covered_bases || 0;
+    const len = r.simulated?.read_length || 250;
+    const d = Number(depth) > 0 ? Number(depth) : 100;
+    return Math.max(1, Math.round((cov * d) / (2 * len)));
+  };
   const nameCounts = {};
   for (const r of preview?.rows || []) {
     if (!picked[r.id]) continue;
@@ -142,15 +164,22 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
   return (
     <div className="block">
       <InputHelp line="Drop FASTA or GenBank files, or type accessions; check the preview, then import.">
-        <p>A consensus genome or a VP1 sequence from another lab, a GenBank flat file, or GenBank accessions
-        (fetched from NCBI, or served from the library&apos;s cache when NCBI cannot be reached).</p>
-        <p>Imported as a <b>sample</b>, a genome becomes simulated reads and goes through Step 1 like any sample
-        (badged Simulated, QC not applied); a VP1 record is typed and placed on the VP1 tree without reads.
-        Imported as <b>context</b>, the record joins this project&apos;s own comparator set and stands in the tree
-        as lineage|country|year|accession.</p>
-        <p>VP1 is cut from a genome by blastn. Country, year, host and isolate come from the GenBank record, a
-        NanoFMDV-style header, or a metadata sheet; every field can be edited in the preview.{" "}
-        <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv">Metadata sheet template</a></p>
+        <p>A consensus genome or an assembly from another lab or pipeline, a GenBank flat file, or GenBank
+        accessions (fetched from NCBI; a record fetched once is served from disk afterwards).</p>
+        <p><b>Reads are made from the sequence</b> — perfect paired reads, {depth}&times; by default, skipping
+        every run of N — so the record goes through Grab and Step 1 like any sample and stands in Step 2
+        beside your own. It is badged <b>Simulated</b> everywhere afterwards and gets no QC verdict, because
+        depth, mapping rate and coverage would describe the simulation and not a sample.</p>
+        {fmdvOn ? (
+          <p>In this FMDV project the record is also typed: VP1 is cut from a genome by blastn, and country,
+          year, host and isolate come from the GenBank record, a NanoFMDV-style header, or a metadata sheet.
+          Every field can be edited below. Imported as <b>context</b> instead of a sample, the record joins
+          this project&apos;s own comparator set and stands in the tree as lineage|country|year|accession.{" "}
+          <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv">Metadata sheet template</a></p>
+        ) : (
+          <p>The depth matters only where a tool has a minimum-depth rule — vsnp3 calls a position N under
+          10&times;. Perfect reads are no more right at 500&times; than at 100&times;.</p>
+        )}
       </InputHelp>
       <div
         className="dropzone"
@@ -168,9 +197,12 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
         />
         <button type="button" disabled={!enabled} onClick={() => inputRef.current?.click()}>Choose Files</button>
         <span>
-          Or drop FASTA, GenBank (.gb) or a metadata sheet here{" "}
-          <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv"
-            title="A tab-separated sheet with a sample column and any of role, serotype, lineage, country, year, host, accession, isolate; drop it beside the FASTA.">(sheet template)</a>
+          {fmdvOn ? (
+            <>Or drop FASTA, GenBank (.gb) or a metadata sheet here{" "}
+              <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv"
+                title="A tab-separated sheet with a sample column and any of role, serotype, lineage, country, year, host, accession, isolate; drop it beside the FASTA.">(sheet template)</a>
+            </>
+          ) : "Or drop FASTA or GenBank (.gb) files here"}
         </span>
       </div>
       {files.length ? (
@@ -193,12 +225,26 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
         style={{ fontSize: "12px" }}
       />
       <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-        <label style={{ fontSize: "12px" }}>
-          Import as{" "}
-          <select value={role} onChange={(e) => setRole(e.target.value)} disabled={!enabled} style={{ fontSize: "12px" }}>
-            <option value="sample">samples (typed, reported, highlighted in the tree)</option>
-            <option value="context">context (comparators in the tree and the typing)</option>
-          </select>
+        {fmdvOn ? (
+          <label style={{ fontSize: "12px" }}>
+            Import as{" "}
+            <select value={role} onChange={(e) => setRole(e.target.value)} disabled={!enabled} style={{ fontSize: "12px" }}>
+              <option value="sample">samples (typed, reported, highlighted in the tree)</option>
+              <option value="context">context (comparators in the tree and the typing)</option>
+            </select>
+          </label>
+        ) : null}
+        <label style={{ fontSize: "12px" }}
+          title="How deep the reads simulated from each sequence are made. 100x is the default; vsnp3 calls a position N under 10x, so lower depths start to cost calls. 1 to 1000.">
+          Read depth{" "}
+          <input type="number" min="1" max="1000" step="10" value={depth}
+            onChange={(e) => setDepth(e.target.value === "" ? "" : Number(e.target.value))}
+            onBlur={() => setDepth((d) => {
+              const n = Math.round(Number(d));
+              return Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(1000, n)) : 100;
+            })}
+            disabled={!enabled} style={{ fontSize: "12px", width: "64px" }} />
+          <span className="muted">&times;</span>
         </label>
         <button type="button" onClick={doPreview} disabled={!canPreview}>
           {busy && !preview ? "Reading…" : "Preview"}
@@ -224,9 +270,10 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
                   <th></th>
                   <th style={{ textAlign: "left" }}>Record</th>
                   <th style={{ textAlign: "left" }}>Name</th>
-                  <th>Role</th>
-                  {FIELDS.map(([k, label]) => <th key={k} style={{ textAlign: "left" }}>{label}</th>)}
-                  <th style={{ textAlign: "left" }}>VP1</th>
+                  {fmdvOn ? <th>Role</th> : null}
+                  {fmdvOn ? FIELDS.map(([k, label]) => <th key={k} style={{ textAlign: "left" }}>{label}</th>) : null}
+                  <th style={{ textAlign: "left" }}>Reads</th>
+                  {fmdvOn ? <th style={{ textAlign: "left" }}>VP1</th> : null}
                 </tr>
               </thead>
               <tbody>
@@ -257,20 +304,37 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
                           </div>
                         ) : null}
                         {dup ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>name used twice</div> : null}
+                        {!fmdvOn && r.problem ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>{r.problem}</div> : null}
                       </td>
-                      <td>
-                        <select value={e.role || "sample"} onChange={(ev) => edit(r.id, "role", ev.target.value)} disabled={refused} style={{ fontSize: "11px" }}>
-                          <option value="sample">sample</option>
-                          <option value="context">context</option>
-                        </select>
-                      </td>
-                      {FIELDS.map(([k, , w]) => (
+                      {fmdvOn ? (
+                        <td>
+                          <select value={e.role || "sample"} onChange={(ev) => edit(r.id, "role", ev.target.value)} disabled={refused} style={{ fontSize: "11px" }}>
+                            <option value="sample">sample</option>
+                            <option value="context">context</option>
+                          </select>
+                        </td>
+                      ) : null}
+                      {fmdvOn ? FIELDS.map(([k, , w]) => (
                         <td key={k} style={{ minWidth: `${w}px` }}>
                           <input type="text" value={e[k] ?? ""} onChange={(ev) => edit(r.id, k, ev.target.value)} disabled={refused} style={inputStyle}
                             title={k === "serotype" && r.serotype_note ? r.serotype_note : k === "lineage" ? "Topotype or lineage as the reference laboratories write it (I, EA-3, ME-SA/PanAsia-2). Left NA when not known; the typer and the tree treat NA as unannotated." : ""} />
                           {k === "serotype" && r.serotype_note ? <div style={{ fontSize: "10px", color: "var(--danger, #b00)" }}>⚠ {r.serotype_note}</div> : null}
                         </td>
-                      ))}
+                      )) : null}
+                      <td style={{ whiteSpace: "nowrap" }}
+                        title={r.simulated
+                          ? `Perfect paired reads simulated from this record at ${depth}x over its ${r.simulated.covered_bases.toLocaleString()} called bases. Runs of N get no reads and read back as zero coverage.`
+                          : (isCtx ? "A context record is a comparator in the tree: it is never aligned." : "Typed and placed on the VP1 tree without reads: nothing here is aligned.")}>
+                        {r.simulated && !isCtx ? (
+                          <>
+                            ≈{estPairs(r).toLocaleString()} pairs
+                            <div className="muted" style={{ fontSize: "10px" }}>
+                              {depth || 100}&times; · {r.simulated.read_length} bp · paired
+                            </div>
+                          </>
+                        ) : <span className="muted">none</span>}
+                      </td>
+                      {fmdvOn ? (
                       <td style={{ whiteSpace: "nowrap" }} title={r.vp1 ? `Template ${r.vp1.template} at ${r.vp1.identity}% identity` : r.problem}>
                         {r.vp1 ? (
                           <>
@@ -282,6 +346,7 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
                           <span style={{ color: "var(--danger, #b00)" }}>{r.problem}</span>
                         )}
                       </td>
+                      ) : null}
                     </tr>
                   );
                 })}

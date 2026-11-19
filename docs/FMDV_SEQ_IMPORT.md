@@ -1,5 +1,13 @@
 # Importing sequences into FMDV mode
 
+> **Since v0.4.155 this is not FMDV-only.** Any project takes a FASTA or
+> GenBank record on the Sequences tab and makes simulated paired reads from
+> it (depth 100x by default, settable), so a published genome runs through
+> Step 1 and joins Step 2 like any sample. What stays FMDV-only is everything
+> this note is about: locating VP1, reading the serotype and lineage, typing,
+> and the **context** role. Outside FMDV mode a record is simply a sample,
+> and neither the reference library nor BLAST+ has to be installed.
+
 Design note. The FMDV mode takes reads (FASTQ from a MinKNOW run, a local
 file or SRA). Two other inputs come up in outbreak work and are not covered:
 a FASTA somebody already has (a consensus genome or a VP1 sequence from

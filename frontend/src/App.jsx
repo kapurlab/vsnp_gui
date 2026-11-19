@@ -7579,10 +7579,11 @@ export default function App() {
                   onImported={() => { loadAll(); loadInputs(selectedProject); }}
                 />
                 ) : null}
-                {fmdvOn && inputTab === "sequences" ? (
+                {inputTab === "sequences" ? (
                   <SeqImport
                     apiBase={API_BASE}
                     project={selectedProject}
+                    fmdvOn={fmdvOn}
                     enabled={!!selectedProject && settingsReady}
                     onImported={async () => {
                       // An imported sequence is a new Step 1 folder with a
@@ -7593,6 +7594,7 @@ export default function App() {
                       loadInputs(selectedProject);   // Ready to run: simulated reads land in download/
                       loadStep1Status();
                       loadQC({ refresh: true });
+                      if (!fmdvOn) return;          // nothing to retype outside FMDV mode
                       try {
                         const res = await fetch(`${API_BASE}/api/projects/${selectedProject}/fmdv`);
                         if (res.ok) setFmdvInfo(await res.json());

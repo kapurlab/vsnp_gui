@@ -95,12 +95,36 @@ FASTQ → Step 1 (align + call) → QC Review → Step 2 (tree + matrix)
 ```
 
 1. **Create project** - Organizes your analysis
-2. **Add inputs** - Link FASTQs already on the server, upload them, or download from SRA
+2. **Add inputs** - Four ways, one at a time in the Inputs panel: a MinKNOW run
+   folder, FASTQ files already on the server (or uploaded), **Sequences** (a
+   FASTA or GenBank file, or a GenBank accession), or SRA accessions
 3. **Step 1: Grab ready-to-run samples** - Copies the downloaded FASTQs into Step 1, one folder per sample
 4. **Step 1 Run** - Aligns reads, calls SNPs (per sample)
 5. **Step 1 Results** - Review QC metrics, exclude bad samples
 6. **Step 2: Build comparison set** - Gathers the VCFs to compare into step2/vcf_database
 7. **Step 2 Run** - Build phylogenetic tree and SNP matrices
+
+### A sequence instead of reads
+
+The **Sequences** tab takes a FASTA or GenBank file, or a GenBank accession
+it fetches from NCBI, and makes **perfect paired reads from the sequence**
+(`backend/app/seq_import.py`) into `download/`. From there it is an ordinary
+sample: Grab, Step 1, Step 2, the tree. That is how a published genome, an
+assembly, or a consensus another laboratory sent you joins a comparison
+without a round trip through the command line.
+
+- **Read depth** is `100x` by default and is set beside the preview (1 to
+  1000). It matters only where a tool has a minimum-depth rule — vsnp3 calls
+  a position N under 10x. Perfect reads are no more right at 500x than at
+  100x.
+- The reads skip every run of N, so a masked region reads back as zero
+  coverage rather than invented bases.
+- The sample is badged **Simulated** in Step 1 Results and gets **no QC
+  verdict**: depth, mapping rate and coverage would describe the simulation,
+  not a sample. `step1/<name>/imported_sequence.json` records where the
+  record came from, its checksum and the depth used.
+- In an FMDV project the same import also types the record and can bring it
+  in as tree context instead (`docs/FMDV_SEQ_IMPORT.md`).
 
 ## Documentation
 

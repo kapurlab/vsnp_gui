@@ -11,6 +11,11 @@ What these pin:
     record with no panel hit are refused with a reason;
   * a sample lands in step1/<name>/ with the four files the typer and the
     tree read, a context record is appended to fmdv_context/<SEROTYPE>.*;
+  * OUTSIDE an FMDV project the same import needs no library, no blastn and
+    no serotype: every record long enough becomes simulated paired reads at
+    the depth asked for and a plain sample folder, and a record that no read
+    can be made from is refused;
+  * the import record is read under its name of today and the v0.4.154 one;
   * a name already in step1/ and an accession already in the library or the
     project refuse the plan;
   * the fetch caches every record before use and reports a missing one per
@@ -213,12 +218,12 @@ def test_locate_preview_commit():
         rc = si.run_commit(plan_path)
         check(rc, 0, "commit succeeds")
         d = project / "step1" / "lab-consensus-1"
-        for f in ("lab-consensus-1_imported.fasta", "lab-consensus-1_VP1.fasta", "fmdv_import.json", "fmdv_consensus.json"):
+        for f in ("lab-consensus-1_imported.fasta", "lab-consensus-1_VP1.fasta", si.IMPORT_JSON, "fmdv_consensus.json"):
             check((d / f).is_file(), True, f"{f} written")
         cons = json.loads((d / "fmdv_consensus.json").read_text())
         check((cons["source"], cons["serotype"], cons["reference"], cons["vp1_length"], cons["vp1_called_percent"]),
               ("imported", "SAT1", "", 657, 100.0), "fmdv_consensus.json for the tree")
-        imp = json.loads((d / "fmdv_import.json").read_text())
+        imp = si.read_import_json(d)
         check(imp["metadata"]["country"], "Ethiopia", "edited metadata kept")
         check(imp["metadata"]["topotype"], "I", "edited lineage kept")
         vp1 = (d / "lab-consensus-1_VP1.fasta").read_text().splitlines()
@@ -229,7 +234,7 @@ def test_locate_preview_commit():
         check(sorted(p.name for p in (project / "download").glob("lab-consensus-1_R*.fastq.gz")),
               ["lab-consensus-1_R1.fastq.gz", "lab-consensus-1_R2.fastq.gz"], "paired reads written for the genome")
         check(list((project / "download").glob("vp1only*")), [], "no reads for a VP1 record")
-        check(json.loads((project / "step1" / "vp1only" / "fmdv_import.json").read_text())["reads"], "none", "VP1 record marked no reads")
+        check(si.read_import_json(project / "step1" / "vp1only")["reads"], "none", "VP1 record marked no reads")
         check(imp["simulated_reads"]["covered_bases"], len(GENOME), "covered bases reported")
         tsv = (project / "fmdv_context" / "SAT1.tsv").read_text().splitlines()
         check(tsv[0].split("\t")[:3], ["name", "serotype", "topotype"], "context TSV header")
@@ -258,6 +263,81 @@ def test_locate_preview_commit():
         # No blastn: every record is refused with the reason, nothing crashes.
         pv4 = si.preview(si.records_from_fasta(f">x\n{VP1_A}\n", "x.fasta"), project, lib, "sample", blastn=None)
         check("blastn" in pv4["rows"][0]["problem"], True, "missing blastn is the stated problem")
+
+
+def test_import_outside_fmdv_mode():
+    """Any project: a record long enough becomes a sample with simulated
+    reads at the depth asked for. No library, no blastn, no serotype, no VP1,
+    no typing — and nothing FMDV-shaped written into the folder."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "proj"
+        (project / "step1").mkdir(parents=True)
+        lib = root / "no-such-library"      # never read outside FMDV mode
+
+        fasta = f">assembly_one some genome\n{GENOME}\n>tiny fragment\n{VP1_A[:120]}\n"
+        recs = si.records_from_fasta(fasta, "assemblies.fasta")
+        pv = si.preview(recs, project, lib, blastn=None, mode="stock", depth=40)
+        check(pv["mode"], "stock", "preview says which mode it ran in")
+        check((pv["depth"], pv["min_depth"], pv["max_depth"]), (40, 1, 1000), "depth echoed with its bounds")
+        big, small = pv["rows"][0], pv["rows"][1]
+        check((big["class"], big["reads"], big["role"]), ("sequence", "simulated", "sample"), "a long record is a sample with reads")
+        check(big["vp1"], None, "no VP1 is looked for outside FMDV mode")
+        check(big["problem"], "", "a long record is not refused without blastn")
+        check(big["simulated"]["covered_bases"], len(GENOME), "the reads cover the whole called record")
+        check(small["class"], "short", "a 120 nt record cannot make a read")
+        check("too short" in small["problem"], True, "and says so")
+
+        rows = [{"id": big["id"], "name": "assembly-one"}]
+        plan, errors = si.build_plan(pv["token"], rows, project, lib, mode="stock", depth=40)
+        check(errors, [], "plan builds without a serotype")
+        check((plan["mode"], plan["depth"]), ("stock", 40), "the plan carries mode and depth")
+        # A record no read can be made from is refused by the plan too, not
+        # only greyed out in the browser.
+        _, errs = si.build_plan(pv["token"], [{"id": small["id"], "name": "tiny"}], project, lib, mode="stock")
+        check(any("no reads can be made" in e for e in errs), True, "a too-short record is refused at the commit")
+
+        plan_path = root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        check(si.run_commit(plan_path), 0, "commit succeeds")
+
+        d = project / "step1" / "assembly-one"
+        check((d / "assembly-one_imported.fasta").is_file(), True, "the record is kept beside the sample")
+        check((d / si.IMPORT_JSON).is_file(), True, "the import record is written")
+        for f in ("assembly-one_VP1.fasta", "fmdv_consensus.json"):
+            check((d / f).exists(), False, f"no {f} outside FMDV mode")
+        imp = si.read_import_json(d)
+        check((imp["reads"], imp["mode"]), ("simulated", "stock"), "marked simulated, with its mode")
+        check(imp["simulated_reads"]["depth"], 40, "the depth used is recorded")
+        check("40-fold" in imp["note"], True, "and said in words")
+        check(imp.get("vp1"), None, "no VP1 block")
+        check(sorted(p.name for p in (project / "download").glob("assembly-one_R*.fastq.gz")),
+              ["assembly-one_R1.fastq.gz", "assembly-one_R2.fastq.gz"], "paired reads written")
+
+        # Depth is the one knob: twice the depth, twice the reads.
+        pairs_40 = imp["simulated_reads"]["pairs"]
+        r1 = root / "x_R1.fastq.gz"
+        deep = si.simulate_reads(GENOME, "assembly-one", r1, root / "x_R2.fastq.gz", depth=80)
+        check(abs(deep["pairs"] - pairs_40 * 2) <= 1, True,
+              f"80-fold makes twice the pairs of 40-fold ({pairs_40} -> {deep['pairs']})")
+        check(si.simulate_reads(GENOME, "assembly-one", r1, root / "x_R2.fastq.gz",
+                                depth=si.clamp_depth("not a number"))["depth"], 100,
+              "a depth that is not a number falls back to 100")
+
+
+def test_import_record_read_under_either_name():
+    """Projects imported on v0.4.154 keep working: the import record is read
+    under the name of the day and the one it had then."""
+    with tempfile.TemporaryDirectory() as td:
+        step1 = Path(td) / "step1"
+        (step1 / "new").mkdir(parents=True)
+        (step1 / "old").mkdir(parents=True)
+        (step1 / "new" / si.IMPORT_JSON).write_text(json.dumps({"reads": "simulated"}))
+        (step1 / "old" / si.LEGACY_IMPORT_JSON).write_text(json.dumps({"reads": "none"}))
+        check(si.read_import_json(step1 / "new")["reads"], "simulated", "today's name")
+        check(si.read_import_json(step1 / "old")["reads"], "none", "the v0.4.154 name")
+        check(si.read_import_json(step1 / "missing"), {}, "no record is an empty dict, not a crash")
+        check([p.parent.name for p in si.import_json_files(step1)], ["new", "old"], "both are listed, in sample order")
 
 
 def test_simulator_skips_n():

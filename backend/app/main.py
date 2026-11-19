@@ -359,21 +359,6 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
         m = re.search(r"(\d[\d,]*) thin calls", str(row.get("Long-read Calls Limited to N") or ""))
         row["fmdv_thin_calls"] = int(m.group(1).replace(",", "")) if m else None
         sample_dir = step1_dir / str(row.get("sample") or "")
-        # A sample whose reads were simulated from an imported sequence
-        # (app.seq_import): the row keeps vsnp3's numbers, badged so nobody
-        # reads depth or mapping rate as a measurement.
-        imp = sample_dir / "fmdv_import.json"
-        if imp.is_file() and row.get("read_type") != "sequence":
-            try:
-                ij = json.loads(imp.read_text())
-            except (OSError, ValueError):
-                ij = {}
-            if ij.get("reads") == "simulated":
-                row["read_type"] = "simulated"
-                row["fmdv_source"] = ij.get("kind") or "fasta"
-                row["fmdv_import_source"] = ij.get("source") or ""
-                row["fmdv_import_class"] = ij.get("class") or ""
-                row["fmdv_import_length"] = ij.get("length")
         # The consensus block's numbers: how much of the genome and of VP1
         # was called (depth >= 10 and an unambiguous base), the two figures
         # a reader needs before trusting a Step 2 group or a VP1 tree.
@@ -437,6 +422,28 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
         row["fmdv_serotype_share"] = d.get("serotype_share")
 
 
+def _flag_imported_rows(rows: list, step1_dir: Path) -> None:
+    """Badge every row whose reads were simulated from an imported sequence
+    (app.seq_import). In place, in any project: the row keeps vsnp3's
+    numbers, marked so nobody reads depth or mapping rate as a measurement
+    of a sample. _annotate_qc_rows then gives it no QC verdict."""
+    for row in rows:
+        if not isinstance(row, dict) or row.get("read_type") == "sequence":
+            continue
+        ij = seq_import.read_import_json(step1_dir / str(row.get("sample") or ""))
+        if ij.get("reads") == "simulated":
+            row["read_type"] = "simulated"
+            row["import_source"] = ij.get("source") or ""
+            row["import_kind"] = ij.get("kind") or "fasta"
+            row["import_depth"] = (ij.get("simulated_reads") or {}).get("depth")
+            # The names the FMDV columns read. Kept for every project so one
+            # set of table code serves both.
+            row["fmdv_source"] = ij.get("kind") or "fasta"
+            row["fmdv_import_source"] = ij.get("source") or ""
+            row["fmdv_import_class"] = ij.get("class") or ""
+            row["fmdv_import_length"] = ij.get("length")
+
+
 def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
     """Attach `_qc_verdict` to each row in place. Returns the same list."""
     for row in rows:
@@ -452,15 +459,14 @@ def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
     return rows
 
 
-def _fmdv_import_rows(rows: list, step1_dir: Path) -> List[Dict[str, Any]]:
-    """Results rows for the samples imported as sequences (app.seq_import):
-    no stats workbook, so the scanner never sees them. Read columns stay
-    blank; the typing columns are filled by _fmdv_flag_qc_rows afterwards."""
+def _imported_sequence_rows(rows: list, step1_dir: Path, mode: str = "") -> List[Dict[str, Any]]:
+    """Results rows for the samples imported as sequences (app.seq_import)
+    that Step 1 has not run yet: no stats workbook, so the scanner never sees
+    them. Read columns stay blank; in FMDV mode the typing columns are filled
+    by _fmdv_flag_qc_rows afterwards."""
     present = {str(r.get("sample") or r.get("_sample") or "") for r in rows if isinstance(r, dict)}
     out: List[Dict[str, Any]] = []
-    if not step1_dir.is_dir():
-        return out
-    for p in sorted(step1_dir.glob("*/fmdv_import.json")):
+    for p in seq_import.import_json_files(step1_dir):
         sample = p.parent.name
         if sample in present:
             continue
@@ -469,17 +475,21 @@ def _fmdv_import_rows(rows: list, step1_dir: Path) -> List[Dict[str, Any]]:
         except (OSError, ValueError):
             d = {}
         meta = d.get("metadata") or {}
-        out.append({
+        row = {
             "sample": sample, "_sample": sample, "_file": str(p),
             # simulated reads not yet run show as such; once Step 1 has run
-            # the workbook row takes over (see _fmdv_flag_qc_rows).
+            # the workbook row takes over (see _flag_imported_rows).
             "read_type": "simulated" if d.get("reads") == "simulated" else "sequence",
             "_run_date": (d.get("imported") or "")[:10], "Reference": "",
+            "import_source": d.get("source") or "", "import_kind": d.get("kind") or "fasta",
+            "import_depth": (d.get("simulated_reads") or {}).get("depth"),
             "fmdv_source": d.get("kind") or "fasta", "fmdv_import_source": d.get("source") or "",
             "fmdv_import_class": d.get("class") or "", "fmdv_import_length": d.get("length"),
-            "fmdv_serotype": meta.get("serotype") or "", "fmdv_lineage": meta.get("topotype") or "",
-            "fmdv_country": meta.get("country") or "", "fmdv_year": meta.get("year") or "",
-        })
+        }
+        if mode == "fmdv":
+            row.update({"fmdv_serotype": meta.get("serotype") or "", "fmdv_lineage": meta.get("topotype") or "",
+                        "fmdv_country": meta.get("country") or "", "fmdv_year": meta.get("year") or ""})
+        out.append(row)
     return out
 
 
@@ -1285,7 +1295,7 @@ def _step1_dispatch_plan(
     for p in sorted(step1_dir.iterdir()):
         if not p.is_dir() or p.name.startswith(("_", ".")):
             continue
-        if (p / "fmdv_import.json").is_file() and next(p.glob("*.fastq.gz"), None) is None:
+        if seq_import.import_json_path(p) is not None and next(p.glob("*.fastq.gz"), None) is None:
             # A sequence imported without reads (app.seq_import): nothing to
             # align, and not a skip worth reporting. One imported as
             # simulated reads has a FASTQ once Grabbed and runs like any sample.
@@ -2172,6 +2182,9 @@ class SeqImportRow(BaseModel):
 class SeqImportCommitRequest(BaseModel):
     token: str
     rows: List[SeqImportRow] = []
+    # How deep the simulated reads are made (seq_import.clamp_depth holds it
+    # to 1..1000; anything unusable falls back to 100).
+    depth: Optional[int] = None
 
 
 class ImportVcfRequest(BaseModel):
@@ -5385,6 +5398,20 @@ async def _run_blocking(fn, *args):
     return await asyncio.to_thread(fn, *args)
 
 
+def _genbank_cache(cfg: Dict, project_dir: Path) -> Path:
+    """Where fetched GenBank records are kept.
+
+    An FMDV project uses the reference library's own cache, which a site that
+    runs offline ships with the library. Any other project has no library to
+    put it in, so the records go to this user's cache directory."""
+    if _project_mode(project_dir) == "fmdv":
+        lib = _fmdv_lib(cfg)
+        if lib.is_dir():
+            return lib / "genbank_cache"
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+    return Path(base) / "vsnp_gui" / "genbank_cache"
+
+
 def _seq_import_blastn() -> Optional[str]:
     env = _fmdv_tree_env()
     return shutil.which("blastn", path=env["path"]) or shutil.which("blastn")
@@ -5404,21 +5431,28 @@ async def project_import_sequences_preview(
     files: List[UploadFile] = File([]),
     accessions: str = Form(""),
     role: str = Form("sample"),
+    depth: str = Form(""),
 ):
     """One editable row per record of the uploaded FASTA or GenBank files and
-    of the accessions, with VP1 found (blastn) and the sequences stashed for
-    the commit. Nothing lands in step1/ or fmdv_context/ yet. Accessions not in
-    the library or the cache are fetched from NCBI; when NCBI cannot be
-    reached the response says so per accession and the rows that could be
-    served from disk are still returned."""
+    of the accessions, with the reads each would make, and the sequences
+    stashed for the commit. Nothing lands in step1/ yet. Accessions not
+    already on disk are fetched from NCBI; when NCBI cannot be reached the
+    response says so per accession and the rows that could be served from
+    disk are still returned.
+
+    In an FMDV project the records are also typed: VP1 is located by blastn
+    and the metadata read, and a record may be imported as context. In any
+    other project a record is a sample and nothing but reads is made from it,
+    so neither the FMDV library nor BLAST+ has to be there."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
-    if _project_mode(project_dir) != "fmdv":
-        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    mode = _project_mode(project_dir) or "stock"
+    fmdv = mode == "fmdv"
     lib = _fmdv_lib(cfg)
-    default_role = "context" if (role or "").strip().lower() == "context" else "sample"
+    want_depth = seq_import.clamp_depth(depth)
+    default_role = "context" if fmdv and (role or "").strip().lower() == "context" else "sample"
     records: List[Dict] = []
     problems: List[str] = []
     sidecar: Dict[str, Dict[str, str]] = {}
@@ -5450,15 +5484,15 @@ async def project_import_sequences_preview(
     problems.extend(f"not an accession: {b}" for b in bad)
     ncbi: Dict[str, Any] = {}
     if accs:
-        lib_acc = seq_import.library_accessions(lib)
-        proj_acc = seq_import.project_context_accessions(project_dir)
+        lib_acc = seq_import.library_accessions(lib) if fmdv else {}
+        proj_acc = seq_import.project_context_accessions(project_dir) if fmdv else {}
         # Context already held is not fetched again; a sample is, since the
         # library's copy is an unnamed comparator and the project wants the
         # record itself, typed and highlighted.
         present = ({a: lib_acc.get(a) or proj_acc.get(a) for a in accs if a in lib_acc or a in proj_acc}
                    if default_role == "context" else {})
         todo = [a for a in accs if a not in present]
-        cache = lib / "genbank_cache"
+        cache = _genbank_cache(cfg, project_dir)
         cached = {a for a in todo if (cache / f"{a}.gb").is_file()}
         need_net = [a for a in todo if a not in cached]
         reachable = True
@@ -5498,8 +5532,9 @@ async def project_import_sequences_preview(
     if not records:
         raise HTTPException(status_code=400, detail="; ".join(problems) or "No sequences or accessions given")
     seq_import.prune_stash(project_dir)
-    blastn = _seq_import_blastn()
-    result = await _run_blocking(seq_import.preview, records, project_dir, lib, default_role, blastn, 4)
+    blastn = _seq_import_blastn() if fmdv else None
+    result = await _run_blocking(seq_import.preview, records, project_dir, lib, default_role,
+                                 blastn, 4, mode, want_depth)
     result["problems"] = problems
     result["ncbi"] = ncbi
     return result
@@ -5507,18 +5542,19 @@ async def project_import_sequences_preview(
 
 @app.post("/api/projects/{project}/import_sequences")
 def project_import_sequences(project: str, payload: SeqImportCommitRequest):
-    """Write the chosen rows as samples (step1/<name>/) or context
-    (fmdv_context/<SEROTYPE>.*) and type the samples, as a background job."""
+    """Write the chosen rows as samples (step1/<name>/, with their simulated
+    reads in download/) or, in an FMDV project, as context
+    (fmdv_context/<SEROTYPE>.*), as a background job."""
     cfg = load_config()
     project_dir = _project_dir_for(cfg, project)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
-    if _project_mode(project_dir) != "fmdv":
-        raise HTTPException(status_code=400, detail="Not an FMDV project")
+    mode = _project_mode(project_dir) or "stock"
     ensure_project_dirs(project_dir)
     if not re.fullmatch(r"[0-9]{8}_[0-9]{6}_[0-9a-f]{8}", payload.token or ""):
         raise HTTPException(status_code=400, detail="Invalid preview token")
-    plan, errors = seq_import.build_plan(payload.token, [r.dict() for r in payload.rows], project_dir, _fmdv_lib(cfg))
+    plan, errors = seq_import.build_plan(payload.token, [r.dict() for r in payload.rows], project_dir,
+                                         _fmdv_lib(cfg), mode, seq_import.clamp_depth(payload.depth))
     if errors:
         raise HTTPException(status_code=400, detail="Import refused: " + "; ".join(errors))
     plan_path = _jobs_dir / f"seq_import_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{len(plan['entries'])}.json"
@@ -5530,7 +5566,7 @@ def project_import_sequences(project: str, payload: SeqImportCommitRequest):
     env = _fmdv_tree_env()
     job_id = job_manager.start_job(name=f"import_sequences:{project}", command=command, cwd=backend_root,
                                    env={"PATH": env["path"]})
-    return {"job_id": job_id,
+    return {"job_id": job_id, "depth": plan["depth"], "mode": plan["mode"],
             "entries": [{"name": e["name"], "role": e["role"], "serotype": e["meta"]["serotype"]} for e in plan["entries"]]}
 
 
@@ -6450,7 +6486,7 @@ def fmdv_project_get(project: str):
             }
     imports: Dict[str, Dict] = {}
     if step1.is_dir():
-        for p in step1.glob("*/fmdv_import.json"):
+        for p in seq_import.import_json_files(step1):
             try:
                 d = json.loads(p.read_text())
             except (OSError, ValueError):
@@ -7295,18 +7331,16 @@ def step1_status(project: str):
         input_issue = ""
         if status == "not_started":
             input_issue = _step1_input_issue(sample_dir, min_bytes) or ""
-            if input_issue.startswith("no fastq") and listing.exists("fmdv_import.json"):
+            if input_issue.startswith("no fastq") and (listing.exists(seq_import.IMPORT_JSON)
+                                                        or listing.exists(seq_import.LEGACY_IMPORT_JSON)):
                 # An imported sequence (app.seq_import) with no reads in its
                 # folder: sequence-only (typed and placed on the VP1 tree,
                 # never aligned), or simulated reads still in download/
                 # waiting for Grab. Not a misfit either way.
                 status = "sequence"
-                try:
-                    mode = json.loads((sample_dir / "fmdv_import.json").read_text()).get("reads")
-                except (OSError, ValueError):
-                    mode = ""
+                reads = seq_import.read_import_json(sample_dir).get("reads")
                 input_issue = ("imported sequence: simulated reads in download/, Grab then Run"
-                               if mode == "simulated" else "imported sequence, no reads")
+                               if reads == "simulated" else "imported sequence, no reads")
             elif input_issue:
                 status = "misfit"
 
@@ -9284,8 +9318,10 @@ def _qc_rows_for_export(project_dir: Path, step1_dir: Path) -> List[Dict[str, An
     Results table shows (serotype, lineage, identity, genome and VP1 called)
     added in FMDV mode. A copy: the cached rows stay as the scanner left them."""
     rows = [dict(r) for r in _qc_rows_blocking(step1_dir)]
-    if _project_mode(project_dir) == "fmdv":
-        rows.extend(_fmdv_import_rows(rows, step1_dir))
+    mode = _project_mode(project_dir)
+    rows.extend(_imported_sequence_rows(rows, step1_dir, mode))
+    _flag_imported_rows(rows, step1_dir)
+    if mode == "fmdv":
         _fmdv_flag_qc_rows(rows, step1_dir)
     return rows
 
@@ -9340,8 +9376,10 @@ def qc_summary(project: str, refresh: int = 0):
     # keys its rows on `sample`.
     rows = [{k: v for k, v in r.items() if not k.startswith("_sa")}
             for r in state["rows"] or []]
-    if _project_mode(project_dir) == "fmdv":
-        rows.extend(_fmdv_import_rows(rows, step1_dir))
+    mode = _project_mode(project_dir)
+    rows.extend(_imported_sequence_rows(rows, step1_dir, mode))
+    _flag_imported_rows(rows, step1_dir)
+    if mode == "fmdv":
         _fmdv_flag_qc_rows(rows, step1_dir)
     _annotate_qc_rows(rows, _resolve_qc_thresholds(cfg, project_dir))
     return {

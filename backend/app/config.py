@@ -165,6 +165,23 @@ _DEFAULT_SHARED_VCF_DB_ROOT = (
     str(_SHARED_VCF_DB_ROOT) if _SHARED_VCF_DB_ROOT.is_dir() else ""
 )
 
+# The FMDV reference library (bin/fmdv_library_build.sh). A site keeps one
+# copy for everyone at <site>/refs/fmdv, beside the vsnp3 references; a
+# personal build defaults to ~/fmdv_refs. A user's own "fmdv_reflib" in
+# config.json wins over both, and is the only one of the three that is stored.
+def fmdv_reflib_default() -> Path:
+    site_lib = _SITE_ROOT / "refs" / "fmdv"
+    if (site_lib / "lineages.json").is_file():
+        return site_lib
+    return HOME_DIR / "fmdv_refs"
+
+
+def fmdv_reflib(cfg: Dict[str, Any]) -> Path:
+    """Where this launch reads the FMDV reference library from."""
+    own = str(cfg.get("fmdv_reflib") or "").strip()
+    return Path(own).expanduser() if own else fmdv_reflib_default()
+
+
 # --- Site-derived paths -----------------------------------------------------
 # These keys are functions of the LAUNCH CONTEXT (site.conf, launcher env vars,
 # checkout position), not user data. They used to sit in DEFAULTS and get
@@ -196,7 +213,11 @@ def site_path_defaults(vsnp3_effective: str = "") -> Dict[str, str]:
         "vsnp3_path": str(_DEFAULT_VSNP3_PATH),
         "shared_projects_root": _DEFAULT_SHARED_PROJECTS_ROOT,
         "vcf_db_folders_root": _DEFAULT_SHARED_VCF_DB_ROOT,
-        "vsnp_gui_deploy_path": str(TOOLS_ROOT / "vsnp_gui"),
+        # The checkout this backend is running from, not the site's stock
+        # install: a fork or a development copy under another path otherwise
+        # writes the stock deployment's commit and path into every run's
+        # provenance. For the site deployment the two are the same folder.
+        "vsnp_gui_deploy_path": str(Path(__file__).resolve().parents[2]),
         "audit_root": str(_SITE_ROOT / "audit"),
         "vsnp3_reference_options_root": str(_SITE_ROOT / "refs" / "vsnp3" / "reference_options"),
         # The site's list of reference locations (refs.py). In a folder of its

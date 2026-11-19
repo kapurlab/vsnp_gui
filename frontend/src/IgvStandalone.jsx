@@ -204,12 +204,20 @@ async function describeStep1FilesError(res) {
 // folder" is the tag the Step 2 sample list puts on the same samples: their
 // calls are the VCF in vcf_database, and no alignment was ever made here.
 function noReadsReason(data) {
+  // A reference-database genome in FMDV mode has reads, but they were simulated
+  // from its own sequence when the library was built; the note says so.
+  if (data.kind === "library_genome") return "library genome";
   if (data.bam) return "";
   return data.kind === "imported_vcf" ? "no Step 1 folder" : "no BAM in its Step 1 folder";
 }
 
 function callsTrackName(displayName, reason) {
-  return reason ? `${displayName} · calls only (${reason})` : `${displayName} · calls`;
+  if (!reason || reason === "library genome") return `${displayName} · calls`;
+  return `${displayName} · calls only (${reason})`;
+}
+
+function readsTrackName(displayName, reason) {
+  return reason === "library genome" ? `${displayName} · reads (simulated from its genome)` : `${displayName} · reads`;
 }
 
 // The bar's account of every loaded sample without reads, one sentence per
@@ -229,8 +237,17 @@ function NoReadsNote({ entries }) {
         const one = list.length === 1;
         return (
           <span key={reason}>
-            <strong>No reads for {names}</strong>
-            {reason === "no Step 1 folder"
+            {reason === "library genome" ? (
+              <>
+                <strong>Simulated reads for {names}</strong>
+                {` — ${one ? "this is a reference-database genome" : "these are reference-database genomes"}: the reads were simulated `}
+                {`from ${one ? "its" : "their"} own GenBank sequence by vsnp3's FASTA mode when the library was built, so depth is uniform `}
+                {`and the base shown at a variant site is the genome's own. `}
+              </>
+            ) : (
+              <strong>No reads for {names}</strong>
+            )}
+            {reason === "library genome" ? null : reason === "no Step 1 folder"
               ? ` — ${one ? "it has" : "they have"} no Step 1 folder in this project, so there is no alignment to show. `
                 + `${one ? "The calls track is its VCF" : "The calls tracks are their VCFs"} from vcf_database. `
               : ` — ${one ? "its Step 1 folder holds" : "their Step 1 folders hold"} no BAM file. `}
@@ -334,7 +351,7 @@ export default function IgvStandalone() {
           });
         } catch (_) { /* non-fatal: drop the calls track, keep the BAM */ }
       }
-      if (data.bam) await browserRef.current.loadTrack(readsTrack(reqProject, sample, `${displayName} · reads`, data));
+      if (data.bam) await browserRef.current.loadTrack(readsTrack(reqProject, sample, readsTrackName(displayName, reason), data));
       if (reason) setNoReads((prev) => [...prev, { name: displayName, reason, vcf: callsVcf }]);
       loadedRef.current.add(trackKey);
       setMeta((prev) => ({ ...prev, trackCount: loadedRef.current.size }));
@@ -546,7 +563,7 @@ export default function IgvStandalone() {
           });
         }
         if (t.bamPath) {
-          out.push(readsTrack(t.project, t.sample, `${displayName} · reads`, t.files));
+          out.push(readsTrack(t.project, t.sample, readsTrackName(displayName, reason), t.files));
         }
         return out;
       });

@@ -297,12 +297,15 @@ export function searchRows(layout, term, displayName, alsoTry) {
   const out = [];
   const t = String(term || "").trim().toLowerCase();
   if (!t) return out;
+  // Several names at once, comma-separated: a link from the Step 2 VP1 view
+  // names every sample in the run, so all of them light up rather than one
+  // and a hunt for the rest.
+  const terms = t.split(",").map((x) => x.trim()).filter(Boolean);
   // `alsoTry` are other spellings of the same sample, from the reference's
   // metadata. A tree written through that metadata labels its tips
   // `GISAID-19152935_…` for a sample the project ran as `EPI-ISL-19152935`,
   // so searching the name you have found nothing on the tree you are looking
   // at — the one place a name really has to be findable.
-  const terms = [t];
   (alsoTry || []).forEach((x) => {
     const v = String(x || "").trim().toLowerCase();
     if (v && !terms.includes(v)) terms.push(v);

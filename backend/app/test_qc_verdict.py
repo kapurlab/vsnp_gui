@@ -98,6 +98,16 @@ def main() -> int:
     assert_eq(v_default["level"], "pass", "60× passes default 30× threshold")
     assert_eq(v_strict["level"], "review", "60× reviews under strict 100× threshold")
 
+    print("\n[compute_verdict — depth with a thousands separator]")
+    strict = merge_thresholds({"coverage": {"pass_min": 100.0, "review_min": 20.0}})
+    row = {"Average Depth": "2,762.2", "Unmapped Percent": "0.0%"}
+    v = compute_verdict(row, strict)
+    assert_eq(v["signals"]["coverage"], 2762.2, "2,762.2 parses as depth")
+    assert_eq(v["level"], "pass", "deep sample passes the 100× line")
+    row = {"Average Depth": "1,050", "Unmapped Percent": "0.0%"}
+    v = compute_verdict(row, merge_thresholds({"coverage": {"pass_min": 2000.0, "review_min": 20.0}}))
+    assert_eq(v["level"], "review", "1,050 is compared to the threshold, not skipped")
+
     print("\nAll qc_verdict smoke tests passed.")
     return 0
 

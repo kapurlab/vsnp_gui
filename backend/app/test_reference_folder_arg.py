@@ -87,6 +87,7 @@ class Fixture:
         make_ref(self.second, "Brucella_suis3")
         self.vsnp3 = tmp / "vsnp3"
         (self.vsnp3 / "bin").mkdir(parents=True)
+        (self.vsnp3 / "bin" / "vsnp3_step1.py").write_text("#!/usr/bin/env python\n")
         (self.vsnp3 / "bin" / "vsnp3_step2.py").write_text("#!/usr/bin/env python\n")
         (self.vsnp3 / "dependencies").mkdir()
         self.projects = tmp / "projects"
@@ -113,6 +114,8 @@ def test_step1(fx: Fixture) -> None:
     args = run_args(script) if script.exists() else []
     check("RUN_ARGS carries -t <folder of the first location holding the name>",
           "-t" in args and args[args.index("-t") + 1] == str(fx.folder))
+    check("Step 1 calls the configured install, not a name resolved on PATH",
+          args and args[0] == str(fx.vsnp3 / "bin" / "vsnp3_step1.py"))
     check("...as one argument although the path has a space", str(fx.folder) in args)
     check("...not the name, and not the shadowed copy",
           REF not in args and str(fx.second / REF) not in args)

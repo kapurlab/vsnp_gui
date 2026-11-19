@@ -3373,7 +3373,11 @@ export default function App() {
   async function createProject() {
     if (!newProjectName.trim()) return;
     const body = { name: newProjectName.trim() };
-    if (newProjectReference) body.reference = newProjectReference;
+    // FMDV mode is chosen where the project is made: the reference is then
+    // picked per sample at Step 1, and the Inputs panel offers the
+    // Sequences tab from the start instead of after a tick further down.
+    const fmdv = newProjectReference === "__fmdv__";
+    if (newProjectReference && !fmdv) body.reference = newProjectReference;
     const res = await fetch(`${API_BASE}/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3383,6 +3387,17 @@ export default function App() {
       const detail = await res.json().catch(() => ({}));
       window.alert(`Could not create project: ${detail.detail || res.status}`);
       return;
+    }
+    if (fmdv) {
+      try {
+        const r2 = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(body.name)}/fmdv`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "fmdv", scope: "FMDV" }),
+        });
+        if (!r2.ok) window.alert(`Project created, but FMDV mode could not be set: ${(await r2.text()).slice(0, 200)}`);
+      } catch (e) {
+        window.alert(`Project created, but FMDV mode could not be set: ${e.message || e}`);
+      }
     }
     setNewProjectName("");
     setNewProjectReference("");
@@ -7069,10 +7084,11 @@ export default function App() {
               <select
                 value={newProjectReference}
                 onChange={(e) => setNewProjectReference(e.target.value)}
-                title="Optional: set the reference at project creation"
+                title="Optional: set the reference at project creation. FMDV mode chooses the lineage reference per sample at Step 1 and adds the Sequences tab to Inputs."
                 style={{ minWidth: "10rem" }}
               >
                 <option value="">-- reference (optional) --</option>
+                <option value="__fmdv__">FMDV mode (reference chosen per sample)</option>
                 <ReferenceOptions references={references} />
               </select>
               <button onClick={createProject}>Create</button>

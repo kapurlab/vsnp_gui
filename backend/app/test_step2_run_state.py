@@ -103,7 +103,10 @@ def check_vp1_tree_state() -> None:
         # RAxML's final search writes nothing for a long time: a process that
         # still names the folder keeps it running however old the files are.
         import subprocess as _sp
-        sleeper = _sp.Popen(["sh", "-c", f"sleep 30 # {vp1}"])
+        # The folder rides as an argument of the process itself: macOS's sh
+        # execs a lone `sleep`, and a comment after it never reaches argv.
+        sleeper = _sp.Popen([sys.executable, "-c", "import time; time.sleep(30)", str(vp1)])
+        time.sleep(0.3)
         try:
             assert_eq(_vp1_tree_run_state(run, run.name), "running", "quiet folder, live process names it → running")
         finally:

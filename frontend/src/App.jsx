@@ -1292,6 +1292,10 @@ export default function App() {
   const [sraReport, setSraReport] = useState({ downloaded: [], already_in_step1: [], failed: [] });
   // Item 6: Reference Editor
   const [refEditorRef, setRefEditorRef] = useState("");
+  // "<project>\0<reference>" the editor last followed. The editor opens on the
+  // selected project's reference; a manual pick holds until the project, or
+  // the project's reference, changes.
+  const refEditorFollowedRef = useRef("");
   const [refEditorFiles, setRefEditorFiles] = useState([]);
   // "Find a sample": which of this reference's spreadsheets mention a name.
   const [refEditorWritable, setRefEditorWritable] = useState(true);
@@ -2430,6 +2434,18 @@ export default function App() {
   }
 
   // Item 6: Reference Editor
+  // Show one reference in the editor: its spreadsheets and metadata, with the
+  // metadata form cleared. Both the dropdown and the project-follow use this.
+  function selectRefEditorRef(refName) {
+    setRefEditorRef(refName);
+    setMetaStatus("");
+    setMetaSingleOrig("");
+    setMetaSingleDisplay("");
+    setMetaBulkText("");
+    loadRefEditorFiles(refName);
+    loadMetadata(refName);
+  }
+
   async function loadRefEditorFiles(refName) {
     if (!refName) {
       setRefEditorFiles([]);
@@ -3224,6 +3240,26 @@ export default function App() {
     const projectRef = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
     if (projectRef) setImportReference(projectRef);
   }, [projectReference, refLock.references]);
+
+  // The Reference Editor opens on the selected project's reference. It follows
+  // once per project + reference, so a manual pick in the dropdown stays put
+  // until the user switches project or the project's reference changes; a
+  // reload of the reference list does not undo it. A project with no
+  // reference, or one that names no listed reference, leaves the editor alone.
+  const refEditorProjectRef = (() => {
+    const name = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    if (!name) return "";
+    const hit = references.find((r) => r.name === name)
+      || references.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    return hit ? hit.name : "";
+  })();
+  useEffect(() => {
+    if (!selectedProject || !refEditorProjectRef) return;
+    const key = `${selectedProject}\u0000${refEditorProjectRef}`;
+    if (refEditorFollowedRef.current === key) return;
+    refEditorFollowedRef.current = key;
+    if (refEditorProjectRef !== refEditorRef) selectRefEditorRef(refEditorProjectRef);
+  }, [selectedProject, refEditorProjectRef]);
 
   useEffect(() => {
     if (!selectedProject || !settingsReady) return;
@@ -7804,19 +7840,25 @@ export default function App() {
                 <h3>Reference Type</h3>
                 <select
                   value={refEditorRef}
-                  onChange={(e) => {
-                    setRefEditorRef(e.target.value);
-                    setMetaStatus("");
-                    setMetaSingleOrig("");
-                    setMetaSingleDisplay("");
-                    setMetaBulkText("");
-                    loadRefEditorFiles(e.target.value);
-                    loadMetadata(e.target.value);
-                  }}
+                  onChange={(e) => selectRefEditorRef(e.target.value)}
                 >
                   <option value="">Choose a reference...</option>
                   <ReferenceOptions references={references} />
                 </select>
+                {selectedProject && refEditorProjectRef ? (
+                  refEditorRef === refEditorProjectRef ? (
+                    <div className="note" style={{marginTop:"0.4em"}}>
+                      The selected project's reference.
+                    </div>
+                  ) : (
+                    <div className="note" style={{marginTop:"0.4em"}}>
+                      The selected project uses <strong>{refEditorProjectRef}</strong>.{" "}
+                      <button className="ghost" onClick={() => selectRefEditorRef(refEditorProjectRef)}>
+                        Show it
+                      </button>
+                    </div>
+                  )
+                ) : null}
                 {refEditorPath ? (
                   <div className="note" style={{wordBreak:"break-all", marginTop:"0.5em"}}>
                     Directory: {refEditorPath}

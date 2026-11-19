@@ -3905,6 +3905,35 @@ def snp_table_filter_context(project: str, path: str = Query(...)):
     return {k: v for k, v in ctx.items() if k not in ("project_dir", "ref_dir")}
 
 
+@app.get("/api/projects/{project}/snp-table-filter/download")
+def snp_table_filter_download(project: str):
+    """The project's reference's define_filter workbook, from a SNP table's
+    "Download define filter" link: the same file the Reference Editor's Define
+    Filter Download gives, chosen by vsnp3's own rule (define_filter_of), so it
+    is the one the next Step 2 run reads and the table's filter tools write.
+
+    The link opens a tab, so a refusal is a readable page, never bare JSON."""
+    from app import xlsx_html
+    cfg = load_config()
+    try:
+        project_dir = _project_dir_for(cfg, project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    target, why = sample_groups.define_filter_of(_project_reference_dir(project_dir, cfg))
+    if target is None:
+        return HTMLResponse(status_code=404, content=xlsx_html.message_page(
+            "No define filter to download",
+            f"There is no define filter to download: {why}.",
+            filename=_project_reference(project_dir) or "",
+            back_hint="Close this tab to return to the table. The Reference "
+                      "Editor can create one from the template."))
+    return _fresh_file_response(
+        target,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=target.name,
+    )
+
+
 class SnpTableFilterAddRequest(BaseModel):
     path: str
     positions: List[str]
@@ -10970,7 +10999,7 @@ def bootstrap():
 # about the deployment was wrong.
 #
 # So: if a change alters a single byte of rendered preview HTML, bump this.
-_XLSX_RENDER_VERSION = "20"  # 20: "Add defining SNP…" and "Filter samples…" (19: the filter panel takes its rationale inline, no pop-ups (18: "Filter positions…" picks headers for the group's filter (17: column window)
+_XLSX_RENDER_VERSION = "21"  # 21: "Download define filter" in the bar (20: "Add defining SNP…" and "Filter samples…" (19: the filter panel takes its rationale inline, no pop-ups (18: "Filter positions…" picks headers for the group's filter (17: column window)
 #                                  (the windows themselves did not change — the ETag had to, so a
 #                                  browser holding the old page does not keep it on a 304)
 #                              16: windows record the rows drawn without reads; sample sets left the key

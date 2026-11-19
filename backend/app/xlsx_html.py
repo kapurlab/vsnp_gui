@@ -3156,7 +3156,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <span class="filename">{filename}</span>
   <span class="meta">sheet: {sheet} · {rows} rows × {cols} cols</span>
   {controls}
-  <span style="margin-left: auto;">{download_link}</span>
+  <span style="margin-left: auto;">{download_link}<span id="xlsxDfDlWrap" hidden> · <a id="xlsxDfDl" href="#" target="_blank" rel="noopener" title="The reference&#39;s defining-SNP filter workbook (*_define_filter.xlsx) as it is now: the file the next Step 2 run reads, and the one the Reference Editor&#39;s Define Filter Download gives.">Download define filter</a></span></span>
   <div id="xlsxFlt" class="xlsx-flt" hidden></div>
 </div>
 {notice}
@@ -3945,6 +3945,16 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       p[0].hidden = false;
       p[0].addEventListener("click", function() {{ if (fltMode === p[1]) closeFlt(); else openMode(p[1]); }});
     }});
+    // The define filter these tools write to, downloadable from the table as
+    // from the Reference Editor. A real anchor beside this page
+    // (/api/projects/<p>/snp-table-filter/download), so it survives a proxy
+    // prefix; the server answers with a readable page when there is no file.
+    var dfWrap = document.getElementById("xlsxDfDlWrap");
+    var dfLink = document.getElementById("xlsxDfDl");
+    if (dfWrap && dfLink) {{
+      dfLink.href = fltApi + "/download";
+      dfWrap.hidden = false;
+    }}
   }}
 
   // ---- the identical-position toggle --------------------------------------

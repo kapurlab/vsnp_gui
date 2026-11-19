@@ -350,6 +350,31 @@ def main() -> int:
           "window.prompt(" not in page and "window.confirm(" not in page)
     check("the panel has a rationale box", 'id="xlsxFltWhy"' in page)
 
+    print("[a SNP table downloads its reference's define filter]")
+    # Requested 2026-11-19: the Reference Editor's Define Filter Download, on
+    # the SNP table page too. The link sits beside the page and names only the
+    # project; the server picks the file by vsnp3's rule.
+    check("the page carries the link, hidden until the script places it",
+          'id="xlsxDfDlWrap" hidden' in page and 'id="xlsxDfDl"' in page
+          and 'fltApi + "/download"' in page)
+    resp = M.snp_table_filter_download("p1")
+    check("it serves the define filter itself",
+          Path(resp.path).resolve() == book.resolve())
+    check("as an attachment named after the file",
+          book.name in resp.headers.get("content-disposition", "")
+          and resp.headers.get("content-disposition", "").startswith("attachment"))
+    check("revalidated before reuse, like every reference download",
+          resp.headers.get("cache-control") == "no-cache")
+    empty_ref = tmp / "EmptyRef"
+    empty_ref.mkdir()
+    M._project_reference_dir = lambda _pd, _c: empty_ref
+    resp = M.snp_table_filter_download("p1")
+    body = resp.body.decode()
+    check("no define filter: a readable 404 page, not bare JSON",
+          resp.status_code == 404 and "<html" in body.lower()
+          and "no defining-SNP workbook" in body)
+    M._project_reference_dir = lambda _pd, _c: ref_dir
+
     print(f"\n{'ALL PASSED' if not FAILED else f'{FAILED} FAILED'}")
     return 1 if FAILED else 0
 

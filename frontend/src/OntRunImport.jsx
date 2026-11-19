@@ -119,7 +119,7 @@ export default function OntRunImport({ apiBase, project, enabled, onImported }) 
 
   return (
     <div className="block">
-      <InputHelp line="Point at the run folder; preview the barcodes and names before anything is written.">
+      <InputHelp line={<>Point at the run folder; preview the barcodes and names before anything is written. <a href={`${apiBase}/api/ont/sample_sheet_template`} download="sample_sheet.csv" title="barcode,sample_id: name each barcode's sample in the run folder">Sample sheet template</a></>}>
         <p>A MinKNOW run folder (<code>fastq_pass/barcodeNN/</code>), or the folder above it. Each barcode&apos;s
         chunk files become one FASTQ in this project&apos;s <code>download/</code>, named from the run&apos;s{" "}
         <code>sample_sheet.csv</code> (columns <code>barcode,sample_id</code>) or from the barcode when there is no sheet.</p>

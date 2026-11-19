@@ -167,7 +167,11 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
           onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }}
         />
         <button type="button" disabled={!enabled} onClick={() => inputRef.current?.click()}>Choose Files</button>
-        <span>Or drop FASTA, GenBank (.gb) or a metadata sheet (.tsv) here</span>
+        <span>
+          Or drop FASTA, GenBank (.gb) or a metadata sheet here{" "}
+          <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv"
+            title="A tab-separated sheet with a sample column and any of role, serotype, lineage, country, year, host, accession, isolate; drop it beside the FASTA.">(sheet template)</a>
+        </span>
       </div>
       {files.length ? (
         <div className="muted" style={{ fontSize: "11px", marginBottom: "4px" }}>

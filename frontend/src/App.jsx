@@ -9185,12 +9185,12 @@ export default function App() {
                                   <td title={row.read_type === "simulated" ? "Simulated reads: mapping rate describes the simulation and is not shown." : undefined}>{row.read_type === "simulated" ? "-" : fmtPercent1(qcMappingRate(row))}</td>
                                   {fmdvLongRead ? (
                                     <td title={row["Long-read Error Rate"] || (row.read_type === "ont" ? "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference." : "Long reads only.")}>
-                                      {typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
+                                      {row.read_type === "simulated" ? "-" : typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
                                     </td>
                                   ) : null}
                                   {fmdvShortRead ? (
                                     <td title={row.read_type === "ont" ? "Not marked for long reads." : "Mapped reads marked duplicate and set aside before calling."}>
-                                      {row.read_type === "ont" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
+                                      {row.read_type === "ont" || row.read_type === "simulated" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
                                     </td>
                                   ) : null}
                                   <td title={row.read_type === "simulated" ? "Simulated reads: coverage describes the simulation and is not shown." : "Percent of reference positions covered by at least one read."}>{row.read_type === "simulated" ? "-" : formatPercent(row["Genome with Coverage"])}</td>
@@ -9204,7 +9204,7 @@ export default function App() {
                                   <td title="vsnp3's AC=1 calls: sites where the reads disagree. Hundreds on one sample, against single digits on the rest, is a mixed infection.">{row["Ambiguous SNPs"] ?? "-"}</td>
                                   {fmdvLongRead ? (
                                     <td title={row["Long-read Calls Limited to N"] || (row.read_type === "ont" ? "Calls raised to the N floor by the long-read model; the consensus masks these sites." : "Long reads only.")}>
-                                      {typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
+                                      {row.read_type === "simulated" ? "-" : typeof row.fmdv_thin_calls === "number" ? row.fmdv_thin_calls : "-"}
                                     </td>
                                   ) : null}
                                   <td title={row.Groups ? String(row.Groups) : undefined}>{row.Groups || "-"}</td>

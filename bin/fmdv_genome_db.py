@@ -45,7 +45,9 @@ from typing import Dict, Iterator, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fmdv_reflib  # noqa: E402
 
-DEFAULT_CONFIG = Path("~/.config/fmdv_gui_xdg/vsnp_gui/config.json")
+# The GUI's own config.json: XDG_CONFIG_HOME when the backend is launched with
+# one, ~/.config otherwise, the same file bin/fmdv_panel_register.py writes.
+DEFAULT_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "vsnp_gui" / "config.json"
 
 
 def _err(msg: str) -> None:

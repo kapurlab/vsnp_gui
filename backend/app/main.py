@@ -5349,6 +5349,21 @@ def _require_valid_accessions(accessions) -> None:
     which would be a confusing thing to tell someone who simply typed a stray
     character.
     """
+    # A GenBank nucleotide accession (EU448369, PX113531, NC_039210) is not a
+    # sequencing run and no SRA mirror will have reads for it. Refused here
+    # with the right pointer, before a five-minute job fails on every one.
+    genbank = [a for a in (accessions or []) if str(a).strip()
+               and re.fullmatch(r"[A-Z]{1,2}_?\d{5,8}(\.\d+)?", str(a).strip().upper())
+               and not re.match(r"^(SRR|ERR|DRR|SRX|ERX|DRX|SRS|ERS|DRS|SRP|ERP|DRP|SAM|PRJ|GS[EM])", str(a).strip().upper())]
+    if genbank:
+        shown = ", ".join(genbank[:5]) + (f" (+{len(genbank) - 5} more)" if len(genbank) > 5 else "")
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{shown}: these look like GenBank nucleotide accessions (sequences), not SRA runs. "
+                    "SRA Download fetches reads for run, experiment or sample accessions (SRR, SRX, SRS, PRJNA). "
+                    "To bring in published sequences, switch the project to FMDV mode and use the Sequences tab, "
+                    "which fetches the GenBank records and imports them as samples or as context."),
+        )
     bad = [a for a in (accessions or []) if str(a).strip()
            and not sra_is_valid_accession(str(a))]
     if bad:

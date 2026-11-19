@@ -236,6 +236,21 @@ carry no `N`, so the N-to-random-base behaviour of that path does not bite).
 - Do not register the FMDV folders with `vsnp3_path_adder.py`; pass the
   folder path with `-t`, as vsnp_gui already does for every reference.
 
+## The Inputs panel
+
+The Inputs pane shows one way in at a time: a row of tabs, MinKNOW run,
+FASTQ files, Sequences (FMDV mode only) and SRA, in the order a lab reaches
+for them, with the last tab used remembered per browser and the sequencer's
+run folder as the default in an FMDV project. Each tab carries one sentence
+of context and a "?" that opens the rest in flow under it, so the controls
+stand on their own; the paragraphs that used to sit beside every block
+live there now (`frontend/src/InputsTabs.jsx`). Whatever the source, the
+reads land in `download/` and appear under Ready to run on the right, which
+carries the count and a Grab into Step 1 button, the same Grab as the
+Step 1 panel's; Quarantine folds to one line with its count and opens
+when it holds something. Stock mode sees the same panel without the
+Sequences tab.
+
 ## Importing a MinKNOW run
 
 vsnp3 takes one read file per sample and the Inputs page lists `download/`

@@ -22,6 +22,7 @@ import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
 import FmdvVp1Results from "./FmdvVp1Results.jsx";
 import OntRunImport from "./OntRunImport.jsx";
 import SeqImport from "./SeqImport.jsx";
+import { InputTabs, InputHelp, useInputTab } from "./InputsTabs.jsx";
 
 const API_BASE = import.meta.env.VITE_API_URL || ".";
 
@@ -817,6 +818,8 @@ export default function App() {
   const [fmdvLineages, setFmdvLineages] = useState(null);
   const [fmdvScope, setFmdvScope] = useState("FMDV");
   const fmdvOn = fmdvInfo?.mode === "fmdv";
+  // The Inputs panel shows one source at a time (InputsTabs.jsx).
+  const [inputTab, setInputTab] = useInputTab(fmdvOn);
   const [newProjectName, setNewProjectName] = useState("");
   const [settings, setSettings] = useState({
     vsnp3_path: "",
@@ -7309,7 +7312,16 @@ export default function App() {
             </div>
             <div className="input-columns">
               <div className="input-column">
-                <h3>Add local FASTQ</h3>
+                <InputTabs value={inputTab} onChange={setInputTab} fmdvOn={fmdvOn} disabled={!selectedProject} />
+                {inputTab === "fastq" ? (
+                <div className="input-tab-body">
+                <InputHelp line="Link a folder on the server, or upload files; paired reads are matched by _R1 and _R2.">
+                  <p>Browse the server for FASTQ files or a folder, pick another project&apos;s <code>download/</code>,
+                  or type a path. Linked files stay where they are; uploads are copied into this project&apos;s{" "}
+                  <code>download/</code>.</p>
+                  <p>A sample is named from the file up to its first underscore, so <code>Mg_280_R1.fastq.gz</code>
+                  becomes <code>Mg-280</code>. Pairs are recognised by <code>_R1</code>/<code>_R2</code> or <code>_1</code>/<code>_2</code>.</p>
+                </InputHelp>
                 {window?.vsnp?.selectPath ? (
                   <button
                     onClick={async () => {
@@ -7468,13 +7480,17 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                </div>
+                ) : null}
+                {inputTab === "minknow" ? (
                 <OntRunImport
                   apiBase={API_BASE}
                   project={selectedProject}
                   enabled={!!selectedProject && settingsReady}
                   onImported={() => { setNanoporeMode(true); loadAll(); }}
                 />
-                {fmdvOn ? (
+                ) : null}
+                {fmdvOn && inputTab === "sequences" ? (
                   <SeqImport
                     apiBase={API_BASE}
                     project={selectedProject}
@@ -7494,7 +7510,16 @@ export default function App() {
                     }}
                   />
                 ) : null}
-                <h3>SRA Download</h3>
+                {inputTab === "sra" ? (
+                <div className="input-tab-body">
+                <InputHelp line="Run, experiment or sample accessions, one per line; the reads download in the background.">
+                  <p>SRR, ERR, DRR run accessions, or SRX/SRS/PRJNA which are expanded through NCBI first.
+                  Downloads land in this project&apos;s <code>download/</code> (or the subfolder you name) and
+                  appear under Ready to run. Accessions already run in Step 1 are skipped, and the crosswalk
+                  records which run accessions each submitted one resolved to.</p>
+                  <p>Needs a working link to NCBI and ENA; set <code>NCBI_API_KEY</code> on the backend for a
+                  higher request rate.</p>
+                </InputHelp>
                 <textarea
                   placeholder="SRR/SRX/SRS accessions (one per line)"
                   value={sraText}
@@ -7562,6 +7587,8 @@ export default function App() {
                     <span className="muted"> — sample/study accessions you submitted → run accessions actually downloaded.</span>
                   </div>
                 ) : null}
+                </div>
+                ) : null}
               </div>
               <div className="input-column">
                 {/* T-07-adjacent: file list in <project>/download/ so users can see what
@@ -7569,15 +7596,29 @@ export default function App() {
                     partial files left behind by a cancelled upload. */}
                 {selectedProject ? (
                   <div className="block">
-                    <h3 style={{display:"flex", alignItems:"center", gap:"8px"}}>
-                      <span style={{flex:1}}>
+                    <h3 style={{display:"flex", alignItems:"center", gap:"8px", flexWrap:"wrap", rowGap:"6px"}}>
+                      <span style={{flex:"1 0 auto", whiteSpace:"nowrap"}}>
                         Ready to run
                         {shownDownloadGroups.length > 0 ? (
-                          <span className="muted" style={{marginLeft:"6px", fontWeight:"normal", fontSize:"12px"}}>
-                            ({shownDownloadGroups.length} sample{shownDownloadGroups.length === 1 ? "" : "s"}, {_formatBytes(shownDownloadBytes)})
+                          <span className="count-badge" title={`${shownDownloadGroups.length} sample${shownDownloadGroups.length === 1 ? "" : "s"}, ${_formatBytes(shownDownloadBytes)}, not yet in Step 1`}>
+                            {shownDownloadGroups.length}
                           </span>
                         ) : null}
                       </span>
+                      {/* Every source lands here, so the step that takes it on
+                          sits here too. The same Grab as the Step 1 panel's. */}
+                      <button
+                        type="button"
+                        onClick={step1Setup}
+                        disabled={!selectedProject || !settingsReady || grabJobStatus === "running" || step1JobStatus === "running" || shownDownloadGroups.length === 0}
+                        title={grabJobStatus === "running" ? "A Grab is in progress — watch it in Live Logs below"
+                          : step1JobStatus === "running" ? "Step 1 batch is in progress — wait for it to finish before grabbing"
+                          : shownDownloadGroups.length === 0 ? "Nothing waiting: every downloaded sample is already in Step 1"
+                          : "Stage these into Step 1 as samples, ready to Run"}
+                        style={{fontSize:"12px", padding:"3px 10px"}}
+                      >
+                        {grabJobStatus === "running" ? (<>Grabbing… <Elapsed /></>) : "Grab into Step 1"}
+                      </button>
                       {inputs.files.some((f) => f.name === "sra_crosswalk.tsv") ? (
                         <button
                           type="button"
@@ -7623,7 +7664,7 @@ export default function App() {
                       </div>
                     ) : null}
                     {!inputsLoading && inputs.files.length === 0 ? (
-                      <div className="muted" style={{fontSize:"12px"}}>No files yet. Upload above or use Choose Folder.</div>
+                      <div className="muted" style={{fontSize:"12px"}}>Nothing yet. Add reads or sequences on the left; they appear here.</div>
                     ) : null}
                     {!inputsLoading && inputs.files.length > 0 && shownDownloadGroups.length === 0 ? (
                       <div className="muted" style={{fontSize:"12px"}}>All downloaded samples have been run in Step 1 (or are in Quarantine).</div>
@@ -7678,14 +7719,11 @@ export default function App() {
                     })() : null}
                   </div>
                 ) : null}
-                <div className="quarantine-panel" style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>
-                  <h3 style={{ marginBottom: "4px" }}>
+                <details className="quarantine-panel" open={quarantine.length > 0} style={{ marginTop: "16px", borderTop: "1px solid var(--border)", paddingTop: "10px" }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: "14px", marginBottom: "4px" }}
+                    title="Samples removed from Step 1. Nothing is deleted until you say so: Restore puts the reads back in download/, Delete erases them for good.">
                     Quarantine <span className="muted" style={{ fontSize: "12px", fontWeight: "normal" }}>({quarantine.length})</span>
-                  </h3>
-                  <div className="muted" style={{ fontSize: "11px", marginBottom: "8px" }}>
-                    Samples removed from Step 1 land here — nothing is deleted until you say so.
-                    Restore puts the reads back in download/ (then Setup re-adds it); Delete erases them for good.
-                  </div>
+                  </summary>
                   {quarantine.length ? (
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "6px", maxHeight: "300px", overflowY: "auto" }}>
                       {quarantine.map((q) => (
@@ -7705,7 +7743,7 @@ export default function App() {
                   ) : (
                     <div className="muted" style={{ fontSize: "11px" }}>No removed samples. Use “Remove” on a Step 1 sample to move it here.</div>
                   )}
-                </div>
+                </details>
               </div>
             </div>
           </section>

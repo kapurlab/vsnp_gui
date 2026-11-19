@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { InputHelp } from "./InputsTabs.jsx";
 
 // FMDV mode: import sequences that are not reads. FASTA or GenBank files
 // (dropped or chosen) and GenBank accessions (typed) go through one preview:
@@ -140,14 +141,17 @@ export default function SeqImport({ apiBase, project, enabled, onImported }) {
 
   return (
     <div className="block">
-      <h3>Import sequences</h3>
-      <div className="muted" style={{ fontSize: "12px", margin: "0 0 6px" }}>
-        FASTA or GenBank files you already have (a consensus genome, a VP1 sequence), or GenBank accessions.
-        A <b>sample</b> is typed and placed on the VP1 tree like one from reads; a <b>context</b> record joins
-        this project&apos;s own comparator set and stands in the tree as lineage|country|year|accession.
-        VP1 is cut from a genome by blastn. No reads, no alignment, no whole-genome SNPs.{" "}
-        <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv">Metadata sheet template</a>
-      </div>
+      <InputHelp line="Drop FASTA or GenBank files, or type accessions; check the preview, then import.">
+        <p>A consensus genome or a VP1 sequence from another lab, a GenBank flat file, or GenBank accessions
+        (fetched from NCBI, or served from the library&apos;s cache when NCBI cannot be reached).</p>
+        <p>Imported as a <b>sample</b>, a genome becomes simulated reads and goes through Step 1 like any sample
+        (badged Simulated, QC not applied); a VP1 record is typed and placed on the VP1 tree without reads.
+        Imported as <b>context</b>, the record joins this project&apos;s own comparator set and stands in the tree
+        as lineage|country|year|accession.</p>
+        <p>VP1 is cut from a genome by blastn. Country, year, host and isolate come from the GenBank record, a
+        NanoFMDV-style header, or a metadata sheet; every field can be edited in the preview.{" "}
+        <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv">Metadata sheet template</a></p>
+      </InputHelp>
       <div
         className="dropzone"
         onDragOver={(e) => e.preventDefault()}

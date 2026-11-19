@@ -360,6 +360,131 @@ p {
   gap: 12px;
 }
 
+/* The Inputs panel: one row of source tabs, one source shown at a time. */
+.input-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.input-tab-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.input-tab-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.input-tab-btn.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.input-tab-icon {
+  margin-right: 6px;
+  opacity: 0.8;
+}
+
+.input-tab-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* One sentence of context and a "?" that opens the rest. */
+.input-help {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+.input-help-line {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The details element dissolves into the row: its summary sits at the end
+   of the sentence and its body wraps onto a full-width line below, in flow,
+   so nothing floats over a neighbouring column or gets clipped by the pane. */
+.input-help-more {
+  display: contents;
+}
+
+.input-help-more > summary {
+  list-style: none;
+  cursor: pointer;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.input-help-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.input-help-more[open] > summary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.input-help-body {
+  flex: 1 1 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.input-help-body p {
+  margin: 0 0 8px;
+}
+
+.input-help-body p:last-child {
+  margin-bottom: 0;
+}
+
+.count-badge {
+  display: inline-block;
+  margin-left: 8px;
+  min-width: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  vertical-align: middle;
+}
+
 .input-column .settings-row {
   grid-template-columns: 140px 1fr auto;
 }

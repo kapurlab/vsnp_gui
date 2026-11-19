@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { InputHelp } from "./InputsTabs.jsx";
 
 // Import a MinKNOW run folder into the project's download/ as one FASTQ per
 // barcode. Preview first (POST import_run/preview: the barcodes found, their
@@ -118,13 +119,14 @@ export default function OntRunImport({ apiBase, project, enabled, onImported }) 
 
   return (
     <div className="block">
-      <h3>Import ONT run</h3>
-      <div className="muted" style={{ fontSize: "12px", margin: "0 0 6px" }}>
-        A MinKNOW run folder (fastq_pass/barcodeNN/). Each barcode&apos;s chunk files
-        become one FASTQ named from the run&apos;s <code>sample_sheet.csv</code>
-        (columns <code>barcode,sample_id</code>) or from the barcode.{" "}
-        <a href={`${apiBase}/api/ont/sample_sheet_template`} download="sample_sheet.csv">Sheet template</a>
-      </div>
+      <InputHelp line="Point at the run folder; preview the barcodes and names before anything is written.">
+        <p>A MinKNOW run folder (<code>fastq_pass/barcodeNN/</code>), or the folder above it. Each barcode&apos;s
+        chunk files become one FASTQ in this project&apos;s <code>download/</code>, named from the run&apos;s{" "}
+        <code>sample_sheet.csv</code> (columns <code>barcode,sample_id</code>) or from the barcode when there is no sheet.</p>
+        <p>Underscores in a name become dashes, because vsnp3 cuts a sample name at its first underscore.
+        Unclassified reads are listed apart and skipped unless ticked. Nothing in the run folder is changed.</p>
+        <p><a href={`${apiBase}/api/ont/sample_sheet_template`} download="sample_sheet.csv">Sample sheet template</a></p>
+      </InputHelp>
       <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
         <input
           type="text"

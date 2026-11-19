@@ -85,16 +85,28 @@ A record under 600 nt, or one whose slice fails the VP1 check, is refused
 in the preview with the reason. A record of another virus fails the check
 and reads as such.
 
-The genome itself is kept but does nothing in the first cut. Putting an
-imported genome into the whole-genome Step 2 means running it through
-`vsnp3_step1.py -f` against a lineage reference, which is what the GenBank
-genome databases already do. Two things stand in the way and are the
-reason it is deferred: `vsnp3_fasta_to_fastq.py` turns every N into a
-random base, so a consensus with masked regions becomes SNP clusters (the
-"Do not" rule in `FMDV_MODE.md`), and the reference has to be chosen for a
-sequence rather than for reads. Both are tractable (refuse FASTA mode above
-a small N count; choose the reference as the best panel VP1 hit of the
-slice), and both belong to a second cut.
+A genome does not stop at the slice. Vivek's question on 18 November 2026,
+after the first trial: why not make perfect reads from the record, mark
+them as such, and run them through the regular workflow? That is what the
+GenBank genome databases already do with `vsnp3_step1.py -f`, and it is
+simpler than a parallel sequence-only path: the chooser, vsnp3, the
+consensus, typing, the sample report and the whole-genome Step 2 all run
+unchanged, and most of the special casing for a sample without reads goes
+away. So a genome-class record becomes simulated paired reads in
+`download/`, with two provisos. The simulator is ours, not vsnp3's:
+`vsnp3_fasta_to_fastq.py` replaces every N and ambiguity code with a
+random base, so a masked consensus would come out as SNP clusters; ours
+cuts at every non-ACGT base and simulates nothing across the cut. And the
+provenance has to travel: every read header says `SIMULATED`,
+`fmdv_import.json` says `reads: simulated`, the Results row is badged and
+its QC reads "n/a", because depth, mapping rate and coverage describe the
+simulation. The MQ 54 and pass-every-filter caveats of the genome databases
+apply here too.
+
+A record shorter than a genome (VP1, P1, a fragment) stays sequence-only:
+simulated reads from 639 nucleotides would give a sample with 8 percent of
+the genome covered and nothing for the whole-genome workflow to do, while
+typing and the tree need only the VP1.
 
 ## Context sequences in the project
 
@@ -241,8 +253,6 @@ code and is listed, not made, here.
 
 ## Out of scope for the first cut
 
-- Imported genomes in the whole-genome Step 2 (the `vsnp3_step1.py -f`
-  path with an N rule and a reference chosen from the slice).
 - Importing reads by accession; SRA Download does that.
 - Promoting a project's context or samples into the library's context set.
 - Editing metadata after import; delete and import again.
@@ -275,9 +285,10 @@ Backend:
 - `bin/fmdv_vp1_type.py`: `--project-context <dir>`, a second database
   built from the project set, hits merged by bitscore; the Step 1 batch
   and the retype route pass it.
-- `bin/fmdv_sample_report.py`, `bin/fmdv_run_report.py`: include
-  `fmdv_import.json` folders. Report code, flagged for its owner; not
-  made in this build, so an imported sample has no report yet.
+- `bin/fmdv_sample_report.py`, `bin/fmdv_run_report.py`: no change for a
+  genome import, which has a chooser result once Step 1 has run; a
+  sequence-only (VP1) import still has no report. Report code, flagged for
+  its owner.
 - `backend/app/test_seq_import.py` (new): header and flat-file parsing,
   classification and slicing against a small panel, the offline branch of
   the fetch, the preview's collision rules.

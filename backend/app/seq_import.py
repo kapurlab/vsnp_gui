@@ -4,12 +4,19 @@ Two inputs the reads path does not cover: a FASTA somebody already has (a
 consensus genome or a VP1 sequence from another lab or pipeline) and GenBank
 accessions. Each imported record plays one of two roles (docs/FMDV_SEQ_IMPORT.md):
 
-  sample   lands in <project>/step1/<name>/ beside the samples that came from
-           reads, with <name>_imported.fasta (as given), <name>_VP1.fasta (the
-           record when it is VP1, else the slice), fmdv_import.json (provenance
-           and the metadata as entered) and fmdv_consensus.json (the record the
-           VP1 tree reads). No reads, no alignment, no stats workbook: Grab and
-           the Step 1 batch skip the folder, the typer and the tree take it.
+  sample   a GENOME (7,000 nt or more) becomes simulated paired reads in
+           <project>/download/<name>_R1/_R2.fastq.gz and goes through Grab and
+           Step 1 like any sample: chooser, alignment, VCF, consensus, typing,
+           report, whole-genome Step 2. The reads are perfect and uniform, skip
+           every run of N (vsnp3's own simulator turns N into random bases,
+           which the FMDV doc forbids for a masked consensus), and are marked
+           simulated in every header and in step1/<name>/fmdv_import.json, so
+           the Results table badges the row and QC does not apply.
+           A shorter record (VP1, P1, a fragment) has nothing for the
+           whole-genome workflow and lands sequence-only in step1/<name>/ with
+           <name>_imported.fasta, <name>_VP1.fasta, fmdv_import.json and
+           fmdv_consensus.json (what the tree reads): no reads, no alignment,
+           Grab and the batch skip the folder, the typer and the tree take it.
   context  lands in <project>/fmdv_context/<SEROTYPE>.fasta and .tsv, named
            and laid out like the library's vp1_context sets, so the tree, the
            tables and the typer read it beside them. Never pruned from a tree.
@@ -36,10 +43,12 @@ from __future__ import annotations
 
 import collections
 import csv
+import gzip
 import hashlib
 import io
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -699,6 +708,61 @@ def _write_fasta(path: Path, name: str, seq: str, width: int = 70) -> None:
             fh.write(seq[i:i + width] + "\n")
 
 
+READ_LEN = 250
+FRAGMENT = 400
+SIM_DEPTH = 100
+COMPLEMENT = str.maketrans("ACGT", "TGCA")
+
+
+def simulate_reads(seq: str, name: str, r1: Path, r2: Path, read_len: int = READ_LEN,
+                   fragment: int = FRAGMENT, depth: int = SIM_DEPTH, seed: Optional[int] = None) -> Dict:
+    """Perfect paired reads from a sequence, skipping every run of N.
+
+    The sequence is cut at any base that is not A, C, G or T; each remaining
+    segment of at least `read_len` is sampled with fragments of `fragment`
+    bases (or the whole segment when shorter) at `depth` fold, R1 the first
+    `read_len` of the fragment and R2 the reverse complement of its last
+    `read_len`. Quality is Phred 40 throughout. Masked regions therefore get no
+    reads at all: they read as zero coverage in the VCF and as N in the
+    consensus, which is what a masked consensus means. Every header carries
+    SIMULATED and the record it came from. Deterministic for a given name."""
+    rng = random.Random(seed if seed is not None else int(hashlib.sha1(name.encode()).hexdigest()[:8], 16))
+    s = seq.upper()
+    segments = [m for m in re.finditer(r"[ACGT]+", s)]
+    qual = chr(33 + 40) * read_len
+    n_pairs = 0
+    covered = 0
+    skipped = 0
+    r1.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(r1, "wt", compresslevel=1) as f1, gzip.open(r2, "wt", compresslevel=1) as f2:
+        for m in segments:
+            seg = m.group(0)
+            L = len(seg)
+            if L < read_len:
+                skipped += 1
+                continue
+            covered += L
+            frag = min(fragment, L)
+            pairs = max(1, round(L * depth / (2 * read_len)))
+            for _ in range(pairs):
+                start = rng.randint(0, L - frag)
+                piece = seg[start:start + frag]
+                a = piece[:read_len]
+                b = piece[-read_len:].translate(COMPLEMENT)[::-1]
+                n_pairs += 1
+                head = f"SIMULATED:{name}:{m.start() + start + 1}:{n_pairs}"
+                f1.write(f"@{head}/1 simulated from imported sequence, no real reads\n{a}\n+\n{qual[:len(a)]}\n")
+                f2.write(f"@{head}/2 simulated from imported sequence, no real reads\n{b}\n+\n{qual[:len(b)]}\n")
+    return {"pairs": n_pairs, "read_length": read_len, "fragment": fragment, "depth": depth,
+            "covered_bases": covered, "segments": len(segments), "segments_too_short": skipped,
+            "r1": str(r1), "r2": str(r2)}
+
+
+def reads_mode(entry: Dict) -> str:
+    """simulated for a genome-class record, none for anything shorter."""
+    return "simulated" if entry.get("class") == "genome" else "none"
+
+
 def write_sample(entry: Dict, project_dir: Path) -> Path:
     """The sample folder of one imported record. Nothing in it is a read."""
     name = entry["name"]
@@ -711,8 +775,16 @@ def write_sample(entry: Dict, project_dir: Path) -> Path:
         (d / f"{name}_imported.gb").write_text(entry["raw"])
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
     meta = entry["meta"]
+    mode = reads_mode(entry)
+    sim = None
+    if mode == "simulated":
+        dl = project_dir / "download"
+        sim = simulate_reads(seq, name, dl / f"{name}_R1.fastq.gz", dl / f"{name}_R2.fastq.gz")
     (d / "fmdv_import.json").write_text(json.dumps({
         "sample": name, "role": "sample", "imported": now,
+        # simulated: paired reads in download/, run through Step 1 like any
+        # sample; none: sequence-only, typed and placed on the VP1 tree.
+        "reads": mode, "simulated_reads": sim,
         "source": entry["source"], "kind": entry["kind"], "header": entry["header"],
         "sha256": hashlib.sha256(seq.encode()).hexdigest(),
         "length": len(seq), "n_count": sum(1 for c in seq if c not in "ACGT"),
@@ -720,8 +792,11 @@ def write_sample(entry: Dict, project_dir: Path) -> Path:
         "vp1": {k: v for k, v in vp1.items() if k != "sequence"} | {"length": len(vp1["sequence"])},
         "panel_hit": entry.get("panel_hit"),
         "metadata": meta,
-        "note": "Imported sequence, no reads. Typed and placed on the VP1 tree like a sample; "
-                "no alignment, QC or whole-genome SNPs.",
+        "note": ("Imported sequence. The reads in download/ are SIMULATED from it (perfect, uniform, none over N): "
+                 "depth, mapping rate and QC describe the simulation, not a sample."
+                 if mode == "simulated" else
+                 "Imported sequence, no reads. Typed and placed on the VP1 tree like a sample; "
+                 "no alignment, QC or whole-genome SNPs."),
     }, indent=1))
     # What the VP1 tree reads (collect_samples): serotype, and how much of
     # VP1 is called. `reference` is empty because nothing was mapped.
@@ -777,7 +852,8 @@ def run_commit(plan_path: Path) -> int:
             if e["role"] == "sample":
                 d = write_sample(e, project_dir)
                 samples.append(e["name"])
-                print(f"sample {e['name']}: {e['class']} {len(e['sequence'])} nt, VP1 {e['vp1']['start']}-{e['vp1']['end']} -> {d}", flush=True)
+                how = "simulated paired reads in download/, Grab then Run" if reads_mode(e) == "simulated" else "sequence only"
+                print(f"sample {e['name']}: {e['class']} {len(e['sequence'])} nt, VP1 {e['vp1']['start']}-{e['vp1']['end']} -> {d} ({how})", flush=True)
             else:
                 d = append_context(e, project_dir)
                 print(f"context {e['name']}: {e['class']} {len(e['sequence'])} nt, VP1 {e['vp1']['start']}-{e['vp1']['end']} -> {d / (e['meta']['serotype'] + '.fasta')}", flush=True)

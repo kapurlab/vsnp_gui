@@ -359,6 +359,21 @@ def _fmdv_flag_qc_rows(rows: list, step1_dir: Path) -> None:
         m = re.search(r"(\d[\d,]*) thin calls", str(row.get("Long-read Calls Limited to N") or ""))
         row["fmdv_thin_calls"] = int(m.group(1).replace(",", "")) if m else None
         sample_dir = step1_dir / str(row.get("sample") or "")
+        # A sample whose reads were simulated from an imported sequence
+        # (app.seq_import): the row keeps vsnp3's numbers, badged so nobody
+        # reads depth or mapping rate as a measurement.
+        imp = sample_dir / "fmdv_import.json"
+        if imp.is_file() and row.get("read_type") != "sequence":
+            try:
+                ij = json.loads(imp.read_text())
+            except (OSError, ValueError):
+                ij = {}
+            if ij.get("reads") == "simulated":
+                row["read_type"] = "simulated"
+                row["fmdv_source"] = ij.get("kind") or "fasta"
+                row["fmdv_import_source"] = ij.get("source") or ""
+                row["fmdv_import_class"] = ij.get("class") or ""
+                row["fmdv_import_length"] = ij.get("length")
         # The consensus block's numbers: how much of the genome and of VP1
         # was called (depth >= 10 and an unambiguous base), the two figures
         # a reader needs before trusting a Step 2 group or a VP1 tree.
@@ -426,11 +441,12 @@ def _annotate_qc_rows(rows: list, thresholds: Dict) -> list:
     """Attach `_qc_verdict` to each row in place. Returns the same list."""
     for row in rows:
         if isinstance(row, dict):
-            if row.get("read_type") == "sequence":
-                # An imported sequence has no reads: nothing was measured, so
-                # no threshold applies. Not a pass.
-                row["_qc_verdict"] = {"level": "na", "reasons": ["imported sequence, no reads: QC does not apply"],
-                                      "signals": {}}
+            if row.get("read_type") in ("sequence", "simulated"):
+                # An imported sequence: no reads, or perfect simulated ones.
+                # Nothing was measured, so no threshold applies. Not a pass.
+                why = ("imported sequence, simulated reads: depth, mapping and coverage describe the simulation, QC does not apply"
+                       if row.get("read_type") == "simulated" else "imported sequence, no reads: QC does not apply")
+                row["_qc_verdict"] = {"level": "na", "reasons": [why], "signals": {}}
                 continue
             row["_qc_verdict"] = qc_verdict.compute_verdict(row, thresholds)
     return rows
@@ -454,7 +470,10 @@ def _fmdv_import_rows(rows: list, step1_dir: Path) -> List[Dict[str, Any]]:
             d = {}
         meta = d.get("metadata") or {}
         out.append({
-            "sample": sample, "_sample": sample, "_file": str(p), "read_type": "sequence",
+            "sample": sample, "_sample": sample, "_file": str(p),
+            # simulated reads not yet run show as such; once Step 1 has run
+            # the workbook row takes over (see _fmdv_flag_qc_rows).
+            "read_type": "simulated" if d.get("reads") == "simulated" else "sequence",
             "_run_date": (d.get("imported") or "")[:10], "Reference": "",
             "fmdv_source": d.get("kind") or "fasta", "fmdv_import_source": d.get("source") or "",
             "fmdv_import_class": d.get("class") or "", "fmdv_import_length": d.get("length"),
@@ -1266,9 +1285,10 @@ def _step1_dispatch_plan(
     for p in sorted(step1_dir.iterdir()):
         if not p.is_dir() or p.name.startswith(("_", ".")):
             continue
-        if (p / "fmdv_import.json").is_file():
-            # An imported sequence (app.seq_import): no reads, nothing to
-            # align, and not a skip worth reporting.
+        if (p / "fmdv_import.json").is_file() and next(p.glob("*.fastq.gz"), None) is None:
+            # A sequence imported without reads (app.seq_import): nothing to
+            # align, and not a skip worth reporting. One imported as
+            # simulated reads has a FASTQ once Grabbed and runs like any sample.
             continue
         if not force_rerun and _step1_is_complete(p):
             skipped.append({
@@ -5615,6 +5635,7 @@ def fmdv_project_get(project: str):
             except (OSError, ValueError):
                 continue
             imports[p.parent.name] = {"kind": d.get("kind"), "source": d.get("source"), "class": d.get("class"),
+                                      "reads": d.get("reads") or "none",
                                       "serotype": (d.get("metadata") or {}).get("serotype"), "imported": d.get("imported")}
     return {"mode": mode,
             "scope": (_project_fmdv_scope(project_dir) or "FMDV") if mode == "fmdv" else "",
@@ -6437,14 +6458,21 @@ def step1_status(project: str):
         # (_step1_dispatch_plan rule 1-3); this just stops the list lying about
         # them, and lets the UI sort them to the bottom.
         input_issue = ""
-        if status == "not_started" and listing.exists("fmdv_import.json"):
-            # An imported sequence (app.seq_import): a sample with no reads,
-            # typed and placed on the VP1 tree, never aligned. Not a misfit.
-            status = "sequence"
-            input_issue = "imported sequence, no reads"
-        elif status == "not_started":
+        if status == "not_started":
             input_issue = _step1_input_issue(sample_dir, min_bytes) or ""
-            if input_issue:
+            if input_issue.startswith("no fastq") and listing.exists("fmdv_import.json"):
+                # An imported sequence (app.seq_import) with no reads in its
+                # folder: sequence-only (typed and placed on the VP1 tree,
+                # never aligned), or simulated reads still in download/
+                # waiting for Grab. Not a misfit either way.
+                status = "sequence"
+                try:
+                    mode = json.loads((sample_dir / "fmdv_import.json").read_text()).get("reads")
+                except (OSError, ValueError):
+                    mode = ""
+                input_issue = ("imported sequence: simulated reads in download/, Grab then Run"
+                               if mode == "simulated" else "imported sequence, no reads")
+            elif input_issue:
                 status = "misfit"
 
         if legacy_complete:

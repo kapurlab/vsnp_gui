@@ -286,15 +286,34 @@ takes FASTA or GenBank files, dropped or chosen, and GenBank accessions
 typed one per line, and shows one editable row per record before anything
 is written. Each record plays one of two roles:
 
-- a **sample** lands in `step1/<name>/` with `<name>_imported.fasta` (as
-  given), `<name>_VP1.fasta`, `fmdv_import.json` (provenance, the slice
-  coordinates and template, the metadata as entered) and
+- a **sample** that is a genome (7,000 nt or more) becomes simulated
+  paired reads in `download/<name>_R1.fastq.gz` and `_R2.fastq.gz` and goes
+  through Grab and Step 1 like any sample: the chooser votes on the reads,
+  vsnp3 aligns and calls, the consensus, VP1 slice, typing and sample report
+  follow, and the sample enters the whole-genome Step 2. The reads are
+  perfect and uniform (250-base pairs, 400-base fragments, 100-fold) and
+  are written by the importer's own simulator, not vsnp3's, because
+  `vsnp3_fasta_to_fastq.py` turns every N into a random base and a masked
+  consensus would come out as SNP clusters; ours cuts the sequence at every
+  non-ACGT base and simulates nothing across the cut, so a masked region
+  reads as zero coverage in the VCF and N in the consensus. Every read
+  header carries `SIMULATED`, `step1/<name>/fmdv_import.json` says
+  `reads: simulated`, and the Results row is badged Simulated with QC "n/a":
+  depth, mapping rate and coverage describe the simulation, not a sample.
+  Until Grab the Samples list shows the folder as "sequence" with a note to
+  Grab then Run;
+- a **sample** shorter than that (a VP1 record, a P1, a fragment) has
+  nothing for the whole-genome workflow and lands sequence-only in
+  `step1/<name>/` with `<name>_imported.fasta` (as given),
+  `<name>_VP1.fasta`, `fmdv_import.json` (`reads: none`, provenance, the
+  slice coordinates and template, the metadata as entered) and
   `fmdv_consensus.json` (what the tree reads: `source: imported`,
   `serotype`, `vp1_called_percent`). No reads, so Grab and the Step 1 batch
   skip the folder, the Samples list shows it as "sequence", and the Results
-  table shows a row with the read columns blank, a Sequence badge and a QC
-  of "n/a". It is typed at import and the Step 2 VP1 tab lists it; "Build
-  VP1 tree" includes it and highlights it like any sample;
+  table shows a row with the read columns blank and a QC of "n/a". It is
+  typed at import and the Step 2 VP1 tab lists it; "Build VP1 tree"
+  includes it and highlights it like any sample. It has no sample report,
+  since the report scripts take folders with a chooser result;
 - a **context** record is appended to `<project>/fmdv_context/<SEROTYPE>.fasta`
   and `.tsv`, named `<SEROTYPE>-<topotype or NA>_<accession>` with the
   library's TSV columns plus `source`. The tree reads the project set beside
@@ -343,12 +362,13 @@ Set `ncbi.email` and `ncbi.api_key` in the user config, or `NCBI_EMAIL`
 and `NCBI_API_KEY` in the backend's environment, for NCBI's scripted-use
 policy and the higher rate.
 
-Not done: imported genomes in the whole-genome Step 2 (`vsnp3_step1.py -f`
-turns N into random bases and the reference would have to be chosen for a
-sequence), promoting a project's context into the library, editing metadata
-after import (delete and import again), and the sample and run reports,
-which still take only folders with `fmdv_reference.json`, so an imported
-sample has no report yet.
+Two caveats carry over from the GenBank genome databases, which are built
+the same way: simulated reads sit near MQ 54 at some positions, under the
+56 that vsnp3's passing rule wants, so a real SNP can be invisible to the
+defining-SNP logic; and perfect uniform reads pass every quality filter by
+construction. Not done: promoting a project's context into the library,
+editing metadata after import (delete and import again), and a sample
+report for a sequence-only (VP1) import.
 
 ## QC in FMDV mode
 

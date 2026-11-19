@@ -1404,6 +1404,9 @@ export default function App() {
       // An imported sequence (FMDV mode): no reads at all, typed from the
       // sequence it was given.
       sequence: { label: "Sequence", bg: "#fdf2e9", fg: "#8a4b08" },
+      // Reads simulated from an imported genome and run through Step 1: the
+      // numbers are vsnp3's, the reads are not a sample's.
+      simulated: { label: "Simulated", bg: "#fdf2e9", fg: "#8a4b08" },
     };
     const s = map[rt];
     if (!s) return <span className="muted">-</span>;
@@ -7481,6 +7484,7 @@ export default function App() {
                       // typing result: the Samples list, the Results rows
                       // (rescanned, since the scanner lists folders) and the
                       // VP1 typing table all change.
+                      loadAll();            // the download/ listing: simulated reads land there
                       loadStep1Status();
                       loadQC({ refresh: true });
                       try {
@@ -8615,7 +8619,7 @@ export default function App() {
                           s.status === "misfit"
                             ? "Held out of every Run — this folder has no usable reads, so vsnp3 has nothing to align. Fix the folder, or Remove it to file it in Quarantine."
                             : s.status === "sequence"
-                              ? "An imported sequence: no reads, so Step 1 never aligns it. It is typed from its VP1 and placed on the VP1 tree like any sample."
+                              ? "An imported sequence. With simulated reads: Grab, then Run, and it goes through Step 1 like any sample. Without: typed from its VP1 and placed on the VP1 tree, never aligned."
                               : ""
                         }
                       >
@@ -9133,8 +9137,10 @@ export default function App() {
                                     : "Identity of the reads to the chosen reference over the VP1 panel vote."}>
                                     {typeof row.fmdv_identity === "number" ? row.fmdv_identity.toFixed(3) : "-"}{row.fmdv_distant ? " ⚠" : ""}
                                   </td>
-                                  <td title={row.read_type === "sequence" ? `Imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): ${row.fmdv_import_class || "record"} of ${typeof row.fmdv_import_length === "number" ? row.fmdv_import_length.toLocaleString() : "?"} nt, no reads.` : "Reads in the sample's FASTQ."}>
-                                    {row.read_type === "sequence" ? <span className="muted">none</span> : typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}
+                                  <td title={row.read_type === "sequence" ? `Imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): ${row.fmdv_import_class || "record"} of ${typeof row.fmdv_import_length === "number" ? row.fmdv_import_length.toLocaleString() : "?"} nt, no reads.`
+                                    : row.read_type === "simulated" ? `SIMULATED reads from an imported sequence (${row.fmdv_source || "fasta"}${row.fmdv_import_source ? ", " + row.fmdv_import_source : ""}): perfect, uniform, none over N. Depth and mapping describe the simulation.`
+                                    : "Reads in the sample's FASTQ."}>
+                                    {row.read_type === "sequence" ? <span className="muted">none</span> : typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}{row.read_type === "simulated" ? <span className="muted"> sim</span> : null}
                                   </td>
                                   <td>{row["Average Depth"] || "-"}</td>
                                   <td>{fmtPercent1(qcMappingRate(row))}</td>

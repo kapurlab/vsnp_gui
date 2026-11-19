@@ -223,7 +223,14 @@ def test_locate_preview_commit():
         check(imp["metadata"]["topotype"], "I", "edited lineage kept")
         vp1 = (d / "lab-consensus-1_VP1.fasta").read_text().splitlines()
         check("".join(vp1[1:]), VP1_A, "VP1 FASTA holds the slice")
-        check(list((project / "step1").glob("*/*.fastq.gz")), [], "no reads were invented")
+        check(list((project / "step1").glob("*/*.fastq.gz")), [], "no reads inside step1/ folders")
+        # A genome becomes simulated paired reads in download/; a VP1 record does not.
+        check(imp["reads"], "simulated", "genome import marked simulated")
+        check(sorted(p.name for p in (project / "download").glob("lab-consensus-1_R*.fastq.gz")),
+              ["lab-consensus-1_R1.fastq.gz", "lab-consensus-1_R2.fastq.gz"], "paired reads written for the genome")
+        check(list((project / "download").glob("vp1only*")), [], "no reads for a VP1 record")
+        check(json.loads((project / "step1" / "vp1only" / "fmdv_import.json").read_text())["reads"], "none", "VP1 record marked no reads")
+        check(imp["simulated_reads"]["covered_bases"], len(GENOME), "covered bases reported")
         tsv = (project / "fmdv_context" / "SAT1.tsv").read_text().splitlines()
         check(tsv[0].split("\t")[:3], ["name", "serotype", "topotype"], "context TSV header")
         row = dict(zip(tsv[0].split("\t"), tsv[1].split("\t")))
@@ -251,6 +258,36 @@ def test_locate_preview_commit():
         # No blastn: every record is refused with the reason, nothing crashes.
         pv4 = si.preview(si.records_from_fasta(f">x\n{VP1_A}\n", "x.fasta"), project, lib, "sample", blastn=None)
         check("blastn" in pv4["rows"][0]["problem"], True, "missing blastn is the stated problem")
+
+
+def test_simulator_skips_n():
+    import gzip
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # 2,000 called bases, a 30-N mask, 1,500 called bases, a short 100-base island after more N
+        seq = GENOME[:2000] + "N" * 30 + GENOME[2000:3500] + "N" * 5 + GENOME[3500:3600]
+        r1, r2 = root / "x_R1.fastq.gz", root / "x_R2.fastq.gz"
+        stats = si.simulate_reads(seq, "x", r1, r2, depth=20)
+        check(stats["covered_bases"], 3500, "only the two long segments are covered")
+        check(stats["segments_too_short"], 1, "the 100-base island is skipped")
+        with gzip.open(r1, "rt") as f1, gzip.open(r2, "rt") as f2:
+            a = f1.read().splitlines(); b = f2.read().splitlines()
+        reads1 = a[1::4]; reads2 = b[1::4]
+        check(len(reads1), stats["pairs"], "R1 count")
+        check(len(reads2), stats["pairs"], "R2 count")
+        check(all("N" not in r for r in reads1 + reads2), True, "no read carries an N")
+        check(all(len(r) <= 250 for r in reads1), True, "read length")
+        check(a[0].startswith("@SIMULATED:x:"), True, "header says simulated")
+        # Every R1 is a substring of a called segment, never spanning the mask.
+        segs = [GENOME[:2000], GENOME[2000:3500]]
+        check(all(any(r in sg for sg in segs) for r in reads1), True, "reads lie within called segments")
+        rc = str.maketrans("ACGT", "TGCA")
+        check(all(any(r.translate(rc)[::-1] in sg for sg in segs) for r in reads2), True, "R2 is the reverse complement of called sequence")
+        # depth about right: pairs * 2 * 250 / 3500 ~ 20
+        check(abs(stats["pairs"] * 500 / 3500 - 20) < 1.0, True, "depth near the target")
+        # deterministic
+        stats2 = si.simulate_reads(seq, "x", root / "y_R1.fastq.gz", root / "y_R2.fastq.gz", depth=20)
+        check(gzip.open(root / "y_R1.fastq.gz", "rt").read() == gzip.open(r1, "rt").read(), True, "same name, same reads")
 
 
 def test_fetch_cache_and_errors():

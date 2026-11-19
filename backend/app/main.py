@@ -140,7 +140,7 @@ def _step1_status_from_disk(stored: Any, dir_mtime: Optional[int]) -> Optional[D
 
 from app.config import (
     load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT, CONFIG_PATH,
-    apply_site_paths, set_path_override, site_path_defaults,
+    apply_site_paths, set_path_override, site_path_defaults, fmdv_reflib,
 )
 from app.jobs import JobManager
 from app import name_aliases
@@ -2258,7 +2258,7 @@ def _fmdv_primer_set(lib: Path, project_dir: Path) -> str:
 
 def _fmdv_is_lib_reference(cfg: Dict, name: str) -> bool:
     """True when `name` is a genome in the FMDV library (a safe name)."""
-    lib = Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+    lib = fmdv_reflib(cfg)
     try:
         idx = json.loads((lib / "lineages.json").read_text())
     except (OSError, ValueError):
@@ -6364,7 +6364,7 @@ def step1_setup_status(project: str):
 
 # ---- FMDV mode: what the picker needs -------------------------------------
 def _fmdv_lib(cfg: Dict) -> Path:
-    return Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser()
+    return fmdv_reflib(cfg)
 
 
 @app.get("/api/fmdv/lineages")
@@ -6791,7 +6791,7 @@ def _step1_dispatch(
         # per-sample choice; the folder itself is decided inside the batch,
         # one sample at a time, and passed as -t there (see fmdv_choose_lines).
         fmdv_scope = _require_fmdv_scope(payload.fmdv_scope or _project_fmdv_scope(project_dir))
-        fmdv_lib = str(Path(cfg.get("fmdv_reflib") or (Path.home() / "fmdv_refs")).expanduser())
+        fmdv_lib = str(fmdv_reflib(cfg))
         chooser = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_choose_reference.py")
         clipper = str(Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_clip_primers.py")
         # The primer set: project.json fmdv_primers (a file name under

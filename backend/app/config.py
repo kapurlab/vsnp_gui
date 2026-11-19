@@ -165,6 +165,23 @@ _DEFAULT_SHARED_VCF_DB_ROOT = (
     str(_SHARED_VCF_DB_ROOT) if _SHARED_VCF_DB_ROOT.is_dir() else ""
 )
 
+# The FMDV reference library (bin/fmdv_library_build.sh). A site keeps one
+# copy for everyone at <site>/refs/fmdv, beside the vsnp3 references; a
+# personal build defaults to ~/fmdv_refs. A user's own "fmdv_reflib" in
+# config.json wins over both, and is the only one of the three that is stored.
+def fmdv_reflib_default() -> Path:
+    site_lib = _SITE_ROOT / "refs" / "fmdv"
+    if (site_lib / "lineages.json").is_file():
+        return site_lib
+    return HOME_DIR / "fmdv_refs"
+
+
+def fmdv_reflib(cfg: Dict[str, Any]) -> Path:
+    """Where this launch reads the FMDV reference library from."""
+    own = str(cfg.get("fmdv_reflib") or "").strip()
+    return Path(own).expanduser() if own else fmdv_reflib_default()
+
+
 # --- Site-derived paths -----------------------------------------------------
 # These keys are functions of the LAUNCH CONTEXT (site.conf, launcher env vars,
 # checkout position), not user data. They used to sit in DEFAULTS and get

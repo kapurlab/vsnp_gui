@@ -6965,7 +6965,10 @@ def _step1_dispatch(
             # safely with vsnp3's own internal >701 bp auto-detection.
             "  NP=\"" + nanopore_flag + "\"",
             "  if [ -z \"$NP\" ]; then",
-            "    AVG=$(zcat \"$R1\" 2>/dev/null | head -n 1600 | awk 'NR%4==2{n++;s+=length($0)} END{if(n>0)printf \"%d\", s/n; else print 0}')",
+            # gzip -dc, not zcat: macOS's zcat looks for <file>.Z, reads nothing,
+            # and every ONT sample on a Mac averaged 0 bp and was aligned as short
+            # reads unless the Nanopore box was ticked.
+            "    AVG=$(gzip -dc \"$R1\" 2>/dev/null | head -n 1600 | awk 'NR%4==2{n++;s+=length($0)} END{if(n>0)printf \"%d\", s/n; else print 0}')",
             "    if [ \"${AVG:-0}\" -gt 600 ]; then",
             "      NP=\"--nanopore\"",
             "      echo \"Auto-detected long reads (avg ${AVG}bp) — using --nanopore\" | tee -a \"$LOG\"",

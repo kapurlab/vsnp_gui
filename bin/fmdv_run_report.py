@@ -64,9 +64,11 @@ def main() -> int:
         s = d.name
         ref = load_json(d / "fmdv_reference.json"); typ = load_json(d / "fmdv_vp1_type.json")
         cons = load_json(d / "fmdv_consensus.json"); srow = R.stats_row(d, s)
+        imp = load_json(d / "fmdv_import.json")
+        simulated = imp.get("reads") == "simulated"
         chosen = ref.get("chosen") or {}
         verdict = None
-        if R.compute_verdict and srow:
+        if R.compute_verdict and srow and not simulated:
             r2 = dict(srow); reasons = []
             if ref.get("distant"): reasons.append("distant reference")
             if ref.get("mixed"): reasons.append("mixed serotypes")
@@ -76,6 +78,11 @@ def main() -> int:
         typed = typ.get("status") == "typed"
         best = typ.get("best") or {}
         notes = []
+        if simulated:
+            im = imp.get("metadata") or {}
+            notes.append(f"IMPORTED SEQUENCE ({imp.get('kind')} {imp.get('source')}"
+                         + (f", {im.get('accession')}" if im.get("accession") and im.get("accession") != imp.get("source") else "")
+                         + "), not a sequenced sample: reads simulated from it, QC not applicable")
         if ref.get("mixed"):
             sh = ref.get("serotype_share") or {}
             notes.append("two serotypes in the reads (" + ", ".join(f"{k} {v:.0%}" for k, v in list(sh.items())[:2]) + "): repeat or plaque-purify before the call is used")
@@ -96,8 +103,8 @@ def main() -> int:
             "lineage": typ.get("lineage") if typed else "", "typed": typed,
             "nearest": f"{best.get('country', '')} {best.get('year', '') if str(best.get('year')) not in ('0', 'None', '') else ''}".strip() or "-",
             "nearest_acc": best.get("accession", ""), "identity": typ.get("identity"),
-            "called": cons.get("called_percent"), "verdict": verdict["level"] if verdict else "-",
-            "notes": notes, "date": srow.get("date") or "",
+            "called": None if simulated else cons.get("called_percent"), "verdict": verdict["level"] if verdict else ("n/a" if simulated else "-"),
+            "notes": notes, "date": srow.get("date") or "", "simulated": simulated,
         })
 
     # Summary in words
@@ -114,7 +121,14 @@ def main() -> int:
     h.append(f"<h1>FMDV run report: {esc(project.name)}</h1><div class='muted'>{len(rows)} samples · written {time.strftime('%Y-%m-%d %H:%M')}</div>")
     h.append("<h2>Summary</h2>")
     lines = []
-    lines.append(f"{len(rows)} sample{'s' if len(rows) != 1 else ''} sequenced: {sero_sentence()}.")
+    n_imp = sum(1 for r in rows if r.get("simulated"))
+    n_seq = len(rows) - n_imp
+    if n_imp:
+        lines.append(f"{n_seq} sample{'s' if n_seq != 1 else ''} sequenced and {n_imp} sequence{'s' if n_imp != 1 else ''} imported "
+                     f"({', '.join(r['sample'] for r in rows if r.get('simulated'))}; reads simulated from the imported records, "
+                     f"not sequenced samples): {sero_sentence()}.")
+    else:
+        lines.append(f"{len(rows)} sample{'s' if len(rows) != 1 else ''} sequenced: {sero_sentence()}.")
     if by_lineage:
         lin = "; ".join(f"{s} {l}: {n}" for (s, l), n in sorted(by_lineage.items(), key=lambda x: -x[1]))
         lines.append(f"Lineages by VP1: {lin}.")
@@ -131,7 +145,7 @@ def main() -> int:
     h.append("<table><tr><th>Sample</th><th>Serotype</th><th>Lineage (VP1)</th><th>Nearest relative</th><th>Identity</th><th>Genome called</th><th>QC</th><th>Note</th></tr>")
     for r in rows:
         v = r["verdict"]
-        h.append(f"<tr><td><b>{esc(r['sample'])}</b></td><td>{esc(r['serotype'] or '-')}</td><td>{esc(r['lineage'] or ('unassigned' if r['typed'] else '-'))}</td>"
+        h.append(f"<tr><td><b>{esc(r['sample'])}</b>{' <span class=\'flag review\'>imported sequence</span>' if r.get('simulated') else ''}</td><td>{esc(r['serotype'] or '-')}</td><td>{esc(r['lineage'] or ('unassigned' if r['typed'] else '-'))}</td>"
                  f"<td>{(esc(r['nearest']) + ' · ') if r['nearest'] != '-' else ''}{esc(r['nearest_acc']) if r['nearest_acc'] else ('-' if r['nearest'] == '-' else '')}</td><td>{pct(r['identity'])}</td><td>{pct(r['called'])}</td>"
                  f"<td><span class='flag {esc(v)}'>{esc(v)}</span></td><td class='small'>{'; '.join(esc(n) for n in r['notes']) or ''}</td></tr>")
     h.append("</table>")

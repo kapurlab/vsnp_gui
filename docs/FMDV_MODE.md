@@ -316,7 +316,13 @@ is written. Each record plays one of two roles:
   `reads: simulated`, and the Results row is badged Simulated with QC "n/a":
   depth, mapping rate and coverage describe the simulation, not a sample.
   Until Grab the Samples list shows the folder as "sequence" with a note to
-  Grab then Run;
+  Grab then Run. The sample report opens with a boxed statement that the
+  record is an imported sequence and not a sequenced sample, replaces the
+  Quality section with the record's provenance and "not applicable", and
+  leaves vsnp3's depth, mapping and coverage figures out; the run report
+  counts imported sequences apart from sequenced samples, badges their rows
+  and prints no genome-called figure for them; the Results table leaves
+  their depth, mapping and coverage cells blank;
 - a **sample** shorter than that (a VP1 record, a P1, a fragment) has
   nothing for the whole-genome workflow and lands sequence-only in
   `step1/<name>/` with `<name>_imported.fasta` (as given),

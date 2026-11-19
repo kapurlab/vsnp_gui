@@ -343,6 +343,11 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
     ref = load_json(sample_dir / "fmdv_reference.json")
     typ = load_json(sample_dir / "fmdv_vp1_type.json")
     cons = load_json(sample_dir / "fmdv_consensus.json")
+    # An imported sequence (app.seq_import): the "reads" vsnp3 saw were
+    # simulated from a FASTA or GenBank record. Nothing about depth, coverage
+    # or mapping is a measurement, and the report must say so first.
+    imp = load_json(sample_dir / "fmdv_import.json")
+    simulated = imp.get("reads") == "simulated"
     row = stats_row(sample_dir, sample)
     proj = load_json(project / "project.json")
     thr = proj.get("qc_thresholds") or {}
@@ -351,9 +356,9 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
     meta = T.load_meta(lib)
     ver = versions(project, lib, row)
 
-    # verdict, as the GUI computes it
+    # verdict, as the GUI computes it; none for simulated reads
     verdict = None
-    if compute_verdict and row:
+    if compute_verdict and row and not simulated:
         r2 = dict(row)
         reasons = []
         if ref.get("distant"):
@@ -401,6 +406,8 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
     lineage = typ.get("lineage") or ""
     provisional = typed and (not lineage or ref.get("distant"))
     flags = []
+    if simulated:
+        flags.append('<span class="flag review">imported sequence: reads simulated, QC not applicable</span>')
     if verdict:
         flags.append(f'<span class="flag {verdict["level"]}">QC {verdict["level"]}</span>')
     if ref.get("mixed"):
@@ -437,6 +444,21 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
 
     h = [f"<!doctype html><html><head><meta charset='utf-8'><title>{esc(sample)} FMDV report</title><style>{CSS}</style></head><body>"]
     h.append(f"<h1>{esc(sample)}</h1><div class='muted'>FMDV report · project {esc(project.name)} · Step 1 run {esc(row.get('date') or '-')} · written {time.strftime('%Y-%m-%d %H:%M')}</div>")
+    if imp:
+        im = imp.get("metadata") or {}
+        src = f"{esc(imp.get('kind') or 'sequence')} {esc(imp.get('source') or '')}".strip()
+        what = ", ".join(x for x in (esc(im.get("accession")), esc(im.get("isolate")), esc(im.get("country")),
+                                     esc(im.get("year")) if str(im.get("year")) not in ("", "0", "None") else "") if x)
+        h.append("<div style='margin:10px 0;padding:10px 12px;border:2px solid #b45309;background:#fff7ed;color:#7c2d12'>"
+                 f"<b>Imported sequence, not a sequenced sample.</b> This record was imported as {src}"
+                 + (f" ({what})" if what else "") + f" on {esc((imp.get('imported') or '')[:10])}. "
+                 + ("The reads vsnp3 aligned were <b>simulated</b> from that sequence: perfect, uniform, none over N. "
+                    "Read counts, depth, mapping rate and coverage describe the simulation and carry no information "
+                    "about any sample. No QC verdict applies. The typing, the tree placement and the SNPs against "
+                    "the lineage reference describe the imported sequence itself."
+                    if simulated else
+                    "No reads exist for it; the typing and tree placement describe the imported sequence itself.")
+                 + "</div>")
     h.append("<div class='call'>" + call_line + "</div>")
     if nearest_line:
         h.append(f"<div>Nearest VP1 record: {nearest_line}" + (f" · {named_by}" if named_by and tb.get("accession") != best.get("accession") else "") + "</div>")
@@ -444,8 +466,23 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
         h.append(f"<div class='small muted'>Lineage agreement {agree['lineage']:.0%} of the {agree.get('n_annotated')} annotated hits among the top {agree.get('n')}; serotype agreement {agree.get('serotype', 0):.0%}.</div>")
     h.append("<div style='margin:8px 0'>" + " ".join(flags) + "</div>")
 
-    h.append("<h2>Quality</h2>")
-    qrows = [("Verdict", f"<b>{esc(verdict['level'])}</b>" + (": " + esc("; ".join(verdict["reasons"])) if verdict and verdict["reasons"] else "") if verdict else "-"),
+    if simulated:
+        h.append("<h2>Imported sequence</h2>")
+        im = imp.get("metadata") or {}
+        v1 = imp.get("vp1") or {}
+        sim = imp.get("simulated_reads") or {}
+        h.append(kv([("Source", f"{esc(imp.get('kind'))}: {esc(imp.get('source'))}"),
+                     ("Record", esc(imp.get("header") or "-")),
+                     ("Metadata as entered", ", ".join(f"{k} {esc(v)}" for k, v in im.items() if v) or "-"),
+                     ("Length", f"{esc(imp.get('length'))} nt, {esc(imp.get('n_count'))} N, {pct(imp.get('called_percent'))} called"),
+                     ("VP1 in the record", f"{esc(v1.get('start'))}-{esc(v1.get('end'))} ({esc(v1.get('strand'))}), {esc(v1.get('length'))} nt, cut by blastn against {esc(v1.get('template'))} at {esc(v1.get('identity'))}%"),
+                     ("Simulated reads", f"{esc(sim.get('pairs'))} perfect pairs of {esc(sim.get('read_length'))} bases at {esc(sim.get('depth'))}-fold over the called bases; none over N" if sim else "-"),
+                     ("Quality control", "<b>not applicable</b>: there is no sample and no sequencing run to judge")]))
+        h.append("<div class='small muted'>vsnp3's read counts, depth, mapping rate and coverage for these reads are left out of this report on purpose: they describe the simulation.</div>")
+        qrows = []
+    else:
+        h.append("<h2>Quality</h2>")
+        qrows = [("Verdict", f"<b>{esc(verdict['level'])}</b>" + (": " + esc("; ".join(verdict["reasons"])) if verdict and verdict["reasons"] else "") if verdict else "-"),
              ("Reads", esc(row.get("R1 Read Count") or "-") + (" paired" if row.get("FASTQ_R2") else "")),
              ("Platform", esc(row.get("Platform") or "-")),
              ("Mean depth", esc(row.get("Average Depth") or "-")),
@@ -455,17 +492,20 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
              ("VP1 called", pct(cons.get("vp1_called_percent"))),
              ("Mixed sites (reads disagree)", esc(row.get("Ambiguous SNPs") or "-")),
              ("SNPs against the lineage reference", esc(row.get("Quality SNPs") or "-"))]
-    h.append(kv(qrows))
-    if thr:
+    if qrows:
+        h.append(kv(qrows))
+    if thr and not simulated:
         h.append(f"<div class='small muted'>Lines: genome covered pass {thr.get('genome_coverage', {}).get('pass_min')}% / fail {thr.get('genome_coverage', {}).get('review_min')}%; depth pass {thr.get('coverage', {}).get('pass_min')}x / review {thr.get('coverage', {}).get('review_min')}x; mapping pass {thr.get('mapping_rate', {}).get('pass_min')}%.</div>")
 
-    h.append("<h2>Reference chosen by the reads</h2>")
+    h.append("<h2>Reference chosen by the simulated reads</h2>" if simulated else "<h2>Reference chosen by the reads</h2>")
     sh = ref.get("serotype_share") or {}
-    h.append(kv([("Lineage reference", f"{esc(chosen.get('safe'))} ({esc(chosen.get('isolate'))}, {esc(chosen.get('accession'))})" if chosen else "-"),
-                 ("Chosen by", f"{esc(ref.get('vote'))} vote, share {esc(ref.get('f_match'))}" + (f"; runner-up {esc(ref.get('runner_up', {}).get('safe'))}" if ref.get("runner_up") else "")),
-                 ("Read identity to it", esc(ref.get("identity"))),
-                 ("Serotype composition of VP1 reads", ", ".join(f"{k} {v:.0%}" for k, v in sh.items()) if sh else "undetermined"),
-                 ("Reads used", f"{esc(ref.get('reads_used'))} sampled; {esc(ref.get('fmdv_reads'))} FMDV; {esc(ref.get('vp1_reads'))} on VP1")]))
+    refrows = [("Lineage reference", f"{esc(chosen.get('safe'))} ({esc(chosen.get('isolate'))}, {esc(chosen.get('accession'))})" if chosen else "-"),
+               ("Chosen by", f"{esc(ref.get('vote'))} vote, share {esc(ref.get('f_match'))}" + (f"; runner-up {esc(ref.get('runner_up', {}).get('safe'))}" if ref.get("runner_up") else "")),
+               ("Sequence identity to it" if simulated else "Read identity to it", esc(ref.get("identity")))]
+    if not simulated:
+        refrows += [("Serotype composition of VP1 reads", ", ".join(f"{k} {v:.0%}" for k, v in sh.items()) if sh else "undetermined"),
+                    ("Reads used", f"{esc(ref.get('reads_used'))} sampled; {esc(ref.get('fmdv_reads'))} FMDV; {esc(ref.get('vp1_reads'))} on VP1")]
+    h.append(kv(refrows))
 
     h.append("<h2>Neighbourhood</h2>")
     if neigh and neigh.get("records"):
@@ -498,7 +538,7 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
         h.append("<p class='muted'>Available once a VP1 tree includes this sample.</p>")
 
     h.append("<h2>Sequences</h2>")
-    h.append(kv([("Consensus genome", f"{esc(cons_file.name)} · {esc(cons.get('length'))} nt, {pct(cons.get('called_percent'))} called, {esc(cons.get('substitutions'))} substitutions from the reference, {esc(cons.get('n_count'))} N" if cons else "-"),
+    h.append(kv([("Consensus genome" + (" (rebuilt from the simulated reads; the imported record is the source)" if simulated else ""), f"{esc(cons_file.name)} · {esc(cons.get('length'))} nt, {pct(cons.get('called_percent'))} called, {esc(cons.get('substitutions'))} substitutions from the reference, {esc(cons.get('n_count'))} N" if cons else "-"),
                  ("VP1", f"{esc(vf.name)} · {esc(cons.get('vp1_length'))} nt, {pct(cons.get('vp1_called_percent'))} called" if cons else "-")]))
     if vp1_seq:
         h.append(f"<div class='small muted'>VP1 consensus ({esc(sample)}):</div><pre class='seq'>&gt;{esc(sample)}_VP1\n{esc(vp1_seq)}</pre>")
@@ -512,7 +552,8 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
                  ("Consensus", "reference-anchored: vsnp3 substitution calls, N below depth 10 or where the reads disagree; no indels")]))
     h.append("<div class='small muted' style='margin-top:10px'>Caveats: the consensus carries substitutions only, so insertions and deletions relative to the reference are not called and a true deletion reads as reference sequence. A lineage is provisional when the nearest records are far from the sample or no annotated record is within 3% of the best hit. A sample flagged mixed carries a second serotype in its VP1 reads; its consensus is that of the majority with the disputed sites masked.</div>")
     h.append("</body></html>")
-    info = {"sample": sample, "typed": typed, "tree_run": run.name if run else None, "verdict": verdict["level"] if verdict else None}
+    info = {"sample": sample, "typed": typed, "tree_run": run.name if run else None, "verdict": verdict["level"] if verdict else None,
+            "imported": bool(imp), "simulated": simulated}
     return "\n".join(h), info
 
 

@@ -7487,7 +7487,7 @@ export default function App() {
                   apiBase={API_BASE}
                   project={selectedProject}
                   enabled={!!selectedProject && settingsReady}
-                  onImported={() => { setNanoporeMode(true); loadAll(); }}
+                  onImported={() => { loadAll(); loadInputs(selectedProject); }}
                 />
                 ) : null}
                 {fmdvOn && inputTab === "sequences" ? (
@@ -7500,7 +7500,8 @@ export default function App() {
                       // typing result: the Samples list, the Results rows
                       // (rescanned, since the scanner lists folders) and the
                       // VP1 typing table all change.
-                      loadAll();            // the download/ listing: simulated reads land there
+                      loadAll();
+                      loadInputs(selectedProject);   // Ready to run: simulated reads land in download/
                       loadStep1Status();
                       loadQC({ refresh: true });
                       try {
@@ -9180,8 +9181,8 @@ export default function App() {
                                     : "Reads in the sample's FASTQ."}>
                                     {row.read_type === "sequence" ? <span className="muted">none</span> : typeof row.fmdv_reads === "number" ? row.fmdv_reads.toLocaleString() : (row["R1 Read Count"] || "-")}{row.read_type === "simulated" ? <span className="muted"> sim</span> : null}
                                   </td>
-                                  <td>{row["Average Depth"] || "-"}</td>
-                                  <td>{fmtPercent1(qcMappingRate(row))}</td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: depth describes the simulation and is not shown." : undefined}>{row.read_type === "simulated" ? "-" : (row["Average Depth"] || "-")}</td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: mapping rate describes the simulation and is not shown." : undefined}>{row.read_type === "simulated" ? "-" : fmtPercent1(qcMappingRate(row))}</td>
                                   {fmdvLongRead ? (
                                     <td title={row["Long-read Error Rate"] || (row.read_type === "ont" ? "Mismatches and indels per aligned base (samtools stats). About 2% is clean; 6% or more points to a mixed sample or a distant reference." : "Long reads only.")}>
                                       {typeof row.fmdv_error_rate === "number" ? `${row.fmdv_error_rate.toFixed(2)}%` : "-"}
@@ -9192,9 +9193,9 @@ export default function App() {
                                       {row.read_type === "ont" ? "-" : (row["Duplicate Percent of Mapped Reads"] || "-")}
                                     </td>
                                   ) : null}
-                                  <td title="Percent of reference positions covered by at least one read.">{formatPercent(row["Genome with Coverage"])}</td>
-                                  <td title="Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous).">
-                                    {typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: coverage describes the simulation and is not shown." : "Percent of reference positions covered by at least one read."}>{row.read_type === "simulated" ? "-" : formatPercent(row["Genome with Coverage"])}</td>
+                                  <td title={row.read_type === "simulated" ? "Simulated reads: not a measurement." : "Percent of the reference genome with a called base in the consensus (depth 10 or more, unambiguous)."}>
+                                    {row.read_type === "simulated" ? "-" : typeof row.fmdv_genome_called === "number" ? `${row.fmdv_genome_called.toFixed(1)}%` : "-"}
                                   </td>
                                   <td title="Percent of VP1 with a called base in the consensus. The VP1 tree takes samples at 50% or more.">
                                     {typeof row.fmdv_vp1_called === "number" ? `${row.fmdv_vp1_called.toFixed(1)}%` : "-"}

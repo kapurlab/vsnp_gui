@@ -140,7 +140,7 @@ def _step1_status_from_disk(stored: Any, dir_mtime: Optional[int]) -> Optional[D
 
 from app.config import (
     load_config, save_config, SITE_ROOT, TOOLS_ROOT, DB_ROOT, CONFIG_PATH,
-    apply_site_paths, set_path_override, site_path_defaults, fmdv_reflib,
+    apply_site_paths, set_path_override, site_path_defaults, fmdv_reflib, fmdv_reflib_candidates,
 )
 from app.jobs import JobManager
 from app import name_aliases
@@ -5537,6 +5537,13 @@ async def project_import_sequences_preview(
                                  blastn, 4, mode, want_depth)
     result["problems"] = problems
     result["ncbi"] = ncbi
+    if result.get("library"):
+        # Every place the library was looked for, in order, so a missing one
+        # is reported with where it could go and not only where the search
+        # ended. A user's own "fmdv_reflib" is the single place looked.
+        own = str(cfg.get("fmdv_reflib") or "").strip()
+        result["library"]["searched"] = ([str(Path(own).expanduser())] if own
+                                         else [str(p) for p in fmdv_reflib_candidates()])
     return result
 
 

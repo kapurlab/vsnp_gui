@@ -45,6 +45,7 @@ const blastMissing = (data) => !!data && data.mode === "fmdv" && data.blastn ===
 // The FMDV reference library was never built where this install looks for it.
 // Like a missing blastn it refuses every record for one reason, so it is said
 // once. `library` is absent from a backend older than v0.4.160: no notice then.
+// `library.searched` (v0.4.161) is every folder tried, in order.
 const libraryMissing = (data) => !!data && data.mode === "fmdv" && data.library?.ready === false;
 
 const FIELDS = [
@@ -261,8 +262,13 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
         <div className="note warning" style={{ fontSize: "12px" }}>
           <strong>Nothing was imported: the FMDV reference library has not been built on this install.</strong>{" "}
           This is the install, not anything you entered. An FMDV project checks each record's VP1 against that
-          library, and looked for it at <code style={{ wordBreak: "break-all" }}>{data.library.path}</code>.
-          Build it once from the suite folder (about five minutes, it needs the internet), then press Import again:
+          library, and looked for it in {(data.library.searched || [data.library.path]).length > 1 ? "each of these, in order" : "this folder"}:
+          {(data.library.searched || [data.library.path]).map((p) => (
+            <div key={p}><code style={{ wordBreak: "break-all" }}>{p}</code></div>
+          ))}
+          Build it once from the suite folder (about five minutes, it needs the internet), then press Import again.
+          If it was already built, run the same command again: it takes seconds, and it now checks that this
+          program can see the library and says so.
           <div style={{ marginTop: "4px" }}>
             <code>bin/bdtools setup-databases fmdv</code> on your own computer
           </div>

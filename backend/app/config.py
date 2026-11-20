@@ -3,7 +3,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 # Per-user config under XDG_CONFIG_HOME (defaults to ~/.config). With multiple
 # users sharing one vsnp_gui install (T-12a), each user gets their own
@@ -168,12 +168,28 @@ _DEFAULT_SHARED_VCF_DB_ROOT = (
 # The FMDV reference library (bin/fmdv_library_build.sh). A site keeps one
 # copy for everyone at <site>/refs/fmdv, beside the vsnp3 references; a
 # personal build defaults to ~/fmdv_refs. A user's own "fmdv_reflib" in
-# config.json wins over both, and is the only one of the three that is stored.
+# config.json wins over all of them, and is the only one that is stored.
+#
+# Between the two sits <database root>/fmdv/fmdv_refs, which is where
+# `bdtools setup-databases fmdv` BUILDS the library; <site>/refs/fmdv is only a
+# link to it. Reading the built copy directly means the GUI does not depend on
+# that link having been made in the right place by an account allowed to make
+# it. On the Ames HPC (2026-11-20) the library was built under the site's
+# database root, the link went into the installing user's own home, and every
+# Import said the library had not been built. DB_ROOT is BDTOOLS_DB_ROOT, which
+# the bdtools launcher exports from site state, else <site>/databases: the
+# same for every user either way.
+def fmdv_reflib_candidates() -> List[Path]:
+    """Every place a library is looked for, in the order tried."""
+    return [_SITE_ROOT / "refs" / "fmdv", DB_ROOT / "fmdv" / "fmdv_refs", HOME_DIR / "fmdv_refs"]
+
+
 def fmdv_reflib_default() -> Path:
-    site_lib = _SITE_ROOT / "refs" / "fmdv"
-    if (site_lib / "lineages.json").is_file():
-        return site_lib
-    return HOME_DIR / "fmdv_refs"
+    candidates = fmdv_reflib_candidates()
+    for lib in candidates:
+        if (lib / "lineages.json").is_file():
+            return lib
+    return candidates[-1]
 
 
 def fmdv_reflib(cfg: Dict[str, Any]) -> Path:

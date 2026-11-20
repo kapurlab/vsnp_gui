@@ -1298,6 +1298,13 @@ export default function App() {
   // from its own mount, so opening another Inputs tab and coming back set a
   // ten-minute wait back to 0s.
   const [sraStartedAt, setSraStartedAt] = useState(0);
+  // In flight: the same condition the status line and the Stop button use.
+  // Declared here, after sraStatus: a const read above its own declaration is
+  // a temporal-dead-zone ReferenceError at render, which the bundler does not
+  // catch.
+  const sraDownloading = sraStatus.includes("Downloading");
+  // True while an SRA download job is in flight (the same condition the status
+  // line and the Stop button use).
   // Persistent outcome of the last SRA download (from sra_download_report.tsv).
   // Buckets survive a reload, so skipped-because-already-in-Step-1 accessions —
   // which never land in download/ and so leave no other on-screen trace — stay
@@ -7668,7 +7675,22 @@ export default function App() {
                     missing from download/ is missing on purpose, not by error. */}
                 {(sraReport.already_in_step1.length > 0 || sraReport.failed.length > 0 || sraReport.downloaded.length > 0) ? (
                   <div className="note" style={{marginTop:"6px", fontSize:"12px"}}>
-                    <div style={{fontWeight:600, marginBottom:"3px"}}>Last download</div>
+                    {/* While a download is running this panel is the PREVIOUS
+                        attempt, and saying "Last download ... 1 failed" over a
+                        run that is at that moment re-fetching the very sample
+                        reads as the running one having failed (Ames, 2026-11-20:
+                        "Failed - SRR34371563" on screen while SRR34371563 was
+                        84% downloaded and climbing). Name which run it is, and
+                        do not spring the failures open over a run that may be
+                        fixing them. */}
+                    <div style={{fontWeight:600, marginBottom:"3px"}}>
+                      {sraDownloading ? "Previous download" : "Last download"}
+                    </div>
+                    {sraDownloading ? (
+                      <div className="muted" style={{fontSize:"11px", marginBottom:"3px"}}>
+                        The download running now is not finished; this is the attempt before it.
+                      </div>
+                    ) : null}
                     <div className="muted">
                       {sraReport.downloaded.length} downloaded
                       {sraReport.already_in_step1.length > 0 ? ` · ${sraReport.already_in_step1.length} already in Step 1 (skipped, not re-downloaded)` : ""}
@@ -7685,7 +7707,7 @@ export default function App() {
                       </details>
                     ) : null}
                     {sraReport.failed.length > 0 ? (
-                      <details style={{marginTop:"4px"}} open>
+                      <details style={{marginTop:"4px"}} open={!sraDownloading}>
                         <summary style={{cursor:"pointer", color:"var(--danger, #b00)"}}>
                           Failed — {sraReport.failed.length}
                         </summary>

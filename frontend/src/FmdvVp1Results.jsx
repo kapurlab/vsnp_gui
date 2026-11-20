@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 // fmdv_vp1_tables.py), and the run's files.
 export default function FmdvVp1Results({
   apiBase, project, runs, selectedRun, onSelectRun, groups, loading,
-  fmdvInfo, previewXlsx, viewInline, downloadOutput, treeUrlFor,
+  fmdvInfo, previewXlsx, viewInline, downloadOutput, treeUrlFor, onRefresh,
 }) {
   const [section, setSection] = useState("typing");
   const [info, setInfo] = useState(null);        // vp1_tree.json
@@ -18,6 +18,20 @@ export default function FmdvVp1Results({
 
   const run = runs.find((r) => r.run_id === selectedRun) || null;
   const vp1Dir = run?.path ? `${run.path}/VP1` : "";
+
+  // A tree still being built is looked at again every 15 s until it is not.
+  // The panel says "Sections fill in as its files appear", and that was true
+  // only in the browser tab that had started the build and stayed open: after
+  // a reload, or from another session, a finished tree read "running" until
+  // somebody pressed Refresh. The O tree takes a quarter of an hour and the A
+  // tree hours, so that is the usual way to meet one.
+  const anyRunning = runs.some((r) => r.state === "running");
+  useEffect(() => {
+    if (!anyRunning || !onRefresh) return undefined;
+    const t = setInterval(() => { onRefresh(); }, 15000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyRunning, project]);
 
   useEffect(() => {
     setInfo(null); setNeigh(null); setTables(null);
@@ -36,7 +50,7 @@ export default function FmdvVp1Results({
       setInfo(i); setNeigh(n); setTables(t);
     })();
     return () => { cancelled = true; };
-  }, [vp1Dir, project, apiBase, run?.status]);
+  }, [vp1Dir, project, apiBase, run?.status, run?.state]);
 
   const files = useMemo(() => {
     const g = (groups || []).find((x) => x.name === "VP1");

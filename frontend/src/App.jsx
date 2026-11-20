@@ -11941,6 +11941,7 @@ export default function App() {
                 runs={vp1Runs}
                 selectedRun={step2SelectedRun}
                 onSelectRun={(id) => setStep2SelectedRun(id)}
+                onRefresh={() => refreshStep2Results()}
                 groups={step2Groups}
                 loading={!!selectedProject && step2OutputsFor !== selectedProject}
                 fmdvInfo={fmdvInfo}

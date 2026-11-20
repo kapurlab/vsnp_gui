@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -198,6 +199,45 @@ def fmdv_reflib(cfg: Dict[str, Any]) -> Path:
     return Path(own).expanduser() if own else fmdv_reflib_default()
 
 
+# The library's reference_options/ holds one ordinary vsnp3 reference folder
+# per lineage genome (FASTA, GenBank, GFF, <name>_define_filter.xlsx,
+# <name>_remove_from_analysis.xlsx). FMDV mode hands those folders to vsnp3
+# itself, so for a long time nothing listed them as a reference LOCATION, and
+# the Reference Editor, the defining-SNP groups, the filter positions and the
+# remove list, which all resolve a reference through the locations, had
+# nothing to open for an FMDV project. A user had to know to add the folder by
+# hand, per account (Ames HPC, 2026-11-20). It is now a location of its own
+# wherever a library exists, found the way the library is found (refs.py reads
+# this key; it is never stored).
+FMDV_REFERENCE_ROOT_KEY = "fmdv_reference_root"
+
+# own "fmdv_reflib" setting -> (looked up at, answer). load_config() runs on
+# every request, and the answer changes only when a library is built or
+# removed, so the two to four stats it takes are made at most once per
+# _FMDV_ROOT_TTL_S; a library built while the GUI is open shows within that.
+_FMDV_ROOT_MEMO: Dict[str, tuple] = {}
+_FMDV_ROOT_TTL_S = 10.0
+
+
+def fmdv_reference_root(cfg: Dict[str, Any]) -> str:
+    """<library>/reference_options when a built library is there, else ""."""
+    own = str(cfg.get("fmdv_reflib") or "").strip()
+    now = time.monotonic()
+    hit = _FMDV_ROOT_MEMO.get(own)
+    if hit is not None and now - hit[0] < _FMDV_ROOT_TTL_S:
+        return hit[1]
+    answer = ""
+    try:
+        lib = fmdv_reflib(cfg)
+        root = lib / "reference_options"
+        if (lib / "lineages.json").is_file() and root.is_dir():
+            answer = str(root)
+    except OSError:
+        answer = ""
+    _FMDV_ROOT_MEMO[own] = (now, answer)
+    return answer
+
+
 # --- Site-derived paths -----------------------------------------------------
 # These keys are functions of the LAUNCH CONTEXT (site.conf, launcher env vars,
 # checkout position), not user data. They used to sit in DEFAULTS and get
@@ -354,7 +394,10 @@ def load_config() -> Dict[str, Any]:
     # Existing users get sensible defaults without losing what they customized.
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
-    return apply_site_paths(cfg)
+    cfg = apply_site_paths(cfg)
+    # Computed, like the site-derived paths, and never stored (save_config).
+    cfg[FMDV_REFERENCE_ROOT_KEY] = fmdv_reference_root(cfg)
+    return cfg
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
@@ -362,6 +405,7 @@ def save_config(cfg: Dict[str, Any]) -> None:
     # Never persist the effective site-derived values load_config() filled in —
     # a frozen copy of a computed default is precisely the multi-user bug this
     # layout replaced. "path_overrides" carries the user's explicit choices.
-    to_write = {k: v for k, v in cfg.items() if k not in SITE_DERIVED_KEYS}
+    to_write = {k: v for k, v in cfg.items()
+                if k not in SITE_DERIVED_KEYS and k != FMDV_REFERENCE_ROOT_KEY}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(to_write, f, indent=2, sort_keys=True)

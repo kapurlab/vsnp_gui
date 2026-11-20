@@ -133,6 +133,14 @@ else
   say "3/4 GenBank VP1 context sets: present"
 fi
 
+# ---- the typing database, made now ----------------------------------------------
+# VP1 typing searches one BLAST database of every set above. The GUI builds it
+# the first time a sample is typed, inside the library, which on a site library
+# the people running samples cannot write was a failure for every sample.
+# Built here by the account that can; a no-op when it is already current.
+say "VP1 typing database"
+"${PY}" "${HERE}/fmdv_vp1_type.py" --build-db --lib "${LIB}" > /dev/null
+
 # ---- 4. annotations, the one step that needs NCBI ------------------------------
 ANNOT="done"
 n_genomes="$(find "${LIB}/genomes" -maxdepth 1 -name '*.fasta' | wc -l | tr -d ' ')"

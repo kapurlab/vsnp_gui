@@ -92,9 +92,78 @@ def load_metadata(lib: Path, project_context: Optional[Path] = None) -> Dict[str
     return meta
 
 
+def _fresh(out: Path, stem: str, newest: float) -> bool:
+    marker = out / f"{stem}.nsq"
+    try:
+        return marker.stat().st_mtime >= newest and (out / f"{stem}.fasta").is_file()
+    except OSError:
+        return False
+
+
+def _build_db(sources: List[Path], out: Path, stem: str, makeblastdb: str) -> Path:
+    """A BLAST database of `sources` at <out>/<stem>, rebuilt when a source is
+    newer than it. Returns the prefix. Raises OSError when `out` cannot be
+    written and holds no current database.
+
+    Step 1 types several samples at once, so two workers can find the database
+    stale in the same second. One builds; the others wait on a lock and then
+    find it built. The build is made in a folder of its own and moved in file
+    by file, the marker last, so no reader ever opens a FASTA that is still
+    being written (it used to be written in place)."""
+    prefix = out / stem
+    newest = max(p.stat().st_mtime for p in sources)
+    if _fresh(out, stem, newest):
+        return prefix
+    out.mkdir(exist_ok=True)
+    import fcntl
+    import tempfile
+    with open(out / f".{stem}.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            pass                      # a file system without locks: build anyway
+        if _fresh(out, stem, newest):
+            return prefix
+        with tempfile.TemporaryDirectory(dir=out, prefix=f".{stem}_build_") as tmp:
+            tmp_dir = Path(tmp)
+            fasta = tmp_dir / f"{stem}.fasta"
+            seen: set = set()
+            with open(fasta, "w") as fh:
+                for src in sources:
+                    for name, seq in read_fasta(src):
+                        key = name.split()[0]
+                        if key in seen or not seq:
+                            continue
+                        seen.add(key)
+                        fh.write(f">{key}\n{seq}\n")
+            subprocess.run([makeblastdb, "-in", str(fasta), "-dbtype", "nucl", "-title", stem,
+                            "-out", str(tmp_dir / stem)],
+                           check=True, capture_output=True, text=True)
+            built = sorted(tmp_dir.iterdir(), key=lambda f: f.suffix == ".nsq")   # the marker last
+            for f in built:
+                os.replace(f, out / f.name)
+    return prefix
+
+
+def _user_typing_dir(lib: Path) -> Path:
+    """Where this account keeps a typing database for a library it cannot
+    write: its own cache folder, one per library path."""
+    import hashlib
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+    return Path(base) / "vsnp_gui" / "fmdv_typing" / hashlib.sha256(str(lib).encode()).hexdigest()[:12]
+
+
 def ensure_db(lib: Path, makeblastdb: str) -> Path:
     """One BLAST database of every context VP1 plus the panel VP1s, rebuilt
-    when any source is newer than it. Returns the database prefix."""
+    when any source is newer than it. Returns the database prefix.
+
+    It lives in the library (vp1_context/_typing), where the library build
+    makes it, so on a site library nobody but the builder writes, everyone
+    reads the one copy. If it is missing or stale there and this account
+    cannot write the library, the database is built in the account's own
+    cache instead: typing a sample must not depend on being allowed to write
+    the shared library (it raised PermissionError there, outside the handler,
+    and every sample came out untyped)."""
     ctx = lib / "vp1_context"
     sources = sorted(ctx.glob("*.fasta"))
     panel = lib / "panels" / "vp1.fasta"
@@ -102,26 +171,14 @@ def ensure_db(lib: Path, makeblastdb: str) -> Path:
         sources.append(panel)
     if not sources:
         raise FileNotFoundError(f"no VP1 sets under {ctx} (run fmdv_vp1_context.py)")
-    out = ctx / "_typing"
-    out.mkdir(exist_ok=True)
-    fasta = out / "all_vp1.fasta"
-    prefix = out / "all_vp1"
-    newest = max(p.stat().st_mtime for p in sources)
-    marker = out / "all_vp1.nsq"
-    if marker.is_file() and marker.stat().st_mtime >= newest and fasta.is_file():
-        return prefix
-    seen: set = set()
-    with open(fasta, "w") as fh:
-        for src in sources:
-            for name, seq in read_fasta(src):
-                key = name.split()[0]
-                if key in seen or not seq:
-                    continue
-                seen.add(key)
-                fh.write(f">{key}\n{seq}\n")
-    subprocess.run([makeblastdb, "-in", str(fasta), "-dbtype", "nucl", "-out", str(prefix)],
-                   check=True, capture_output=True, text=True)
-    return prefix
+    try:
+        return _build_db(sources, ctx / "_typing", "all_vp1", makeblastdb)
+    except OSError as exc:
+        own = _user_typing_dir(lib)
+        _err(f"vp1_type: the library's typing database cannot be written ({exc.strerror or exc}); "
+             f"using {own}")
+        own.mkdir(parents=True, exist_ok=True)
+        return _build_db(sources, own, "all_vp1", makeblastdb)
 
 
 def ensure_project_db(project_context: Optional[Path], makeblastdb: str) -> Optional[Path]:
@@ -134,24 +191,7 @@ def ensure_project_db(project_context: Optional[Path], makeblastdb: str) -> Opti
     sources = sorted(p for p in project_context.glob("*.fasta") if not p.name.startswith((".", "_")))
     if not sources:
         return None
-    out = project_context / "_typing"
-    out.mkdir(exist_ok=True)
-    fasta, prefix, marker = out / "project_vp1.fasta", out / "project_vp1", out / "project_vp1.nsq"
-    newest = max(p.stat().st_mtime for p in sources)
-    if marker.is_file() and marker.stat().st_mtime >= newest and fasta.is_file():
-        return prefix
-    seen: set = set()
-    with open(fasta, "w") as fh:
-        for src in sources:
-            for name, seq in read_fasta(src):
-                key = name.split()[0]
-                if key in seen or not seq:
-                    continue
-                seen.add(key)
-                fh.write(f">{key}\n{seq}\n")
-    subprocess.run([makeblastdb, "-in", str(fasta), "-dbtype", "nucl", "-out", str(prefix)],
-                   check=True, capture_output=True, text=True)
-    return prefix
+    return _build_db(sources, project_context / "_typing", "project_vp1", makeblastdb)
 
 
 def blast(blastn: str, dbs: "Path | List[Path]", query: Path, threads: int) -> List[Dict]:
@@ -280,6 +320,9 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--sample-dir", help="one Step 1 sample folder")
     g.add_argument("--project", help="type every sample folder under <project>/step1")
+    g.add_argument("--build-db", action="store_true",
+                   help="build the library's typing database and stop (the library build runs this, "
+                        "so a library its users cannot write already has it)")
     ap.add_argument("--lib", required=True, help="FMDV reference library")
     ap.add_argument("--project-context", help="the project's own VP1 context folder (<project>/fmdv_context), "
                     "searched beside the library's sets; ignored when absent or empty")
@@ -296,10 +339,13 @@ def main() -> int:
     project_context = Path(a.project_context).expanduser() if a.project_context else None
     try:
         db: "Path | List[Path]" = ensure_db(lib, makeblastdb)
+        if a.build_db:
+            print(db)
+            return 0
         pdb = ensure_project_db(project_context, makeblastdb)
         if pdb is not None:
             db = [db, pdb]
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+    except (OSError, subprocess.CalledProcessError) as e:
         _err(f"vp1_type: cannot build the VP1 typing database: {e}")
         return 2
     meta = load_metadata(lib, project_context)

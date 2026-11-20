@@ -42,18 +42,32 @@ an 8 kb reference cover only 38 to 50% of positions (measured 14 November
 Real samples will refine both; the simulation benchmark should score them.
 
 Usage:
-    fmdv_define_snps.py --lib ~/fmdv_refs --ref SAT1-I_KM268899 [--max-positions 3] [--panel-only] [--dry-run]
-Writes reference_options/<ref>/<ref>_define_filter.xlsx (sheet "all",
-column A "name-All") and prints the groups.
+    fmdv_define_snps.py --lib ~/fmdv_refs --ref SAT1-I_KM268899 [--max-positions 3] [--panel-only] [--dry-run] [--replace]
+Writes the groups into reference_options/<ref>/<ref>_define_filter.xlsx
+(sheet "all", column A "name-All") and prints them.
+
+The workbook is also what people edit, in the GUI's Reference Editor or in
+Excel: groups of their own, and under any group the positions to leave out of
+its table. So an existing workbook is added to, never rebuilt. A derived group
+that is not in it gets a new column. One that is there keeps its column and
+everything under it; its signature is brought up to date only when it is still
+the one this script wrote last time (DEFINING_SNPS.json remembers), so a
+signature somebody corrected by hand stays as they left it. Nothing is removed.
+The workbook as it was goes to .history/ first, named as the Reference Editor
+names its own archives. --replace writes a fresh workbook holding only the
+derived groups, after the same archive.
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
+import shutil
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -171,6 +185,106 @@ def group_name(serotype: str, topotype: str) -> str:
     return f"{serotype}-{topotype}".replace("/", "-")
 
 
+def _sig_text(chrom: str, positions: List[int]) -> str:
+    return ", ".join(f"{chrom}:{p}" for p in positions)
+
+
+def _same_sig(a, b) -> bool:
+    """Two row-1 cells name the same signature, whatever the spacing."""
+    norm = lambda v: ",".join(t.strip() for t in str(v or "").split(",") if t.strip())
+    return norm(a) == norm(b)
+
+
+def _archive(out: Path) -> str:
+    """Copy the workbook into .history/ before it changes, under the name the
+    GUI's Reference Editor gives its own archives (<UTC time>_<sha256[:8]>_
+    <file>), so one folder holds every earlier version whoever made the edit."""
+    sha = hashlib.sha256(out.read_bytes()).hexdigest()
+    hist = out.parent / ".history"
+    hist.mkdir(exist_ok=True)
+    dst = hist / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{sha[:8]}_{out.name}"
+    shutil.copy2(out, dst)
+    return str(dst)
+
+
+def write_groups(out: Path, record: Path, chrom: str, kept: List[Tuple[str, List[int]]],
+                 replace: bool = False) -> List[str]:
+    """Put the derived groups into the define_filter workbook `out` and return
+    what was done, one line per fact.
+
+    A workbook that exists is edited in place (see the module docstring): new
+    groups appended as columns, a known group's signature refreshed only while
+    it is still the derived one, every other cell left alone. `record` is
+    DEFINING_SNPS.json from the last run, which is how "still the derived one"
+    is known; without it an existing group's signature is never touched.
+    """
+    import openpyxl
+    report: List[str] = []
+    if replace and out.is_file():
+        report.append(f"previous workbook kept as {_archive(out)}")
+    if replace or not out.is_file():
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = "all"
+        ws.cell(row=2, column=1, value="name-All")
+        for i, (name, sig) in enumerate(kept, start=2):
+            ws.cell(row=1, column=i, value=_sig_text(chrom, sig))
+            ws.cell(row=2, column=i, value=name)
+        wb.save(out)
+        report.append(f"{'replaced' if replace and len(report) else 'created'}: {len(kept)} groups")
+        return report
+
+    last: Dict[str, str] = {}
+    try:
+        prev = json.loads(record.read_text())
+        last = {g["name"]: _sig_text(prev.get("chrom", chrom), g["positions"]) for g in prev.get("groups", [])}
+    except (OSError, ValueError, KeyError, TypeError):
+        last = {}
+    wb = openpyxl.load_workbook(out)
+    ws = wb.worksheets[0]          # vsnp3 reads the first sheet
+    where: Dict[str, int] = {}
+    last_used = 1
+    for col in range(1, ws.max_column + 1):
+        head, name = ws.cell(row=1, column=col).value, ws.cell(row=2, column=col).value
+        if head not in (None, "") or name not in (None, ""):
+            last_used = col
+        if name not in (None, ""):
+            where.setdefault(str(name).strip(), col)
+    added = updated = unchanged = 0
+    for name, sig in kept:
+        text = _sig_text(chrom, sig)
+        col = where.get(name)
+        if col is None:
+            last_used += 1
+            ws.cell(row=1, column=last_used, value=text)
+            ws.cell(row=2, column=last_used, value=name)
+            where[name] = last_used
+            added += 1
+            report.append(f"added group {name}: {text}")
+            continue
+        current = ws.cell(row=1, column=col).value
+        if _same_sig(current, text):
+            unchanged += 1
+        elif name in last and _same_sig(current, last[name]):
+            ws.cell(row=1, column=col, value=text)
+            updated += 1
+            report.append(f"updated group {name}: {current} -> {text}")
+        else:
+            report.append(f"left group {name} as it is in the workbook ({current}): it was edited by hand, "
+                          f"or this script has no record of writing it. Derived now: {text}")
+    derived = {name for name, _sig in kept}
+    for name in last:
+        if name not in derived and name in where:
+            report.append(f"group {name} is no longer derived; left in the workbook")
+    if added or updated:
+        # Archived only when there is something to write, so a run that finds
+        # nothing new leaves neither a new file nor a copy of the old one.
+        report.insert(0, f"previous workbook kept as {_archive(out)}")
+        wb.save(out)
+    report.append(f"workbook {'added to' if added or updated else 'left as it is'}: "
+                  f"{added} new, {updated} updated, {unchanged} unchanged; "
+                  f"{len(where) - len(derived & set(where))} other column(s) and all filter positions untouched")
+    return report
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lib", required=True)
@@ -178,6 +292,9 @@ def main() -> int:
     ap.add_argument("--max-positions", type=int, default=MAX_POSITIONS)
     ap.add_argument("--panel-only", action="store_true", help="ignore the GenBank genome VCFs")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--replace", action="store_true",
+                    help="write a fresh workbook with only the derived groups (the old one is archived "
+                         "under .history/); without it an existing workbook is added to and nothing in it is lost")
     a = ap.parse_args()
     lib = Path(a.lib).expanduser().resolve()
     idx = fmdv_reflib.load(lib)
@@ -266,14 +383,10 @@ def main() -> int:
         return 0
 
     folder = fmdv_reflib.materialize(lib, a.ref)
-    import openpyxl
-    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "all"
-    ws.cell(row=2, column=1, value="name-All")
-    for i, (name, sig) in enumerate(kept, start=2):
-        ws.cell(row=1, column=i, value=", ".join(f"{chrom}:{p}" for p in sig))
-        ws.cell(row=2, column=i, value=name)
     out = folder / f"{a.ref}_define_filter.xlsx"
-    wb.save(out)
+    report = write_groups(out, folder / "DEFINING_SNPS.json", chrom, kept, replace=a.replace)
+    for line in report:
+        print(line)
     (folder / "DEFINING_SNPS.json").write_text(json.dumps(
         {"reference": a.ref, "chrom": chrom, "alt_qual": ALT_QUAL, "min_mq": MIN_MQ, "max_positions": a.max_positions,
          "groups": [{"name": n, "positions": s,
@@ -282,7 +395,7 @@ def main() -> int:
                     for n, s in kept],
          "genomes_with_vcfs": len(alt), "panel_genomes": len(alt) - n_genbank, "genbank_genomes": n_genbank,
          "unlabelled_same_serotype": unlabelled}, indent=1))
-    print(f"wrote {out} with {len(kept)} groups")
+    print(f"{out}: {len(kept)} groups derived this run (recorded in DEFINING_SNPS.json)")
     return 0
 
 

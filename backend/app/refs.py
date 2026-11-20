@@ -65,6 +65,11 @@ PERSONAL_KEY = "reference_locations"
 SITE = "site"
 PERSONAL = "personal"
 INSTALL = "install"   # vsnp3's own list, shown only until the site list is seeded
+# The FMDV reference library's reference_options/ (config.fmdv_reference_root):
+# on no list, there whenever a library is, the same for every user. Last in the
+# order, so it never changes which folder an existing name resolves to.
+FMDV = "fmdv"
+FMDV_ROOT_KEY = "fmdv_reference_root"
 
 INSTALL_LIST = Path("dependencies") / "reference_options_paths.txt"
 
@@ -360,6 +365,8 @@ def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
     is seeded) the install's entries, then personal. A location listed twice is
     kept where it first appears. Returns (entries, notes); entries are
     {path, source}. Never raises on an unreadable list: it becomes a note.
+    Last comes the FMDV library's reference folders, when a library is built
+    (source "fmdv", on no list; see fmdv_root).
 
     Site and install entries in another account's home folder are left out
     (see _shared_entry_visible): not shown, not counted, not resolved through.
@@ -390,7 +397,17 @@ def _entries(cfg: Dict) -> Tuple[List[Dict], List[str]]:
         _take([p for p in _install_candidates(lines or [])[0]
                if _shared_entry_visible(cfg, p)], INSTALL)
     _take(personal_locations(cfg), PERSONAL)
+    lib = fmdv_root(cfg)
+    if lib:
+        _take([lib], FMDV)
     return out, notes
+
+
+def fmdv_root(cfg: Dict) -> str:
+    """The FMDV library's reference_options folder, or "" when no library is
+    built. Read off cfg, where load_config() puts it; a cfg made by hand (the
+    tests) has none unless it says so. Costs no file system call."""
+    return str(cfg.get(FMDV_ROOT_KEY) or "").strip()
 
 
 def site_list_state(status: Dict) -> str:
@@ -681,6 +698,10 @@ def add_reference_location(cfg: Dict, new_path: str,
     entries, _notes = _entries(cfg)
     for e in entries:
         if _norm(e["path"]) == _norm(resolved) or _key(e["path"]) == k:
+            if e["source"] == FMDV:
+                return {"list": None, "path": resolved,
+                        "note": (f"{resolved} holds the FMDV reference library's lineage "
+                                 "references, which are always included. Nothing to add.")}
             return {"list": None, "path": resolved,
                     "note": f"{resolved} is already a reference location, on {_WHERE[e['source']]}."}
     if not _site_in_home(cfg) and (in_home_folder(resolved) or in_home_folder(new_path)):
@@ -749,7 +770,11 @@ def remove_reference_location(cfg: Dict, path: str,
             raise SiteListRefused(
                 f"{path} is on the site's reference location list, which this "
                 f"account cannot change. {status['reason']}")
-    if not sources:
+    if sources == {FMDV}:
+        note = (f"{path} holds the FMDV reference library's lineage references. It is on "
+                "no list, so there is nothing to remove: it is included wherever a "
+                "library is built.")
+    elif not sources:
         note = f"{path} is not one of the reference locations; nothing was removed."
     return {"removed_from": removed, "note": note}
 
@@ -1113,15 +1138,35 @@ def _same_dir(a: Path, b: Path) -> bool:
         return False
 
 
-def _open_root(root: Path) -> Tuple[str, Optional[str], List[Path]]:
+def _scan_dirs(root: Path) -> List[Path]:
+    """The visible folders directly under `root`, from one directory read:
+    scandir hands back each entry's type with its name, so no child is asked
+    again whether it is a folder."""
+    out: List[Path] = []
+    with os.scandir(root) as it:
+        for entry in it:
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    out.append(Path(entry.path))
+            except OSError:
+                continue
+    return sorted(out)
+
+
+def _open_root(root: Path, dirs_only: bool = False) -> Tuple[str, Optional[str], List[Path]]:
     """(status, reason, children) for one location: "ok", "missing" or
     "cannot_open". A folder this account may not open, a dangling link or a
     file where a folder should be is "cannot_open" with the reason, never an
     exception: one bad location must not take the list down (Ames, 2026-11-05:
     a location the account could not open made GET /api/references/paths a
-    bare HTTP 500)."""
+    bare HTTP 500).
+
+    dirs_only: the children are the visible folders only (see _scan_dirs),
+    for a location whose every folder is known to be a reference."""
     try:
-        children = sorted(root.iterdir())
+        children = _scan_dirs(root) if dirs_only else sorted(root.iterdir())
     except (FileNotFoundError, NotADirectoryError) as exc:
         if root.is_symlink():
             try:
@@ -1155,39 +1200,66 @@ def survey(cfg: Dict) -> Dict:
     to, plus any shadowed copies elsewhere. Hidden directories and directories
     with no reference-shaped files are skipped (see _REF_CONTENT_SUFFIXES).
 
-    Reference entry: {name, path, root, shadowed: [{path, root}, ...]}.
+    Reference entry: {name, path, root, shadowed: [{path, root}, ...]}, plus
+    "fmdv": True on a lineage reference of the FMDV library (and on a shadowed
+    copy that is the library's).
     Location entry: {path, source, exists, status, reason, provides, shadowed,
     removable, implicit, fix}. `provides` counts the names this location
     resolves, `shadowed` the ones an earlier location already provides, and
     `fix` is location_fix's for a folder this account cannot open. `site_fix`
     is site_list_fix's.
+
+    The FMDV library's reference folders (source "fmdv", `implicit`) are on no
+    list and cannot be removed. Every folder there is a reference, written by
+    the library build, so it is read with one directory listing instead of
+    being opened folder by folder: 79 lineages cost a site with a library one
+    call, not 160. When the same folder is ALSO on a list (added by hand before
+    it was built in, perhaps through a link, so under another spelling), the
+    listed row stands, its references are marked "fmdv", and the built-in row
+    is left out rather than shown as a second location providing nothing.
     """
     entries, notes = _entries(cfg)
     status = site_list_status(cfg)
     by_name: Dict[str, Dict] = {}
     order: List[str] = []
     opened: Dict[str, Tuple[str, Optional[str]]] = {}
+    listed_library: Optional[str] = None   # the library folder, when a list has it too
     for e in entries:
         parent = Path(e["path"])
-        state, reason, children = _open_root(parent)
+        library = e["source"] == FMDV
+        state, reason, children = _open_root(parent, dirs_only=library)
         opened[e["path"]] = (state, reason)
         for child in children:
-            try:
-                if child.name.startswith(".") or not child.is_dir():
+            if not library:
+                try:
+                    if child.name.startswith(".") or not child.is_dir():
+                        continue
+                except OSError:
                     continue
-            except OSError:
-                continue
-            if not _is_reference_dir(child):
-                continue
+                if not _is_reference_dir(child):
+                    continue
             entry = by_name.get(child.name)
             if entry is None:
                 by_name[child.name] = {"name": child.name, "path": str(child),
                                        "root": str(parent), "shadowed": []}
+                if library:
+                    by_name[child.name]["fmdv"] = True
                 order.append(child.name)
+            elif library and _same_dir(parent, Path(entry["root"])):
+                # A list already holds this very folder under another spelling.
+                listed_library = entry["root"]
+                break
             elif not _same_dir(child, Path(entry["path"])):
                 # Same dir reached twice (a listed symlink of a listed location)
                 # is not a duplicate; a different dir with the same name is.
-                entry["shadowed"].append({"path": str(child), "root": str(parent)})
+                shadow = {"path": str(child), "root": str(parent)}
+                if library:
+                    shadow["fmdv"] = True
+                entry["shadowed"].append(shadow)
+    if listed_library is not None:
+        for r in by_name.values():
+            if r["root"] == listed_library:
+                r["fmdv"] = True
     refs = [by_name[n] for n in order]
     wins: Dict[str, int] = {}
     dups: Dict[str, int] = {}
@@ -1199,6 +1271,9 @@ def survey(cfg: Dict) -> Dict:
     for e in entries:
         state, reason = opened[e["path"]]
         key = str(Path(e["path"]))
+        library = e["source"] == FMDV
+        if library and listed_library is not None:
+            continue
         locations.append({
             "path": e["path"],
             "source": e["source"],
@@ -1207,8 +1282,8 @@ def survey(cfg: Dict) -> Dict:
             "reason": reason,
             "provides": wins.get(key, 0),
             "shadowed": dups.get(key, 0),
-            "removable": e["source"] == PERSONAL or status["writable"],
-            "implicit": False,
+            "removable": not library and (e["source"] == PERSONAL or status["writable"]),
+            "implicit": library,
             "fix": location_fix(cfg, Path(e["path"])) if state == "cannot_open" else None,
         })
     return {"entries": entries, "references": refs, "locations": locations,
@@ -1279,8 +1354,16 @@ def find_gff_for_fasta(fasta_path: Path, cfg: Dict) -> Optional[Path]:
 
     best_score = 0
     best_gff: Optional[Path] = None
+    library = fmdv_root(cfg)
     for root in reference_roots(cfg):
-        state, _reason, children = _open_root(root)
+        if library and str(root) == library:
+            # A lineage folder, its FASTA and its GFF share one name, and the
+            # alignment dir is alignment_<that name>: the only folder that can
+            # score here is the one named for it. Looking at that one keeps a
+            # lookup for any other reference from globbing all 79.
+            state, children = "ok", [root / n for n in dict.fromkeys((align_key, stem)) if n]
+        else:
+            state, _reason, children = _open_root(root)
         if state != "ok":
             continue
         for ref_dir in children:

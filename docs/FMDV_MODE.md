@@ -228,6 +228,37 @@ reference. To see where samples land among lineages, the same-serotype
 lineage genomes can be added as synthetic samples (`vsnp3_step1.py -f`; they
 carry no `N`, so the N-to-random-base behaviour of that path does not bite).
 
+### Defining SNPs, filter positions and the remove list
+
+Each lineage genome is an ordinary vsnp3 reference folder,
+`<lib>/reference_options/<lineage>/`, with its own
+`<lineage>_define_filter.xlsx` and `<lineage>_remove_from_analysis.xlsx`.
+Step 2 on a lineage reads that lineage's two files, exactly as it does for
+any reference. They are edited the same way too:
+
+- The library's `reference_options` folder is a reference location wherever
+  a library is built. Nobody adds it; it is on no list, it is the same for
+  every user, and the Reference Locations pane shows it as `[FMDV library]`.
+  (Before v0.4.167 it had to be added by hand, per account, and until then
+  the Reference Editor had nothing to open for an FMDV project.)
+- In an FMDV project the Reference Editor lists the lineages the project's
+  samples were placed on, one button each, and opens on the one Step 2
+  compares on. In its dropdown those lineages come first and the other
+  library lineages last, after the site's own references.
+- On the **Genome SNPs: build** tab, under **Compare on reference**, the
+  chosen lineage's defining-SNP groups, filtered positions and remove list
+  are summarised, with a button into the Reference Editor.
+- **Add group**, **Filter positions** and **Remove from analysis** then
+  work as for any reference, with the same archive under the folder's
+  `.history/` and the same audit record.
+
+Rebuilding the library (`fmdv_library_build.sh`, `setup-databases fmdv`)
+leaves an existing lineage folder's workbooks alone, and
+`fmdv_define_snps.py` adds to a workbook instead of replacing it (below).
+On a site library, who may write these files is whoever may write the
+library folder; the Reference Editor says when the account running it
+cannot.
+
 ## Do not
 
 - Do not feed a medaka consensus through `vsnp3_step1.py -f`:
@@ -539,6 +570,17 @@ and the simulation benchmark should score them. Written into
 `reference_options/<ref>/<ref>_define_filter.xlsx`; vsnp3 recognised the
 groups in both the GUI run and a direct run.
 
+That workbook is also the one people edit in the Reference Editor, so the
+script adds to it and never rebuilds it: a derived group that is missing
+gets a new column; one that is there keeps its column and the filter
+positions under it, and its signature is refreshed only while it is still
+the one the script wrote last time (`DEFINING_SNPS.json` remembers), so a
+signature corrected by hand stays. Nothing is removed, the workbook as it
+was goes to `.history/` first, and a run with nothing new writes nothing.
+`--replace` gives a fresh workbook with only the derived groups. (Until
+v0.4.167 every run replaced the workbook, deleting any group or filter
+position added since.)
+
 Rederived on 15 November 2026 from the 78 panel VCFs plus the 39 GenBank
 SAT1 genomes (`fmdv_define_snps.py` reads both; `--panel-only` restores
 the old behaviour). Three changes came with the larger set. The passing
@@ -651,7 +693,11 @@ blastn against one database built once from every record of
 serotype by `fmdv_vp1_context.py`, with serotype, topotype, lineage,
 country, year and isolate per record from the TSVs beside them) plus the 79
 panel VP1s. The database lives under `lib/vp1_context/_typing/` and is
-rebuilt when a set is newer than it.
+rebuilt when a set is newer than it. The library build makes it, so a site
+library its users cannot write already has it; where it is missing or stale
+and the library cannot be written, it is built in the user's own cache
+(`~/.cache/vsnp_gui/fmdv_typing/`) instead. The build is locked and moved
+into place, so samples typed at the same time never read a half-written one.
 
 The nearest record names the serotype and is reported as the nearest
 relative. The lineage comes from the nearest ANNOTATED record within 3%
@@ -897,10 +943,27 @@ Then minimap2 to the reference, `samtools ampliconclip --hard-clip
 reads back out as `fmdv_clip/<sample>_clipped.fastq.gz`. Unmapped reads
 pass through untouched so the mapping rate vsnp3 reports still means what
 it did. The project key `fmdv_primers` names a set under `<lib>/primers/`
-or `none`; with one set in the library it is used by default. On the ten
-Test_FMDV samples clipping changed no SNP call and no consensus base: those
-reads carry no primers. The effect size on AHI's amplicon reads is
-unmeasured until the first real run.
+or `none`; with one set in the library it is used by default.
+
+**Until v0.4.167 the clipped reads never reached vsnp3.** The batch
+assembled the vsnp3 command, with `-r1` in it, before the clip step
+replaced R1, so every sample ran on its unclipped reads while
+`fmdv_clip.json` and the log said it had been clipped. The earlier
+statement here, that on the ten Test_FMDV samples clipping "changed no SNP
+call and no consensus base", measured that and nothing else. With the order
+corrected, SRR34371563 (public ONT, 65,636 reads in, 65,629 out, 25 primers
+placed) keeps the same 6 SNP calls, the same VP1 and the same typing; its
+consensus goes from 24 to 51 `N` (99.71% to 99.37% called), which is depth
+lost where primers were cut. So expect slightly fewer called bases at
+primer sites on ONT amplicon runs than v0.4.166 reported, and SNP calls
+that no longer count primer-derived bases as evidence.
+
+The clip is applied to long single-file reads only (the sample is ONT by
+the batch's own read-type detection and has no R2). The clipper aligns with
+minimap2's `map-ont` preset and takes one file, so paired reads would come
+back as a filtered R1 beside an untouched R2; those, and short single-end
+reads, go to vsnp3 as they are and the sample's log says so. The effect
+size on AHI's amplicon reads is unmeasured until the first real run.
 
 ## Benchmark against NanoFMDV
 

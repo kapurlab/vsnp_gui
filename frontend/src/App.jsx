@@ -22,6 +22,7 @@ import TargetNamePicker, { useTargetNames } from "./TargetNames.jsx";
 import FmdvScopePicker from "./FmdvScopePicker.jsx";
 import FmdvVp1Panel from "./FmdvVp1Panel.jsx";
 import FmdvVp1Results from "./FmdvVp1Results.jsx";
+import FmdvRefFiles from "./FmdvRefFiles.jsx";
 import OntRunImport from "./OntRunImport.jsx";
 import SeqImport from "./SeqImport.jsx";
 import { InputTabs, InputHelp, useInputTab } from "./InputsTabs.jsx";
@@ -153,8 +154,21 @@ function referenceCellLabel(value) {
 // registered location wins), so this list never shows one name twice. When
 // more than one location contributes, group by location so it's obvious
 // where each entry comes from.
-function ReferenceOptions({ references }) {
-  const refs = references || [];
+/* The FMDV library's lineage references (r.fmdv, 79 of them) are kept apart
+   from the references a site chose: always in a group of their own, after the
+   rest, so a dropdown opens on the same names it always did. `projectLineages`
+   (the Reference Editor in an FMDV project) names the lineages this project's
+   samples were placed on; they lead the list, because those are the ones a
+   user has come to edit, and nobody should have to find one name in 79. */
+function ReferenceOptions({ references, projectLineages }) {
+  const all = references || [];
+  const refs = all.filter((r) => !r.fmdv);
+  const lineages = all.filter((r) => r.fmdv);
+  const mine = (projectLineages || [])
+    .map((l) => ({ ...l, ref: lineages.find((r) => r.name === l.name) }))
+    .filter((l) => l.ref);
+  const mineNames = new Set(mine.map((l) => l.name));
+  const others = lineages.filter((r) => !mineNames.has(r.name));
   const roots = [];
   const byRoot = new Map();
   refs.forEach((r) => {
@@ -165,18 +179,32 @@ function ReferenceOptions({ references }) {
     }
     byRoot.get(root).push(r);
   });
-  if (roots.length <= 1) {
-    return refs.map((r) => (
-      <option key={r.path || r.name} value={r.name}>{r.name}</option>
-    ));
-  }
-  return roots.map((root) => (
-    <optgroup key={root || "(unknown)"} label={shortenPath(root) || "(unknown location)"}>
-      {byRoot.get(root).map((r) => (
-        <option key={r.path || r.name} value={r.name}>{r.name}</option>
-      ))}
-    </optgroup>
-  ));
+  const opt = (r) => <option key={r.path || r.name} value={r.name}>{r.name}</option>;
+  return (
+    <>
+      {mine.length ? (
+        <optgroup label="FMDV lineages this project's samples are on">
+          {mine.map((l) => (
+            <option key={`mine-${l.name}`} value={l.name}>
+              {l.name} ({l.samples} sample{l.samples === 1 ? "" : "s"})
+            </option>
+          ))}
+        </optgroup>
+      ) : null}
+      {roots.length <= 1 && !lineages.length
+        ? refs.map(opt)
+        : roots.map((root) => (
+          <optgroup key={root || "(unknown)"} label={shortenPath(root) || "(unknown location)"}>
+            {byRoot.get(root).map(opt)}
+          </optgroup>
+        ))}
+      {others.length ? (
+        <optgroup label={mine.length ? "Other FMDV lineage references" : "FMDV lineage references"}>
+          {others.map(opt)}
+        </optgroup>
+      ) : null}
+    </>
+  );
 }
 
 /* Module scope, NOT redefined inside App on every render. A component declared
@@ -2517,6 +2545,17 @@ export default function App() {
     loadMetadata(refName);
   }
 
+  // From anywhere on the page to the Reference Editor, open on one reference.
+  function openRefEditorOn(refName) {
+    if (!refName) return;
+    setShowRowRefEditor(true);
+    if (refName !== refEditorRef) selectRefEditorRef(refName);
+    setTimeout(() => {
+      const el = document.getElementById("reference-editor");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
+
   async function loadRefEditorFiles(refName) {
     if (!refName) {
       setRefEditorFiles([]);
@@ -3116,6 +3155,22 @@ export default function App() {
     runPreflight();
   }, [settings.vsnp3_path]);
 
+  // The reference list is read when the page loads. A library built since
+  // then (setup-databases fmdv in another window) is not in it, and an FMDV
+  // project opened now would be told its lineages cannot be edited. Ask again,
+  // once per project, when an FMDV project finds no lineage reference listed.
+  const fmdvRefsAskedFor = useRef("");
+  useEffect(() => {
+    if (!fmdvOn || !selectedProject) return;
+    if (references.some((r) => r.fmdv)) return;
+    if (fmdvRefsAskedFor.current === selectedProject) return;
+    fmdvRefsAskedFor.current = selectedProject;
+    fetch(`${API_BASE}/api/references`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((refs) => { if (Array.isArray(refs) && refs.some((r) => r.fmdv)) setReferences(refs); })
+      .catch(() => {});
+  }, [fmdvOn, selectedProject, references]);
+
   // FMDV mode state follows the selected project; the lineage library is
   // fetched the first time an FMDV project is opened.
   useEffect(() => {
@@ -3370,8 +3425,19 @@ export default function App() {
   // until the user switches project or the project's reference changes; a
   // reload of the reference list does not undo it. A project with no
   // reference, or one that names no listed reference, leaves the editor alone.
+  // An FMDV project has no single reference: each sample was placed on a
+  // lineage. What its Step 2 compares on plays the part, and until one is
+  // chosen, the lineage its samples are on when that is only one.
+  const fmdvProjectLineages = useMemo(() => {
+    if (fmdvInfo?.mode !== "fmdv") return [];
+    return Object.entries(refLock.samples_by_reference || {})
+      .map(([name, ss]) => ({ name, samples: (ss || []).length }))
+      .sort((a, b) => b.samples - a.samples || a.name.localeCompare(b.name));
+  }, [fmdvInfo, refLock.samples_by_reference]);
   const refEditorProjectRef = (() => {
-    const name = projectReference || (refLock.references.length === 1 ? refLock.references[0] : "");
+    const name = fmdvInfo?.mode === "fmdv"
+      ? (fmdvInfo.step2_reference || (fmdvProjectLineages.length === 1 ? fmdvProjectLineages[0].name : ""))
+      : (projectReference || (refLock.references.length === 1 ? refLock.references[0] : ""));
     if (!name) return "";
     const hit = references.find((r) => r.name === name)
       || references.find((r) => r.name.toLowerCase() === name.toLowerCase());
@@ -7949,7 +8015,7 @@ export default function App() {
         </div>
         ) : null}
 
-        <div className="row-header">
+        <div className="row-header" id="reference-editor">
           <h2>Reference Editor</h2>
           <button className="ghost" onClick={() => setShowRowRefEditor(!showRowRefEditor)}>
             {showRowRefEditor ? "Hide" : "Show"}
@@ -7996,7 +8062,9 @@ export default function App() {
                       } else {
                         stat = <span className="muted">no references found here</span>;
                       }
-                      const source = loc.source === "personal"
+                      const source = loc.source === "fmdv"
+                        ? { label: "FMDV library", title: "The FMDV reference library's lineage references. On no list: included wherever a library is built, for every user" }
+                        : loc.source === "personal"
                         ? { label: REF_LIST_LABELS.personal, title: "On your personal list (see Stored in): only you see it" }
                         : loc.source === "install"
                           ? { label: REF_LIST_LABELS.install, title: "On vSNP's own list inside its install (see Stored in), shown until the site list is set up" }
@@ -8015,7 +8083,9 @@ export default function App() {
                             className="ghost-btn danger"
                             style={{fontSize:"0.8em"}}
                             disabled={loc.removable === false}
-                            title={loc.removable === false
+                            title={loc.source === "fmdv"
+                              ? "The FMDV reference library is on no list, so there is nothing to remove. It is included wherever a library is built."
+                              : loc.removable === false
                               ? `This location is on the site list, which this account cannot change. ${refSiteReason}`
                               : "Remove this location from the list (no files are deleted)"}
                             onClick={() => removeRefPath(loc.path)}
@@ -8129,9 +8199,52 @@ export default function App() {
                   onChange={(e) => selectRefEditorRef(e.target.value)}
                 >
                   <option value="">Choose a reference...</option>
-                  <ReferenceOptions references={references} />
+                  <ReferenceOptions references={references} projectLineages={fmdvProjectLineages} />
                 </select>
-                {selectedProject && refEditorProjectRef ? (
+                {selectedProject && fmdvOn ? (
+                  // An FMDV project has one reference per lineage its samples
+                  // landed on, each with its own defining SNPs, filter
+                  // positions and remove list. Name them here, one click each,
+                  // so nobody has to know a lineage's folder name to edit it.
+                  <div className="note" style={{marginTop:"0.4em"}} data-testid="fmdv-editor-lineages">
+                    {!references.some((r) => r.fmdv) ? (
+                      <>
+                        <strong>No FMDV lineage references are available.</strong> The FMDV reference
+                        library has not been built here, so there is nothing to edit yet.
+                      </>
+                    ) : !fmdvProjectLineages.length ? (
+                      <>
+                        FMDV mode places each sample on its own lineage reference. Run Step 1 and the
+                        lineages this project uses are listed here; each has its own defining SNPs,
+                        filter positions and remove list.
+                      </>
+                    ) : (
+                      <>
+                        FMDV mode placed this project's samples on{" "}
+                        {fmdvProjectLineages.length === 1 ? "one lineage reference" : `${fmdvProjectLineages.length} lineage references`}.
+                        Each has its own defining SNPs, filter positions and remove list, and Step 2
+                        (Genome SNPs) reads the ones for the lineage it compares on:
+                        <div style={{display:"flex", flexWrap:"wrap", gap:"0.3em", marginTop:"0.35em"}}>
+                          {fmdvProjectLineages.map((l) => (
+                            <button
+                              key={l.name}
+                              className={refEditorRef === l.name ? "" : "ghost"}
+                              style={{fontSize:"0.9em"}}
+                              disabled={!references.some((r) => r.name === l.name)}
+                              title={references.some((r) => r.name === l.name)
+                                ? `Edit ${l.name}: ${l.samples} sample${l.samples === 1 ? "" : "s"} of this project`
+                                : `${l.name} is not in the FMDV reference library on this machine`}
+                              onClick={() => selectRefEditorRef(l.name)}
+                            >
+                              {l.name} ({l.samples})
+                              {fmdvInfo?.step2_reference === l.name ? " · Step 2 compares on this" : ""}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : selectedProject && refEditorProjectRef ? (
                   refEditorRef === refEditorProjectRef ? (
                     <div className="note" style={{marginTop:"0.4em"}}>
                       The selected project's reference.
@@ -8158,7 +8271,15 @@ export default function App() {
                       Another copy of this reference exists and is ignored (vSNP uses the
                       first location that has a name):
                       {sel.shadowed.map((s) => (
-                        <div key={s.path} style={{marginTop:2}}>{s.path}</div>
+                        <div key={s.path} style={{marginTop:2}}>
+                          {s.path}
+                          {s.fmdv ? (
+                            <div>
+                              That copy is the FMDV reference library's own, and it is the one
+                              FMDV mode projects run against: edits made here do not reach them.
+                            </div>
+                          ) : null}
+                        </div>
                       ))}
                     </div>
                   );
@@ -10288,6 +10409,13 @@ export default function App() {
                       Samples mapped to other lineage references stay in Step 1 and are left out of this
                       comparison. Run Step 2 once per reference you want a tree and SNP matrix for.
                     </div>
+                    <FmdvRefFiles
+                      apiBase={API_BASE}
+                      reference={fmdvInfo?.step2_reference || ""}
+                      known={references.some((r) => r.name === (fmdvInfo?.step2_reference || ""))}
+                      refreshKey={refEditorFiles}
+                      onEdit={() => openRefEditorOn(fmdvInfo?.step2_reference || "")}
+                    />
                   </div>
                 ) : null}
                 <div className="step2-src">

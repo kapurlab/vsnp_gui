@@ -26,6 +26,7 @@ import logging
 import shlex
 import re
 import hashlib
+import functools
 import tempfile
 import threading
 from datetime import datetime as _dt, timezone as _timezone
@@ -5400,18 +5401,28 @@ async def _run_blocking(fn, *args):
     return await asyncio.to_thread(fn, *args)
 
 
-def _genbank_cache(cfg: Dict, project_dir: Path) -> Path:
-    """Where fetched GenBank records are kept.
+def _genbank_caches(cfg: Dict, project_dir: Path) -> Tuple[Path, List[Path]]:
+    """Where fetched GenBank records are kept: (the cache new records are
+    written to, caches that are only read).
 
     An FMDV project uses the reference library's own cache, which a site that
     runs offline ships with the library. Any other project has no library to
-    put it in, so the records go to this user's cache directory."""
+    put it in, so the records go to this user's cache directory. So do an FMDV
+    project's when this account cannot write the library (a site library built
+    by one account: the import used to stop on PermissionError there); the
+    library's cache is still read, so records shipped with it are found."""
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
+    own = Path(base) / "vsnp_gui" / "genbank_cache"
     if _project_mode(project_dir) == "fmdv":
         lib = _fmdv_lib(cfg)
         if lib.is_dir():
-            return lib / "genbank_cache"
-    base = os.environ.get("XDG_CACHE_HOME", "").strip() or str(Path.home() / ".cache")
-    return Path(base) / "vsnp_gui" / "genbank_cache"
+            shared = lib / "genbank_cache"
+            target = shared if shared.is_dir() else lib
+            if os.access(target, os.W_OK | os.X_OK):
+                return shared, []
+            return own, [shared]
+    return own, []
+
 
 
 def _seq_import_blastn() -> Optional[str]:
@@ -5494,8 +5505,12 @@ async def project_import_sequences_preview(
         present = ({a: lib_acc.get(a) or proj_acc.get(a) for a in accs if a in lib_acc or a in proj_acc}
                    if default_role == "context" else {})
         todo = [a for a in accs if a not in present]
-        cache = _genbank_cache(cfg, project_dir)
-        cached = {a for a in todo if (cache / f"{a}.gb").is_file()}
+        cache, read_only_caches = _genbank_caches(cfg, project_dir)
+        cached = {}
+        for a in todo:
+            hit = next((c / f"{a}.gb" for c in (cache, *read_only_caches) if (c / f"{a}.gb").is_file()), None)
+            if hit is not None:
+                cached[a] = hit
         need_net = [a for a in todo if a not in cached]
         reachable = True
         if need_net:
@@ -5503,9 +5518,11 @@ async def project_import_sequences_preview(
         results: Dict[str, Dict] = {}
         if reachable:
             email, key = _seq_import_fetch_settings(cfg)
-            results = await _run_blocking(seq_import.fetch_genbank, todo, cache, email, key)
+            results = await _run_blocking(
+                functools.partial(seq_import.fetch_genbank, todo, cache, email, key,
+                                  also_read=read_only_caches))
         else:
-            results = {a: {"path": str(cache / f"{a}.gb"), "cached": True} for a in cached}
+            results = {a: {"path": str(hit), "cached": True} for a, hit in cached.items()}
             results.update({a: {"error": "NCBI is unreachable from this server"} for a in need_net})
         fetched = failed = 0
         for a in accs:
@@ -6924,12 +6941,29 @@ def _step1_dispatch(
             # Amplicon primers, clipped from the reads before vsnp3 (after
             # NanoFMDV): the BED is found on the chosen reference. Only when
             # the library carries a primer set; unmapped reads drop out here.
+            #
+            # These lines run BEFORE the vsnp3 command is assembled (see the
+            # RUN_ARGS note below), because R1 is replaced here. They used to
+            # come after it, so the clipped file was written, recorded in
+            # fmdv_clip.json as what the sample ran on, and never read: vsnp3
+            # had already been given the unclipped reads.
+            #
+            # Long single-file reads only. The clipper aligns with minimap2's
+            # map-ont preset and takes one file, so a paired sample would come
+            # back with a filtered R1 beside an untouched R2, and short reads
+            # are not what the scheme's amplicons are. Anything else goes to
+            # vsnp3 as it is, the log says so, and a clip record left by an
+            # earlier run is removed so no report claims a clip that this run
+            # did not use.
             "  FMDV_PRIMERS=" + shlex.quote(fmdv_primers),
-            "  if [ -n \"$FMDV_PRIMERS\" ] && [ -f \"$FMDV_PRIMERS\" ]; then",
+            "  if [ -n \"$FMDV_PRIMERS\" ] && [ -f \"$FMDV_PRIMERS\" ] && [ -n \"$NP\" ] && [ -z \"$R2\" ]; then",
             "    CLIPPED=$(python3 " + shlex.quote(clipper) + " --reads \"$R1\" --ref-dir \"$REF_DIR\""
             + " --primers \"$FMDV_PRIMERS\" --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
-            "    if [ -n \"$CLIPPED\" ] && [ -s \"$CLIPPED\" ]; then R1=\"$CLIPPED\"; echo \"FMDV primers clipped: $CLIPPED\" | tee -a \"$LOG\";",
-            "    else echo \"FMDV: primer clipping failed for $d, running on unclipped reads\" | tee -a \"$LOG\"; fi",
+            "    if [ -n \"$CLIPPED\" ] && [ -s \"$CLIPPED\" ]; then R1=\"$CLIPPED\"; echo \"FMDV primers clipped; vSNP3 reads: $CLIPPED\" | tee -a \"$LOG\";",
+            "    else rm -f fmdv_clip.json; echo \"FMDV: primer clipping failed for $d, running on unclipped reads\" | tee -a \"$LOG\"; fi",
+            "  elif [ -n \"$FMDV_PRIMERS\" ] && [ -f \"$FMDV_PRIMERS\" ]; then",
+            "    rm -f fmdv_clip.json",
+            "    echo \"FMDV: primers are clipped from long single-file reads only; these reads go to vSNP3 as they are\" | tee -a \"$LOG\"",
             "  fi",
         ]
     else:
@@ -7082,12 +7116,14 @@ def _step1_dispatch(
             # ref_arg/debug_flag/assemble_unmap_flag/$NP are unquoted on purpose:
             # they are server-built option tokens that must word-split into
             # separate argv entries, and each is now validated or a fixed literal.
+        ] + fmdv_choose_lines + [
+            # After the FMDV lines, never before: they may point R1 at the
+            # primer-clipped reads, and the array below is where R1 is read.
             f"  RUN_ARGS=({step1_exe} -r1 \"$R1\")",
             # The sample name is the folder name, not whatever vsnp3 reads off
             # the file before its first underscore.
             "  RUN_ARGS+=(-n \"$(basename \"$d\")\")",
             "  if [ -n \"$R2\" ]; then RUN_ARGS+=(-r2 \"$R2\"); fi",
-        ] + fmdv_choose_lines + [
             # FMDV mode: -t is the per-sample folder the chooser just printed,
             # passed as two quoted array entries. Otherwise ref_arg is the
             # run-wide token resolved above and this line is a no-op.

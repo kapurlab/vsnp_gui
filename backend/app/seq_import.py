@@ -72,7 +72,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 _BIN = Path(__file__).resolve().parent.parent.parent / "bin"
 if str(_BIN) not in sys.path:
@@ -403,17 +403,26 @@ def _efetch(ids: List[str], email: str, api_key: str) -> str:
 
 def fetch_genbank(accessions: List[str], cache_dir: Path, email: str = "", api_key: str = "",
                   fetch: Callable[[List[str], str, str], str] = _efetch,
-                  delay: float = FETCH_DELAY) -> Dict[str, Dict]:
+                  delay: float = FETCH_DELAY,
+                  also_read: Sequence[Path] = ()) -> Dict[str, Dict]:
     """accession -> {"path": cached flat file} or {"error": why}. Records already
     in the cache are not fetched. Every fetched record is written to the cache
-    before it is used, so a retry or another project reads it from disk."""
+    before it is used, so a retry or another project reads it from disk.
+
+    `also_read`: caches to look in as well and never write to (a site
+    library's own cache, when this account keeps its records elsewhere)."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     out: Dict[str, Dict] = {}
     todo: List[str] = []
     for acc in accessions:
-        p = cache_dir / f"{acc}.gb"
-        if p.is_file() and p.stat().st_size > 0:
-            out[acc] = {"path": str(p), "cached": True}
+        for folder in (cache_dir, *also_read):
+            p = folder / f"{acc}.gb"
+            try:
+                if p.is_file() and p.stat().st_size > 0:
+                    out[acc] = {"path": str(p), "cached": True}
+                    break
+            except OSError:
+                continue
         else:
             todo.append(acc)
     for i in range(0, len(todo), FETCH_BATCH):

@@ -10198,6 +10198,7 @@ export default function App() {
                 onInfo={setFmdvInfo}
                 onTreeDone={() => refreshStep2Results()}
                 step1Done={step1Status.filter((s) => s.status === "complete").length}
+                treeBuilding={vp1Runs.some((r) => r.state === "running")}
               />
             ) : step2Mode === "build" ? (
               <div className="block">

@@ -150,6 +150,7 @@ from app import provenance_writer
 from app import step1_staging
 from app import ont_import
 from app import seq_import
+from app import fmdv_tree_progress
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -6627,8 +6628,16 @@ def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
             "Run Step 1 first; samples with little VP1 coverage are left out of the tree."))
     script = Path(__file__).resolve().parent.parent.parent / "bin" / "fmdv_vp1_tree.py"
     (project_dir / "step2").mkdir(parents=True, exist_ok=True)
+    # The session's own core budget when the launcher gave one: os.cpu_count()
+    # is the whole node, and eight threads inside a four-core allocation make
+    # the build slower, not faster.
+    try:
+        budget = int(os.environ.get("BDTOOLS_SESSION_CORES", "") or 0)
+    except ValueError:
+        budget = 0
+    threads = max(1, min(8, budget or os.cpu_count() or 1))
     parts = [sys.executable, "-u", str(script), "--project", str(project_dir), "--lib", str(_fmdv_lib(cfg)),
-             "--threads", str(max(1, min(8, os.cpu_count() or 1))),
+             "--threads", str(threads),
              "--bootstraps", str(max(0, int(payload.bootstraps))), "--min-called", f"{min_called:g}"]
     if sero:
         parts += ["--serotype", sero]
@@ -6636,6 +6645,36 @@ def fmdv_vp1_tree(project: str, payload: FmdvVp1TreeRequest):
     job_id = job_manager.start_job(name="fmdv_vp1_tree", command=command,
                                    cwd=Path(__file__).resolve().parent.parent, env={"PATH": env["path"]})
     return {"job_id": job_id, "serotype": sero, "samples": usable, "tree_tool": env["tree_tool"]}
+
+
+@app.get("/api/projects/{project}/fmdv/vp1_tree/progress")
+def fmdv_vp1_tree_progress(project: str, run_id: str = ""):
+    """Where a VP1 tree build has got to (app.fmdv_tree_progress): aligning,
+    bootstrap k of n, the tree search, finishing. For the named run, or the
+    newest VP1 tree folder of the project. Read from the files the build
+    writes, so it answers after a reload and after a backend restart."""
+    cfg = load_config()
+    project_dir = _project_dir_for(cfg, project)
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    step2 = project_dir / "step2"
+    if run_id:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9-]{8}_VP1-tree(-[A-Za-z0-9]+)?", run_id):
+            raise HTTPException(status_code=400, detail="Not a VP1 tree run")
+        run_dir = step2 / run_id
+    else:
+        try:
+            found = sorted(p for p in step2.iterdir() if p.is_dir() and "_VP1-tree" in p.name)
+        except OSError:
+            found = []
+        if not found:
+            raise HTTPException(status_code=404, detail="No VP1 tree has been started in this project")
+        run_dir = found[-1]
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="No such VP1 tree run")
+    out = fmdv_tree_progress.progress(run_dir)
+    out["state"] = _vp1_tree_run_state(run_dir, run_dir.name) or ("done" if out["stage"] == "done" else "")
+    return out
 
 
 @app.post("/api/projects/{project}/fmdv")

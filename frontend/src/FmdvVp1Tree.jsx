@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import Elapsed from "./Elapsed.jsx";
+import FmdvTreeProgress from "./FmdvTreeProgress.jsx";
 
 // The VP1 tree button for an FMDV project. POST fmdv/vp1_tree starts
 // bin/fmdv_vp1_tree.py as a background job (mafft alignment of the samples'
@@ -6,7 +8,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // the tree lands under step2/<stamp>_VP1-tree[-SEROTYPE]/ and the Step 2
 // Results list shows it like any comparison. One serotype per tree: the
 // VP1 of two serotypes differ too much for one alignment to mean anything.
-export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDone }) {
+//
+// `building` is true while Step 2 Results lists a VP1 tree of this project as
+// running. This button knew only about a build IT had started, in this tab:
+// after a reload it read "Build VP1 tree" again beside a build still going,
+// and a second click started a second RAxML on the same cores.
+export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDone, building = false }) {
   const [serotype, setSerotype] = useState("");
   const [jobId, setJobId] = useState("");
   const [status, setStatus] = useState("");
@@ -78,12 +85,16 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
       // whole build, beside a button that said Building.
       if (onDone) setTimeout(() => onDone({ status: "running" }), 3000);
       setStatus("running");
-      setMsg(`Aligning VP1 of ${body.samples} sample${body.samples === 1 ? "" : "s"} and building the tree with ${body.tree_tool}. A few minutes with bootstraps.`);
+      // No "a few minutes": that is true of one lineage and wrong by hours for
+      // a serotype spread over many. The line under the button says where the
+      // build is.
+      setMsg(`Aligning VP1 of ${body.samples} sample${body.samples === 1 ? "" : "s"} with their GenBank neighbours, then building the tree with ${body.tree_tool}. Minutes when the samples sit in one lineage; an hour or more when they are spread across a serotype, because the tree then carries hundreds of GenBank records.`);
     } catch (e) { setMsg(`VP1 tree: ${e.message || e}`); }
   }
 
   const tools = fmdvInfo?.vp1_tree || {};
-  const running = status === "running" || status === "queued";
+  const mine = status === "running" || status === "queued";
+  const running = mine || building;
   const noSamples = serotypes.length === 0;
   const why = !tools.ready
     ? "mafft or a tree builder is missing. A bdtools install adds mafft with bin/bdtools install vsnp_gui; elsewhere create the fmdv_gui conda env from conda_setup/fmdv_environment.yml."
@@ -100,8 +111,9 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
       </select>
       <button onClick={start} disabled={disabled || running || noSamples || !tools.ready || !serotype}
         title={why || `Align the ${serotype} samples' VP1 with the library panel and context set, build a tree with ${tools.tree_tool}, and list it in Step 2 Results.`}>
-        {running ? "Building…" : "Build VP1 tree"}
+        {running ? (<>Building… {mine ? <Elapsed /> : null}</>) : "Build VP1 tree"}
       </button>
+      {running ? <FmdvTreeProgress apiBase={apiBase} project={project} /> : null}
       {msg ? <span className="muted" style={{ fontSize: "0.85em", flexBasis: "100%" }}>{msg}</span> : null}
     </div>
   );

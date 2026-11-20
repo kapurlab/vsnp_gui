@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import FmdvTreeProgress from "./FmdvTreeProgress.jsx";
 
 // The VP1 half of Step 2 Results in FMDV mode. One VP1 tree run at a time
 // (pills, newest first), and inside it the sections a typing report is made
@@ -112,7 +113,15 @@ export default function FmdvVp1Results({
         ))}
       </div>
       {run?.path ? <div className="note s2-folder s2-folder-selected">Folder: <span className="s2-folder-path">{run.path}</span></div> : null}
-      {run?.state === "running" ? <div className="note"><span className="pulse-dot" /> This tree is still being built. Sections fill in as its files appear.</div> : null}
+      {run?.state === "running" ? (
+        <>
+          <FmdvTreeProgress apiBase={apiBase} project={project} runId={run.run_id} />
+          <div className="muted" style={{ fontSize: "0.85em", marginTop: "0.25em" }}>
+            The sections below fill in by themselves when it finishes. You can leave this page, or close it: the build
+            carries on.
+          </div>
+        </>
+      ) : null}
       <div className="mode-toggle" style={{ marginTop: "0.6em", marginBottom: "0.6em" }}>
         {sections.map(([k, label]) => (
           <button key={k} className={section === k ? "active" : ""} onClick={() => setSection(k)}>{label}</button>

@@ -21,7 +21,7 @@ import FmdvVp1Tree from "./FmdvVp1Tree.jsx";
 // after Step 1 had typed the whole run (Ames HPC, 2026-11-20). The panel now
 // reads again when it is shown, and each time another Step 1 sample completes
 // (`step1Done`), so it follows a run in progress too.
-export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onInfo, onTreeDone, step1Done = 0 }) {
+export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onInfo, onTreeDone, step1Done = 0, treeBuilding = false }) {
   const [jobId, setJobId] = useState("");
   const [msg, setMsg] = useState("");
   const pollRef = useRef(null);
@@ -158,7 +158,7 @@ export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onI
           <span className="step2-src-num">2</span>
           VP1 tree
         </div>
-        <FmdvVp1Tree apiBase={apiBase} project={project} fmdvInfo={fmdvInfo} disabled={disabled} onDone={onTreeDone} />
+        <FmdvVp1Tree apiBase={apiBase} project={project} fmdvInfo={fmdvInfo} disabled={disabled} onDone={onTreeDone} building={treeBuilding} />
       </div>
     </div>
   );

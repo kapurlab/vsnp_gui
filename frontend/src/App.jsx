@@ -2142,10 +2142,40 @@ export default function App() {
     </>
   );
 
+  // FMDV mode: a whole-genome comparison is the chosen lineage reference's
+  // samples, and that has to hold however the project got here. Choosing the
+  // reference in box 0 unticks every sample on another reference, once. A
+  // sample that reached Step 1 afterwards, or a project whose choice was made
+  // elsewhere, was still ticked, so Build put it in the set and Run was
+  // refused with "called against a different reference — fix them in Reference
+  // check", where the only fixes on offer were to re-run the sample against
+  // the wrong lineage or remove it from the project. Other-reference samples
+  // are kept unticked for as long as a reference is chosen.
+  const fmdvCompareRef = fmdvOn ? (fmdvInfo?.step2_reference || "") : "";
+  useEffect(() => {
+    if (!fmdvCompareRef || !step2TicksReady) return undefined;
+    const byRef = refLock.samples_by_reference || {};
+    if (!byRef[fmdvCompareRef]) return undefined;
+    const stray = Object.entries(byRef).filter(([r]) => r !== fmdvCompareRef)
+      .flatMap(([, ss]) => ss).filter((s) => !step2BuildExcluded[s]);
+    if (!stray.length) return undefined;
+    setStep2BuildExcludedMany(stray, true);
+    const t = setTimeout(() => loadStep2ReferenceAudit(), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fmdvCompareRef, refLock, step2TicksReady, step2BuildExcluded]);
+
   const step2RunBlock = useMemo(() => {
     if (!selectedProject) return "Select a project first.";
     if (!settingsReady) return "Set the vSNP3 path and Projects root in Settings first.";
     if (!reference && !projectReference) {
+      // An FMDV project has no single reference: its samples sit on several
+      // lineage references and the one to compare on is chosen per run, in
+      // box 0. "Choose one in the Projects panel" sent people to a control
+      // that is not how this mode works (Ames HPC, 2026-11-20).
+      if (fmdvOn) {
+        return "Choose the lineage to compare on first: box 0, “Compare on reference”, at the top of the Genome SNPs: build tab.";
+      }
       return "This project has no reference set — choose one in the Projects panel.";
     }
     const inSet = step2VcfCount > 0 || Boolean(selected && selected.step2_vcfs > 0);
@@ -11570,6 +11600,37 @@ export default function App() {
                       <button className="ghost small" onClick={loadStep2ReferenceAudit}>Re-check</button>
                     </div>
                   </div>
+                ) : !step2RefAudit.project_reference && fmdvOn ? (
+                  /* Not an error in FMDV mode, and not something the Projects
+                     panel settles. Step 1 maps every sample to its nearest
+                     lineage, so a project of many serotypes holds VCFs on many
+                     references; in red, with "no way to tell which of them are
+                     the wrong ones", that read as Step 1 having gone wrong. */
+                  <div className="note">
+                    <strong>Nothing is wrong here.</strong> This project's samples were called against{" "}
+                    {(step2RefAudit.db_references || []).length} lineage references, which is what FMDV mode
+                    does: Step 1 maps each sample to its nearest lineage. Whole-genome SNPs compare{" "}
+                    <strong>one lineage at a time</strong>. Choose it in box 0, &ldquo;Compare on reference&rdquo;,
+                    at the top of the <strong>Genome SNPs: build</strong> tab; the samples on other references are
+                    left out of that run, and you can run again for another lineage.
+                    {(() => {
+                      const rows = Object.entries(refLock.samples_by_reference || {})
+                        .map(([r, ss]) => [r, ss.length]).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                      if (!rows.length) return null;
+                      return (
+                        <details style={{ marginTop: "0.35rem" }}>
+                          <summary>The {rows.length} references, and how many samples are on each</summary>
+                          <div style={{ fontFamily: "monospace", fontSize: "0.85em", marginTop: "0.25rem" }}>
+                            {rows.map(([r, n]) => <div key={r}>{String(n).padStart(3, " ")}{"  "}{r}</div>)}
+                          </div>
+                        </details>
+                      );
+                    })()}
+                    <div className="muted" style={{ marginTop: "0.3rem", fontSize: "0.9em" }}>
+                      For serotype and topotype across all of them, use the <strong>VP1</strong> tab: it needs no
+                      reference to be chosen.
+                    </div>
+                  </div>
                 ) : !step2RefAudit.project_reference ? (
                   <div className="note error">
                     The comparison set holds VCFs called against{" "}
@@ -11585,7 +11646,20 @@ export default function App() {
                   </div>
                 ) : (
                   <>
-                    {step2RefAudit.mixed ? (
+                    {step2RefAudit.mixed && fmdvOn ? (
+                      <div className="note">
+                        Comparing on <strong>{step2RefAudit.project_reference}</strong>. The set also holds VCFs
+                        called against other lineage references ({(step2RefAudit.db_references || [])
+                          .filter((r) => r !== step2RefAudit.project_reference).length}); their samples are being
+                        left out of this run, which is how FMDV mode compares. This clears by itself in a moment;
+                        if it does not, press Re-check.
+                        <div style={{ marginTop: "0.3rem" }}>
+                          <button className="ghost small" onClick={loadStep2ReferenceAudit} disabled={step2RefAuditBusy}>
+                            {step2RefAuditBusy ? "Re-checking…" : "Re-check"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : step2RefAudit.mixed ? (
                       <div className="note error">
                         This project's reference is <strong>{step2RefAudit.project_reference}</strong>, but the
                         comparison set holds VCFs called against{" "}
@@ -11593,6 +11667,12 @@ export default function App() {
                           .filter((r) => r !== step2RefAudit.project_reference).join(", ")}</strong>.
                         SNP positions from different references are different coordinates, so a matrix built
                         across them is meaningless — Step 2 stays disabled until the set is single-reference.
+                      </div>
+                    ) : fmdvOn ? (
+                      <div className="note">
+                        Comparing on <strong>{step2RefAudit.project_reference}</strong>: Step 2 can run. Samples
+                        on other lineage references are left out of this comparison, as FMDV mode intends. To
+                        compare those, choose their reference in box 0 and run again.
                       </div>
                     ) : (
                       <div className="note">
@@ -11632,7 +11712,23 @@ export default function App() {
                       </div>
                     ) : null}
 
-                    {(step2RefAudit.unusable || []).length ? (
+                    {(step2RefAudit.unusable || []).length ? (fmdvOn ? (
+                      /* FMDV mode: these are the other lineages' samples, not
+                         samples that "must be re-run or removed from the
+                         project". */
+                      <details className="note" style={{ marginTop: "0.4rem" }}>
+                        <summary>
+                          {step2RefAudit.unusable.length} sample{step2RefAudit.unusable.length === 1 ? " is" : "s are"} on
+                          other lineage references and left out of this run
+                        </summary>
+                        <textarea
+                          readOnly
+                          rows={Math.min(14, Math.max(3, step2RefAudit.unusable.length))}
+                          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.3rem" }}
+                          value={step2RefAudit.unusable.join("\n")}
+                        />
+                      </details>
+                    ) : (
                       <div className="note warning" style={{ marginTop: "0.4rem" }}>
                         <strong>{step2RefAudit.unusable.length} sample
                         {step2RefAudit.unusable.length === 1 ? " has" : "s have"} no{" "}
@@ -11694,7 +11790,7 @@ export default function App() {
                         </div>
                         ) : null}
                       </div>
-                    ) : null}
+                    )) : null}
 
                     {(step2RefAudit.orphans || []).length ? (
                       <div className="note warning" style={{ marginTop: "0.4rem" }}>

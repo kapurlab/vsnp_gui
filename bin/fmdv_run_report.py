@@ -174,6 +174,8 @@ def main() -> int:
     msg = f"run_report: {out}"
     if not a.no_pdf:
         try:
+            from fmdv_pdf import font_config
+            font_config()   # the env's fonts, named before the renderer loads
             from weasyprint import HTML  # type: ignore
             HTML(string=page, base_url=str(project)).write_pdf(str(project / "FMDV_run_report.pdf"))
             msg += " + pdf"

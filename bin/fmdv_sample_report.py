@@ -577,10 +577,8 @@ def main() -> int:
         step1 = project / "step1"
         dirs = sorted(d for d in step1.iterdir() if d.is_dir() and not d.name.startswith((".", "_"))
                       and (d / "fmdv_reference.json").is_file() and (not a.samples or d.name in a.samples))
-    try:
-        from weasyprint import HTML  # type: ignore
-    except Exception:
-        HTML = None
+    from fmdv_pdf import weasy_html   # names the env's fonts before the renderer loads
+    HTML = weasy_html()
     n = 0
     for d in dirs:
         try:

@@ -41,7 +41,7 @@ import (the library keeps only a cache of fetched GenBank records, below).
 
 The import panel asks for the role once per import. FASTA files default to
 sample; accessions default to context. Either can be switched per row in
-the preview. A published isolate from the outbreak is an accession imported
+the review table (Review first). A published isolate from the outbreak is an accession imported
 as a sample; that is the case the default does not guess.
 
 ## Where a sample without reads lives
@@ -236,7 +236,17 @@ for accessions, one per line. Both lead to the same preview table: one row
 per record with the fields above, a role switch, a tick box, the slice
 result (coordinates, template, identity, or the refusal), and whether the
 name or accession already exists. Import runs as a job; the block polls it
-and reports per row, as the ONT importer does. A third tab inside the
+and reports per row, as the ONT importer does.
+
+Since v0.4.159 that table is optional. The block's main button is
+**Import**: it makes the same preview call, commits every row the preview
+found importable as it stands (no problem, name not taken, not a context
+record the library or the project already holds), and lists the rest with
+the reason each was left out. **Review first** opens the table, for the
+import that needs a name, a role or metadata changed before anything is
+written. Preview then Import for every import was a second click with
+nothing to decide when the records are accessions. The two endpoints are
+unchanged; the one-click path calls them back to back. A third tab inside the
 existing panel was considered; the Inputs page has no tabbed panel, the
 ONT importer is a block, and a block beside it is what a user will look
 for.

@@ -86,25 +86,26 @@ files stay where they are; the project keeps a link.
 
 ## Scene 6. A GenBank accession (45 s)
 
-Do: Sequences tab. Type `EU448369` in the accession box. Preview. Hold on
-the row: country, year, host, isolate filled from GenBank, VP1 cut at its
-coordinates, the note that the library already holds it. Import.
+Do: Sequences tab. Type `EU448369` in the accession box. Review first. Hold
+on the row: country, year, host, isolate filled from GenBank, VP1 cut at its
+coordinates, the note that the library already holds it. Import 1 record.
 
 Say: Sometimes the sequence is published and there are no reads. Type the
 accession. The record is fetched from NCBI, or from the library's cache
 when the server is offline, and its metadata is read: country, year,
 host, isolate. VP1 is cut out of the genome by blastn. A genome is
 imported as simulated reads and goes through the same Step 1 as everything
-else, badged so that nobody mistakes the numbers for a sample's. Every
-field can be edited before import.
+else, badged so that nobody mistakes the numbers for a sample's. Import on
+its own does all of this in one click; Review first shows the row, with
+every field open to editing, before anything is written.
 
 ## Scene 7. A FASTA from another laboratory (30 s)
 
 Do: still on Sequences. Drop `lab_consensus_O.fasta` on the drop zone.
-Preview. Change the name to `lab-consensus-O`. Import.
+Review first. Change the name to `lab-consensus-O`. Import 1 record.
 
 Say: A consensus genome from another laboratory works the same way. Drop
-the file, check what the preview found, give it a name, import. A VP1
+the file, check what was found, give it a name, import. A VP1
 sequence on its own is accepted too; it is typed and placed on the tree
 without reads.
 

@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { InputHelp } from "./InputsTabs.jsx";
+import Elapsed from "./Elapsed.jsx";
 
 // Import sequences that are not reads. FASTA or GenBank files (dropped or
-// chosen) and GenBank accessions (typed) go through one preview: one editable
-// row per record, then a commit that runs as a background job.
+// chosen) and GenBank accessions (typed) are imported by ONE button: the
+// records are read (accessions fetched from NCBI), every record that can be
+// imported goes straight to the background job that writes it and builds its
+// reads, and whatever could not be imported is listed with its reason.
+//
+// The table of one editable row per record is still there, behind "Review
+// first", for the import that needs a name, a role or metadata changed. It
+// used to be the only way in: Preview, then Import, for every import, which
+// was a second click with nothing to decide when the records are accessions
+// (2026-11-20).
 //
 // IN ANY PROJECT a record becomes a sample: perfect paired reads are
 // simulated from it at the chosen depth (100x by default) into download/, so
@@ -16,6 +25,23 @@ import { InputHelp } from "./InputsTabs.jsx";
 // VP1 tree labelled lineage|country|year|accession.
 //
 // Backend: app.seq_import; design: docs/FMDV_SEQ_IMPORT.md.
+
+// A row the backend's preview says can be written as it stands.
+const importable = (row) =>
+  !row.problem && !row.exists && !(row.in_context && (row.role || "sample") === "context");
+const whyNot = (row) =>
+  row.problem || row.exists || (row.in_context ? `${row.in_context}, so it cannot be added as context again` : "");
+// What the commit endpoint takes for one row: `e` is the edited copy when the
+// row came through the review table.
+const asPayload = (r, e = r) => ({
+  id: r.id, name: e.name || "", role: e.role || "sample", serotype: e.serotype || "",
+  lineage: e.lineage || "", country: e.country || "", year: e.year || "", host: e.host || "",
+  accession: e.accession || "", isolate: e.isolate || "",
+});
+// BLAST+ is asked for only by an FMDV project. The backend answers
+// blastn: false in every other project too (it never looks), so the mode has
+// to be read with it or a stock project is told nothing can be imported.
+const blastMissing = (data) => !!data && data.mode === "fmdv" && data.blastn === false;
 
 const FIELDS = [
   ["serotype", "Serotype", 64],
@@ -34,10 +60,14 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
   // How deep the simulated reads are made. 100x is the default everywhere;
   // the backend holds whatever arrives to 1..1000 (seq_import.clamp_depth).
   const [depth, setDepth] = useState(100);
-  const [preview, setPreview] = useState(null);
+  const [preview, setPreview] = useState(null);   // the review table, only after "Review first"
+  const [report, setReport] = useState(null);     // what a one-click import read, and what it left out
   const [rows, setRows] = useState({});     // id -> edited row
   const [picked, setPicked] = useState({}); // id -> bool
-  const [busy, setBusy] = useState(false);
+  // "" when idle, else which wait this is: "reading" (the one-click import is
+  // fetching and checking), "review" (the same read, for the table) or
+  // "starting" (the commit is being handed to the job runner).
+  const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState("");
@@ -45,7 +75,7 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
   const pollRef = useRef(null);
 
   useEffect(() => {
-    setPreview(null); setMsg(""); setJobId(""); setJobStatus(""); setFiles([]); setAccText("");
+    setPreview(null); setReport(null); setMsg(""); setJobId(""); setJobStatus(""); setFiles([]); setAccText("");
   }, [project]);
 
   useEffect(() => {
@@ -64,6 +94,9 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
               ? "Imported. Samples are in Step 1 and typed; context records are in the project's VP1 set. Build a VP1 tree to place them."
               : "Imported. The simulated reads are under Ready to run: Grab into Step 1, then Run, and the sample is compared like any other.");
             setPreview(null); setFiles([]); setAccText("");
+            // The report stays only while it still has something to say:
+            // the records that were left out.
+            setReport((r) => (r && r.skipped.length ? r : null));
           } else {
             setMsg(`Import ${job.status}. The job log says which record failed.`);
           }
@@ -85,59 +118,88 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
     setFiles(next);
   }
 
-  async function doPreview() {
-    if (!project || (!files.length && !accText.trim())) return;
-    setBusy(true); setMsg(""); setPreview(null); setJobId(""); setJobStatus("");
+  // Read the records: parse the files, fetch the accessions, and (in an FMDV
+  // project) find VP1. Nothing is written to the project's samples. Throws
+  // with the backend's own words when it refuses.
+  async function readRecords() {
+    const fd = new FormData();
+    for (const f of files) fd.append("files", f, f.name);
+    fd.append("accessions", accText);
+    fd.append("role", role);
+    fd.append("depth", String(depth));
+    const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences/preview`, {
+      method: "POST", body: fd,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    return data;
+  }
+
+  // Hand the chosen rows to the background job that writes them.
+  async function commit(token, chosen) {
+    const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, rows: chosen, depth }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    setJobId(data.job_id); setJobStatus("running");
+    setMsg(`Importing ${data.entries.length} record${data.entries.length === 1 ? "" : "s"}…`);
+  }
+
+  // The one-click import: read, then write every record that can be written.
+  async function importNow() {
+    if (!canStart) return;
+    setBusy("reading"); setMsg(""); setPreview(null); setReport(null); setJobId(""); setJobStatus("");
     try {
-      const fd = new FormData();
-      for (const f of files) fd.append("files", f, f.name);
-      fd.append("accessions", accText);
-      fd.append("role", role);
-      fd.append("depth", String(depth));
-      const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences/preview`, {
-        method: "POST", body: fd,
+      const data = await readRecords();
+      const good = data.rows.filter(importable);
+      setReport({
+        ...data,
+        imported: good.length,
+        skipped: data.rows.filter((r) => !importable(r)).map((r) => ({ id: r.id, name: r.name, why: whyNot(r) })),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setMsg(data.detail || `Preview failed (HTTP ${res.status})`); return; }
+      if (!good.length) return;   // the report says why, record by record
+      setBusy("starting");
+      await commit(data.token, good.map((r) => asPayload(r)));
+    } catch (e) {
+      setMsg(`Import failed: ${e.message}`);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // The same read, shown as one editable row per record instead of imported.
+  async function doPreview() {
+    if (!canStart) return;
+    setBusy("review"); setMsg(""); setPreview(null); setReport(null); setJobId(""); setJobStatus("");
+    try {
+      const data = await readRecords();
       setPreview(data);
       const r = {}; const p = {};
       for (const row of data.rows) {
         r[row.id] = { ...row };
-        p[row.id] = !row.problem && !row.exists && !(row.in_context && (row.role || "sample") === "context");
+        p[row.id] = importable(row);
       }
       setRows(r); setPicked(p);
     } catch (e) {
-      setMsg(`Preview failed: ${e.message}`);
+      setMsg(`Reading the records failed: ${e.message}`);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   }
 
   async function doImport() {
     if (!preview) return;
-    const chosen = preview.rows.filter((r) => picked[r.id]).map((r) => {
-      const e = rows[r.id] || r;
-      return {
-        id: r.id, name: e.name || "", role: e.role || "sample", serotype: e.serotype || "",
-        lineage: e.lineage || "", country: e.country || "", year: e.year || "", host: e.host || "",
-        accession: e.accession || "", isolate: e.isolate || "",
-      };
-    });
+    const chosen = preview.rows.filter((r) => picked[r.id]).map((r) => asPayload(r, rows[r.id] || r));
     if (!chosen.length) { setMsg("Nothing ticked."); return; }
-    setBusy(true); setMsg("");
+    setBusy("starting"); setMsg("");
     try {
-      const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/import_sequences`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: preview.token, rows: chosen, depth }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) { setMsg(data.detail || `Import failed (HTTP ${res.status})`); return; }
-      setJobId(data.job_id); setJobStatus("running");
-      setMsg(`Importing ${data.entries.length} record${data.entries.length === 1 ? "" : "s"}…`);
+      await commit(preview.token, chosen);
     } catch (e) {
       setMsg(`Import failed: ${e.message}`);
     } finally {
-      setBusy(false);
+      setBusy("");
     }
   }
 
@@ -158,12 +220,48 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
     nameCounts[k] = (nameCounts[k] || 0) + 1;
   }
   const nPicked = Object.values(picked).filter(Boolean).length;
-  const canPreview = enabled && !busy && (files.length > 0 || accText.trim().length > 0);
+  const jobActive = jobStatus === "running" || jobStatus === "queued";
+  const canStart = !!project && enabled && !busy && !jobActive && (files.length > 0 || accText.trim().length > 0);
+  // The count line and the three notices a read can come back with. One
+  // function, because the one-click report and the review table both show them.
+  const notices = (data) => (
+    <>
+      <div className="muted" style={{ fontSize: "12px" }}>
+        {data.rows.length} record{data.rows.length === 1 ? "" : "s"}
+        {data.ncbi?.requested ? ` · ${data.ncbi.fetched} of ${data.ncbi.requested} accession${data.ncbi.requested === 1 ? "" : "s"} fetched${data.ncbi.present ? `, ${data.ncbi.present} already in the library or this project` : ""}` : ""}
+      </div>
+      {/* A missing blastn refuses every record at once. As a clause on the
+          grey count line it read as a footnote, and the page then showed
+          unticked, greyed rows and "Import 0 records" with no visible cause
+          (Ames HPC, 2026-11-19: the code arrived by a site sync, the env
+          never got BLAST+). The backend looks for blastn on every read, so
+          no restart is needed once it is installed. */}
+      {blastMissing(data) ? (
+        <div className="note warning" style={{ fontSize: "12px" }}>
+          <strong>Nothing was imported: BLAST+ (blastn) is missing from the environment vSNP3 runs in.</strong>{" "}
+          This is the install, not anything you entered. An FMDV project checks each record's VP1 with blastn
+          before it imports it. To add BLAST+, run one of these from the suite folder, then press Import again:
+          <div style={{ marginTop: "4px" }}>
+            <code>bin/bdtools install vsnp_gui</code> on your own computer
+          </div>
+          <div>
+            <code>bin/bdtools update-packages vsnp_gui</code> on a shared install (a site administrator runs it)
+          </div>
+        </div>
+      ) : null}
+      {data.ncbi?.message ? (
+        <div className="note error" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{data.ncbi.message}</div>
+      ) : null}
+      {data.problems?.length ? (
+        <div className="note warning" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{data.problems.join("\n")}</div>
+      ) : null}
+    </>
+  );
   const inputStyle = { width: "100%", fontSize: "11px", padding: "1px 3px", boxSizing: "border-box" };
 
   return (
     <div className="block">
-      <InputHelp line="Drop FASTA or GenBank files, or type accessions; check the preview, then import.">
+      <InputHelp line="Drop FASTA or GenBank files, or type accessions, then press Import: the records are fetched and their reads built in one go.">
         <p>A consensus genome or an assembly from another lab or pipeline, a GenBank flat file, or GenBank
         accessions (fetched from NCBI; a record fetched once is served from disk afterwards).</p>
         <p><b>Reads are made from the sequence</b> — perfect paired reads, {depth}&times; by default, skipping
@@ -173,7 +271,7 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
         {fmdvOn ? (
           <p>In this FMDV project the record is also typed: VP1 is cut from a genome by blastn, and country,
           year, host and isolate come from the GenBank record, a NanoFMDV-style header, or a metadata sheet.
-          Every field can be edited below. Imported as <b>context</b> instead of a sample, the record joins
+          <b>Review first</b> shows every field for editing before anything is written. Imported as <b>context</b> instead of a sample, the record joins
           this project&apos;s own comparator set and stands in the tree as lineage|country|year|accession.{" "}
           <a href={`${apiBase}/api/fmdv/sequence_sheet_template`} download="sequence_sheet.tsv">Metadata sheet template</a></p>
         ) : (
@@ -246,41 +344,41 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
             disabled={!enabled} style={{ fontSize: "12px", width: "64px" }} />
           <span className="muted">&times;</span>
         </label>
-        <button type="button" onClick={doPreview} disabled={!canPreview}>
-          {busy && !preview ? "Reading…" : "Preview"}
+        <button type="button" onClick={importNow} disabled={!canStart}
+          title="Fetch the accessions and read the files, then import every record that can be imported and build its reads. Nothing more to click.">
+          {busy === "reading" ? (<>Fetching and checking… <Elapsed /></>)
+            : busy === "starting" && !preview ? (<>Starting… <Elapsed /></>) : "Import"}
+        </button>
+        <button type="button" className="ghost" onClick={doPreview} disabled={!canStart}
+          title="Show one editable row per record before anything is written: change a name, a role or the metadata, or leave a record out.">
+          {busy === "review" ? (<>Reading… <Elapsed /></>) : "Review first"}
         </button>
       </div>
-      {preview ? (
+      {report && !preview ? (
         <div style={{ marginTop: "6px" }}>
-          <div className="muted" style={{ fontSize: "12px" }}>
-            {preview.rows.length} record{preview.rows.length === 1 ? "" : "s"}
-            {preview.ncbi?.requested ? ` · ${preview.ncbi.fetched} of ${preview.ncbi.requested} accession${preview.ncbi.requested === 1 ? "" : "s"} fetched${preview.ncbi.present ? `, ${preview.ncbi.present} already in the library or this project` : ""}` : ""}
-          </div>
-          {/* A missing blastn refuses every record at once. As a clause on the
-              grey count line it read as a footnote, and the page then showed
-              unticked, greyed rows and "Import 0 records" with no visible cause
-              (Ames HPC, 2026-11-19: the code arrived by a site sync, the env
-              never got BLAST+). The backend looks for blastn on every preview,
-              so no restart is needed once it is installed. */}
-          {preview.blastn === false ? (
+          {notices(report)}
+          {/* With no blastn every record carries the same reason, and the
+              notice above has already given it once. */}
+          {report.skipped.length && !blastMissing(report) ? (
             <div className="note warning" style={{ fontSize: "12px" }}>
-              <strong>Nothing can be imported yet: BLAST+ (blastn) is missing from the environment vSNP3 runs in.</strong>{" "}
-              An FMDV project checks each record's VP1 with blastn before it imports it. To add BLAST+, run one of these
-              from the suite folder, then press Preview again:
-              <div style={{ marginTop: "4px" }}>
-                <code>bin/bdtools install vsnp_gui</code> on your own computer
-              </div>
-              <div>
-                <code>bin/bdtools update-packages vsnp_gui</code> on a shared install (a site administrator runs it)
+              <strong>
+                {report.imported
+                  ? `Not imported (${report.skipped.length} of ${report.rows.length}):`
+                  : "Nothing was imported:"}
+              </strong>
+              {report.skipped.map((k) => (
+                <div key={k.id}><span style={{ fontFamily: "monospace" }}>{k.name}</span>: {k.why}</div>
+              ))}
+              <div className="muted" style={{ marginTop: "2px" }}>
+                A name that is already taken can be changed under Review first.
               </div>
             </div>
           ) : null}
-          {preview.ncbi?.message ? (
-            <div className="note error" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{preview.ncbi.message}</div>
-          ) : null}
-          {preview.problems?.length ? (
-            <div className="note warning" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{preview.problems.join("\n")}</div>
-          ) : null}
+        </div>
+      ) : null}
+      {preview ? (
+        <div style={{ marginTop: "6px" }}>
+          {notices(preview)}
           <div style={{ overflowX: "auto" }}>
             <table style={{ fontSize: "11px", marginTop: "4px", minWidth: "900px" }}>
               <thead>
@@ -381,6 +479,7 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
               Import {nPicked} record{nPicked === 1 ? "" : "s"}
             </button>
             <button type="button" className="ghost" onClick={() => { setPreview(null); setMsg(""); }}>Cancel</button>
+            {busy === "starting" ? <span className="muted" style={{ fontSize: "12px" }}>Starting… <Elapsed /></span> : null}
             {preview.rows.length > 0 && preview.rows.every((r) => r.problem) ? (
               <span style={{ fontSize: "12px", color: "var(--danger, #b00)" }}>
                 None of these can be imported; the reason is under each name.
@@ -391,10 +490,10 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
       ) : null}
       {msg ? (
         <div className={`note${/fail|refused|not found|unreachable/i.test(msg) ? " error" : ""}`} style={{ marginTop: "6px", display: "flex", alignItems: "center", gap: "8px" }}>
-          {jobStatus === "running" || jobStatus === "queued" ? <span className="pulse-dot" /> : null}
-          <span style={{ flex: 1 }}>{msg}</span>
-          {!jobId || (jobStatus && jobStatus !== "running" && jobStatus !== "queued") ? (
-            <button type="button" className="ghost" style={{ fontSize: "11px", padding: "2px 8px" }} onClick={() => { setMsg(""); setJobId(""); setJobStatus(""); }}>Dismiss</button>
+          {jobActive ? <span className="pulse-dot" /> : null}
+          <span style={{ flex: 1 }}>{msg}{jobActive ? <> <Elapsed /></> : null}</span>
+          {!jobId || (jobStatus && !jobActive) ? (
+            <button type="button" className="ghost" style={{ fontSize: "11px", padding: "2px 8px" }} onClick={() => { setMsg(""); setJobId(""); setJobStatus(""); setReport(null); }}>Dismiss</button>
           ) : null}
         </div>
       ) : null}

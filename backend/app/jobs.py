@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from app.config import SITE_ROOT
+from app.duration import human_duration
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +382,11 @@ class JobManager:
                 duration = (finished_at - started_at).total_seconds()
                 log.write("\n")
                 log.write(f"# finished_at_utc: {finished_at.isoformat()}\n")
-                log.write(f"# duration_seconds: {duration:.2f}\n")
+                # Days, hours, minutes and seconds first: a bare count of
+                # seconds is exact and says nothing about how long the run
+                # was (app.duration). The raw figure stays beside it for
+                # anything that reads this log as data.
+                log.write(f"# duration: {human_duration(duration)}  ({duration:.2f} seconds)\n")
             self._finalize(job_id, exit_code, started_at, finished_at)
         finally:
             # Always release the slot so the next queued job in this category

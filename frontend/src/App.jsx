@@ -911,6 +911,7 @@ export default function App() {
   // write the wrong project's data.
   const selectedProjectRef = useRef(null);
   const step2SelectedRunRef = useRef(null);
+  const projExpandedRef = useRef({});
   const [uploadStatus, setUploadStatus] = useState("");
   const [inputs, setInputs] = useState({ files: [], total_bytes: 0, count: 0 });
   const [inputsLoading, setInputsLoading] = useState(false);
@@ -1403,6 +1404,10 @@ export default function App() {
   useEffect(() => { qcRowsRef.current = qcRows; }, [qcRows]);
   useEffect(() => { selectedProjectRef.current = selectedProject; }, [selectedProject]);
   useEffect(() => { step2SelectedRunRef.current = step2SelectedRun; }, [step2SelectedRun]);
+  // Which projects are expanded, read from refreshProjects without making it
+  // depend on this render's value (it is called from job callbacks captured
+  // long before).
+  useEffect(() => { projExpandedRef.current = projExpanded; }, [projExpanded]);
   // Keep the Kraken run modal's log scrolled to the latest line.
   useEffect(() => {
     const el = krakenLogRef.current;
@@ -3585,6 +3590,17 @@ export default function App() {
   async function refreshProjects() {
     const proj = await fetch(`${API_BASE}/api/projects`).then((r) => r.json());
     setProjects(proj);
+    // The samples listed UNDER an expanded project come from a separate
+    // fetch, made once when it was expanded and never again. Every count on
+    // the card moved with the work — "FASTQ: 310 | Step1: 79" — while the
+    // list below it still showed the two samples the project held when it was
+    // opened, which reads as the rest having gone missing (Ames HPC,
+    // 2026-11-20). Every caller of this is a moment when a project's contents
+    // changed: a download, a Grab, a Step 1, an import, an archive.
+    const open = projExpandedRef.current || {};
+    for (const name of Object.keys(open)) {
+      if (open[name]) loadProjData(name);
+    }
     const current = selectedProjectRef.current;
     if (current && proj.find((p) => p.name === current)) {
       return;
@@ -10182,7 +10198,13 @@ export default function App() {
               </div>
               <p className="muted" style={{marginTop:"0.5em", marginBottom:0, fontSize:"0.8em"}}>
                 {step2Mode === "vp1"
-                  ? "Each sample's VP1 consensus typed against the GenBank VP1 sets, and a VP1 tree per serotype with the panel and context genomes. Whole-genome SNPs are for samples already known to share a lineage: the second tab."
+                  // Said in terms of the question, not the method. The old
+                  // line ("Each sample's VP1 consensus typed against the
+                  // GenBank VP1 sets, and a VP1 tree per serotype with the
+                  // panel and context genomes") used "typed", "panel" and
+                  // "context" as terms of art, and read as though a sample
+                  // were being used as a reference (Ames HPC, 2026-11-20).
+                  ? "Start here: what each sample is — its serotype, topotype and lineage — and where it sits among published FMDV strains. Each sample's VP1 gene is compared against thousands of published VP1 sequences; the closest matches name the strain and go into a family tree with it. No reference is chosen and nothing is mapped: this works across serotypes. Genome SNPs, on the next tab, is the finer comparison for samples already known to share one lineage."
                   : step2Mode === "build"
                   ? "The normal path: this project's own samples, plus any reference database you want them compared against."
                   : "Paste sample names to compare just those samples out of this project — optionally alongside the reference databases ticked on the Build tab."}
@@ -10197,6 +10219,7 @@ export default function App() {
                 disabled={step1JobStatus === "running"}
                 onInfo={setFmdvInfo}
                 onTreeDone={() => refreshStep2Results()}
+                onLogJob={(id) => setJobId(id)}
                 step1Done={step1Status.filter((s) => s.status === "complete").length}
                 treeBuilding={vp1Runs.some((r) => r.state === "running")}
               />

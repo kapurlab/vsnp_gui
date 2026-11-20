@@ -13,7 +13,7 @@ import FmdvTreeProgress from "./FmdvTreeProgress.jsx";
 // running. This button knew only about a build IT had started, in this tab:
 // after a reload it read "Build VP1 tree" again beside a build still going,
 // and a second click started a second RAxML on the same cores.
-export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDone, building = false }) {
+export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDone, onLogJob, building = false }) {
   const [serotype, setSerotype] = useState("");
   const [jobId, setJobId] = useState("");
   const [status, setStatus] = useState("");
@@ -80,6 +80,11 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
       const body = await res.json().catch(() => ({}));
       if (!res.ok) { setMsg(body.detail || `HTTP ${res.status}`); return; }
       setJobId(body.job_id);
+      // Live Logs follows this build. It shows whichever job was last
+      // attached to it, so during a tree build it was still showing the Step
+      // 2 comparison that ran before — lines about a finished run, under a
+      // tree that was still working (Ames HPC, 2026-11-20).
+      if (onLogJob) onLogJob(body.job_id);
       // Step 2 Results lists the run as soon as its folder exists, marked
       // running. Without this it went on saying "No VP1 tree yet" for the
       // whole build, beside a button that said Building.
@@ -97,20 +102,20 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
   const running = mine || building;
   const noSamples = serotypes.length === 0;
   const why = !tools.ready
-    ? "mafft or a tree builder is missing. A bdtools install adds mafft with bin/bdtools install vsnp_gui; elsewhere create the fmdv_gui conda env from conda_setup/fmdv_environment.yml."
-    : noSamples ? "Run Step 1 first; the tree uses each sample's VP1 consensus."
-    : running ? "A VP1 tree is being built." : "";
+    ? "The programs that align sequences and build trees are missing from the environment. On your own computer: bin/bdtools install vsnp_gui; on a shared install: bin/bdtools update-packages vsnp_gui."
+    : noSamples ? "Run Step 1 first: the tree is built from each sample's VP1 sequence."
+    : running ? "A tree is already being built for this project. They run one at a time." : "";
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap", marginTop: "0.5em" }}>
-      <span className="muted" style={{ fontSize: "0.85em" }}>VP1 tree</span>
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap" }}>
+      <span className="muted" style={{ fontSize: "0.85em" }}>Serotype:</span>
       <select value={serotype} disabled={disabled || running || noSamples} onChange={(e) => setSerotype(e.target.value)}
-        title="One serotype per tree: the samples placed on this serotype, with the library panel and the GenBank context set for it.">
+        title="One tree per serotype: VP1 differs too much between serotypes for a single tree across them to mean anything.">
         {serotypes.map(([s, n]) => <option key={s} value={s}>{s} ({n} sample{n === 1 ? "" : "s"})</option>)}
         {noSamples ? <option value="">no samples yet</option> : null}
       </select>
       <button onClick={start} disabled={disabled || running || noSamples || !tools.ready || !serotype}
-        title={why || `Align the ${serotype} samples' VP1 with the library panel and context set, build a tree with ${tools.tree_tool}, and list it in Step 2 Results.`}>
+        title={why || `Build a tree of the ${serotype} samples with the published strains closest to them. Minutes when the samples sit in one lineage; an hour or more when they are spread across the serotype.`}>
         {running ? (<>Building… {mine ? <Elapsed /> : null}</>) : "Build VP1 tree"}
       </button>
       {running ? <FmdvTreeProgress apiBase={apiBase} project={project} /> : null}

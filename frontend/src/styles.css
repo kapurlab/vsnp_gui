@@ -2427,3 +2427,140 @@ html[data-theme="dark"] .tm-check.warn { color: #efca8d; }
   background: var(--panel); border: 1px solid var(--border); font-size: 12px; max-width: 100%;
 }
 .target-manager code { font-size: 11px; overflow-wrap: anywhere; }
+
+/* ---- FMDV mode, the VP1 half of Step 2 --------------------------------------
+   Each view says what it shows, how to read it and what it is for, in the same
+   place and the same shape, and every table scrolls inside its own box. The
+   tables used to carry .qc-table on the <table> itself, where overflow does
+   nothing: a table wider than the pane ran out past its edge and under the
+   page's own clipping, with no scrollbar to reach the last columns. */
+.vp1-lede {
+  font-size: 0.9em;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0 0 0.7em;
+}
+.vp1-lede strong { font-weight: 650; }
+.vp1-explain {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--panel-2);
+  border-radius: 4px 10px 10px 4px;
+  padding: 0.6em 0.85em;
+  margin: 0 0 0.75em;
+  font-size: 0.88em;
+  line-height: 1.5;
+  color: var(--text);
+}
+.vp1-explain h4 {
+  margin: 0 0 0.25em;
+  font-size: 1.06em;
+  font-weight: 650;
+}
+.vp1-explain p { margin: 0.25em 0; }
+.vp1-explain .vp1-use { color: var(--muted); }
+.vp1-explain .vp1-use b { color: var(--text); font-weight: 600; }
+.vp1-explain details { margin-top: 0.35em; }
+.vp1-explain summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.95em;
+}
+.vp1-explain dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25em 0.9em;
+  margin: 0.45em 0 0.1em;
+}
+.vp1-explain dt { font-weight: 600; white-space: nowrap; }
+.vp1-explain dd { margin: 0; color: var(--muted); }
+@media (max-width: 900px) {
+  .vp1-explain dl { grid-template-columns: 1fr; }
+  .vp1-explain dd { margin-bottom: 0.3em; }
+}
+
+.vp1-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0.7em 0 0.7em;
+}
+button.vp1-tab {
+  text-align: left;
+  padding: 7px 12px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 400;
+  line-height: 1.25;
+  min-width: 0;
+}
+button.vp1-tab b { display: block; font-size: 13px; font-weight: 650; }
+button.vp1-tab span { display: block; font-size: 11px; color: var(--muted); }
+button.vp1-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  box-shadow: 0 6px 14px rgba(76, 140, 138, 0.22);
+}
+button.vp1-tab.active span { color: var(--accent-text); opacity: 0.88; }
+
+.vp1-scroll {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.vp1-scroll.vp1-short { max-height: 264px; }
+.vp1-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.vp1-scroll th,
+.vp1-scroll td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.vp1-scroll tbody tr:last-child td { border-bottom: none; }
+.vp1-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-2);
+  font-weight: 650;
+  font-size: 11.5px;
+  color: var(--text);
+}
+.vp1-scroll th small {
+  display: block;
+  font-weight: 400;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.vp1-scroll td.vp1-num { font-variant-numeric: tabular-nums; }
+.vp1-scroll button.ghost { padding: 3px 8px; font-size: 11.5px; }
+
+.vp1-row {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 0.6em;
+}
+.vp1-row .vp1-label { font-size: 0.85em; color: var(--muted); }
+.vp1-pick button.ghost.active { font-weight: 650; border-color: var(--accent); }
+.vp1-hint { font-size: 0.82em; color: var(--muted); line-height: 1.45; margin: 0.35em 0 0; }
+.vp1-neighbour { margin-bottom: 0.5em; }
+.vp1-neighbour > summary { cursor: pointer; padding: 0.3em 0; font-size: 0.9em; }
+.vp1-neighbour > summary span { color: var(--muted); }
+
+/* The two panes of a split row may be narrower than what is in them; without
+   this a wide table widens its pane past the page instead of scrolling. */
+.row-grid > .panel { min-width: 0; }

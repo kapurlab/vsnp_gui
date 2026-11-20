@@ -151,6 +151,7 @@ from app import step1_staging
 from app import ont_import
 from app import seq_import
 from app import fmdv_tree_progress
+from app import duration
 from app import ref_contigs
 from app import igv_annotation
 from app import sample_groups
@@ -6998,6 +6999,10 @@ def _step1_dispatch(
             "set -uo pipefail",
             "FAIL=0",
             f"MAX_PARALLEL={max_parallel}",
+            # Durations in this log are written in days, hours, minutes and
+            # seconds; the function is defined here rather than called out to
+            # python so the script still runs on its own (app.duration).
+            *duration.SHELL_HUMAN_DURATION,
             "OVERALL_START=$(date +%s)",
             "OVERALL_LOG=\"step1_run_summary.log\"",
             "echo \"Start: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
@@ -7117,7 +7122,9 @@ def _step1_dispatch(
             "    END_TS=$(date +%s)",
             "    DURATION=$((END_TS-START_TS))",
             "    echo \"Complete: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$LOG\"",
-            "    echo \"Duration: ${DURATION}s\" | tee -a \"$LOG\"",
+            # Days, hours, minutes, seconds — a sample that ran for 47283s
+            # said so and nothing else (app.duration, human_duration).
+            "    echo \"Duration: $(human_duration ${DURATION})  (${DURATION} seconds)\" | tee -a \"$LOG\"",
             (fmdv_consensus_line if fmdv_mode else "    :"),
             "  else",
             "    echo \"Error: exit $STATUS\" | tee -a \"$LOG\"",
@@ -7150,7 +7157,7 @@ def _step1_dispatch(
             "OVERALL_END=$(date +%s)",
             "OVERALL_DURATION=$((OVERALL_END-OVERALL_START))",
             "echo \"End: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$OVERALL_LOG\"",
-            "echo \"Duration: ${OVERALL_DURATION}s\" >> \"$OVERALL_LOG\"",
+            "echo \"Duration: $(human_duration ${OVERALL_DURATION})  (${OVERALL_DURATION} seconds)\" >> \"$OVERALL_LOG\"",
             # FMDV mode: the run report for the outbreak team, once every
             # sample has its call. Never changes the batch's exit code.
             (fmdv_run_report_line if fmdv_mode else ":"),

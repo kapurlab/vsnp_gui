@@ -73,6 +73,10 @@ export default function FmdvVp1Tree({ apiBase, project, fmdvInfo, disabled, onDo
       const body = await res.json().catch(() => ({}));
       if (!res.ok) { setMsg(body.detail || `HTTP ${res.status}`); return; }
       setJobId(body.job_id);
+      // Step 2 Results lists the run as soon as its folder exists, marked
+      // running. Without this it went on saying "No VP1 tree yet" for the
+      // whole build, beside a button that said Building.
+      if (onDone) setTimeout(() => onDone({ status: "running" }), 3000);
       setStatus("running");
       setMsg(`Aligning VP1 of ${body.samples} sample${body.samples === 1 ? "" : "s"} and building the tree with ${body.tree_tool}. A few minutes with bootstraps.`);
     } catch (e) { setMsg(`VP1 tree: ${e.message || e}`); }

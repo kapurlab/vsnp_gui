@@ -3391,6 +3391,17 @@ export default function App() {
     if (prev === "running" && step1JobStatus !== "running" && step1JobStatus !== "") {
       loadQC({ refresh: true });
       refreshProjects();
+      // FMDV mode: Step 1 has just typed its samples and chosen their
+      // references, and the Step 1 scope panel, the comparison-reference
+      // picker and the Step 2 VP1 tab all read that from fmdvInfo. Without
+      // this they showed the project as it was before the run.
+      const proj = selectedProjectRef.current;
+      if (proj && fmdvInfo?.mode === "fmdv") {
+        fetch(`${API_BASE}/api/projects/${proj}/fmdv`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((info) => { if (info && selectedProjectRef.current === proj) setFmdvInfo(info); })
+          .catch(() => { /* the VP1 tab reads it again when shown */ });
+      }
     }
   }, [step1JobStatus]);
 
@@ -10156,6 +10167,7 @@ export default function App() {
                 disabled={step1JobStatus === "running"}
                 onInfo={setFmdvInfo}
                 onTreeDone={() => refreshStep2Results()}
+                step1Done={step1Status.filter((s) => s.status === "complete").length}
               />
             ) : step2Mode === "build" ? (
               <div className="block">

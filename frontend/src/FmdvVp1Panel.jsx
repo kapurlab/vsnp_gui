@@ -11,19 +11,39 @@ import FmdvVp1Tree from "./FmdvVp1Tree.jsx";
 // blastn of the VP1 consensus against the GenBank VP1 sets). Step 1 types
 // each sample as it finishes; "Type VP1" retypes the whole project, for
 // samples run before typing existed or after the context sets change.
-export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onInfo, onTreeDone }) {
+//
+// WHAT IS ON DISK NOW, not what was there when the project was opened. The
+// table and the tree's serotype list both come from one fetch of the project's
+// FMDV info, and that fetch used to happen only when a project was selected,
+// after an import, and after Type VP1. Step 1 writing a typing result for
+// every sample changed nothing on screen: a project whose two imported genomes
+// were typed at import still read "2 of 2 typed" and offered "O (2 samples)"
+// after Step 1 had typed the whole run (Ames HPC, 2026-11-20). The panel now
+// reads again when it is shown, and each time another Step 1 sample completes
+// (`step1Done`), so it follows a run in progress too.
+export default function FmdvVp1Panel({ apiBase, project, fmdvInfo, disabled, onInfo, onTreeDone, step1Done = 0 }) {
   const [jobId, setJobId] = useState("");
   const [msg, setMsg] = useState("");
   const pollRef = useRef(null);
+  const projectRef = useRef(project);
+  projectRef.current = project;
 
   useEffect(() => { setJobId(""); setMsg(""); }, [project]);
 
   async function reload() {
+    const asked = project;
+    if (!asked) return;
     try {
-      const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(project)}/fmdv`);
-      if (res.ok && onInfo) onInfo(await res.json());
+      const res = await fetch(`${apiBase}/api/projects/${encodeURIComponent(asked)}/fmdv`);
+      if (!res.ok) return;
+      const info = await res.json();
+      // An answer about a project the user has since left is not shown.
+      if (projectRef.current === asked && onInfo) onInfo(info);
     } catch (_) { /* transient */ }
   }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { reload(); }, [project, step1Done]);
 
   useEffect(() => {
     if (!jobId) return undefined;

@@ -78,7 +78,9 @@ export default function FmdvVp1Results({
     return (
       <div className="note">
         No VP1 tree yet. Build one from the VP1 tab on the left: one serotype per tree, the samples typed to it with the
-        library panel and the GenBank context for their topotypes.
+        library panel and the GenBank context for their topotypes. The <b>Typing</b>, <b>Tree</b>, <b>Neighbours</b>,{" "}
+        <b>Sites</b> and <b>Files</b> views appear here once a tree has been started; they belong to a tree, so there is
+        nothing to show before the first one.
       </div>
     );
   }

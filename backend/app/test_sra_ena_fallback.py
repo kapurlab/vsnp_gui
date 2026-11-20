@@ -87,7 +87,7 @@ def function_source(name: str) -> str:
 
 def method3_source() -> str:
     """method3 and the two functions it calls."""
-    return "\n".join(function_source(n) for n in ("size_of", "fetch_resumable", "method3"))
+    return "\n".join(function_source(n) for n in ("human", "size_of", "fetch_resumable", "method3"))
 
 
 def stall_setting() -> str:
@@ -161,7 +161,8 @@ def run_fetch(path: str) -> tuple[int, str, dict, list, float]:
     try:
         harness = (
             "set -u\nsleep() { :; }\n" + stall_setting() + "\n"
-            + function_source("size_of") + function_source("fetch_resumable")
+            + function_source("human") + function_source("size_of")
+            + function_source("fetch_resumable")
             + f'\nfetch_resumable "http://127.0.0.1:{srv.server_address[1]}{path}" out.fastq.gz\n'
         )
         env = dict(os.environ, SRA_STALL_SECONDS="2", NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")

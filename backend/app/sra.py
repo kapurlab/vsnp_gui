@@ -224,7 +224,15 @@ fi
 if command -v fasterq-dump >/dev/null 2>&1; then
   HAS_FASTERQ=1; echo "[OK] fasterq-dump found: $(command -v fasterq-dump)"
 else
-  echo "[MISSING] fasterq-dump — Method 1 (SRA conversion) will be skipped"
+  # Not a fault, but it decides how fast this run is, so say what it means and
+  # how to fix it rather than one word no one can act on (Ames, 2026-11-20:
+  # four minutes at 50 kB/s on the fallback, with "[MISSING]" the only clue).
+  echo "[MISSING] fasterq-dump — the fast route (NCBI S3 + fasterq-dump) is off."
+  echo "          Reads will come from the European archive over curl instead,"
+  echo "          which on a slow link can be many times slower."
+  echo "          To turn the fast route on, in the tools folder:"
+  echo "              bin/bdtools pull && bin/bdtools update-packages vsnp_gui"
+  echo "          That installs sra-tools, which tools.yml pins for vsnp_gui."
 fi
 
 if command -v enaDataGet >/dev/null 2>&1; then
@@ -388,29 +396,74 @@ size_of() {{
 # stopped (-C -), up to 30 of them; three tries in a row that add nothing end
 # it, which is what covers ENA's 403-under-load and a dead link alike. curl's
 # own --retry is not used: it starts the file again from the beginning.
+# Bytes as a person reads them, for the one-line-per-event log below.
+human() {{
+  awk -v b="$1" 'BEGIN {{
+    if (b >= 1048576) printf "%.1f MB", b/1048576;
+    else if (b >= 1024) printf "%.0f kB", b/1024;
+    else printf "%d B", b
+  }}'
+}}
+
 fetch_resumable() {{
   local url="$1" out="$2" part="$2.part"
-  local before after try=0 idle=0
+  local before after try=0 idle=0 rc t0 took cpid last lastt now dt rate
   while [ "$try" -lt 30 ]; do
     try=$((try + 1))
     before=$(size_of "$part")
-    if curl -f -C - $CURL_STALL {curl_insecure} "$url" -o "$part" 2>&1; then
+    t0=$SECONDS
+    # --no-progress-meter, deliberately: four workers run in parallel and
+    # curl's meter is a carriage-return animation, so with -P 4 the log became
+    # interleaved columns of numbers from different files that no one can read
+    # (Ames, 2026-11-20). Every event below is one line naming its own file.
+    curl -f -C - --no-progress-meter $CURL_STALL {curl_insecure} "$url" -o "$part" &
+    cpid=$!
+    # One line every PROGRESS_EVERY seconds while it runs. Without it a 50 MB
+    # file on a slow link prints nothing at all between "Downloading" and the
+    # end -- which is the same "it is stuck" as the meter it replaced, just
+    # quieter. With it, a slow transfer is visibly a slow transfer.
+    last=$(size_of "$part"); lastt=$SECONDS
+    while kill -0 "$cpid" 2>/dev/null; do
+      sleep 3
+      kill -0 "$cpid" 2>/dev/null || break
+      now=$(size_of "$part"); dt=$((SECONDS - lastt))
+      if [ "$dt" -ge "${{PROGRESS_EVERY:-30}}" ]; then
+        rate=$(( (now - last) / dt ))
+        echo "  ${{out}}: $(human "$now") so far, $(human "$rate")/s"
+        last=$now; lastt=$SECONDS
+      fi
+    done
+    wait "$cpid"
+    rc=$?
+    took=$((SECONDS - t0))
+    after=$(size_of "$part")
+    if [ "$rc" -eq 0 ]; then
       if ! gzip -t "$part" 2>/dev/null; then
-        echo "  [FAILED] $out arrived damaged (gzip test) — discarded"
+        echo "  [FAILED] ${{out}}: arrived damaged (gzip test) — discarded"
         rm -f "$part"
         return 1
       fi
+      echo "  [OK] ${{out}} — $(human "$after") in ${{took}}s"
       mv -f "$part" "$out"
       return 0
     fi
-    after=$(size_of "$part")
     if [ "$after" -gt "$before" ]; then
       idle=0
-      echo "  $out stopped at $after bytes (try $try) — resuming"
+      # 28 is curl's timeout, which is how the stall limit in CURL_STALL ends a
+      # transfer that has gone quiet. Say which it was: a stall that resumes is
+      # normal on a slow link, a hard error is not.
+      if [ "$rc" -eq 28 ]; then
+        echo "  ${{out}}: no data for ${{SRA_STALL_SECONDS:-60}}s, stopped at $(human "$after") — resuming (try ${{try}})"
+      else
+        echo "  ${{out}}: interrupted (curl $rc) at $(human "$after") — resuming (try ${{try}})"
+      fi
     else
       idle=$((idle + 1))
-      if [ "$idle" -ge 3 ]; then break; fi
-      echo "  $out: nothing received (try $try) — trying again"
+      if [ "$idle" -ge 3 ]; then
+        echo "  [FAILED] ${{out}}: three tries added nothing (curl $rc); giving up"
+        break
+      fi
+      echo "  ${{out}}: nothing received (curl $rc, try ${{try}}) — trying again"
     fi
     sleep 5
   done
@@ -525,7 +578,7 @@ download_one() {{
 
 # xargs subshells need our functions and the HAS_*/CAN_* state.
 export -f download_one already_have already_in_step1 compress_fastqs method1 method2 method3
-export -f size_of fetch_resumable
+export -f size_of human fetch_resumable
 export HAS_WGET HAS_FASTERQ HAS_ENADATAGET HAS_CURL HAS_PIGZ CURL_STALL
 export CAN_METHOD1 CAN_METHOD2 CAN_METHOD3
 export STEP1_DIR

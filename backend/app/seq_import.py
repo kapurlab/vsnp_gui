@@ -585,8 +585,14 @@ def locate_vp1(records: List[Dict], lib: Path, project_dir: Optional[Path], blas
             r["problem"] = "blastn is not on the backend's PATH (BLAST+), so VP1 cannot be checked or cut"
         return
     if not panel:
+        # Said as what it is. "no VP1 panel at <path> (run fmdv_reflib.py
+        # panels)" named a script nobody on a bdtools install runs, for what
+        # is nearly always a library that was never built on this machine
+        # (Ames HPC, 2026-11-20). The preview carries `library` so the panel
+        # can say it once, with the command.
         for r in live:
-            r["problem"] = f"no VP1 panel at {lib / 'panels' / 'vp1.fasta'} (run fmdv_reflib.py panels)"
+            r["problem"] = (f"the FMDV reference library is not built on this install "
+                            f"(no VP1 panel at {lib / 'panels' / 'vp1.fasta'})")
         return
     best = blast_best_hits(blastn, [(f"r{i}", r["sequence"]) for i, r in enumerate(live)], panel, threads, "import")
     if best is None:
@@ -725,6 +731,11 @@ def preview(records: List[Dict], project_dir: Path, lib: Path, default_role: str
                                               "panel_hit": r.get("panel_hit"), "raw": r.get("raw", "")}
                                              for i, r in enumerate(records)]}))
     return {"token": token, "rows": rows, "blastn": bool(blastn), "mode": mode,
+            # Whether the FMDV library this import checks VP1 against is there,
+            # and where it was looked for. None outside an FMDV project, which
+            # has no library to look for.
+            "library": ({"path": str(lib), "ready": (lib / "panels" / "vp1.fasta").is_file()}
+                        if fmdv else None),
             "depth": clamp_depth(depth), "min_depth": MIN_DEPTH, "max_depth": MAX_DEPTH,
             "project_context": project_context_counts(project_dir)}
 

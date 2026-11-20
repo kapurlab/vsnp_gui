@@ -263,6 +263,18 @@ def test_locate_preview_commit():
         # No blastn: every record is refused with the reason, nothing crashes.
         pv4 = si.preview(si.records_from_fasta(f">x\n{VP1_A}\n", "x.fasta"), project, lib, "sample", blastn=None)
         check("blastn" in pv4["rows"][0]["problem"], True, "missing blastn is the stated problem")
+        check(pv4["library"], {"path": str(lib), "ready": True}, "the preview says the library is there")
+
+        # No library (Ames HPC, 2026-11-20: BLAST+ present, the library never
+        # built): refused as that, with where it was looked for, and the
+        # preview says so once for the panel to show with the command.
+        nolib = project.parent / "no_such_fmdv_refs"
+        pv5 = si.preview(si.records_from_fasta(f">x\n{VP1_A}\n", "x.fasta"), project, nolib, "sample", blastn="/usr/bin/blastn")
+        check("reference library is not built" in pv5["rows"][0]["problem"], True, "a missing library is the stated problem")
+        check("fmdv_reflib.py" in pv5["rows"][0]["problem"], False, "and no script nobody runs is named")
+        check(pv5["library"], {"path": str(nolib), "ready": False}, "the preview says the library is missing, and where")
+        pv6 = si.preview(si.records_from_fasta(">y\n" + "ACGT" * 100 + "\n", "y.fasta"), project, nolib, "sample", mode="stock")
+        check(pv6["library"], None, "a project that is not FMDV has no library to miss")
 
 
 def test_import_outside_fmdv_mode():

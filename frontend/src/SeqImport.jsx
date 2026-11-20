@@ -42,6 +42,10 @@ const asPayload = (r, e = r) => ({
 // blastn: false in every other project too (it never looks), so the mode has
 // to be read with it or a stock project is told nothing can be imported.
 const blastMissing = (data) => !!data && data.mode === "fmdv" && data.blastn === false;
+// The FMDV reference library was never built where this install looks for it.
+// Like a missing blastn it refuses every record for one reason, so it is said
+// once. `library` is absent from a backend older than v0.4.160: no notice then.
+const libraryMissing = (data) => !!data && data.mode === "fmdv" && data.library?.ready === false;
 
 const FIELDS = [
   ["serotype", "Serotype", 64],
@@ -249,6 +253,24 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
           </div>
         </div>
       ) : null}
+      {/* Shown beside the blastn notice when both are missing, so an install
+          that lacks both is told both in one go instead of one per attempt
+          (Ames HPC, 2026-11-20: BLAST+ was added, and the next Import then
+          said "no VP1 panel ... run fmdv_reflib.py panels"). */}
+      {libraryMissing(data) ? (
+        <div className="note warning" style={{ fontSize: "12px" }}>
+          <strong>Nothing was imported: the FMDV reference library has not been built on this install.</strong>{" "}
+          This is the install, not anything you entered. An FMDV project checks each record's VP1 against that
+          library, and looked for it at <code style={{ wordBreak: "break-all" }}>{data.library.path}</code>.
+          Build it once from the suite folder (about five minutes, it needs the internet), then press Import again:
+          <div style={{ marginTop: "4px" }}>
+            <code>bin/bdtools setup-databases fmdv</code> on your own computer
+          </div>
+          <div>
+            <code>bin/bdtools setup-databases fmdv --shared</code> on a shared install (a site administrator runs it)
+          </div>
+        </div>
+      ) : null}
       {data.ncbi?.message ? (
         <div className="note error" style={{ fontSize: "12px", whiteSpace: "pre-wrap" }}>{data.ncbi.message}</div>
       ) : null}
@@ -357,9 +379,9 @@ export default function SeqImport({ apiBase, project, fmdvOn = false, enabled, o
       {report && !preview ? (
         <div style={{ marginTop: "6px" }}>
           {notices(report)}
-          {/* With no blastn every record carries the same reason, and the
-              notice above has already given it once. */}
-          {report.skipped.length && !blastMissing(report) ? (
+          {/* With no blastn, or no library, every record carries the same
+              reason, and the notice above has already given it once. */}
+          {report.skipped.length && !blastMissing(report) && !libraryMissing(report) ? (
             <div className="note warning" style={{ fontSize: "12px" }}>
               <strong>
                 {report.imported

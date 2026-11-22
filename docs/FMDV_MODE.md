@@ -66,14 +66,22 @@ The library path is `fmdv_reflib` in the user config, default `~/fmdv_refs`.
 ### Adding a genome the 79 do not cover
 
 NanoFMDV's panel has no genome for some lineages that circulate. Measured
-22 November 2026 on 67 Ethiopian SAT2 topotype XIII VP1 records: the
-nearest panel SAT2 genome is 75% identical, minimap2 seeds nothing at that
-distance, and the chooser saw no FMDV reads at all. One command adds a
-complete genome from GenBank:
+22 November 2026 on 67 Ethiopian SAT2 VP1 records: the nearest panel SAT2
+genome was 75 to 81% identical and the chooser had no vote. 44 of the 67
+are within 1% of OQ557397 (ETH/2/2022), a complete genome that is itself
+24% from every topotype-annotated SAT2 VP1 in the typing set; the other 23
+are topotype XIII, the 2009 Ethiopian outbreak, for which GenBank holds no
+complete genome, so they stay on the least distant library genome with the
+`distant` and `ambiguous_vote` flags set. One command adds a complete
+genome from GenBank:
 
 ```
-fmdv_reflib.py add --lib ~/fmdv_refs --accession OQ557397 --serotype SAT2 --lineage XIII
+fmdv_reflib.py add --lib ~/fmdv_refs --accession OQ557397 --serotype SAT2
 ```
+
+`--lineage <topotype>` labels it in the picker; leave it out when the
+topotype is not established, and the genome is listed as unassigned, as
+NanoFMDV's own SAT2 KU821592 is.
 
 It fetches the record, writes `genomes/<safe>.fasta`, enters the genome in
 `lineages.json` (so the picker shows the lineage) and `panels/genomes.fasta`,

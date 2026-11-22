@@ -27,12 +27,18 @@ Usage:
     fmdv_reflib.py list  --lib <dir>
     fmdv_reflib.py materialize --lib <dir> --genome <safe>
     fmdv_reflib.py annotations --lib <dir> [--email you@example.org] [--force] [--no-proteins]
-    fmdv_reflib.py add --lib <dir> --accession OQ557397 --serotype SAT2 --lineage XIII
+    fmdv_reflib.py add --lib <dir> --accession OQ557397 --serotype SAT2 [--lineage <topotype>]
 
 Adding a genome: `add` puts one more complete genome into the library, for a
 lineage NanoFMDV's 79 do not cover. Measured 22 November 2026 on 67 Ethiopian
-SAT2 topotype XIII VP1 records: at 75% identity to every SAT2 genome in the
-panel, minimap2 seeds nothing and the chooser sees no FMDV reads at all. The
+SAT2 VP1 records: at 75 to 81% identity to every SAT2 genome in the panel
+the chooser had no vote. 44 of them sit at 99% to OQ557397 (ETH/2/2022, a
+complete genome 24% from every topotype-annotated SAT2 VP1 in the typing
+set, so it goes in unassigned until someone names its topotype); the other
+23 are topotype XIII (the 2009 Ethiopian outbreak), for which GenBank holds
+no complete genome at all, and those stay on the least distant library
+genome, flagged distant and ambiguous. Leave --lineage out unless the
+topotype is established: the label is what the picker shows. The
 genome is fetched from GenBank (or read from --fasta), written to genomes/,
 entered in lineages.json and panels/genomes.fasta, and its VP1 is cut and
 appended to panels/vp1.fasta: from --vp1-fasta when given, else by exact
@@ -478,7 +484,8 @@ def main() -> int:
     ad.add_argument("--lib", required=True)
     ad.add_argument("--accession", required=True, help="GenBank accession of a complete genome, e.g. OQ557397")
     ad.add_argument("--serotype", required=True, help="O, A, C, Asia1, SAT1, SAT2, SAT3")
-    ad.add_argument("--lineage", default="", help="topotype/lineage as the picker should show it, e.g. XIII or EA-3")
+    ad.add_argument("--lineage", default="", help="topotype/lineage as the picker should show it, e.g. EA-3; "
+                    "leave out when not established (listed as unassigned)")
     ad.add_argument("--isolate", default="", help="isolate name (default: from the GenBank record)")
     ad.add_argument("--year", default="", help="collection year (default: from the GenBank record)")
     ad.add_argument("--fasta", help="read the genome from this FASTA instead of fetching it")

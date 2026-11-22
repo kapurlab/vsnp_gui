@@ -408,6 +408,7 @@ def add_genome(lib: Path, accession: str, serotype: str, lineage: str, isolate: 
         header, seq = next(_read_fasta(fasta))
     else:
         text = _efetch(acc, "fasta", email)
+        time.sleep(0.4)  # NCBI allows three requests a second; the record and its annotation follow
         if not text.startswith(">"):
             raise SystemExit(f"GenBank returned no FASTA for {acc}")
         header, seq = _split_fasta_text(text)
@@ -417,6 +418,7 @@ def add_genome(lib: Path, accession: str, serotype: str, lineage: str, isolate: 
     if not (isolate and year):
         try:
             gb = _efetch(acc, "gb", email)
+            time.sleep(0.4)
         except Exception:  # noqa: BLE001 - metadata only
             gb = ""
         isolate = isolate or _gb_field(gb, "isolate") or _gb_field(gb, "strain") or acc

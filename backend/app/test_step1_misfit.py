@@ -17,6 +17,7 @@ Run from anywhere with the per-site conda python:
 from __future__ import annotations
 
 import gzip
+import json
 import os
 import shutil
 import sys
@@ -75,6 +76,24 @@ def build_step1(root: Path) -> Path:
     write_fastq(tiny / "TRUNCATED_R1.fastq.gz", 400)
     write_fastq(tiny / "TRUNCATED_R2.fastq.gz", 400)
 
+    # Runnable: reads simulated from an imported sequence (app.seq_import). A
+    # 100-fold perfect simulation of an 8 kb FMDV genome gzips to a few KB,
+    # far under the floor, and is not a truncated download. Must dispatch.
+    sim = step1 / "SIM-IMPORT"
+    sim.mkdir()
+    write_fastq(sim / "SIM-IMPORT_R1.fastq.gz", 5_000)
+    write_fastq(sim / "SIM-IMPORT_R2.fastq.gz", 5_000)
+    (sim / "imported_sequence.json").write_text(
+        json.dumps({"sample": "SIM-IMPORT", "reads": "simulated"}), encoding="utf-8")
+
+    # Misfit: a simulated import whose reads came out empty. Nothing to align.
+    sim0 = step1 / "SIM-EMPTY"
+    sim0.mkdir()
+    (sim0 / "SIM-EMPTY_R1.fastq.gz").write_bytes(b"")
+    (sim0 / "SIM-EMPTY_R2.fastq.gz").write_bytes(b"")
+    (sim0 / "imported_sequence.json").write_text(
+        json.dumps({"sample": "SIM-EMPTY", "reads": "simulated"}), encoding="utf-8")
+
     # Complete: a finished run, reads still in place.
     done = step1 / "DONE-01"
     (done / ".provenance").mkdir(parents=True)
@@ -115,14 +134,20 @@ def test_status(project_dir: Path) -> dict:
 
     check(sorted(by_sample), [
         "BROKEN-LINK", "DONE-01", "DONE-NO-READS", "EMPTY-DIR",
-        "FAILED-01", "GOOD-01", "MISFILED", "TRUNCATED",
+        "FAILED-01", "GOOD-01", "MISFILED", "SIM-EMPTY", "SIM-IMPORT", "TRUNCATED",
     ], "scaffolding (_provenance) is not listed as a sample")
+
+    check(by_sample["SIM-IMPORT"]["status"], "not_started",
+          "tiny simulated-read import is runnable, not a misfit")
+    check(by_sample["SIM-IMPORT"]["reason"], "", "and carries no complaint")
+    check(by_sample["SIM-EMPTY"]["status"], "misfit", "empty simulated reads are a misfit")
+    check("empty" in by_sample["SIM-EMPTY"]["reason"], True, "and say so")
 
     check(by_sample["GOOD-01"]["status"], "not_started",
           "a runnable sample is still Not started")
     check(by_sample["GOOD-01"]["reason"], "", "and carries no complaint")
 
-    for name in ("EMPTY-DIR", "MISFILED", "BROKEN-LINK", "TRUNCATED"):
+    for name in ("EMPTY-DIR", "MISFILED", "BROKEN-LINK", "TRUNCATED", "SIM-EMPTY"):
         check(by_sample[name]["status"], "misfit", f"{name} is a misfit")
         check(bool(by_sample[name]["reason"]), True, f"{name} says why")
 
@@ -140,7 +165,7 @@ def test_status(project_dir: Path) -> dict:
 def test_dispatch_agrees(step1: Path, by_sample: dict) -> None:
     print("\n[dispatch plan]")
     to_run, skipped = m._step1_dispatch_plan(step1)
-    check(to_run, ["GOOD-01"], "only the runnable sample is dispatched")
+    check(to_run, ["GOOD-01", "SIM-IMPORT"], "only the runnable samples are dispatched")
 
     misfits = {n for n, s in by_sample.items() if s["status"] == "misfit"}
     check(misfits & set(to_run), set(), "no misfit is ever dispatched")
@@ -159,7 +184,7 @@ def test_force_rerun_does_not_resurrect(step1: Path) -> None:
     # Force re-run overrides "already completed" / "errored before" — it does
     # NOT override a missing input, because there is nothing to align.
     # DONE-NO-READS is complete but has no reads left, so it stays out too.
-    check(sorted(to_run), ["DONE-01", "FAILED-01", "GOOD-01"],
+    check(sorted(to_run), ["DONE-01", "FAILED-01", "GOOD-01", "SIM-IMPORT"],
           "Force re-run picks up finished and failed samples, never misfits")
 
 

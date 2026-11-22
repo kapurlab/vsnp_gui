@@ -355,7 +355,9 @@ DEFAULTS: Dict[str, Any] = {
     # this are auto-skipped as likely junk/incomplete. Default 50 KB catches the
     # ~43-47 KB SRA-submission-error files we've seen while still passing
     # legitimately small viral/amplicon reads (e.g. SARS-CoV-2 ~200 KB). Raise
-    # it for bacterial-WGS-only sites if you want a stricter floor.
+    # it for bacterial-WGS-only sites if you want a stricter floor. Reads
+    # simulated from an imported sequence (app.seq_import) are exempt: they
+    # gzip to a few KB for a small genome and are never truncated.
     "step1_min_fastq_bytes": 50 * 1024,
     # Per-user opt-out for shared DBs: paths the user has chosen to skip in
     # their analyses. Shared entries are visible but unchecked when in here.

@@ -1236,9 +1236,16 @@ def _step1_input_issue(sample_dir: Path, min_bytes: int) -> Optional[str]:
     if r1_size is None or (r2 is not None and r2_size is None):
         missing = [m.name for m in (r1, r2) if m is not None and _safe_stat_size(m) is None]
         return f"fastq missing or broken link ({', '.join(missing)}); its source was removed — re-import the reads"
+    detail = f"R1={r1_size}" + (f", R2={r2_size}" if r2_size is not None else "")
+    if seq_import.read_import_json(sample_dir).get("reads") == "simulated":
+        # Reads simulated from an imported sequence (app.seq_import): perfect,
+        # uniform reads from a small genome gzip to a few KB, so the junk floor
+        # (meant for truncated downloads and bad SRA submissions) does not apply.
+        # Only an empty read is unusable.
+        if r1_size == 0 or (r2_size is not None and r2_size == 0):
+            return f"simulated reads are empty ({detail} bytes) — re-import the sequence"
+        return None
     if r1_size < min_bytes or (r2_size is not None and r2_size < min_bytes):
-        layout = "paired" if r2 is not None else "single-end"
-        detail = f"R1={r1_size}" + (f", R2={r2_size}" if r2_size is not None else "")
         return f"input too small ({detail} bytes, under the {min_bytes}-byte floor) — likely a truncated/failed download or SRA submission error"
     return None
 
@@ -1282,6 +1289,10 @@ def _step1_dispatch_plan(
          (config: step1_min_fastq_bytes), which catches the 43-47 KB SRA
          submission errors while passing legitimately small viral/amplicon
          reads (SARS-CoV-2 amplicon is ~200 KB).
+         Reads simulated from an imported sequence (app.seq_import, reads ==
+         "simulated" in imported_sequence.json) are exempt: a 100-fold perfect
+         simulation of an 8 kb FMDV genome gzips to a few KB. Only an empty
+         simulated read is held back.
 
     Rules 1-3 are the same _step1_input_issue check the status endpoint uses to
     call a never-run sample a "misfit" — the two must agree, or the Samples list

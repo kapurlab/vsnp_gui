@@ -1215,6 +1215,44 @@ def _step1_errored(sample_dir: Path) -> bool:
         return False
 
 
+# Exit code the Step 1 batch writes when the FMDV chooser could not pick a
+# reference (bin/fmdv_choose_reference.py returns 3 for "no in-scope match").
+# vsnp3 itself never exits 3 on purpose, and the sample's fmdv_reference.json
+# is checked as well, so the two together identify the case.
+_STEP1_NO_REFERENCE_EXIT = 3
+
+
+def _step1_no_reference(sample_dir: Path) -> Optional[Dict[str, Any]]:
+    """The chooser's result when the sample failed only because no FMDV
+    reference could be chosen: exit_code is the chooser's code and
+    fmdv_reference.json records no chosen genome. None otherwise."""
+    ec = sample_dir / ".provenance" / "exit_code"
+    try:
+        if ec.read_text(encoding="utf-8").strip() != str(_STEP1_NO_REFERENCE_EXIT):
+            return None
+        ref = json.loads((sample_dir / "fmdv_reference.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(ref, dict) or ref.get("chosen"):
+        return None
+    return ref
+
+
+def _step1_no_reference_reason(ref: Dict[str, Any]) -> str:
+    """One line for the Samples list from the chooser's JSON."""
+    best = 0
+    for key in ("top_vp1", "top_genome"):
+        rows = ref.get(key) or []
+        if rows and isinstance(rows[0], dict):
+            best = max(best, int(rows[0].get("reads") or 0))
+    scope = ref.get("scope") or "FMDV"
+    fmdv_reads = ref.get("fmdv_reads")
+    where = f"in scope {scope}" if scope != "FMDV" else "in the library"
+    return (f"No FMDV reference could be chosen: no genome {where} collects enough reads "
+            f"(best {best}; {fmdv_reads if fmdv_reads is not None else 0} reads map to any library genome). "
+            "The sample's lineage may have no genome in the library yet; a plain Run retries it.")
+
+
 def _step1_input_issue(sample_dir: Path, min_bytes: int) -> Optional[str]:
     """Return a user-readable reason the sample's INPUT can't be dispatched
     (no fastq / broken link / too small), or None if the input is usable.
@@ -1256,6 +1294,9 @@ def _step1_status_reason(status: str, sample_dir: Path, min_bytes: int) -> str:
     string when there's nothing to explain (a genuinely queued sample, or one
     that completed)."""
     if status == "error":
+        ref = _step1_no_reference(sample_dir)
+        if ref is not None:
+            return _step1_no_reference_reason(ref)
         return "Failed during Step 1 — open View log for the error."
     if status == "unknown":
         return "Interrupted before finishing (batch killed / OOM / restart) — re-run to retry."
@@ -1280,7 +1321,9 @@ def _step1_dispatch_plan(
     Skip rules (in order):
       0. Already completed (exit_code 0, or finished outputs on disk — see
          _step1_outputs_complete) → skip so a re-run after adding new samples
-         doesn't re-align finished ones.
+         doesn't re-align finished ones. Errored before → skip too, except a
+         sample the FMDV chooser found no reference for (_step1_no_reference),
+         which is retried.
          Overridden by `force_rerun` (the GUI's "Force re-run" option).
       1. No fastq files at all in the sample dir → skip.
       2. R1 (or the lone single-end read) is a broken symlink / missing —
@@ -1321,10 +1364,14 @@ def _step1_dispatch_plan(
                 "size_bytes": 0,
             })
             continue
-        if not force_rerun and _step1_errored(p):
+        if not force_rerun and _step1_errored(p) and _step1_no_reference(p) is None:
             # Ran and failed before. Don't silently retry on every plain Run
             # (a sample that reliably fails — e.g. bcftools on some ONT data —
             # would re-hang the batch each time). Force re-run overrides.
+            # The exception is a sample the FMDV chooser could not place: that
+            # failure costs seconds, and the fix (a genome added to the
+            # library, a wider scope) is on the library side, so a plain Run
+            # tries it again.
             skipped.append({
                 "sample": p.name,
                 "reason": "errored in a previous run — use Force re-run to retry",
@@ -6945,6 +6992,15 @@ def _step1_dispatch(
             + " --sample-dir \"$(pwd)\" 2>>\"$LOG\")",
             "  if [ -z \"$REF_DIR\" ] || [ ! -d \"$REF_DIR\" ]; then",
             "    echo \"FMDV: no reference could be chosen for $d (see fmdv_reference.json)\" | tee -a \"$LOG\"",
+            # A terminal sentinel, so the Samples list says what happened
+            # instead of "interrupted" (_step1_status_reason reads the
+            # chooser's JSON for the figures). The code is the chooser's own
+            # exit status for this case, and _step1_no_reference keys on it:
+            # the sample is dispatched again by a plain Run, since the retry
+            # costs seconds and is what one wants after adding a library genome.
+            f"    echo {_STEP1_NO_REFERENCE_EXIT} > .provenance/exit_code",
+            "    date -u +%s.%N > .provenance/finished_at",
+            "    touch . 2>/dev/null || true",
             "    cd ..",
             "    return 0",
             "  fi",

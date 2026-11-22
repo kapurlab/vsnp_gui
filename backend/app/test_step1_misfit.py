@@ -114,6 +114,28 @@ def build_step1(root: Path) -> Path:
     (bad / "run_step1.log").write_text("boom\n", encoding="utf-8")
     write_fastq(bad / "FAILED-01_R1.fastq.gz", 200_000)
 
+    # Errored because the FMDV chooser found no reference (exit code 3 and a
+    # chooser JSON with nothing chosen). Shown as an error that says so, and
+    # retried by a plain Run: the fix is a genome added to the library.
+    noref = step1 / "NO-REF"
+    (noref / ".provenance").mkdir(parents=True)
+    (noref / ".provenance" / "exit_code").write_text("3\n", encoding="utf-8")
+    (noref / "run_step1.log").write_text("FMDV: no reference could be chosen\n", encoding="utf-8")
+    (noref / "fmdv_reference.json").write_text(json.dumps({
+        "scope": "FMDV", "chosen": None, "error": "no in-scope match", "fmdv_reads": 0,
+        "top_vp1": [{"safe": "O-EA-4_X", "reads": 16}], "top_genome": []}), encoding="utf-8")
+    write_fastq(noref / "NO-REF_R1.fastq.gz", 5_000)
+    (noref / "imported_sequence.json").write_text(
+        json.dumps({"sample": "NO-REF", "reads": "simulated"}), encoding="utf-8")
+
+    # Exit code 3 from something other than the chooser (a reference was
+    # chosen; vsnp3 failed later): an ordinary error, not retried.
+    bad3 = step1 / "FAILED-03"
+    (bad3 / ".provenance").mkdir(parents=True)
+    (bad3 / ".provenance" / "exit_code").write_text("3\n", encoding="utf-8")
+    (bad3 / "fmdv_reference.json").write_text(json.dumps({"chosen": {"safe": "O-EA-4_X"}}), encoding="utf-8")
+    write_fastq(bad3 / "FAILED-03_R1.fastq.gz", 200_000)
+
     # Scaffolding, not a sample: stays out of the list entirely.
     (step1 / "_provenance").mkdir()
     return step1
@@ -133,9 +155,17 @@ def test_status(project_dir: Path) -> dict:
     by_sample = statuses(project_dir)
 
     check(sorted(by_sample), [
-        "BROKEN-LINK", "DONE-01", "DONE-NO-READS", "EMPTY-DIR",
-        "FAILED-01", "GOOD-01", "MISFILED", "SIM-EMPTY", "SIM-IMPORT", "TRUNCATED",
+        "BROKEN-LINK", "DONE-01", "DONE-NO-READS", "EMPTY-DIR", "FAILED-01", "FAILED-03",
+        "GOOD-01", "MISFILED", "NO-REF", "SIM-EMPTY", "SIM-IMPORT", "TRUNCATED",
     ], "scaffolding (_provenance) is not listed as a sample")
+
+    check(by_sample["NO-REF"]["status"], "error", "a sample with no FMDV reference is an error")
+    check(by_sample["NO-REF"]["reason"].startswith("No FMDV reference could be chosen"), True,
+          "and the reason says so")
+    check("best 16" in by_sample["NO-REF"]["reason"], True, "with the chooser's best vote")
+    check(by_sample["FAILED-03"]["status"], "error", "exit code 3 with a reference chosen is an error")
+    check(by_sample["FAILED-03"]["reason"], "Failed during Step 1 — open View log for the error.",
+          "with the generic wording")
 
     check(by_sample["SIM-IMPORT"]["status"], "not_started",
           "tiny simulated-read import is runnable, not a misfit")
@@ -165,7 +195,10 @@ def test_status(project_dir: Path) -> dict:
 def test_dispatch_agrees(step1: Path, by_sample: dict) -> None:
     print("\n[dispatch plan]")
     to_run, skipped = m._step1_dispatch_plan(step1)
-    check(to_run, ["GOOD-01", "SIM-IMPORT"], "only the runnable samples are dispatched")
+    check(to_run, ["GOOD-01", "NO-REF", "SIM-IMPORT"],
+          "the runnable samples and the no-reference retry are dispatched")
+    check("FAILED-03" in {s["sample"] for s in skipped}, True,
+          "an ordinary exit-3 failure is held back like any error")
 
     misfits = {n for n, s in by_sample.items() if s["status"] == "misfit"}
     check(misfits & set(to_run), set(), "no misfit is ever dispatched")
@@ -184,7 +217,7 @@ def test_force_rerun_does_not_resurrect(step1: Path) -> None:
     # Force re-run overrides "already completed" / "errored before" — it does
     # NOT override a missing input, because there is nothing to align.
     # DONE-NO-READS is complete but has no reads left, so it stays out too.
-    check(sorted(to_run), ["DONE-01", "FAILED-01", "GOOD-01", "SIM-IMPORT"],
+    check(sorted(to_run), ["DONE-01", "FAILED-01", "FAILED-03", "GOOD-01", "NO-REF", "SIM-IMPORT"],
           "Force re-run picks up finished and failed samples, never misfits")
 
 

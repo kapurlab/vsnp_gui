@@ -63,6 +63,32 @@ genomes into:
 
 The library path is `fmdv_reflib` in the user config, default `~/fmdv_refs`.
 
+### Adding a genome the 79 do not cover
+
+NanoFMDV's panel has no genome for some lineages that circulate. Measured
+22 November 2026 on 67 Ethiopian SAT2 topotype XIII VP1 records: the
+nearest panel SAT2 genome is 75% identical, minimap2 seeds nothing at that
+distance, and the chooser saw no FMDV reads at all. One command adds a
+complete genome from GenBank:
+
+```
+fmdv_reflib.py add --lib ~/fmdv_refs --accession OQ557397 --serotype SAT2 --lineage XIII
+```
+
+It fetches the record, writes `genomes/<safe>.fasta`, enters the genome in
+`lineages.json` (so the picker shows the lineage) and `panels/genomes.fasta`,
+cuts its VP1 and appends it to `panels/vp1.fasta`, and fetches the GenBank
+annotation as `annotations` does. The VP1 comes from `--vp1-fasta` when
+given, else from the typing set's record of the same accession when that is
+a substring of the genome, else from blastn against the panel VP1s of the
+serotype (BLAST+ on PATH). The isolate name and year come from the GenBank
+record unless `--isolate` and `--year` say otherwise. The Step 2 context
+database for the new reference is built as for any other
+(`fmdv_panel_build.sh <safe>`, then `fmdv_panel_register.py <safe>`), and
+context databases built earlier for other references do not hold the new
+genome until rebuilt. The sourmash signatures are not extended; nothing
+reads them.
+
 ### Mature protein features
 
 FMDV work is done in mature proteins and residue numbers within them, VP1
@@ -169,13 +195,31 @@ The chooser is competitive minimap2, after NanoFMDV (Shaw et al. 2025):
 
 1. The first 20,000 reads are mapped (`-c --secondary=no`, preset `map-ont`,
    or `sr` when the mean read length is under 300) to the 79 VP1 sequences.
-   Primary alignments with MAPQ 10 or more and at least 100 aligned bases
-   count. The in-scope genome whose VP1 collects the most aligned bases is
-   the reference, provided it has at least 20 reads; otherwise the same vote
-   is taken on the complete genomes; otherwise no reference is chosen and
-   the sample is skipped with a message in the log.
-2. The same reads are mapped to the 79 complete genomes for the serotype
-   composition and the identity of the reads to the chosen genome.
+   Every primary alignment of at least 100 aligned bases counts, whatever
+   its mapping quality. The in-scope genome whose VP1 collects the most
+   aligned bases is the reference, provided it has at least 20 reads;
+   otherwise the same vote is taken on the complete genomes; otherwise no
+   reference is chosen, the sample is left with exit code 3 and a Samples
+   list entry that says so, and a plain Run tries it again (the fix is on
+   the library side, see "Adding a genome").
+2. The same reads are mapped to the 79 complete genomes, primary alignments
+   with MAPQ 10 or more, for the serotype composition and the identity of
+   the reads to the chosen genome.
+
+Why the VP1 vote ignores mapping quality: MAPQ says how much better a
+read's best placement is than its second best. A sample whose lineage is 14
+to 15% from every panel VP1 of its serotype is about equally far from
+several of them, and minimap2 gives nearly every read MAPQ 0 although each
+aligns perfectly well. Measured 22 November 2026 on 14 Ethiopian O and A
+VP1 records: one sample's 256 reads all aligned to the VP1 panel at the same
+85% identity as a sample that chose without trouble, and 255 had MAPQ under
+10; with a MAPQ floor of 10 the chooser had no vote and the sample no
+reference. The result now carries `vote_reads_unambiguous` (reads at MAPQ
+10 or more on the chosen VP1) and `ambiguous_vote`, true when fewer than 20
+are: the sample's lineage has no genome in the library and the chosen one
+is the least distant. The genome panel keeps the MAPQ floor, because the
+conserved 3' half of the genome places at random between serotypes and
+would otherwise swamp the composition figures.
 
 VP1 decides because it is the serotype- and topotype-determining region:
 only reads carrying discriminating sequence vote, and the conserved 3' half
@@ -187,7 +231,10 @@ an O genome than to the library's A genome (the Pirbright A samples read as
 
 `fmdv_reference.json` in the sample directory records the choice, `vote`
 (`vp1` or `genome`), `f_match` (now the chosen genome's share of the
-in-scope vote, 0 to 1), `vote_reads`, the runner-up, `identity`,
+in-scope vote, 0 to 1), `vote_reads`, `vote_reads_unambiguous`,
+`ambiguous_vote`, the runner-up, `identity` (with `identity_basis`:
+`genome`, or `vp1` when no whole-genome alignment of the reads was
+unambiguous, as for a VP1-only record),
 `serotype_share` (VP1) and `serotype_share_genome`, `mixed`, and the top
 five hits on each panel. Two flags, both **warnings, never refusals**:
 

@@ -30,6 +30,23 @@ from the nearest library genome, where exact 21-mers mostly fail, and a
 1 to 2% trace of Asia1 barcode crosstalk with a near-identical library genome
 out-scored them on breadth. Alignment tolerates the divergence and the vote
 is weighted by reads, so crosstalk stays a minority.
+
+Why the VP1 vote counts ambiguous reads: minimap2's mapping quality says how
+much better a read's best placement is than its second best. On a sample
+whose lineage sits 14 to 15% from every panel VP1 the best and second best
+are near-equidistant panel genomes of the same serotype, and almost every
+read comes back with MAPQ 0 even though it aligns perfectly well. Measured
+22 November 2026 on 14 Ethiopian O and A VP1 records: all 256 reads of one
+sample aligned to the VP1 panel at the same 85% identity as a sample that
+chose its reference without trouble, but 255 of them had MAPQ under 10, so a
+MAPQ floor of 10 left the chooser with no vote and the sample with no
+reference. The vote therefore counts every primary alignment and reports
+beside it how many were unambiguous (MAPQ 10 or more); when fewer than
+MIN_VOTES are, the result is flagged ambiguous_vote, which means the sample
+belongs to a lineage with no genome in the library and the chosen genome is
+merely the least distant. The genome panel keeps the MAPQ floor: there the
+conserved 3' half of the genome splits at random between serotypes and
+counting those reads would make the composition figures meaningless.
 """
 
 from __future__ import annotations
@@ -48,7 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fmdv_reflib  # noqa: E402
 
 SUBSAMPLE = 20000       # reads used for the vote; a few seconds of minimap2
-MIN_MAPQ = 10           # primary alignments only, and unambiguous ones
+MIN_MAPQ = 10           # an unambiguous placement (genome panel floor; VP1 panel reports it)
 MIN_ALN = 100           # aligned bases for a read to count
 MIN_VOTES = 20          # reads on the winning VP1 before the vote is trusted
 DISTANT_BELOW = 0.90    # mean identity of reads to the chosen genome
@@ -77,28 +94,36 @@ def _subsample(seqkit: str, reads: List[Path], work: Path, n: int) -> Tuple[Path
     return out, mean_len
 
 
-def _map(minimap2: str, preset: str, threads: int, panel: Path, reads: Path) -> Dict[str, Dict]:
+def _map(minimap2: str, preset: str, threads: int, panel: Path, reads: Path,
+         min_mapq: int = MIN_MAPQ) -> Dict[str, Dict]:
     """Primary alignments per target: distinct reads, matching bases, aligned
     block, from PAF. Secondary alignments are suppressed; supplementary ones
-    count their own bases but not a second read."""
+    count their own bases but not a second read. Alignments under min_mapq
+    are dropped; with min_mapq 0 every primary alignment counts and
+    "unambiguous" says how many reads per target reached MIN_MAPQ."""
     # -c: base-level alignment, so column 10 is true matches and the de tag
     # is gap-compressed divergence. Without it both are chaining estimates
     # (identities of 0.2 to 0.4 on correct references, measured 14 Nov 2026).
     p = subprocess.run([minimap2, "-c", "-t", str(threads), *preset.split(), "--secondary=no",
                         str(panel), str(reads)], capture_output=True, text=True, check=True)
-    per: Dict[str, Dict] = defaultdict(lambda: {"reads": set(), "match": 0, "block": 0, "div": 0.0})
+    per: Dict[str, Dict] = defaultdict(lambda: {"reads": set(), "unambiguous": set(),
+                                                "match": 0, "block": 0, "div": 0.0})
     for line in p.stdout.splitlines():
         f = line.split("\t")
         if len(f) < 12:
             continue
-        if int(f[11]) < MIN_MAPQ or int(f[10]) < MIN_ALN:
+        mapq = int(f[11])
+        if mapq < min_mapq or int(f[10]) < MIN_ALN:
             continue
         de = next((float(x[5:]) for x in f[12:] if x.startswith("de:f:")), None)
         block = int(f[10])
         t = per[f[5]]
         t["reads"].add(f[0]); t["match"] += int(f[9]); t["block"] += block
+        if mapq >= MIN_MAPQ:
+            t["unambiguous"].add(f[0])
         t["div"] += (de if de is not None else 1 - int(f[9]) / block) * block
-    return {k: {"reads": len(v["reads"]), "match": v["match"], "block": v["block"],
+    return {k: {"reads": len(v["reads"]), "unambiguous": len(v["unambiguous"]),
+                "match": v["match"], "block": v["block"],
                 "identity": (1 - v["div"] / v["block"]) if v["block"] else 0.0}
             for k, v in per.items()}
 
@@ -106,8 +131,8 @@ def _map(minimap2: str, preset: str, threads: int, panel: Path, reads: Path) -> 
 def _top(table: Dict[str, Dict], allowed: Optional[set] = None, n: int = 5) -> List[Dict]:
     rows = [{"safe": k, **v} for k, v in table.items() if allowed is None or k in allowed]
     rows.sort(key=lambda r: (-r["match"], -r["reads"]))
-    return [{"safe": r["safe"], "reads": r["reads"], "bases": r["match"],
-             "identity": round(r["identity"], 4)} for r in rows[:n]]
+    return [{"safe": r["safe"], "reads": r["reads"], "unambiguous": r["unambiguous"],
+             "bases": r["match"], "identity": round(r["identity"], 4)} for r in rows[:n]]
 
 
 def main() -> int:
@@ -165,7 +190,10 @@ def main() -> int:
                    "reads_used": a.subsample, "mean_read_length": round(mean_len)})
 
     gen = _map(minimap2, f"-x {preset}", a.threads, gen_panel, reads)
-    vp1 = _map(minimap2, vp1_preset, a.threads, vp1_panel, reads) if vp1_panel.is_file() else {}
+    # Every primary alignment votes on VP1 (see the module docstring: a
+    # lineage equidistant from several panel VP1s has MAPQ 0 on nearly every
+    # read); the unambiguous count is kept beside it.
+    vp1 = _map(minimap2, vp1_preset, a.threads, vp1_panel, reads, min_mapq=0) if vp1_panel.is_file() else {}
 
     # Composition over ALL genomes (not just the scope): a sample whose reads
     # are mostly another serotype must be visible even under a serotype scope.
@@ -240,12 +268,26 @@ def main() -> int:
         chosen = allowed[best["safe"]]
         # f_match keeps its slot for the GUI: now the chosen genome's share of
         # the in-scope vote (aligned bases), 0 to 1.
+        ambiguous = vote == "vp1" and best["unambiguous"] < MIN_VOTES
         result.update({"chosen": chosen, "pinned": False, "vote": vote,
                        "f_match": round(best["bases"] / total, 4), "vote_reads": best["reads"],
+                       "vote_reads_unambiguous": best["unambiguous"], "ambiguous_vote": ambiguous,
                        "runner_up": ({"safe": runner["safe"], "share": round(runner["bases"] / total, 4),
                                       "reads": runner["reads"]} if runner else None)})
+        if ambiguous:
+            _err(f"fmdv: WARNING {sample_dir.name}: {best['reads']} reads vote for {best['safe']} but only "
+                 f"{best['unambiguous']} place there unambiguously (MAPQ {MIN_MAPQ}+); the sample is about "
+                 f"equally far from several library genomes"
+                 + (f" ({runner['safe']} is the runner-up with {runner['reads']} reads)" if runner else "")
+                 + ". Its lineage probably has no genome in the library; this is the least distant one.")
 
+    # Identity of the reads to the chosen genome, from the genome panel when it
+    # placed any there, else from its VP1 (a VP1-only sample, or one whose
+    # whole-genome alignments were all ambiguous).
     ident = gen.get(chosen["safe"], {}).get("identity")
+    result["identity_basis"] = "genome" if ident is not None else "vp1"
+    if ident is None:
+        ident = vp1.get(chosen["safe"], {}).get("identity")
     result["identity"] = round(ident, 4) if ident is not None else None
     result["distant"] = bool(ident is not None and ident < a.distant_below)
     if result["distant"]:

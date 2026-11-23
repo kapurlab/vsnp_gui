@@ -28,17 +28,21 @@ Usage:
     fmdv_reflib.py materialize --lib <dir> --genome <safe>
     fmdv_reflib.py annotations --lib <dir> [--email you@example.org] [--force] [--no-proteins]
     fmdv_reflib.py add --lib <dir> --accession OQ557397 --serotype SAT2 [--lineage <topotype>]
+    fmdv_reflib.py relabel --lib <dir> --accession OQ557397 --lineage XIV [--source <where from>]
 
 Adding a genome: `add` puts one more complete genome into the library, for a
 lineage NanoFMDV's 79 do not cover. Measured 22 November 2026 on 67 Ethiopian
 SAT2 VP1 records: at 75 to 81% identity to every SAT2 genome in the panel
-the chooser had no vote. 44 of them sit at 99% to OQ557397 (ETH/2/2022, a
-complete genome 24% from every topotype-annotated SAT2 VP1 in the typing
-set, so it goes in unassigned until someone names its topotype); the other
-23 are topotype XIII (the 2009 Ethiopian outbreak), for which GenBank holds
-no complete genome at all, and those stay on the least distant library
-genome, flagged distant and ambiguous. Leave --lineage out unless the
-topotype is established: the label is what the picker shows. The
+the chooser had no vote. 44 of them sit at 99% to OQ557397 (ETH/2/2022);
+the 1991 records are 84% from it and take OQ557396 (ETH/2/91) instead. Both
+are topotype XIV in the WRL sequence metadata, and the typing set holds no
+XIV record, so `add` cannot name that topotype from the library alone: the
+genome goes in unassigned, and `relabel` moves the label in once a reference
+laboratory names it. The other 23 are topotype XIII (the 2009 Ethiopian
+outbreak), for which no complete genome exists in GenBank or in the WRL set,
+and those stay on the least distant library genome, flagged distant and
+ambiguous. Leave --lineage out unless the topotype is established: the label
+is what the picker shows. The
 genome is fetched from GenBank (or read from --fasta), written to genomes/,
 entered in lineages.json and panels/genomes.fasta, and its VP1 is cut and
 appended to panels/vp1.fasta: from --vp1-fasta when given, else by exact
@@ -50,6 +54,17 @@ stopped using it for minimap2. A Step 2 context database for the new
 reference is built as for any other (fmdv_panel_build.sh, then
 fmdv_panel_register.py), and context databases built earlier for other
 references do not contain the new genome until rebuilt.
+
+Relabelling: `relabel` gives a genome entered as unassigned the topotype a
+reference laboratory has since named, by accession. The safe name carries
+the topotype, so the genome's FASTA, its annotation files, the panel
+entries, the hierarchy the picker shows and the typing set's own copies of
+that accession all move together. The typing report quotes the best hit's
+label, and the typing set's slice of the same genome scores as well as the
+panel entry, so a label left behind there would still report a sample
+without a topotype. --source records where the topotype came from. The Step
+2 context database is keyed by the safe name, so it has to be built and
+registered again under the new one.
 
 Annotation: `annotations` fetches each genome's GenBank record and GFF3
 from NCBI once, into annotations/<safe>.gbk and .gff, and materialize
@@ -405,7 +420,7 @@ def add_genome(lib: Path, accession: str, serotype: str, lineage: str, isolate: 
     acc = accession.split(".")[0].strip()
     serotype = serotype.upper().strip()
     lineage = lineage.strip()
-    safe = _UNSAFE.sub("-", f"{serotype}-{lineage or 'NA'}_{acc}").strip("-")
+    safe = _safe(serotype, lineage, acc)
     if any(g["safe"] == safe or g["accession"] == acc for g in idx["genomes"]):
         raise SystemExit(f"{acc} is already in the library")
 
@@ -462,6 +477,123 @@ def add_genome(lib: Path, accession: str, serotype: str, lineage: str, isolate: 
     return rec
 
 
+def _safe(serotype: str, lineage: str, acc_token: str) -> str:
+    return _UNSAFE.sub("-", f"{serotype}-{lineage or 'NA'}_{acc_token}").strip("-")
+
+
+def _relabel_typing_set(lib: Path, serotype: str, acc: str, lineage: str) -> int:
+    """Give the typing set's own copies of `acc` the same topotype.
+
+    The context sets come from NanoFMDV's GenBank collection, whose headers
+    carry no topotype for a record its curators had not placed, so the VP1
+    slice taken from this genome sits there as <SERO>-NA_<acc>. The typing
+    report quotes the best hit's label, and that copy scores the same as the
+    panel entry on an identical sequence, so the label has to move in both
+    places or a typed sample still comes back without a topotype."""
+    ctx = lib / "vp1_context"
+    changed = 0
+    fasta = ctx / f"{serotype}.fasta"
+    if fasta.is_file():
+        lines = fasta.read_text(encoding="utf-8").splitlines(True)
+        for i, line in enumerate(lines):
+            if not line.startswith(">"):
+                continue
+            token = line[1:].split()[0].rsplit("_", 1)[-1]
+            if token.split(".")[0] == acc:
+                lines[i] = f">{_safe(serotype, lineage, token)}\n"
+                changed += 1
+        fasta.write_text("".join(lines), encoding="utf-8")
+    tsv = ctx / f"{serotype}.tsv"
+    if tsv.is_file():
+        rows = tsv.read_text(encoding="utf-8").splitlines(True)
+        head = rows[0].rstrip("\n").split("\t") if rows else []
+        for i, row in enumerate(rows[1:], start=1):
+            cells = row.rstrip("\n").split("\t")
+            if len(cells) < len(head) or cells[head.index("accession")].split(".")[0] != acc:
+                continue
+            token = cells[0].rsplit("_", 1)[-1]
+            cells[0] = _safe(serotype, lineage, token)
+            cells[head.index("topotype")] = lineage
+            rows[i] = "\t".join(cells) + "\n"
+        tsv.write_text("".join(rows), encoding="utf-8")
+    return changed
+
+
+def relabel_genome(lib: Path, accession: str, lineage: str, source: str = "") -> Dict:
+    """Give a library genome the topotype it was entered without.
+
+    `add` lists a genome as unassigned when no annotated VP1 in the typing
+    set is near enough to name its topotype, which is the honest state for a
+    lineage the typing set does not hold. Once a reference laboratory names
+    it, this moves the label in: the safe name carries the topotype, so the
+    genome's files, its panel entries, the typing set's copies of the same
+    accession and the hierarchy the picker shows all follow.
+
+    The Step 2 context database is keyed by the safe name, so an existing one
+    belongs to the old name and has to be built and registered again; the
+    caller is told so. Nothing is inferred: `source` is recorded on the
+    record as where the topotype came from."""
+    idx = load(lib)
+    acc = accession.split(".")[0].strip()
+    lineage = lineage.strip()
+    rec = next((g for g in idx["genomes"] if g["accession"].split(".")[0] == acc), None)
+    if rec is None:
+        raise SystemExit(f"{acc} is not in the library")
+    sero, old = rec["serotype"], rec["safe"]
+    new = _safe(sero, lineage, acc)
+    if new == old:
+        raise SystemExit(f"{acc} is already {rec['lineage'] or 'unassigned'}")
+    if any(g["safe"] == new for g in idx["genomes"]):
+        raise SystemExit(f"{new} is already in the library")
+
+    genome = lib / "genomes" / f"{old}.fasta"
+    if genome.is_file():
+        name, seq = next(_read_fasta(genome))
+        _write_fasta(lib / "genomes" / f"{new}.fasta", new, seq)
+        genome.unlink()
+    for ext in (".gbk", ".gff"):
+        src = lib / "annotations" / f"{old}{ext}"
+        if src.is_file():
+            src.rename(lib / "annotations" / f"{new}{ext}")
+    coords = lib / "annotations" / "protein_coords.json"
+    if coords.is_file():
+        table = json.loads(coords.read_text())
+        if old in table:
+            table[new] = table.pop(old)
+            coords.write_text(json.dumps(table, indent=1))
+    folder = lib / "reference_options" / old
+    had_folder = folder.is_dir()
+    if had_folder:
+        shutil.rmtree(folder)           # materialize rebuilds it under the new name
+
+    old_lineage = rec["lineage"]
+    rec["lineage"] = lineage
+    rec["safe"] = new
+    rec["id"] = f"{sero}{'/' + lineage if lineage else ''}_{acc}_{rec.get('year', '')}_{rec.get('isolate', '')}"
+    note = f"topotype {lineage} assigned {time.strftime('%Y-%m-%d')} by fmdv_reflib.py relabel"
+    rec["source"] = f"{rec.get('source', '')}; {note}{f' ({source})' if source else ''}".lstrip("; ")
+    tree = idx["tree"].setdefault(sero, {})
+    bucket = tree.get(old_lineage or "(unassigned)", [])
+    if old in bucket:
+        bucket.remove(old)
+    if not bucket:
+        tree.pop(old_lineage or "(unassigned)", None)
+    tree.setdefault(lineage or "(unassigned)", []).append(new)
+    (lib / "lineages.json").write_text(json.dumps(idx, indent=1))
+
+    build_panels(lib, None)
+    panel = lib / "panels" / "vp1.fasta"
+    if panel.is_file():
+        text = panel.read_text(encoding="utf-8")
+        panel.write_text(text.replace(f">{old}\n", f">{new}\n"), encoding="utf-8")
+    moved = _relabel_typing_set(lib, sero, acc, lineage)
+    if had_folder:
+        materialize(lib, new)
+    print(f"relabelled {old} -> {new} ({moved} typing-set record(s) relabelled)", file=sys.stderr)
+    print(f"next: fmdv_panel_build.sh {new} && fmdv_panel_register.py {new}  (Step 2 context database); "
+          f"the entry registered for {old} is stale", file=sys.stderr)
+    return rec
+
 def _split_fasta_text(text: str) -> Tuple[str, str]:
     lines = text.strip().splitlines()
     return lines[0][1:].strip(), "".join(l.strip() for l in lines[1:] if not l.startswith(">"))
@@ -492,6 +624,12 @@ def main() -> int:
     ad.add_argument("--vp1-fasta", help="the genome's VP1 sequence, when it cannot be located automatically")
     ad.add_argument("--email", default="", help="contact address for NCBI (default: NCBI_EMAIL)")
     ad.add_argument("--no-annotations", action="store_true", help="skip fetching the GenBank annotation")
+    rl = sub.add_parser("relabel", help="give a genome entered as unassigned its topotype")
+    rl.add_argument("--lib", required=True)
+    rl.add_argument("--accession", required=True, help="GenBank accession of a genome already in the library")
+    rl.add_argument("--lineage", required=True, help="topotype/lineage as the picker should show it, e.g. XIV")
+    rl.add_argument("--source", default="", help="where the topotype comes from, recorded on the record, "
+                    "e.g. 'WRL Pirbright sequence metadata'")
     a = ap.parse_args()
     lib = Path(a.lib).expanduser().resolve()
     if a.cmd == "add":
@@ -499,6 +637,8 @@ def main() -> int:
                    Path(a.fasta).expanduser().resolve() if a.fasta else None,
                    Path(a.vp1_fasta).expanduser().resolve() if a.vp1_fasta else None,
                    a.email, annotations=not a.no_annotations)
+    elif a.cmd == "relabel":
+        relabel_genome(lib, a.accession, a.lineage, a.source)
     elif a.cmd == "build":
         build(Path(a.refs).expanduser().resolve(), lib,
               Path(a.vp1).expanduser().resolve() if a.vp1 else None)

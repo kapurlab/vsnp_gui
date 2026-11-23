@@ -68,10 +68,10 @@ The library path is `fmdv_reflib` in the user config, default `~/fmdv_refs`.
 NanoFMDV's panel has no genome for some lineages that circulate. Measured
 22 November 2026 on 67 Ethiopian SAT2 VP1 records: the nearest panel SAT2
 genome was 75 to 81% identical and the chooser had no vote. 44 of the 67
-are within 1% of OQ557397 (ETH/2/2022), a complete genome that is itself
-24% from every topotype-annotated SAT2 VP1 in the typing set; the other 23
-are topotype XIII, the 2009 Ethiopian outbreak, for which GenBank holds no
-complete genome, so they stay on the least distant library genome with the
+are within 1% of OQ557397 (ETH/2/2022) and the 1991 records are 84% from
+it, close to OQ557396 (ETH/2/91) instead; the other 23 are topotype XIII,
+the 2009 Ethiopian outbreak, for which no complete genome exists in GenBank
+or in the WRL set, so they stay on the least distant library genome with the
 `distant` and `ambiguous_vote` flags set. One command adds a complete
 genome from GenBank:
 
@@ -81,7 +81,9 @@ fmdv_reflib.py add --lib ~/fmdv_refs --accession OQ557397 --serotype SAT2
 
 `--lineage <topotype>` labels it in the picker; leave it out when the
 topotype is not established, and the genome is listed as unassigned, as
-NanoFMDV's own SAT2 KU821592 is.
+NanoFMDV's own SAT2 KU821592 is. Both OQ557397 and OQ557396 are topotype
+XIV in the WRL sequence metadata, which the typing set has no record of, so
+`add` cannot name it from the library alone.
 
 It fetches the record, writes `genomes/<safe>.fasta`, enters the genome in
 `lineages.json` (so the picker shows the lineage) and `panels/genomes.fasta`,
@@ -96,6 +98,22 @@ database for the new reference is built as for any other
 context databases built earlier for other references do not hold the new
 genome until rebuilt. The sourmash signatures are not extended; nothing
 reads them.
+
+Once a reference laboratory names the topotype, `relabel` moves the label
+in by accession:
+
+```
+fmdv_reflib.py relabel --lib ~/fmdv_refs --accession OQ557397 --lineage XIV \
+  --source "WRL Pirbright sequence metadata"
+```
+
+The safe name carries the topotype, so the genome's FASTA, its annotation
+files, the panel entries, the hierarchy the picker shows and the typing
+set's own copies of that accession all move together. A label left in the
+typing set would still be quoted in the typing report, because that slice
+of the genome scores as well as the panel entry. `--source` is recorded on
+the record. The Step 2 context database is keyed by the safe name, so build
+and register it again under the new one.
 
 ### Mature protein features
 

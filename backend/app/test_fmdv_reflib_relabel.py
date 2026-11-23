@@ -70,10 +70,14 @@ def make_library(root: Path) -> Path:
         "".join(f">{g['safe']}\n{'ACGT' * 60}\n" for g in genomes))
     (lib / "panels" / "vp1.fasta").write_text(
         ">SAT2-XIII_AY343939\nACGTACGT\n>SAT2-NA_OQ557397\nTTGGCCAA\n")
+    (lib / "annotations" / "raw").mkdir()
     for ext in (".gbk", ".gff"):
-        (lib / "annotations" / f"SAT2-NA_OQ557397{ext}").write_text("annotation\n")
+        (lib / "annotations" / f"SAT2-NA_OQ557397{ext}").write_text("rewritten\n")
+        (lib / "annotations" / "raw" / f"SAT2-NA_OQ557397{ext}").write_text("as downloaded\n")
     (lib / "annotations" / "protein_coords.json").write_text(json.dumps(
-        {"SAT2-XIII_AY343939": {"VP1": [1, 2]}, "SAT2-NA_OQ557397": {"VP1": [3, 4]}}, indent=1))
+        {"genomes": {"SAT2-XIII_AY343939": {"VP1": [1, 2]}},
+         "failed": {"SAT2-NA_OQ557397": ["expected one CDS, found 12"]},
+         "donors": ["SAT2-NA_OQ557397", "SAT2-XIII_AY343939"], "n_genomes": 1}, indent=1))
     # the typing set holds the slice taken from the same genome, and its own
     # copy of the other accession, which must not move
     (lib / "vp1_context" / "SAT2.fasta").write_text(
@@ -112,9 +116,16 @@ def main() -> int:
         for ext in (".gbk", ".gff"):
             assert_true((lib / "annotations" / f"SAT2-XIV_OQ557397{ext}").is_file(),
                         f"the annotation {ext} is renamed")
+        for ext in (".gbk", ".gff"):
+            assert_true((lib / "annotations" / "raw" / f"SAT2-XIV_OQ557397{ext}").is_file(),
+                        f"the untouched download {ext} is renamed with it")
+            assert_true(not (lib / "annotations" / "raw" / f"SAT2-NA_OQ557397{ext}").exists(),
+                        f"and none left under the old name ({ext})")
         coords = json.loads((lib / "annotations" / "protein_coords.json").read_text())
-        assert_eq(sorted(coords), ["SAT2-XIII_AY343939", "SAT2-XIV_OQ557397"],
-                  "the protein coordinate table is rekeyed")
+        assert_eq(sorted(coords["failed"]), ["SAT2-XIV_OQ557397"],
+                  "the protein table's failed entry is rekeyed")
+        assert_eq(coords["donors"], ["SAT2-XIII_AY343939", "SAT2-XIV_OQ557397"],
+                  "and its donor list")
 
         panel = (lib / "panels" / "vp1.fasta").read_text()
         assert_true(">SAT2-XIV_OQ557397\n" in panel and "SAT2-NA" not in panel,

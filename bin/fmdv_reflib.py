@@ -559,15 +559,30 @@ def relabel_genome(lib: Path, accession: str, lineage: str, source: str = "") ->
         name, seq = next(_read_fasta(genome))
         _write_fasta(lib / "genomes" / f"{new}.fasta", new, seq)
         genome.unlink()
-    for ext in (".gbk", ".gff"):
-        src = lib / "annotations" / f"{old}{ext}"
-        if src.is_file():
-            src.rename(lib / "annotations" / f"{new}{ext}")
+    # annotations/raw holds the untouched download, which fmdv_proteins.py reads
+    # in preference to the rewritten file; left behind, the rewritten record is
+    # parsed instead and its 12 mature CDS features fail the one-CDS check.
+    for folder in (lib / "annotations", lib / "annotations" / "raw"):
+        for ext in (".gbk", ".gff"):
+            src = folder / f"{old}{ext}"
+            if src.is_file():
+                src.rename(folder / f"{new}{ext}")
     coords = lib / "annotations" / "protein_coords.json"
     if coords.is_file():
         table = json.loads(coords.read_text())
+        touched = False
+        for key in ("genomes", "failed"):
+            sub = table.get(key)
+            if isinstance(sub, dict) and old in sub:
+                sub[new] = sub.pop(old)
+                touched = True
+        if isinstance(table.get("donors"), list) and old in table["donors"]:
+            table["donors"] = sorted(new if d == old else d for d in table["donors"])
+            touched = True
         if old in table:
             table[new] = table.pop(old)
+            touched = True
+        if touched:
             coords.write_text(json.dumps(table, indent=1))
     folder = lib / "reference_options" / old
     had_folder = folder.is_dir()

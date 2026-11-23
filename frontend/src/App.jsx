@@ -884,10 +884,12 @@ export default function App() {
   const [projectsScanning, setProjectsScanning] = useState(false);
   const [projectsError, setProjectsError] = useState("");
   // Server-side path browser. mode "folder" picks the projects root; mode
-  // "files" multi-selects FASTQs already on the server (see openFileBrowser).
+  // "files" multi-selects FASTQs already on the server (see openFileBrowser);
+  // mode "pick" hands the chosen directory back to whoever opened it, which is
+  // how the MinKNOW tab offers a folder picker for a path the backend reads.
   const [folderBrowser, setFolderBrowser] = useState({
     open: false, mode: "folder", path: "", parent: null, entries: [], files: [],
-    disk: null, selected: [], loading: false, error: ""
+    disk: null, selected: [], loading: false, error: "", title: "", pick: null
   });
   // Free/total for the current Projects root, shown next to the field.
   const [projectsRootDisk, setProjectsRootDisk] = useState(null);
@@ -3735,7 +3737,24 @@ export default function App() {
     });
     browseDirs(start, "files");
   }
+  // Browse the machine the backend runs on and hand the chosen directory to
+  // `onPick`. The caller holds a server-side path, so a browser folder input
+  // is no use to it: the browser reports a folder's contents, never where it
+  // sits on disk, and on a remote backend it is the wrong disk anyway.
+  function openPathBrowser(start, onPick, title) {
+    setFolderBrowser({
+      open: true, mode: "pick", path: "", parent: null, entries: [], files: [],
+      disk: null, selected: [], loading: true, error: "",
+      title: title || "Select a folder", pick: onPick
+    });
+    browseDirs(start || settings.projects_root || "", "pick");
+  }
   function chooseFolder() {
+    if (folderBrowser.mode === "pick") {
+      if (folderBrowser.pick) folderBrowser.pick(folderBrowser.path);
+      setFolderBrowser((s) => ({ ...s, open: false, pick: null }));
+      return;
+    }
     setSettings((s) => ({ ...s, projects_root: folderBrowser.path }));
     setFolderBrowser((s) => ({ ...s, open: false }));
   }
@@ -7727,6 +7746,7 @@ export default function App() {
                   apiBase={API_BASE}
                   project={selectedProject}
                   enabled={!!selectedProject && settingsReady}
+                  onBrowse={openPathBrowser}
                   onImported={() => { loadAll(); loadInputs(selectedProject); }}
                 />
                 ) : null}
@@ -12599,7 +12619,9 @@ export default function App() {
             style={{ background: "var(--panel, #fff)", color: "inherit", borderRadius: 10, width: "min(640px, 92vw)", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}
           >
             <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border, #ddd)", fontWeight: 700, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-              <span>{folderBrowser.mode === "files" ? "Select FASTQ files on the server" : "Select a projects root"}</span>
+              <span>{folderBrowser.mode === "files" ? "Select FASTQ files on the server"
+                : folderBrowser.mode === "pick" ? (folderBrowser.title || "Select a folder")
+                : "Select a projects root"}</span>
               <DiskSpace disk={folderBrowser.disk} style={{ fontWeight: 400 }} />
             </div>
             <div style={{ padding: "10px 16px", display: "flex", gap: 6, alignItems: "center" }}>
@@ -12655,7 +12677,7 @@ export default function App() {
                 </>
               )}
             </div>
-            {folderBrowser.mode !== "files" && !folderBrowser.loading && !folderBrowser.error && folderBrowser.writable === false ? (
+            {folderBrowser.mode === "folder" && !folderBrowser.loading && !folderBrowser.error && folderBrowser.writable === false ? (
               <div style={{ padding: "6px 16px", fontSize: "13px", color: "var(--danger, #c00)" }}>
                 You cannot write this folder, so no project can be created here. Choose a folder you can write.
               </div>

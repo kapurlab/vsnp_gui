@@ -18,8 +18,9 @@ function fmtBytes(n) {
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
 }
 
-export default function OntRunImport({ apiBase, project, enabled, onImported }) {
+export default function OntRunImport({ apiBase, project, enabled, onImported, onBrowse }) {
   const [runDir, setRunDir] = useState("");
+  const [dragOver, setDragOver] = useState(false);
   const [preview, setPreview] = useState(null);
   const [names, setNames] = useState({});      // barcode -> sample name as edited
   const [picked, setPicked] = useState({});    // barcode -> bool
@@ -61,6 +62,33 @@ export default function OntRunImport({ apiBase, project, enabled, onImported }) 
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
+
+  // A dropped run folder. The other tabs upload what is dropped; this one
+  // cannot, because the backend reads the run folder itself and a MinKNOW run
+  // is tens of gigabytes. So a drop is only ever a way to fill in the path,
+  // and a path is only there when the drop carries text (dragged from a
+  // terminal or a path field) or when a desktop build exposes file.path. A
+  // folder dragged from a file manager in a plain browser carries neither:
+  // the browser reports its contents and its name, never where it lives. Say
+  // so rather than filling the field with a name that is not a path.
+  function onDrop(e) {
+    e.preventDefault();
+    setDragOver(false);
+    if (!enabled) return;
+    const text = (e.dataTransfer.getData("text/plain") || "").trim();
+    if (text.startsWith("/") || /^[A-Za-z]:\\/.test(text)) {
+      setRunDir(text.replace(/^file:\/\//, ""));
+      setMsg("");
+      return;
+    }
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f && f.path) {                       // desktop build only
+      setRunDir(f.path);
+      setMsg("");
+      return;
+    }
+    setMsg("A folder dropped here carries no path, only its contents, and the run folder has to be one the server can read. Use Browse, or type the path.");
+  }
 
   async function doPreview() {
     if (!project || !runDir.trim()) return;
@@ -127,7 +155,16 @@ export default function OntRunImport({ apiBase, project, enabled, onImported }) 
         Unclassified reads are listed apart and skipped unless ticked. Nothing in the run folder is changed.</p>
         <p><a href={`${apiBase}/api/ont/sample_sheet_template`} download="sample_sheet.csv">Sample sheet template</a></p>
       </InputHelp>
-      <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+      <div
+        onDragOver={(e) => { e.preventDefault(); if (enabled) setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={onDrop}
+        style={{
+          display: "flex", gap: "4px", alignItems: "center", padding: "4px",
+          border: dragOver ? "2px dashed var(--accent, #2a7)" : "2px dashed transparent",
+          borderRadius: 6, background: dragOver ? "var(--panel-alt, rgba(42,119,85,0.06))" : "transparent",
+        }}
+      >
         <input
           type="text"
           value={runDir}
@@ -137,6 +174,17 @@ export default function OntRunImport({ apiBase, project, enabled, onImported }) 
           disabled={!enabled}
           onKeyDown={(e) => { if (e.key === "Enter") doPreview(); }}
         />
+        {onBrowse ? (
+          <button
+            type="button"
+            className="ghost"
+            disabled={!enabled || busy}
+            title="Browse the folders on the machine running the analysis"
+            onClick={() => onBrowse(runDir, (chosen) => { setRunDir(chosen); setMsg(""); }, "Select a MinKNOW run folder")}
+          >
+            Browse…
+          </button>
+        ) : null}
         <button type="button" onClick={doPreview} disabled={!enabled || busy || !runDir.trim()}>
           {busy && !preview ? "Scanning…" : "Preview"}
         </button>

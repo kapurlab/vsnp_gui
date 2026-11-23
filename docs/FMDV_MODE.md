@@ -91,8 +91,10 @@ cuts its VP1 and appends it to `panels/vp1.fasta`, and fetches the GenBank
 annotation as `annotations` does. The VP1 comes from `--vp1-fasta` when
 given, else from the typing set's record of the same accession when that is
 a substring of the genome, else from blastn against the panel VP1s of the
-serotype (BLAST+ on PATH). The isolate name and year come from the GenBank
-record unless `--isolate` and `--year` say otherwise. The Step 2 context
+serotype (BLAST+ on PATH). With `--lineage`, the typing set's own copies of
+that accession are labelled too, for the reason given below. The isolate
+name and year come from the GenBank record unless `--isolate` and `--year`
+say otherwise. The Step 2 context
 database for the new reference is built as for any other
 (`fmdv_panel_build.sh <safe>`, then `fmdv_panel_register.py <safe>`), and
 context databases built earlier for other references do not hold the new

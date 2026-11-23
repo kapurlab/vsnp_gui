@@ -48,8 +48,9 @@ entered in lineages.json and panels/genomes.fasta, and its VP1 is cut and
 appended to panels/vp1.fasta: from --vp1-fasta when given, else by exact
 match to the typing set's record of the same accession
 (vp1_context/_typing/all_vp1.fasta), else by blastn against the panel VP1s
-of its serotype (BLAST+ on PATH). The GenBank annotation is fetched as for
-`annotations`. The sourmash signature database is not extended: the chooser
+of its serotype (BLAST+ on PATH). With --lineage, the typing set's own
+copies of that accession are labelled too, for the reason `relabel` gives.
+The GenBank annotation is fetched as for `annotations`. The sourmash signature database is not extended: the chooser
 stopped using it for minimap2. A Step 2 context database for the new
 reference is built as for any other (fmdv_panel_build.sh, then
 fmdv_panel_register.py), and context databases built earlier for other
@@ -470,6 +471,13 @@ def add_genome(lib: Path, accession: str, serotype: str, lineage: str, isolate: 
     with open(lib / "panels" / "vp1.fasta", "a", encoding="utf-8") as out:
         out.write(f">{safe}\n{vp1[0]}\n")
     print(f"added {safe}: {len(seq)} nt, VP1 {len(vp1[0])} nt from {vp1[1]}", file=sys.stderr)
+    if lineage:
+        # The typing set's own slice of this genome carries no topotype, and the
+        # typing report quotes the best hit's label, so a sample of this lineage
+        # would come back without one although the library now names it.
+        moved = _relabel_typing_set(lib, serotype, acc, lineage)
+        if moved:
+            print(f"typing set: {moved} record(s) of {acc} labelled {lineage}", file=sys.stderr)
     if annotations:
         fetch_annotations(lib, email)
     print(f"next: fmdv_panel_build.sh {safe} && fmdv_panel_register.py {safe}  (Step 2 context database)",

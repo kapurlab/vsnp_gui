@@ -133,6 +133,12 @@ def main() -> int:
         kept = next(r for r in rows if r[6] == "AY343939")
         assert_eq(kept[2], "XIII", "the other row's topotype is left alone")
 
+        # `add` asserts a topotype of its own, so it moves the same label
+        mod._relabel_typing_set(lib, "SAT2", "AY343939", "XIII-b")
+        rows = [r.split("\t") for r in (lib / "vp1_context" / "SAT2.tsv").read_text().splitlines()]
+        assert_eq(next(r for r in rows if r[6] == "AY343939")[2], "XIII-b",
+                  "a label asserted on add reaches the typing set")
+
         for bad, label in ((("OQ557397", "XIV"), "relabelling to the label it already has"),
                            (("ZZ000000", "XIV"), "an accession the library does not hold")):
             try:

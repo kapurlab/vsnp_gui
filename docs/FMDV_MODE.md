@@ -72,7 +72,10 @@ are within 1% of OQ557397 (ETH/2/2022) and the 1991 records are 84% from
 it, close to OQ557396 (ETH/2/91) instead; the other 23 are topotype XIII,
 the 2009 Ethiopian outbreak, for which no complete genome exists in GenBank
 or in the WRL set, so they stay on the least distant library genome with the
-`distant` and `ambiguous_vote` flags set. One command adds a complete
+`distant` and `ambiguous_vote` flags set. With both XIV genomes in the
+library they align against OQ557396 at 83% and finish Step 1, but only
+about 2% of the genome is called, so they come back untyped. A VP1-only
+import types them instead. One command adds a complete
 genome from GenBank:
 
 ```

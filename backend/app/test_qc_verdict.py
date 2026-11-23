@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import sys
 
-from qc_verdict import DEFAULTS, compute_verdict, merge_thresholds
+from qc_verdict import (DEFAULTS, compute_verdict, duplicate_context,
+                        merge_thresholds)
 
 
 def assert_eq(actual, expected, label):
@@ -107,6 +108,40 @@ def main() -> int:
     row = {"Average Depth": "1,050", "Unmapped Percent": "0.0%"}
     v = compute_verdict(row, merge_thresholds({"coverage": {"pass_min": 2000.0, "review_min": 20.0}}))
     assert_eq(v["level"], "review", "1,050 is compared to the threshold, not skipped")
+
+    print("\n[duplicate removal qualifies the depth reason]")
+    # SRR6232295 as vsnp3 recorded it: an Ion Torrent amplicon run over 141 bp
+    # of VP1. Every read starts at the same base, so markdup -r took all of
+    # them and the depth fell from tens of thousands to 1.1x.
+    ion = {"Average Depth": "1.1", "Unmapped Percent": "1.4%",
+           "Mapped Single Reads": "2,766,492", "Mapped Paired Reads": "0",
+           "Duplicate Single Reads": "2,766,411", "Duplicate Paired Reads": "0",
+           "Duplicate Percent of Mapped Reads": "100.0%",
+           "R1 Ave Length": "135.3", "Reference Length": "8,198"}
+    v = compute_verdict(ion, merge_thresholds({"coverage": {"pass_min": 30.0, "review_min": 20.0}}))
+    assert_eq(v["level"], "fail", "1.1x still fails")
+    assert_eq(v["signals"]["duplicate_share"], 100.0, "the duplicate share is reported")
+    assert_eq(round(v["signals"]["coverage_before_dedup"]), 45658, "and the depth before removal")
+    reason = v["reasons"][0]
+    assert_eq("after duplicate removal" in reason, True, "the depth reason says what it is")
+    assert_eq("45,658× before" in reason, True, "and gives the figure before removal")
+
+    print("\n[an ordinary library reads as before]")
+    normal = {"Average Depth": "5", "Unmapped Percent": "0.0%",
+              "Mapped Single Reads": "0", "Mapped Paired Reads": "1,000,000",
+              "Duplicate Single Reads": "0", "Duplicate Paired Reads": "40,000",
+              "Duplicate Percent of Mapped Reads": "4.0%",
+              "R1 Ave Length": "150", "Reference Length": "4,400,000"}
+    v = compute_verdict(normal, DEFAULTS)
+    assert_eq(v["reasons"][0], "coverage 5.0\u00d7 < 10\u00d7 fail threshold",
+              "4% duplicates adds no clause")
+
+    print("\n[duplicate_context without the columns]")
+    d = duplicate_context({"Average Depth": "20"})
+    assert_eq(d, {"share": None, "depth_before": None}, "a v1 stats sheet yields nothing")
+    v = compute_verdict({"Average Depth": "5", "Unmapped Percent": "0.0%"}, DEFAULTS)
+    assert_eq(v["reasons"][0], "coverage 5.0\u00d7 < 10\u00d7 fail threshold",
+              "and the reason is unchanged")
 
     print("\nAll qc_verdict smoke tests passed.")
     return 0

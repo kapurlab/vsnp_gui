@@ -12,6 +12,17 @@ Signals consulted:
     below `review_min` ⇒ fail. Missing field skips the signal.
   - **Mapping rate** — derived as `100 - Unmapped Percent`, e.g. "0.0%" ⇒ 100.
     Same threshold structure as coverage.
+  - **Duplicate removal** — not a signal of its own, a qualifier on the depth
+    one. vsnp3 runs `samtools markdup -r`, which for single-end reads can only
+    call two reads duplicates when they share a start coordinate. An amplicon
+    library piles every read on the same few starts, so nearly all of them go,
+    and a sample sequenced to tens of thousands of fold reports about 1x.
+    Measured 22 November 2026 on SRR6232295, an Ion Torrent run over a 141 bp
+    stretch of VP1: 2,766,492 reads mapped, 100.0% of them removed, depth
+    reported as 1.1x. Read plainly that says re-sequence deeper, when depth was
+    never the problem. So where duplicates took most of the mapped reads the
+    depth reason says so and gives the figure before removal.
+
   - **Contamination** — anything truthy in a future `Sourmash Contamination`
     /  `_contamination` field forces the verdict to at least `review`. vsnp3
     doesn't currently emit this — handled defensively so the verdict still
@@ -45,6 +56,12 @@ from __future__ import annotations
 
 import copy
 from typing import Any
+
+
+# Share of mapped reads that has to go before a depth figure is reported as
+# what it is, a post-deduplication number. Half is already enough to halve the
+# depth, and an ordinary isolate library sits far below it.
+DEDUP_NOTE_MIN_PERCENT = 50.0
 
 
 # Module-level defaults — match config.DEFAULTS["qc_thresholds"]. Duplicated
@@ -117,6 +134,51 @@ def merge_thresholds(*layers: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _parse_count(value: Any) -> float | None:
+    """2,766,492 -> 2766492.0. None when the field is absent or not a number."""
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def duplicate_context(row: dict[str, Any]) -> dict[str, float | None]:
+    """What duplicate removal did to this sample, from vsnp3's stats columns.
+
+    Returns `share`, the percentage of mapped reads removed, and
+    `depth_before`, the mean depth those reads gave across the reference
+    before removal (mapped reads times mean read length over reference
+    length). Either is None when the columns needed are not there, which is
+    how a v1 stats sheet and a simulated sample both behave."""
+    share = _parse_percent(row.get("Duplicate Percent of Mapped Reads"))
+    mapped = (_parse_count(row.get("Mapped Single Reads")) or 0.0) + \
+             (_parse_count(row.get("Mapped Paired Reads")) or 0.0)
+    if share is None and mapped:
+        dups = (_parse_count(row.get("Duplicate Single Reads")) or 0.0) + \
+               (_parse_count(row.get("Duplicate Paired Reads")) or 0.0)
+        share = 100.0 * dups / mapped
+    read_len = _parse_count(row.get("R1 Ave Length"))
+    ref_len = _parse_count(row.get("Reference Length"))
+    depth_before = None
+    if mapped and read_len and ref_len:
+        depth_before = mapped * read_len / ref_len
+    return {"share": share, "depth_before": depth_before}
+
+
+def _dedup_qualifier(dup: dict[str, float | None]) -> str:
+    """The clause appended to a depth reason when duplicates took most of the
+    mapped reads. Empty when they did not, so an ordinary sample reads as
+    before."""
+    share = dup.get("share")
+    if share is None or share < DEDUP_NOTE_MIN_PERCENT:
+        return ""
+    before = dup.get("depth_before")
+    tail = f", about {before:,.0f}× before" if before else ""
+    return f" (after duplicate removal, which took {share:.1f}% of mapped reads{tail})"
+
+
 def compute_verdict(row: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
     """Return {level, reasons, signals} for a single qc_summary row.
 
@@ -132,16 +194,20 @@ def compute_verdict(row: dict[str, Any], thresholds: dict[str, Any]) -> dict[str
     # Coverage (Average Depth)
     cov = _parse_depth(row.get("Average Depth"))
     signals["coverage"] = cov
+    dup = duplicate_context(row)
+    signals["duplicate_share"] = dup["share"]
+    signals["coverage_before_dedup"] = dup["depth_before"]
+    dedup_note = _dedup_qualifier(dup)
     cov_cfg = thresholds.get("coverage") or {}
     pass_min = cov_cfg.get("pass_min")
     review_min = cov_cfg.get("review_min")
     if cov is not None and pass_min is not None and review_min is not None:
         if cov < review_min:
             level = _max_level(level, "fail")
-            reasons.append(f"coverage {cov:.1f}× < {review_min:g}× fail threshold")
+            reasons.append(f"coverage {cov:.1f}× < {review_min:g}× fail threshold{dedup_note}")
         elif cov < pass_min:
             level = _max_level(level, "review")
-            reasons.append(f"coverage {cov:.1f}× < {pass_min:g}× pass threshold")
+            reasons.append(f"coverage {cov:.1f}× < {pass_min:g}× pass threshold{dedup_note}")
 
     # Mapping rate (100 - Unmapped Percent)
     unmapped = _parse_percent(row.get("Unmapped Percent"))

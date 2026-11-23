@@ -39,9 +39,11 @@ sys.path.insert(0, str(HERE.parent / "backend" / "app"))
 import fmdv_vp1_tables as T  # noqa: E402  (Newick, fasta, metadata, translation)
 
 try:
-    from qc_verdict import compute_verdict, merge_thresholds  # noqa: E402
+    from qc_verdict import (compute_verdict, merge_thresholds,  # noqa: E402
+                            duplicate_context, DEDUP_NOTE_MIN_PERCENT)
 except Exception:  # the backend is not beside bin/: no verdict, numbers only
-    compute_verdict = merge_thresholds = None
+    compute_verdict = merge_thresholds = duplicate_context = None
+    DEDUP_NOTE_MIN_PERCENT = 50.0
 try:
     from qc_scan import _read_stats_row  # noqa: E402
 except Exception:
@@ -68,6 +70,23 @@ def pct(v, nd=1) -> str:
 
 
 # ---- inputs ---------------------------------------------------------------
+
+def _dedup_row(row):
+    """One ("Duplicates removed", ...) row when duplicate removal took most of
+    the mapped reads, else None. Keeps the depth figure beside it from being
+    read as the depth the sample was sequenced to."""
+    if not duplicate_context or not row:
+        return None
+    dup = duplicate_context(row)
+    share = dup.get("share")
+    if share is None or share < DEDUP_NOTE_MIN_PERCENT:
+        return None
+    before = dup.get("depth_before")
+    text = f"{share:.1f}% of mapped reads"
+    if before:
+        text += f"; about {before:,.0f}\u00d7 before removal"
+    return (("Duplicates removed", text),)
+
 
 def stats_row(sample_dir: Path, sample: str) -> Dict:
     files = sorted(sample_dir.glob(f"{sample}_*_stats.xlsx"), key=lambda p: p.stat().st_mtime)
@@ -488,6 +507,12 @@ def build(sample_dir: Path, lib: Path, project: Path) -> Tuple[str, Dict]:
              ("Reads", esc(row.get("R1 Read Count") or "-") + (" paired" if row.get("FASTQ_R2") else "")),
              ("Platform", esc(row.get("Platform") or "-")),
              ("Mean depth", esc(row.get("Average Depth") or "-")),
+             # vsnp3 reports depth after samtools markdup -r. On a single-end
+             # amplicon library that removes nearly every mapped read, because
+             # they all start at the same base and there is no mate to tell a
+             # PCR duplicate from an independent read, so the depth above can
+             # read about 1x on a sample sequenced tens of thousands deep.
+             *(_dedup_row(row) or ()),
              ("Mapped to the reference", f"{100 - float(str(row.get('Unmapped Percent', '0%')).rstrip('%') or 0):.1f}%" if row.get("Unmapped Percent") else "-"),
              ("Genome covered (≥1 read)", esc(row.get("Genome with Coverage") or "-")),
              ("Genome called (depth ≥10, unambiguous)", pct(cons.get("called_percent"))),

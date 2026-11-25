@@ -92,6 +92,22 @@ def main() -> int:
         check("ran_after" not in plain and plain.count("exit 0") == script.count("exit 0"),
               "with no step the script is as it was")
 
+        # --- a third file of unpaired reads is named in the summary --------
+        print("[unpaired reads beside a pair are named]")
+        have = tmp / "have"; have.mkdir()
+        for name in ("SRR0000002_1.fastq.gz", "SRR0000002_2.fastq.gz", "SRR0000002.fastq.gz"):
+            (have / name).write_bytes(b"")
+        (have / "download_sra.sh").write_text(build_download_script(have, ["SRR0000002"], False),
+                                              encoding="utf-8")
+        proc = subprocess.run(["bash", str(have / "download_sra.sh")], cwd=have, capture_output=True,
+                              text=True, timeout=180, env=env)
+        check(proc.returncode == 0, f"reads already here, so the run succeeds (rc={proc.returncode})")
+        check("not used by Step 1: SRR0000002.fastq.gz" in proc.stdout,
+              f"the summary names the unpaired file: {proc.stdout[-300:]}")
+        check("Reads with no mate" not in subprocess.run(
+            ["bash", str(path)], cwd=dl, capture_output=True, text=True, timeout=180, env=env).stdout,
+            "a run with no such file gets no note")
+
         # --- what the backend puts there ---------------------------------
         print("[the backend's step]")
         project = tmp / "my project"; (project / "download").mkdir(parents=True)

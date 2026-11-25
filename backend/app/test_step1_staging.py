@@ -143,6 +143,28 @@ def test_grab_stages_without_trimming(tmp: Path) -> None:
     assert_eq(summary2["skipped"], 2, "both samples recognised as already staged")
 
 
+def test_unpaired_reads_beside_a_pair_stay_in_download(tmp: Path) -> None:
+    print("[Grab: an SRA run with a third file of unpaired reads]")
+    download, step1 = tmp / "download", tmp / "step1"
+    write_fastq(download / "SRR900_1.fastq.gz", 400, 150, "S", 1, mate=1)
+    write_fastq(download / "SRR900_2.fastq.gz", 400, 150, "S", 1, mate=2)
+    write_fastq(download / "SRR900.fastq.gz", 40, 150, "S", 2)
+    write_fastq(download / "SRR901.fastq.gz", 40, 150, "E", 3)
+
+    summary, log = quiet(stage, download, step1)
+
+    assert_eq(sorted(p.name for p in (step1 / "SRR900").iterdir()),
+              ["SRR900_1.fastq.gz", "SRR900_2.fastq.gz"], "only the pair is staged")
+    check((download / "SRR900.fastq.gz").is_file(), "the unpaired file is still in download/")
+    check((step1 / "SRR901" / "SRR901.fastq.gz").is_file(), "a single-end run is staged as before")
+    assert_eq(summary["unpaired"], 1, "the summary counts the file left behind")
+    assert_eq(summary["created"], 3, "three files staged")
+    check("SRR900.fastq.gz holds reads with no mate" in log, "the log names it")
+
+    summary2, _ = quiet(stage, download, step1)
+    assert_eq(summary2["created"], 0, "a second Grab still stages nothing")
+
+
 def test_trimmed_pair_stays_matched(tmp: Path) -> None:
     print("[Run trim: paired Illumina]")
     download, step1 = tmp / "download", tmp / "step1"
@@ -275,6 +297,7 @@ def test_plan_matches_what_the_trim_does(tmp: Path) -> None:
 def main() -> int:
     test_name_helpers()
     for fn in (test_grab_stages_without_trimming,
+               test_unpaired_reads_beside_a_pair_stay_in_download,
                test_trimmed_pair_stays_matched,
                test_single_file_ont,
                test_trim_is_idempotent_and_never_compounds,

@@ -657,6 +657,18 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
   echo "[FAILED] Failed accessions:$FAILED_LIST"
 fi
 
+# A paired run can also yield <run>.fastq.gz: the reads with no mate. Say so,
+# because a third file beside a pair otherwise looks like a second sample.
+UNPAIRED_LIST=""
+for acc in "${{ACCESSIONS[@]}}"; do
+  if [ -f "${{acc}}_1.fastq.gz" ] && [ -f "${{acc}}_2.fastq.gz" ] && [ -f "${{acc}}.fastq.gz" ]; then
+    UNPAIRED_LIST="$UNPAIRED_LIST ${{acc}}.fastq.gz"
+  fi
+done
+if [ -n "$UNPAIRED_LIST" ]; then
+  echo "[NOTE] Reads with no mate, kept in download/ and not used by Step 1:$UNPAIRED_LIST"
+fi
+
 if ls *.fastq.gz >/dev/null 2>&1; then
   echo ""; echo "Downloaded files:"
   ls -lh *.fastq.gz

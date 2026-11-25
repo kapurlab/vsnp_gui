@@ -125,6 +125,26 @@ def write_crosswalk_tsv(download_dir: Path, mapping: List[tuple[str, List[str]]]
     return crosswalk_path
 
 
+def downloaded_runs(download_dir: Path) -> set:
+    """The run accessions an SRA download has fetched into this folder, read
+    from the sra_crosswalk.tsv that write_crosswalk_tsv keeps there. Empty when
+    the folder has no such record: its files were uploaded or linked."""
+    runs: set = set()
+    try:
+        lines = (Path(download_dir) / "sra_crosswalk.tsv").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return runs
+    for line in lines:
+        if line.startswith("#") or "\t" not in line:
+            continue
+        resolved = line.split("\t", 1)[1]
+        if resolved.strip() == "resolved_runs":
+            continue
+        runs.update(r.strip() for r in resolved.split(",") if r.strip())
+    return runs
+
+
 # An SRA/ENA/DDBJ accession as it may appear in a generated shell script.
 # Real values are SRR/ERR/DRR/SRX/SRS/SRP/PRJNA/SAMN + digits; the charset also
 # admits the dot/underscore/hyphen forms NCBI occasionally returns. Anything

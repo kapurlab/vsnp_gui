@@ -41,6 +41,8 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .sra import downloaded_runs
+
 # Greedy prefix (.+) binds the read marker to the RIGHTMOST _R1/_R2 (or _1/_2),
 # so a sample ID that itself ends in _1/_2 (Mg_2_R1 -> Mg-2) isn't mis-split on
 # the first such token. Non-greedy (.+?) would latch onto the first _1/_2 and
@@ -614,9 +616,19 @@ def stage(download_dir: Path, step1_dir: Path) -> Dict[str, object]:
     # the reads that have no mate. vsnp3 aligns the pair. Staged beside it, the
     # third file is never aligned, and a trim would count it as a read file of
     # the sample. It stays in download/.
+    #
+    # Only for a run the folder's SRA download record names. A long-read file
+    # a lab has put beside an Illumina pair of the same name is theirs to
+    # decide about, and is staged as it always was.
     unpaired = 0
+    from_sra: Dict[Path, set] = {}
     for (sample, _key), slot in groups.items():
         if 0 in slot and 1 in slot and 2 in slot:
+            folder = slot[0].parent
+            if folder not in from_sra:
+                from_sra[folder] = downloaded_runs(folder)
+            if sample not in from_sra[folder]:
+                continue
             _log(f"[NOTE] {slot[0].name} holds reads with no mate, beside the pair for "
                  f"{sample}; left in download/, not staged")
             del slot[0]

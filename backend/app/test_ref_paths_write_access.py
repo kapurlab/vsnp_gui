@@ -75,8 +75,10 @@ def remove(path):
 
 
 def download(output_dir, name):
+    # A download is refused without a contact email for NCBI (test_ref_download.py).
     return call(M.ref_download, M.RefDownloadRequest(
-        accession="NC_000962.3", output_dir=str(output_dir), display_name=name))
+        accession="NC_000962.3", output_dir=str(output_dir), display_name=name,
+        ncbi_email="lab@example.org"))
 
 
 def mode_of(p: Path) -> int:

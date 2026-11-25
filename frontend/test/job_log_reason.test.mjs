@@ -1,7 +1,7 @@
 // Unit test for the line a failed job's status quotes from its log.
 // Run: node test/job_log_reason.test.mjs
 import assert from "node:assert/strict";
-import { failureLine } from "../src/jobLogReason.js";
+import { failureLine, noteLine } from "../src/jobLogReason.js";
 
 // The job manager wraps a job's output in its own stamps; the reason is the
 // script's last line, not "# duration".
@@ -30,5 +30,14 @@ assert.equal(failureLine(undefined), "");
 
 // One very long line does not flood the status note.
 assert.equal(failureLine("x".repeat(1000)).length, 301);
+
+// A job that succeeded with a caveat prints it as a NOTE line; the status
+// quotes it without the prefix. No NOTE, nothing to add.
+assert.equal(
+  noteLine("Downloading X gbk\nNOTE: X was downloaded without its GFF annotation.\n\n# finished_at_utc: y\n"),
+  "X was downloaded without its GFF annotation.",
+);
+assert.equal(noteLine(log), "");
+assert.equal(noteLine(undefined), "");
 
 console.log("job log reason: ok");

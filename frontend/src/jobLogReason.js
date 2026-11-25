@@ -11,3 +11,14 @@ export function failureLine(log) {
   }
   return "";
 }
+
+// What a job that succeeded still wants its user to know: the last line it
+// printed that begins "NOTE: ", without that prefix. "" when there is none.
+export function noteLine(log) {
+  const lines = String(log || "").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line.startsWith("NOTE: ")) return line.slice(6).trim();
+  }
+  return "";
+}

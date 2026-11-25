@@ -11,7 +11,7 @@ import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
 import Elapsed from "./Elapsed.jsx";
-import { failureLine } from "./jobLogReason.js";
+import { failureLine, noteLine } from "./jobLogReason.js";
 import { askOnPage, PageAskHost } from "./pageAsk.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
@@ -3298,8 +3298,12 @@ export default function App() {
       // Update genome download status if this was a genome download job
       if (genomeJobId && jobId === genomeJobId) {
         if (status === "succeeded") {
+          // A reference that arrived without its GFF is complete for Step 1
+          // and Step 2; the job's NOTE says so and how to add the gene track.
+          const note = noteLine(logText);
+          const done = note ? `Download complete. ${note}` : "Download complete.";
           setGenomeDownloadStatus("Download complete. Refreshing references...");
-          loadAll().then(() => setGenomeDownloadStatus("Download complete."));
+          loadAll().then(() => setGenomeDownloadStatus(done));
         } else if (status === "cancelled") {
           setGenomeDownloadStatus("Download stopped.");
           loadRefPaths();

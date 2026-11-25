@@ -2951,12 +2951,31 @@ def ref_download(payload: RefDownloadRequest):
         dest = acc_dir / dest_name
         if src.is_file() and not dest.exists():
             shutil.copy2(str(src), str(dest))
-    # Build script: download fasta/gbk/gff
+    # Build script. FASTA and GenBank are the reference, and either failing
+    # fails the download. The GFF is only the gene track IGV draws, and NCBI's
+    # efetch sometimes answers 500 for it alone, so it is a step of its own:
+    # vsnp3 first, then NCBI's sequence viewer, and failing both the job still
+    # succeeds with a NOTE line (which the form shows) saying what is missing.
+    acc_q = shlex.quote(accession)
+    gff_q = shlex.quote(f"{accession}.gff")
+    fallback = " ".join(shlex.quote(p) for p in (
+        sys.executable, str(Path(__file__).resolve().parents[2] / "bin" / "ref_gff_fallback.py")))
     lines = [
         "#!/bin/bash",
         "set -euo pipefail",
         f"cd {shlex.quote(str(acc_dir))}",
-        f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {shlex.quote(accession)} -fbg",
+        f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {acc_q} -fb",
+        f"if ! vsnp3_download_fasta_gbk_gff_by_acc.py -a {acc_q} -g; then",
+        f"  rm -f {gff_q}",
+        "  echo \"GFF: the download through vsnp3 failed. Trying NCBI's sequence viewer.\"",
+        f"  if ! {fallback} {acc_q} {gff_q}; then",
+        "    echo " + shlex.quote(
+            f"NOTE: {accession} was downloaded without its GFF annotation, which NCBI did not "
+            f"return. The reference is complete for Step 1 and Step 2. Only the gene track in "
+            f"IGV is missing. To add it, save the record's GFF3 from NCBI as {accession}.gff "
+            f"in {acc_dir}."),
+        "  fi",
+        "fi",
     ]
     script_content = "\n".join(lines) + "\n"
     script_path = acc_dir / _REF_DOWNLOAD_SCRIPT

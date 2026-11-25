@@ -23,10 +23,16 @@ Pinned here:
     folder an older version left is cleared on the next attempt, and either
     way the same name downloads the second time;
   - a folder holding a FASTA, GenBank or GFF file, or anything else that the
-    download handler did not write, is never removed.
+    download handler did not write, is never removed;
+  - the GFF is a step of its own. NCBI's efetch answered HTTP 500 for the GFF
+    of NC_003197.2 while its FASTA and GenBank arrived (2026-11-24), and under
+    `-fbg` that failed a reference that was complete for Step 1 and Step 2.
+    When vsnp3's GFF step fails, the GFF is fetched from NCBI's sequence
+    viewer (bin/ref_gff_fallback.py); when that fails too, the job still
+    succeeds and a NOTE line in its log says the gene track is missing.
 
-The downloader here is a stand-in script with the installed one's behavior, so
-no test reaches NCBI.
+The downloader here is a stand-in script with the installed one's behavior,
+and the sequence viewer is a folder of local files, so no test reaches NCBI.
 
 Run directly:  PYTHONPATH=backend <python> backend/app/test_ref_download.py
 """
@@ -58,13 +64,17 @@ from app.jobs import JobManager  # noqa: E402
 DOWNLOADER = "vsnp3_download_fasta_gbk_gff_by_acc.py"
 
 # The installed downloader, reduced to what matters here: it refuses without
-# NCBI_EMAIL, it writes <accession>.fasta/.gbk/.gff into the current folder,
-# and an accession NCBI does not know ends in an error with nothing written.
+# NCBI_EMAIL, and -f, -b and -g each write <accession>.fasta, .gbk or .gff
+# into the current folder, in that order. An accession NCBI does not know
+# (UNKNOWN*) ends in an error with nothing written, PARTIAL* loses the GenBank
+# record after the FASTA, and NOGFF* gets efetch's HTTP 500 for the GFF alone.
 _FAKE_DOWNLOADER = """#!/bin/bash
 acc=""
+flags=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -a) acc="$2"; shift 2 ;;
+    -*) flags="$flags${1#-}"; shift ;;
     *) shift ;;
   esac
 done
@@ -77,15 +87,31 @@ case "$acc" in
   UNKNOWN*)
     echo "urllib.error.HTTPError: HTTP Error 400: Bad Request" >&2
     exit 1 ;;
-  PARTIAL*)
-    printf '>%s\\nACGT\\n' "$acc" > "$acc.fasta"
+esac
+case "$flags" in *f*)
+  printf '>%s\\nACGT\\n' "$acc" > "$acc.fasta" ;;
+esac
+case "$flags" in *b*)
+  case "$acc" in PARTIAL*)
     echo "the GenBank record could not be fetched" >&2
     exit 1 ;;
+  esac
+  echo "LOCUS $acc" > "$acc.gbk" ;;
 esac
-printf '>%s\\nACGT\\n' "$acc" > "$acc.fasta"
-echo "LOCUS $acc" > "$acc.gbk"
-echo "##gff-version 3" > "$acc.gff"
+case "$flags" in *g*)
+  case "$acc" in NOGFF*)
+    echo "urllib.error.HTTPError: HTTP Error 500: Internal Server Error" >&2
+    exit 1 ;;
+  esac
+  printf '##gff-version 3\\n%s\\tvsnp3\\tregion\\t1\\t4\\t.\\t+\\t.\\tID=r\\n' "$acc" > "$acc.gff" ;;
+esac
+exit 0
 """
+
+# What NCBI's sequence viewer returns: GFF3 for a record it has, and HTTP 200
+# with this body for an id it does not know.
+_VIEWER_GFF = "##gff-version 3\n##sequence-region {acc} 1 4\n{acc}\tRefSeq\tregion\t1\t4\t.\t+\t.\tID=viewer\n"
+_VIEWER_ERROR = "Error: F a i l e d  t o  u n d e r s t a n d  i d :  {acc} \n"
 
 
 def check(label, cond):
@@ -119,6 +145,9 @@ class Site:
         script.chmod(0o755)
         self.site_list = tmp / "site" / "refs" / "vsnp3" / "locations" / "reference_locations.txt"
         self.out = tmp / "new_refs"          # does not exist until a download makes it
+        # Stands in for NCBI's sequence viewer: one file per accession it knows.
+        self.viewer = tmp / "viewer"
+        self.viewer.mkdir()
         self.personal: list = []
         self.ncbi: dict = {}
 
@@ -152,7 +181,9 @@ def site(email: str = "lab@example.org", api_key: str = ""):
     if api_key:
         s.ncbi["api_key"] = api_key
     saved = (M.load_config, M.save_config, M.job_manager)
-    saved_env = {k: os.environ.pop(k, None) for k in ("NCBI_EMAIL", "NCBI_API_KEY")}
+    saved_env = {k: os.environ.pop(k, None)
+                 for k in ("NCBI_EMAIL", "NCBI_API_KEY", "VSNP_GUI_GFF_FALLBACK_URL")}
+    os.environ["VSNP_GUI_GFF_FALLBACK_URL"] = (s.viewer / "{acc}.gff3").as_uri().replace("%7B", "{").replace("%7D", "}")
     M.load_config, M.save_config = s.load, s.save
     M.job_manager = JobManager(tmp / "jobs")
     try:
@@ -160,6 +191,7 @@ def site(email: str = "lab@example.org", api_key: str = ""):
     finally:
         M.load_config, M.save_config, M.job_manager = saved
         for k, v in saved_env.items():
+            os.environ.pop(k, None)
             if v is not None:
                 os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
@@ -368,6 +400,56 @@ def test_a_running_download_keeps_its_folder():
               names(d) == ["NC_003197.2_define_filter.xlsx", "download_ref.sh"])
 
 
+def test_a_gff_failure_does_not_fail_the_reference():
+    print("[the GFF fails at efetch: fetched from the sequence viewer instead]")
+    with site() as s:
+        (s.viewer / "NOGFF0001.gff3").write_text(_VIEWER_GFF.format(acc="NOGFF0001"))
+        d = s.out / "NOGFF0001"
+        got, err = download(s, "NOGFF0001")
+        job = finish(got["job_id"]) if err is None else {}
+        check("the download succeeds", job.get("status") == "succeeded")
+        check("FASTA and GenBank came through vsnp3",
+              (d / "NOGFF0001.fasta").is_file() and (d / "NOGFF0001.gbk").is_file())
+        check("the GFF is the sequence viewer's",
+              (d / "NOGFF0001.gff").read_text() == _VIEWER_GFF.format(acc="NOGFF0001"))
+        log = Path(job["log_path"]).read_text()
+        check("the log says where the GFF came from, and carries no NOTE",
+              "fetched from NCBI's sequence viewer" in log and "NOTE:" not in log)
+
+    print("[the GFF fails everywhere: the reference is kept, with a note]")
+    with site() as s:
+        (s.viewer / "NOGFF0002.gff3").write_text(_VIEWER_ERROR.format(acc="NOGFF0002"))
+        got, err = download(s, "NOGFF0002", name="Salmonella_LT2")
+        d = s.out / "Salmonella_LT2"
+        job = finish(got["job_id"]) if err is None else {}
+        check("the download still succeeds", job.get("status") == "succeeded")
+        check("the folder holds the FASTA and GenBank, and no GFF or partial GFF",
+              names(d) == ["NOGFF0002.fasta", "NOGFF0002.gbk", "NOGFF0002_define_filter.xlsx",
+                           "NOGFF0002_remove_from_analysis.xlsx", "download_ref.sh"])
+        log = Path(job["log_path"]).read_text()
+        check("the log's NOTE says the reference is usable and what is missing",
+              "NOTE: NOGFF0002 was downloaded without its GFF annotation" in log
+              and "complete for Step 1 and Step 2" in log and "gene track in IGV" in log)
+        check("the viewer's error body is quoted as the reason", "the reply is not GFF3 (Error:" in log)
+        check("the reference is offered",
+              [r["name"] for r in M.list_references(s.load())] == ["Salmonella_LT2"])
+        got, err = download(s, "NOGFF0002", name="Salmonella_LT2")
+        check("...and holds its name (409)", err is not None and err[0] == 409)
+
+    print("[what counts as GFF3 from the sequence viewer]")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bin"))
+    import ref_gff_fallback as F
+    check("a GFF3 with a feature is accepted", F.problem_with(_VIEWER_GFF.format(acc="X")) == "")
+    check("the viewer's error body is refused",
+          F.problem_with(_VIEWER_ERROR.format(acc="X")).startswith("the reply is not GFF3"))
+    check("an empty reply is refused", "an empty reply" in F.problem_with(""))
+    check("a header with no feature is refused",
+          F.problem_with("##gff-version 3\n##sequence-region X 1 4\n") == "the GFF3 holds no feature")
+    check("the default address is NCBI's viewer, asked for GFF3 of one record",
+          F.DEFAULT_URL.startswith("https://www.ncbi.nlm.nih.gov/sviewer/viewer.cgi?")
+          and "report=gff3" in F.DEFAULT_URL and "id={acc}" in F.DEFAULT_URL)
+
+
 TESTS = [
     test_email_and_key_reach_the_job,
     test_no_email_is_refused_and_leaves_nothing,
@@ -375,6 +457,7 @@ TESTS = [
     test_a_failed_attempt_does_not_hold_the_name,
     test_a_folder_with_sequence_is_never_removed,
     test_a_running_download_keeps_its_folder,
+    test_a_gff_failure_does_not_fail_the_reference,
 ]
 
 

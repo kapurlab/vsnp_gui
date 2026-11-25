@@ -2387,6 +2387,10 @@ def get_config():
     # are going meanwhile; the app shows both until another root is chosen.
     cfg["projects_root_problem"] = _place_jobs(cfg)
     cfg["jobs_dir"] = str(job_manager.jobs_dir)
+    # The email a reference download would send to NCBI: the config's ncbi
+    # block, else NCBI_EMAIL in this launch's environment. "" means the
+    # download form has to ask for one.
+    cfg["ncbi_email_effective"] = _seq_import_fetch_settings(cfg)[0]
     shared_root = cfg.get("shared_projects_root", "").strip()
     cfg["_validation"] = {
         "vsnp3_path": Path(cfg.get("vsnp3_path", "")).is_dir() if cfg.get("vsnp3_path", "").strip() else False,
@@ -2627,6 +2631,9 @@ class RefDownloadRequest(BaseModel):
     accession: str
     output_dir: str
     display_name: Optional[str] = None
+    # The contact email NCBI asks for. When given it is saved to the config's
+    # ncbi block, so it is typed once.
+    ncbi_email: Optional[str] = None
 
 
 @app.get("/api/references")
@@ -2755,6 +2762,86 @@ def _require_ref_token(value: str, field: str) -> str:
     return v
 
 
+# NCBI assembly identifiers: an assembly accession (GCA_/GCF_) or an assembly
+# name (ASM694v2). vsnp3_download_fasta_gbk_gff_by_acc.py queries the NCBI
+# nucleotide database, which holds the sequence records of an assembly, not
+# the assembly itself, so these can never be fetched.
+_ASSEMBLY_ID_RE = re.compile(r"^(?:GC[AF]_|ASM\d+v\d+$)", re.IGNORECASE)
+
+# A contact email as NCBI wants it: one @, a dot in the domain, no spaces.
+_NCBI_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+_REF_DOWNLOAD_SCRIPT = "download_ref.sh"
+_REF_TEMPLATE_SUFFIXES = ("_define_filter.xlsx", "_remove_from_analysis.xlsx")
+# What a download adds to the folder: the three files vsnp3 writes with -fbg.
+_REF_SEQUENCE_SUFFIXES = {
+    ".fasta", ".fa", ".fna", ".fas", ".gbk", ".gb", ".gff", ".gff3",
+}
+
+
+def _refuse_assembly_identifier(accession: str) -> None:
+    if _ASSEMBLY_ID_RE.match(accession):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{accession}' is an NCBI assembly identifier, and the download needs "
+                "the nucleotide accession of the chromosome instead, for example "
+                "NC_003197.2. Open the assembly's page at NCBI and copy the RefSeq or "
+                "GenBank accession listed for the chromosome."
+            ),
+        )
+
+
+def _is_failed_download_dir(d: Path) -> bool:
+    """True when `d` holds only what ref_download itself put there before the
+    download started: download_ref.sh and the copied template workbooks.
+
+    That is a download that never produced anything. One other entry of any
+    kind (a FASTA, GenBank or GFF file above all, but also a hidden file or a
+    subfolder) and the folder is somebody's data and is left alone.
+    """
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return False
+    if not any(e.name == _REF_DOWNLOAD_SCRIPT for e in entries):
+        return False
+    for e in entries:
+        try:
+            if e.is_symlink() or not e.is_file():
+                return False
+        except OSError:
+            return False
+        if e.suffix.lower() in _REF_SEQUENCE_SUFFIXES:
+            return False
+        if e.name != _REF_DOWNLOAD_SCRIPT and not e.name.endswith(_REF_TEMPLATE_SUFFIXES):
+            return False
+    return True
+
+
+def _remove_failed_download_dir(d: Path) -> bool:
+    """Remove the folder of a download that produced nothing. Never removes a
+    folder holding anything but the files ref_download wrote (see above)."""
+    if not _is_failed_download_dir(d):
+        return False
+    try:
+        for e in d.iterdir():
+            e.unlink()
+        d.rmdir()
+    except OSError as exc:
+        logger.warning("failed reference download folder %s not removed: %s", d, exc)
+        return False
+    return True
+
+
+def _ref_download_running_in(d: Path) -> bool:
+    return any(
+        j.get("name") == "ref_download" and j.get("status") in ("running", "queued")
+        and j.get("cwd") == str(d)
+        for j in job_manager.list_jobs()
+    )
+
+
 @app.post("/api/references/download")
 def ref_download(payload: RefDownloadRequest):
     cfg = load_config()
@@ -2766,14 +2853,31 @@ def ref_download(payload: RefDownloadRequest):
     # accession was not, and it reaches a generated bash script (and the cd path,
     # since subdir_name defaults to it).
     accession = _require_ref_token(accession, "accession")
+    # Every refusal below comes before anything is written, so a request that
+    # cannot succeed leaves no folder behind to block the name.
+    _refuse_assembly_identifier(accession)
+    # vsnp3 stops at once without a contact email for NCBI's E-utilities, and
+    # a session started from a dashboard has no NCBI_EMAIL of its own.
+    typed_email = (payload.ncbi_email or "").strip()
+    if typed_email and (len(typed_email) > 254 or not _NCBI_EMAIL_RE.match(typed_email)):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{typed_email}' is not an email address. NCBI needs a contact "
+                   "address such as name@example.org.",
+        )
+    ncbi_email, ncbi_api_key = _seq_import_fetch_settings(cfg)
+    ncbi_email = typed_email or ncbi_email
+    if not ncbi_email:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "NCBI requires a contact email address for downloads, and none is set. "
+                "Enter one in the NCBI contact email field of Download New Reference "
+                "(it is saved to your settings as ncbi.email), or start the backend "
+                "with NCBI_EMAIL set. Nothing was downloaded."
+            ),
+        )
     output_dir = Path(payload.output_dir).expanduser().resolve()
-    # A download into a folder that is not yet a reference location adds it:
-    # to the site list when this account can write it, else to the personal
-    # list (said in the response's `note`), so no account is refused here.
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(status_code=400, detail=f"Cannot create output directory: {e}")
 
     # Optional display name controls the subdir name (and therefore the entry
     # shown in the Reference dropdown). File stems inside still use the
@@ -2793,6 +2897,16 @@ def ref_download(payload: RefDownloadRequest):
         subdir_name = display_name
     else:
         subdir_name = accession
+    acc_dir = output_dir / subdir_name
+    if _ref_download_running_in(acc_dir):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A download into {acc_dir} is still running. Wait for it to finish.",
+        )
+    # What an earlier attempt left when it failed before fetching anything (or
+    # when the backend stopped under it): the script and the template
+    # workbooks. It is not a reference, and it must not hold the name.
+    _remove_failed_download_dir(acc_dir)
     # A reference with this NAME anywhere in the registered locations is the
     # same selection to vsnp3 (`-t` resolves by name) — downloading another
     # copy would only create a shadowed duplicate.
@@ -2808,12 +2922,26 @@ def ref_download(payload: RefDownloadRequest):
                 f"remove the existing reference first."
             ),
         )
-    acc_dir = output_dir / subdir_name
     if acc_dir.exists() and any(acc_dir.iterdir()):
         raise HTTPException(
             status_code=409,
             detail=f"Reference directory already exists and is non-empty: {acc_dir}",
         )
+    # A typed email is kept for the next download. This download uses it
+    # whether or not the settings file could be written.
+    if typed_email and typed_email != str((cfg.get("ncbi") or {}).get("email") or "").strip():
+        cfg["ncbi"] = {**(cfg.get("ncbi") or {}), "email": typed_email}
+        try:
+            save_config(cfg)
+        except OSError as exc:
+            logger.warning("NCBI contact email not saved to the settings: %s", exc)
+    # A download into a folder that is not yet a reference location adds it:
+    # to the site list when this account can write it, else to the personal
+    # list (said in the response's `note`), so no account is refused here.
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Cannot create output directory: {e}")
     acc_dir.mkdir(parents=True, exist_ok=True)
     # Copy template files from dependencies, renaming "template" to accession
     template_dir = vsnp3_path / "dependencies"
@@ -2831,20 +2959,37 @@ def ref_download(payload: RefDownloadRequest):
         f"vsnp3_download_fasta_gbk_gff_by_acc.py -a {shlex.quote(accession)} -fbg",
     ]
     script_content = "\n".join(lines) + "\n"
-    script_path = acc_dir / "download_ref.sh"
+    script_path = acc_dir / _REF_DOWNLOAD_SCRIPT
     script_path.write_text(script_content, encoding="utf-8")
     script_path.chmod(0o755)
     # Add parent dir to the reference locations
     try:
         added = add_reference_location(cfg, str(output_dir), save_config)
     except OSError as exc:
+        _remove_failed_download_dir(acc_dir)
         raise _site_list_change_error(
             cfg, f"add {output_dir} to the reference locations", exc) from exc
+    # The email (and the API key, when there is one) reach vsnp3 through the
+    # job's environment, never the command line, so neither is written to the
+    # script or to the job log.
+    env = build_env(cfg)
+    env["NCBI_EMAIL"] = ncbi_email
+    if ncbi_api_key:
+        env["NCBI_API_KEY"] = ncbi_api_key
+
+    def _drop_folder_of_failed_download(job_id: str, exit_code: int,
+                                        started_at: _dt, finished_at: _dt) -> None:
+        # A failed or stopped download that fetched nothing would otherwise sit
+        # in the Reference dropdown and refuse the name to the next attempt.
+        if exit_code != 0:
+            _remove_failed_download_dir(acc_dir)
+
     job_id = job_manager.start_job(
         name="ref_download",
         command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=acc_dir,
-        env=build_env(cfg)
+        env=env,
+        finalize_callback=_drop_folder_of_failed_download,
     )
     return {"job_id": job_id, "accession": accession, "target_dir": str(acc_dir),
             "note": added["note"] if added["list"] == REF_PERSONAL else None}

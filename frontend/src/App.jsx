@@ -11,6 +11,7 @@ import ThemeToggle from "./ThemeToggle";
 import CitationFooter from "./Citations";
 import CopyLogButton from "./CopyLogButton";
 import Elapsed from "./Elapsed.jsx";
+import { failureLine } from "./jobLogReason.js";
 import { askOnPage, PageAskHost } from "./pageAsk.jsx";
 import { ResizableTable, Grip, useColumnWidths } from "./ResizableTable";
 import { PaneSplitters } from "./SplitPane";
@@ -1288,6 +1289,9 @@ export default function App() {
   const [showGenomeDownload, setShowGenomeDownload] = useState(false);
   const [genomeAccession, setGenomeAccession] = useState("");
   const [genomeDisplayName, setGenomeDisplayName] = useState("");
+  // NCBI refuses a download without a contact email. Filled from the settings
+  // (or the backend's NCBI_EMAIL) when one is known, and saved when typed.
+  const [genomeNcbiEmail, setGenomeNcbiEmail] = useState("");
   const [genomeOutputDir, setGenomeOutputDir] = useState("");
   const [genomeDownloadStatus, setGenomeDownloadStatus] = useState("");
   const [genomeJobId, setGenomeJobId] = useState("");
@@ -2515,11 +2519,19 @@ export default function App() {
         accession: genomeAccession.trim(),
         output_dir: finalDir,
         display_name: finalDisplayName || null,
+        ncbi_email: genomeNcbiEmail.trim() || null,
       })
-    });
+    }).catch((e) => ({ ok: false, unreachable: e }));
     if (!res.ok) {
-      const data = await res.json();
-      setGenomeDownloadStatus(`Error: ${data.detail || "Download failed"}`);
+      // The backend's own words: which value it refused and what to enter
+      // instead. Nothing was created for a refused request.
+      const data = res.unreachable ? {} : await res.json().catch(() => ({}));
+      const reason = res.unreachable
+        ? `cannot reach the backend (${res.unreachable.message || res.unreachable})`
+        : typeof data.detail === "string" && data.detail
+          ? data.detail
+          : `the request was refused (HTTP ${res.status})`;
+      setGenomeDownloadStatus(`Not downloaded: ${reason}`);
       return;
     }
     const data = await res.json();
@@ -2977,6 +2989,7 @@ export default function App() {
     // Diagnostic Tools Dashboard shows). Empty on installs without git —
     // the built-in APP_VERSION constant stays as the fallback.
     setServerVersion(cfg.app_version || "");
+    setGenomeNcbiEmail((typed) => typed || cfg.ncbi_email_effective || "");
     if (cfg._validation) {
       setPathValidation(cfg._validation);
     }
@@ -3231,7 +3244,7 @@ export default function App() {
     // poll, not per line.
     const id = jobId;
     let timer = null, finished = false, errors = 0;
-    const applyTerminal = (status) => {
+    const applyTerminal = (status, logText) => {
       setJobStatus(status);
       // Grab finished: it rewrote download/ (dashed names) and step1/, so pull
       // the listings back in and report the counts the staging job recorded.
@@ -3287,8 +3300,18 @@ export default function App() {
         if (status === "succeeded") {
           setGenomeDownloadStatus("Download complete. Refreshing references...");
           loadAll().then(() => setGenomeDownloadStatus("Download complete."));
+        } else if (status === "cancelled") {
+          setGenomeDownloadStatus("Download stopped.");
+          loadRefPaths();
         } else {
-          setGenomeDownloadStatus(`Download ${status}`);
+          // Say why, in the script's own last words. The backend removes the
+          // folder of a download that fetched nothing, so the name is free.
+          const why = failureLine(logText).replace(/[.\s]+$/, "");
+          setGenomeDownloadStatus(
+            `Download failed${why ? `: ${why}` : ""}. ` +
+            "Check the accession and press Download again; the full output is in the log."
+          );
+          loadRefPaths();
         }
       }
     };
@@ -3307,7 +3330,7 @@ export default function App() {
           }
           if (d.status === "succeeded" || d.status === "failed" || d.status === "cancelled") {
             finished = true;
-            applyTerminal(d.status);
+            applyTerminal(d.status, typeof d.log === "string" ? d.log : "");
             return;
           }
           timer = setTimeout(tick, 1500);
@@ -8143,10 +8166,19 @@ export default function App() {
                   <summary className="ghost action" style={{cursor:"pointer", fontSize:"0.85em", marginTop:"0.3em"}}>Download New Reference</summary>
                   <div style={{fontSize:"0.85em", marginTop:"0.3em"}}>
                     <input
-                      placeholder="GenBank accession (e.g. AF2122/97)"
+                      placeholder="Nucleotide accession of the chromosome (e.g. NC_003197.2)"
                       value={genomeAccession}
                       onChange={(e) => setGenomeAccession(e.target.value)}
                       style={{width:"100%", marginBottom:"0.3em"}}
+                      title="A GenBank or RefSeq nucleotide accession. Assembly identifiers (GCA_, GCF_, ASM694v2) cannot be downloaded here."
+                    />
+                    <input
+                      type="email"
+                      placeholder="NCBI contact email (required by NCBI)"
+                      value={genomeNcbiEmail}
+                      onChange={(e) => setGenomeNcbiEmail(e.target.value)}
+                      style={{width:"100%", marginBottom:"0.3em"}}
+                      title="NCBI asks every download for a contact address. It is saved to your settings, so it is entered once."
                     />
                     <input
                       placeholder="Display name — optional, e.g. LSDV_NW-LW_AF325528.1"

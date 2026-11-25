@@ -171,6 +171,7 @@ def build_download_script(
     concurrency: int = 4,
     step1_dir: Path | None = None,
     report_path: Path | None = None,
+    after_download: str = "",
 ) -> str:
     """Generate a bash script that downloads each accession via xargs -P
     parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
@@ -187,7 +188,13 @@ def build_download_script(
     failed). It's the persistent, machine-readable record of the last download so
     the UI can show which accessions were skipped-because-already-run without the
     user having to scroll the live log — the point being that with hundreds of
-    samples a skipped one leaves no other on-screen trace."""
+    samples a skipped one leaves no other on-screen trace.
+
+    after_download is shell text run once the downloads and their summary are
+    done, just before the script decides its exit code. It goes there, and is
+    not appended to the script, because the script ends in an explicit `exit`:
+    anything after that never runs. Its own exit status is ignored, so it can
+    never change whether the download counts as a success."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
     # Re-validated at the interpolation site itself: accessions also arrive from
@@ -659,6 +666,7 @@ else
   echo "[FAILED] No .fastq.gz files found after download"
 fi
 
+{after_download}
 # Fail the job only if real download attempts failed and nothing else worked;
 # a run where every accession was skipped (already in Step 1) is a success.
 if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -eq 0 ]; then

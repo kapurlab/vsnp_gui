@@ -6299,6 +6299,7 @@ def sra_download(project: str, payload: SraRequest):
         # Always at the top-level download/ (not the optional subfolder) so the
         # report endpoint has one fixed place to read regardless of subfolder.
         report_path=project_dir / "download" / "sra_download_report.tsv",
+        after_download=_sample_metadata_step(project_dir, expanded),
     )
     script_path = download_root / "download_sra.sh"
     script_path.write_text(script, encoding="utf-8")
@@ -6307,9 +6308,42 @@ def sra_download(project: str, payload: SraRequest):
         name="sra_download",
         command=wrap_cmd(cfg, f"bash {shlex.quote(str(script_path))}"),
         cwd=download_root,
-        env=build_env(cfg)
+        env={**build_env(cfg), **_ncbi_contact_env(cfg)},
     )
     return {"job_id": job_id}
+
+
+_SAMPLE_METADATA_SCRIPT = Path(__file__).resolve().parent.parent.parent / "bin" / "sample_metadata.py"
+
+
+def _sample_metadata_step(project_dir: Path, accessions: List[str]) -> str:
+    """Shell text for the end of an SRA download: fill the project's metadata
+    sheet (<project>/sample_metadata.tsv) from the runs' public records.
+
+    bin/sample_metadata.py keeps the sheet. It uses only the standard library,
+    so it runs under whichever interpreter runs this backend. `|| true`: the
+    reads are what was asked for, and a lookup that fails (no route to NCBI, a
+    run too new to be listed) must not turn a finished download into a failed
+    job. The sheet can be fetched again later."""
+    if not accessions or not _SAMPLE_METADATA_SCRIPT.is_file():
+        return ""
+    return (
+        "# Public metadata for the downloaded runs -> <project>/sample_metadata.tsv\n"
+        'echo ""; echo "== Sample metadata =="\n'
+        f"{shlex.quote(sys.executable)} -u {shlex.quote(str(_SAMPLE_METADATA_SCRIPT))} "
+        f"--project {shlex.quote(str(project_dir))} fetch --source sra "
+        f"--samples {' '.join(shlex.quote(a) for a in accessions)} || true\n"
+    )
+
+
+def _ncbi_contact_env(cfg: Dict) -> Dict[str, str]:
+    """NCBI_EMAIL / NCBI_API_KEY for a job, from the config's ncbi block or
+    this process's environment. Passed in the job's environment and never
+    written into a script, so neither ends up in a file under the project."""
+    ncbi = cfg.get("ncbi") or {}
+    email = str(ncbi.get("email") or os.environ.get("NCBI_EMAIL", "")).strip()
+    key = str(ncbi.get("api_key") or os.environ.get("NCBI_API_KEY", "")).strip()
+    return {k: v for k, v in (("NCBI_EMAIL", email), ("NCBI_API_KEY", key)) if v}
 
 
 # The FASTQ-name helpers and the staging/trimming work itself live in

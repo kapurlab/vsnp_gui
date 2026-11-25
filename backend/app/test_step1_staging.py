@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.sra import write_crosswalk_tsv  # noqa: E402
 from app.step1_staging import (  # noqa: E402
     group_key, plan_trim, read_id, read_number, stage, staged_samples,
     trim_staged_samples, trimmed_name,
@@ -141,6 +142,37 @@ def test_grab_stages_without_trimming(tmp: Path) -> None:
     summary2, _ = quiet(stage, download, step1)
     assert_eq(summary2["created"], 0, "a second Grab stages nothing new")
     assert_eq(summary2["skipped"], 2, "both samples recognised as already staged")
+
+
+def test_unpaired_reads_beside_a_pair_stay_in_download(tmp: Path) -> None:
+    print("[Grab: an SRA run with a third file of unpaired reads]")
+    download, step1 = tmp / "download", tmp / "step1"
+    write_fastq(download / "SRR900_1.fastq.gz", 400, 150, "S", 1, mate=1)
+    write_fastq(download / "SRR900_2.fastq.gz", 400, 150, "S", 1, mate=2)
+    write_fastq(download / "SRR900.fastq.gz", 40, 150, "S", 2)
+    write_fastq(download / "SRR901.fastq.gz", 40, 150, "E", 3)
+    # Hybrid data a lab named alike: MinION reads beside the Illumina pair.
+    write_fastq(download / "iso7_R1.fastq.gz", 400, 150, "H", 4, mate=1)
+    write_fastq(download / "iso7_R2.fastq.gz", 400, 150, "H", 4, mate=2)
+    write_fastq(download / "iso7.fastq.gz", 40, 3000, "H", 5)
+    # The record the SRA download keeps in the folder names the two runs only.
+    write_crosswalk_tsv(download, [("SRR900", ["SRR900"]), ("SRR901", ["SRR901"])])
+
+    summary, log = quiet(stage, download, step1)
+
+    assert_eq(sorted(p.name for p in (step1 / "SRR900").iterdir()),
+              ["SRR900_1.fastq.gz", "SRR900_2.fastq.gz"], "only the pair is staged")
+    check((download / "SRR900.fastq.gz").is_file(), "the unpaired file is still in download/")
+    check((step1 / "SRR901" / "SRR901.fastq.gz").is_file(), "a single-end run is staged as before")
+    check((step1 / "iso7" / "iso7.fastq.gz").is_file(),
+          "a file the download record does not name is staged as before")
+    assert_eq(summary["unpaired"], 1, "the summary counts the one file left behind")
+    assert_eq(summary["created"], 6, "six files staged")
+    check("iso7.fastq.gz holds" not in log, "and the log says nothing about the lab's file")
+    check("SRR900.fastq.gz holds reads with no mate" in log, "the log names it")
+
+    summary2, _ = quiet(stage, download, step1)
+    assert_eq(summary2["created"], 0, "a second Grab still stages nothing")
 
 
 def test_trimmed_pair_stays_matched(tmp: Path) -> None:
@@ -275,6 +307,7 @@ def test_plan_matches_what_the_trim_does(tmp: Path) -> None:
 def main() -> int:
     test_name_helpers()
     for fn in (test_grab_stages_without_trimming,
+               test_unpaired_reads_beside_a_pair_stay_in_download,
                test_trimmed_pair_stays_matched,
                test_single_file_ont,
                test_trim_is_idempotent_and_never_compounds,

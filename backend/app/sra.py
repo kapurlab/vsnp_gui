@@ -125,6 +125,26 @@ def write_crosswalk_tsv(download_dir: Path, mapping: List[tuple[str, List[str]]]
     return crosswalk_path
 
 
+def downloaded_runs(download_dir: Path) -> set:
+    """The run accessions an SRA download has fetched into this folder, read
+    from the sra_crosswalk.tsv that write_crosswalk_tsv keeps there. Empty when
+    the folder has no such record: its files were uploaded or linked."""
+    runs: set = set()
+    try:
+        lines = (Path(download_dir) / "sra_crosswalk.tsv").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return runs
+    for line in lines:
+        if line.startswith("#") or "\t" not in line:
+            continue
+        resolved = line.split("\t", 1)[1]
+        if resolved.strip() == "resolved_runs":
+            continue
+        runs.update(r.strip() for r in resolved.split(",") if r.strip())
+    return runs
+
+
 # An SRA/ENA/DDBJ accession as it may appear in a generated shell script.
 # Real values are SRR/ERR/DRR/SRX/SRS/SRP/PRJNA/SAMN + digits; the charset also
 # admits the dot/underscore/hyphen forms NCBI occasionally returns. Anything
@@ -171,6 +191,7 @@ def build_download_script(
     concurrency: int = 4,
     step1_dir: Path | None = None,
     report_path: Path | None = None,
+    after_download: str = "",
 ) -> str:
     """Generate a bash script that downloads each accession via xargs -P
     parallelism. concurrency caps simultaneous workers — past ~4-6 NCBI's
@@ -187,7 +208,13 @@ def build_download_script(
     failed). It's the persistent, machine-readable record of the last download so
     the UI can show which accessions were skipped-because-already-run without the
     user having to scroll the live log — the point being that with hundreds of
-    samples a skipped one leaves no other on-screen trace."""
+    samples a skipped one leaves no other on-screen trace.
+
+    after_download is shell text run once the downloads and their summary are
+    done, just before the script decides its exit code. It goes there, and is
+    not appended to the script, because the script ends in an explicit `exit`:
+    anything after that never runs. Its own exit status is ignored, so it can
+    never change whether the download counts as a success."""
     curl_insecure = "-k" if allow_insecure_https else ""
     concurrency = max(1, int(concurrency))
     # Re-validated at the interpolation site itself: accessions also arrive from
@@ -650,6 +677,18 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
   echo "[FAILED] Failed accessions:$FAILED_LIST"
 fi
 
+# A paired run can also yield <run>.fastq.gz: the reads with no mate. Say so,
+# because a third file beside a pair otherwise looks like a second sample.
+UNPAIRED_LIST=""
+for acc in "${{ACCESSIONS[@]}}"; do
+  if [ -f "${{acc}}_1.fastq.gz" ] && [ -f "${{acc}}_2.fastq.gz" ] && [ -f "${{acc}}.fastq.gz" ]; then
+    UNPAIRED_LIST="$UNPAIRED_LIST ${{acc}}.fastq.gz"
+  fi
+done
+if [ -n "$UNPAIRED_LIST" ]; then
+  echo "[NOTE] Reads with no mate, kept in download/ and not used by Step 1:$UNPAIRED_LIST"
+fi
+
 if ls *.fastq.gz >/dev/null 2>&1; then
   echo ""; echo "Downloaded files:"
   ls -lh *.fastq.gz
@@ -659,6 +698,7 @@ else
   echo "[FAILED] No .fastq.gz files found after download"
 fi
 
+{after_download}
 # Fail the job only if real download attempts failed and nothing else worked;
 # a run where every accession was skipped (already in Step 1) is a success.
 if [ "$FAILED_COUNT" -gt 0 ] && [ "$SUCCEEDED" -eq 0 ] && [ "$SKIPPED_STEP1" -eq 0 ]; then
